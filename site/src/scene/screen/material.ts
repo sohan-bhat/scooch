@@ -192,7 +192,7 @@ void main() {
   float corners = 1.0 - 0.32 * pow(dot(centered * vec2(1.0, 1.2), centered * vec2(1.0, 1.2)), 1.4) * 2.2;
   float hum = 1.0 + 0.006 * sin(uTime * 2.1 + uv.y * 7.0);
   vec3 black = vec3(0.016, 0.018, 0.021);
-  vec3 lit = black + color * tube * blotch * corners * hum * 1.28;
+  vec3 lit = black + color * tube * blotch * corners * hum * 1.12;
   color = mix(black * 0.7, lit, inside) * uPower + black * 0.4 * (1.0 - uPower);
 
   vec3 n = normalize(vNormal);

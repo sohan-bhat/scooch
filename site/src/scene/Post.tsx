@@ -1,4 +1,4 @@
-import { Bloom, DepthOfField, EffectComposer, FXAA, N8AO, Noise, SMAA, ToneMapping, Vignette } from '@react-three/postprocessing';
+import { Bloom, DepthOfField, EffectComposer, N8AO, Noise, SMAA, ToneMapping, Vignette } from '@react-three/postprocessing';
 import { BlendFunction, ToneMappingMode } from 'postprocessing';
 import { useCallback } from 'react';
 import { HalfFloatType, type Texture } from 'three';
@@ -43,9 +43,9 @@ export function Post({ phone }: { phone: boolean }) {
     <EffectComposer multisampling={0} frameBufferType={HalfFloatType}>
       {full && <N8AO ref={ao} halfRes quality="performance" aoRadius={0.18} distanceFalloff={0.5} intensity={1.4} />}
       {full && <DepthOfField ref={dof} focusDistance={1} focusRange={0.2} bokehScale={0} resolutionScale={0.5} />}
-      <Bloom mipmapBlur levels={full ? 5 : 4} luminanceThreshold={1.05} luminanceSmoothing={0.2} intensity={0.6} radius={0.7} />
+      <Bloom mipmapBlur levels={full ? 5 : 4} luminanceThreshold={1.3} luminanceSmoothing={0.35} intensity={0.6} radius={0.7} />
       <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
-      {full ? <SMAA /> : <FXAA />}
+      <SMAA />
       <Vignette offset={0.3} darkness={0.62} />
       <Noise ref={noise} premultiply blendFunction={BlendFunction.SOFT_LIGHT} opacity={GRAIN_OPACITY} />
     </EffectComposer>
