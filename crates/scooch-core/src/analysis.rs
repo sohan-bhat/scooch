@@ -7,11 +7,17 @@ const SHORT_SIDE: usize = 8;
 const TONE_SIGMA: f32 = 1.0;
 const PAIRS: [(f32, f32); 3] = [(2.0, 8.0), (4.0, 16.0), (8.0, 32.0)];
 const SCALES: [f32; 5] = [2.0, 4.0, 8.0, 16.0, 32.0];
-const TONE_FLOOR: f32 = 0.04;
-const CONTRAST_FLOOR: f32 = 0.02;
+const TONE_FLOOR: f32 = 0.08;
+const CONTRAST_FLOOR: f32 = 0.04;
+const STRUCTURE_FLOOR: f32 = 0.02;
 const SMOOTH_SIGMA: f32 = 2.0;
-const SALIENCY_FLOOR: f32 = 0.05;
+const SALIENCY_FLOOR: f32 = 0.5;
+const CALM_LEVEL: f32 = 0.25;
 const SALIENCY_POWER: f32 = 1.5;
+const TERMS: usize = 10;
+const BACKGROUND_ROUNDS: usize = 5;
+const BACKGROUND_STEP: usize = 3;
+const BACKGROUND_SPREAD: f64 = 0.03;
 const BUSY_SIGMA: f32 = 3.0;
 const BUSY_SCALE: f32 = 0.06;
 const SUBJECT_REACH: f64 = 1.5;
@@ -131,7 +137,95 @@ fn mean(plane: &[f32]) -> f32 {
 
 fn blurs(planes: &[Vec<f32>], width: usize, height: usize, sigmas: &[f32]) -> Vec<Vec<f32>> {
     let count = planes.len();
-    (0..sigmas.len() * count).into_par_iter().map(|i| blur::gaussian(&planes[i % count], width, height, sigmas[i / count])).collect()
+    (0..sigmas.len() * count).into_par_iter().map(|i| blur::gaussian_extended(&planes[i % count], width, height, sigmas[i / count])).collect()
+}
+
+fn solve_square(mut m: [[f64; TERMS + 1]; TERMS]) -> Option<[f64; TERMS]> {
+    for c in 0..TERMS {
+        let pivot = (c..TERMS).max_by(|a, b| m[*a][c].abs().total_cmp(&m[*b][c].abs()))?;
+        if m[pivot][c].abs() < 1e-12 {
+            return None;
+        }
+        m.swap(c, pivot);
+        for r in 0..TERMS {
+            if r != c {
+                let f = m[r][c] / m[c][c];
+                for k in c..=TERMS {
+                    m[r][k] -= f * m[c][k];
+                }
+            }
+        }
+    }
+    Some(std::array::from_fn(|r| m[r][TERMS] / m[r][r]))
+}
+
+fn terms(u: f64, v: f64) -> [f64; TERMS] {
+    [1.0, u, v, u * u, u * v, v * v, u * u * u, u * u * v, u * v * v, v * v * v]
+}
+
+fn background(lab: &[Vec<f32>; 3], width: usize, height: usize) -> [Vec<f32>; 3] {
+    let n = width * height;
+    let us: Vec<f64> = (0..width).map(|x| 2.0 * (x as f64 + 0.5) / width as f64 - 1.0).collect();
+    let vs: Vec<f64> = (0..height).map(|y| 2.0 * (y as f64 + 0.5) / height as f64 - 1.0).collect();
+    let samples: Vec<([f64; TERMS], [f64; 3])> = (0..height)
+        .step_by(BACKGROUND_STEP)
+        .flat_map(|y| (0..width).step_by(BACKGROUND_STEP).map(move |x| (x, y)))
+        .map(|(x, y)| (terms(us[x], vs[y]), std::array::from_fn(|c| lab[c][y * width + x] as f64)))
+        .collect();
+    let mut weights = vec![1.0f64; samples.len()];
+    let mut fit: Option<[[f64; TERMS]; 3]> = None;
+    for _ in 0..=BACKGROUND_ROUNDS {
+        let mut normal = [[0.0f64; TERMS + 1]; TERMS];
+        let mut sides = [[0.0f64; TERMS]; 3];
+        for ((t, value), w) in samples.iter().zip(&weights) {
+            for r in 0..TERMS {
+                let wr = w * t[r];
+                for c in r..TERMS {
+                    normal[r][c] += wr * t[c];
+                }
+                for k in 0..3 {
+                    sides[k][r] += wr * value[k];
+                }
+            }
+        }
+        for r in 0..TERMS {
+            for c in 0..r {
+                normal[r][c] = normal[c][r];
+            }
+        }
+        let mut next = [[0.0f64; TERMS]; 3];
+        let mut solved = true;
+        for k in 0..3 {
+            let mut m = normal;
+            for r in 0..TERMS {
+                m[r][TERMS] = sides[k][r];
+            }
+            match solve_square(m) {
+                Some(coefficients) => next[k] = coefficients,
+                None => solved = false,
+            }
+        }
+        if !solved {
+            break;
+        }
+        for ((t, value), w) in samples.iter().zip(weights.iter_mut()) {
+            let r2: f64 = (0..3).map(|k| (value[k] - t.iter().zip(&next[k]).map(|(a, b)| a * b).sum::<f64>()).powi(2)).sum();
+            *w = 1.0 / (1.0 + r2 / (BACKGROUND_SPREAD * BACKGROUND_SPREAD));
+        }
+        fit = Some(next);
+    }
+    let Some(k) = fit else { return std::array::from_fn(|c| vec![mean(&lab[c]); n]) };
+    std::array::from_fn(|c| {
+        let k = &k[c];
+        let mut out = Vec::with_capacity(n);
+        for &v in &vs {
+            let a = k[0] + k[2] * v + k[5] * v * v + k[9] * v * v * v;
+            let b = k[1] + k[4] * v + k[8] * v * v;
+            let q = k[3] + k[7] * v;
+            out.extend(us.iter().map(|&u| (a + u * (b + u * (q + u * k[6]))) as f32));
+        }
+        out
+    })
 }
 
 fn contrast(planes: &[Vec<f32>], width: usize, height: usize) -> Vec<f32> {
@@ -149,42 +243,16 @@ fn contrast(planes: &[Vec<f32>], width: usize, height: usize) -> Vec<f32> {
     out
 }
 
-fn without_plane(values: &[f32], width: usize, height: usize) -> Vec<f32> {
-    let (cx, cy) = ((width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0);
-    let (mut sv, mut sxv, mut syv, mut sxx, mut syy) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
-    for y in 0..height {
-        for x in 0..width {
-            let (dx, dy, v) = (x as f64 - cx, y as f64 - cy, values[y * width + x] as f64);
-            sv += v;
-            sxv += dx * v;
-            syv += dy * v;
-            sxx += dx * dx;
-            syy += dy * dy;
-        }
-    }
-    let base = sv / (width * height) as f64;
-    let (gx, gy) = (if sxx > 0.0 { sxv / sxx } else { 0.0 }, if syy > 0.0 { syv / syy } else { 0.0 });
-    (0..width * height).map(|i| (values[i] as f64 - base - gx * ((i % width) as f64 - cx) - gy * ((i / width) as f64 - cy)) as f32).collect()
-}
-
-fn structured(lab: &[Vec<f32>; 3], width: usize, height: usize) -> bool {
-    let flat: Vec<Vec<f32>> = lab.iter().map(|plane| without_plane(plane, width, height)).collect();
-    contrast(&flat, width, height).iter().any(|c| *c >= CONTRAST_FLOOR)
-}
-
-fn saliency(lab: &[Vec<f32>; 3], width: usize, height: usize) -> Vec<f32> {
-    let n = width * height;
-    let fine = blurs(lab, width, height, &[TONE_SIGMA]);
-    let means: Vec<Vec<f32>> = lab.iter().map(|plane| vec![mean(plane); n]).collect();
-    let tone = distance(&fine, &means);
-    let contrast = contrast(lab, width, height);
+fn saliency(lab: &[Vec<f32>; 3], contrast: &[f32], width: usize, height: usize) -> Vec<f32> {
+    let (fine, ground) = rayon::join(|| blurs(lab, width, height, &[TONE_SIGMA]), || background(lab, width, height));
+    let tone = distance(&fine, &ground);
     let tone_top = quantile(&tone, 0.99).max(TONE_FLOOR);
-    let contrast_top = quantile(&contrast, 0.99).max(CONTRAST_FLOOR);
-    let raw: Vec<f32> = tone.iter().zip(&contrast).map(|(t, c)| 0.5 * t / tone_top + 0.5 * c / contrast_top).collect();
+    let contrast_top = quantile(contrast, 0.99).max(CONTRAST_FLOOR);
+    let raw: Vec<f32> = tone.iter().zip(contrast).map(|(t, c)| 0.5 * t / tone_top + 0.5 * c / contrast_top).collect();
     let smooth = blur::gaussian(&raw, width, height, SMOOTH_SIGMA);
     let top = quantile(&smooth, 0.99).max(SALIENCY_FLOOR);
     let scaled: Vec<f32> = smooth.iter().map(|v| (v / top).clamp(0.0, 1.0)).collect();
-    let floor = quantile(&scaled, 0.5);
+    let floor = quantile(&scaled, 0.5).max(CALM_LEVEL / top);
     let span = (1.0 - floor).max(1e-3);
     scaled.iter().map(|v| ((v - floor).max(0.0) / span).powf(SALIENCY_POWER)).collect()
 }
@@ -224,7 +292,9 @@ pub fn analyze(image: &RgbImage) -> Analysis {
         return Analysis { width: 0, height: 0, saliency: Vec::new(), busy: Vec::new(), subject: CENTER, flat: true, source_width: sw, source_height: sh };
     }
     let lab = lab_planes(image, width, height);
-    let ((mut saliency, busy), shaped) = rayon::join(|| rayon::join(|| saliency(&lab, width, height), || busy_from_lightness(&lab[0], width, height)), || structured(&lab, width, height));
+    let (contrast, busy) = rayon::join(|| contrast(&lab, width, height), || busy_from_lightness(&lab[0], width, height));
+    let shaped = contrast.iter().any(|c| *c >= STRUCTURE_FLOOR);
+    let mut saliency = saliency(&lab, &contrast, width, height);
     let found = subject(&saliency, width, height).filter(|_| shaped);
     if found.is_none() {
         saliency.iter_mut().for_each(|v| *v = 0.0);
@@ -294,16 +364,33 @@ mod tests {
     fn a_tilted_plane_has_no_structure() {
         let (w, h) = (60, 40);
         let ramp: Vec<f32> = (0..w * h).map(|i| 0.2 + 0.01 * (i % w) as f32 - 0.004 * (i / w) as f32).collect();
-        assert!(without_plane(&ramp, w, h).iter().all(|v| v.abs() < 1e-5));
         let lab = [ramp.clone(), vec![0.01; w * h], ramp.iter().map(|v| v * 0.1).collect()];
-        assert!(!structured(&lab, w, h));
+        assert!(contrast(&lab, w, h).iter().all(|c| *c < 1e-3));
         let mut spot = lab.clone();
         for y in 15..25 {
             for x in 25..35 {
                 spot[0][y * w + x] += 0.3;
             }
         }
-        assert!(structured(&spot, w, h));
+        assert!(contrast(&spot, w, h).iter().any(|c| *c >= STRUCTURE_FLOOR));
+    }
+
+    #[test]
+    fn a_smooth_background_is_fitted_and_a_spot_stands_out() {
+        let (w, h) = (80, 50);
+        let curve = |i: usize| {
+            let (u, v) = ((i % w) as f32 / w as f32, (i / w) as f32 / h as f32);
+            0.4 + 0.2 * v * v - 0.1 * u * v + 0.05 * u
+        };
+        let mut lab = [(0..w * h).map(curve).collect::<Vec<f32>>(), vec![0.0; w * h], vec![0.02; w * h]];
+        for y in 10..14 {
+            for x in 60..64 {
+                lab[0][y * w + x] += 0.5;
+            }
+        }
+        let ground = background(&lab, w, h);
+        assert!((ground[0][40 * w + 10] - curve(40 * w + 10)).abs() < 0.01);
+        assert!((ground[0][12 * w + 62] - curve(12 * w + 62)).abs() < 0.05);
     }
 
     #[test]
