@@ -88,3 +88,22 @@ pub fn photos() -> Vec<std::path::PathBuf> {
     out.sort();
     out
 }
+
+pub fn shifted(image: &scooch_core::RgbImage, analysis: &Analysis, at: f32) -> Option<scooch_core::RgbImage> {
+    let s = analysis.subject;
+    if analysis.flat || s.w >= 0.5 {
+        return None;
+    }
+    let (w, h) = (image.width() as f32, image.height() as f32);
+    let (cx, cy) = ((s.x + s.w / 2.0) * w, (s.y + s.h / 2.0) * h);
+    let width = w.min(1.6 * h).min(cx / at).min((w - cx) / (1.0 - at)).floor();
+    let height = (width / 1.6).floor();
+    if width < 160.0 || height < 100.0 {
+        return None;
+    }
+    let x0 = (cx - at * width).round().clamp(0.0, w - width);
+    let y0 = (cy - height / 2.0).round().clamp(0.0, h - height);
+    Some(image::imageops::crop_imm(image, x0 as u32, y0 as u32, width as u32, height as u32).to_image())
+}
+
+pub const SHIFTS: [(f32, &str); 2] = [(0.78, "mac"), (0.22, "windows")];

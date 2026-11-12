@@ -141,7 +141,16 @@ fn main() {
         let main: Vec<Row> = layouts::NAMES.iter().map(|layout| row(&name, &photo, &analysis, layout, (2880, 1800), cell_w, cell_h)).collect();
         compose(header.clone(), &main, cell_w).save(out.join(format!("{name}-a.png"))).expect("save");
         let others = [((1920, 1080), "mac"), ((1920, 1080), "windows"), ((3840, 2160), "cluster"), ((5120, 2880), "mac"), ((1080, 1920), "mac"), ((1080, 1920), "cluster")];
-        let extra: Vec<Row> = others.iter().map(|(screen, layout)| row(&name, &photo, &analysis, layout, *screen, cell_w, cell_h)).collect();
+        let mut extra: Vec<Row> = others.iter().map(|(screen, layout)| row(&name, &photo, &analysis, layout, *screen, cell_w, cell_h)).collect();
+        for (at, layout) in layouts::SHIFTS {
+            if let Some(crop) = layouts::shifted(&photo, &analysis, at) {
+                let moved = scooch_core::analyze(&crop);
+                let label = format!("{name}@{}", (at * 100.0).round());
+                let box_ = moved.subject;
+                println!("{label} crop {}x{} subject x {:.2} to {:.2} y {:.2} to {:.2}", crop.width(), crop.height(), box_.x, box_.x + box_.w, box_.y, box_.y + box_.h);
+                extra.push(row(&label, &crop, &moved, layout, (2880, 1800), cell_w, cell_h));
+            }
+        }
         compose(header, &extra, cell_w).save(out.join(format!("{name}-b.png"))).expect("save");
     }
 }
