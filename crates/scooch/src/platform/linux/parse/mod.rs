@@ -7,3 +7,4 @@ pub mod gvariant;
 pub mod kde;
 pub mod keyfile;
 pub mod record;
+pub mod yaml;
