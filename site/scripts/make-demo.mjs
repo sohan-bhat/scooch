@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -9,13 +9,14 @@ const run = promisify(execFile);
 const site = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const config = JSON.parse(await readFile(join(site, 'scripts', 'demo.config.json'), 'utf8'));
 const binary = resolve(site, process.env.SCOOCH_BIN ?? config.binary);
+const photo = resolve(site, config.photo);
 const work = join(site, '.cache', 'demo');
 const out = join(site, 'public', 'demo');
 const { width, height } = config.screen;
 const mapScale = 4;
 
 function rects(layout) {
-  return config.icons.map((icon) => [...config.layouts[layout][icon.id], config.icon.width, config.icon.height]);
+  return config.icons.map((icon) => [...layout[icon.id], config.icon.width, config.icon.height]);
 }
 
 function lookup(table, t) {
@@ -78,20 +79,36 @@ function round(value) {
   return Math.round(value * 1e4) / 1e4;
 }
 
-async function build(state) {
-  const icons = rects(state.layout);
+async function average(path) {
+  const { channels } = await sharp(path).stats();
+  return channels.slice(0, 3).map((channel) => round(channel.mean / 255));
+}
+
+function dropped(start, subject) {
+  const { icon, to, onto } = config.drag;
+  if (to) return { ...start, [icon]: to };
+  if (onto !== 'subject') throw new Error('drag needs a to position or onto subject');
+  const [sx, sy, sw, sh] = subject;
+  const snap = (value) => Math.round(value / 10) * 10;
+  const x = snap(Math.min(Math.max((sx + sw * 0.5) * width - config.icon.width / 2, 24), width - config.icon.width - 24));
+  const y = snap(Math.min(Math.max((sy + sh * 0.4) * height - config.icon.height / 2, 24), height - config.icon.height - 24));
+  return { ...start, [icon]: [x, y] };
+}
+
+async function build(state, layout) {
+  const icons = rects(layout);
   const scenePath = join(work, `${state.id}.scene.json`);
   const framePath = join(work, `${state.id}.jpg`);
   const jsonPath = join(work, `${state.id}.json`);
   await writeFile(scenePath, JSON.stringify({ width, height, icons: state.solve ? icons : [] }));
-  await run(binary, ['render', resolve(site, config.photos[state.photo]), '--icons', scenePath, '--out', framePath, '--json', jsonPath]);
+  await run(binary, ['render', photo, '--icons', scenePath, '--out', framePath, '--json', jsonPath]);
   const { placement, analysis } = JSON.parse(await readFile(jsonPath, 'utf8'));
-  await sharp(framePath).webp({ quality: 88, effort: 6 }).toFile(join(out, `${state.id}.webp`));
+  await sharp(framePath).webp({ quality: 86, effort: 6 }).toFile(join(out, `${state.id}.webp`));
   await onScreen(analysis, placement).toFile(join(out, `${state.id}.saliency.png`));
   return {
-    photo: state.photo,
     frame: `${state.id}.webp`,
     saliency: `${state.id}.saliency.png`,
+    average: await average(framePath),
     flat: !analysis.saliency.some((value) => value > 0),
     solved: state.solve,
     zoom: round(placement.zoom),
@@ -106,14 +123,25 @@ async function build(state) {
   };
 }
 
-await rm(out, { recursive: true, force: true });
 await mkdir(out, { recursive: true });
 await mkdir(work, { recursive: true });
-const states = {};
+const layouts = { ...config.layouts };
+const frames = {};
 for (const state of config.states) {
-  states[state.id] = await build(state);
-  console.log(state.id, states[state.id].flat ? 'flat analysis' : 'analysis ok', 'zoom', states[state.id].zoom);
+  if (state.layout === 'dropped') layouts.dropped = dropped(layouts.start, frames.fixed.subject);
+  frames[state.id] = await build(state, layouts[state.layout]);
+  console.log(state.id, frames[state.id].flat ? 'flat analysis' : 'analysis ok', 'zoom', frames[state.id].zoom);
 }
-const manifest = { screen: config.screen, icons: config.icons, story: config.story, states };
+const normalize = ([x, y]) => [round(x / width), round(y / height)];
+const manifest = {
+  screen: config.screen,
+  icons: config.icons,
+  frames,
+  drag: {
+    icon: config.drag.icon,
+    from: normalize(layouts.start[config.drag.icon]),
+    to: normalize(layouts.dropped[config.drag.icon]),
+  },
+};
 await writeFile(join(out, 'manifest.json'), JSON.stringify(manifest, null, 2));
-console.log('wrote', Object.keys(states).length, 'states to', out);
+console.log('wrote', Object.keys(frames).length, 'frames to', out);

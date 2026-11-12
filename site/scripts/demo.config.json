@@ -1,169 +1,96 @@
 {
   "binary": "../target/debug/scooch",
+  "photo": "../assets/photos/fox.jpg",
   "screen": {
-    "width": 1100,
-    "height": 900
-  },
-  "photos": {
-    "lighthouse": "photos/chania-lighthouse.jpg",
-    "fox": "photos/arctic-fox.jpg",
-    "astronaut": "photos/astronaut.jpg"
+    "width": 1280,
+    "height": 960
   },
   "icon": {
-    "width": 116,
-    "height": 124
+    "width": 150,
+    "height": 150
   },
   "icons": [
     {
       "id": "trip",
-      "label": "Trip",
+      "label": "Trip photos",
       "glyph": "folder"
     },
     {
-      "id": "work",
-      "label": "Work",
+      "id": "taxes",
+      "label": "Taxes 2025",
       "glyph": "folder"
     },
     {
       "id": "notes",
-      "label": "notes.txt",
+      "label": "Notes",
+      "glyph": "note"
+    },
+    {
+      "id": "resume",
+      "label": "Resume",
       "glyph": "file-text"
     },
     {
-      "id": "scan",
-      "label": "scan.pdf",
-      "glyph": "file-pdf"
-    },
-    {
-      "id": "photo",
-      "label": "IMG_2041",
+      "id": "shot",
+      "label": "Screenshot",
       "glyph": "file-image"
     },
     {
-      "id": "backup",
-      "label": "backup.zip",
-      "glyph": "file-zip"
+      "id": "recipes",
+      "label": "Recipes",
+      "glyph": "folder"
     }
   ],
   "layouts": {
     "start": {
       "trip": [
-        36,
-        30
+        40,
+        40
       ],
-      "work": [
-        36,
-        170
-      ],
-      "notes": [
-        36,
-        310
-      ],
-      "scan": [
-        498,
-        140
-      ],
-      "photo": [
-        506,
-        300
-      ],
-      "backup": [
-        36,
-        450
-      ]
-    },
-    "dropped": {
-      "trip": [
-        36,
-        30
-      ],
-      "work": [
-        36,
-        170
+      "taxes": [
+        40,
+        210
       ],
       "notes": [
-        36,
-        310
+        40,
+        380
       ],
-      "scan": [
-        498,
-        140
+      "resume": [
+        40,
+        550
       ],
-      "photo": [
-        506,
-        300
+      "shot": [
+        210,
+        210
       ],
-      "backup": [
-        500,
-        470
-      ]
-    },
-    "moved": {
-      "trip": [
-        36,
-        30
-      ],
-      "work": [
-        36,
-        170
-      ],
-      "notes": [
-        36,
-        310
-      ],
-      "scan": [
-        850,
-        200
-      ],
-      "photo": [
-        506,
-        300
-      ],
-      "backup": [
-        500,
-        470
+      "recipes": [
+        210,
+        380
       ]
     }
+  },
+  "drag": {
+    "icon": "shot",
+    "to": [
+      940,
+      400
+    ]
   },
   "states": [
     {
       "id": "before",
-      "photo": "lighthouse",
       "layout": "start",
       "solve": false
     },
     {
       "id": "fixed",
-      "photo": "lighthouse",
-      "layout": "dropped",
+      "layout": "start",
       "solve": true
     },
     {
       "id": "moved",
-      "photo": "lighthouse",
-      "layout": "moved",
-      "solve": true
-    },
-    {
-      "id": "fox",
-      "photo": "fox",
-      "layout": "moved",
-      "solve": true
-    },
-    {
-      "id": "astronaut",
-      "photo": "astronaut",
-      "layout": "moved",
+      "layout": "dropped",
       "solve": true
     }
-  ],
-  "story": {
-    "problem": "before",
-    "fixed": "fixed",
-    "moved": "moved",
-    "any": [
-      "fox",
-      "astronaut"
-    ]
-  }
+  ]
 }
