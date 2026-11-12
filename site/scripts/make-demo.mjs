@@ -95,20 +95,45 @@ function dropped(start, subject) {
   return { ...start, [icon]: [x, y] };
 }
 
-async function build(state, layout) {
+function fail(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+async function render(state, layout) {
   const icons = rects(layout);
   const scenePath = join(work, `${state.id}.scene.json`);
   const framePath = join(work, `${state.id}.jpg`);
   const jsonPath = join(work, `${state.id}.json`);
-  await writeFile(scenePath, JSON.stringify({ width, height, icons: state.solve ? icons : [] }));
-  await run(binary, ['render', photo, '--icons', scenePath, '--out', framePath, '--json', jsonPath]);
-  const { placement, analysis } = JSON.parse(await readFile(jsonPath, 'utf8'));
+  await writeFile(scenePath, JSON.stringify({ width, height, icons }));
+  const args = ['render', photo, '--icons', scenePath, '--out', framePath, '--json', jsonPath];
+  if (!state.solve) args.push(config.fill);
+  try {
+    await run(binary, args);
+  } catch (error) {
+    fail(`scooch render failed on the ${state.id} frame, so the engine build at ${binary} is probably too old for this demo. Rebuild it with cargo build -p scooch and run npm run demo again.\n${error.stderr ?? error.message}`);
+  }
+  const data = JSON.parse(await readFile(jsonPath, 'utf8'));
+  const hidden = data.hidden ?? data.placement?.hidden;
+  if (typeof hidden !== 'number') fail(`The scooch build at ${binary} does not report hidden in its JSON, so it is too old for this demo. Rebuild it with cargo build -p scooch and run npm run demo again.`);
+  return { state, icons, framePath, data, hidden };
+}
+
+function check({ state, hidden }) {
+  const value = hidden.toFixed(3);
+  if (!state.solve && hidden < config.limits.before) fail(`The ${state.id} frame hides only ${value} of the subject, below ${config.limits.before}, so the problem frame would not show icons on the subject.`);
+  if (state.solve && hidden > config.limits.after) fail(`The ${state.id} frame still hides ${value} of the subject, above ${config.limits.after}, so it would undercut the pitch.`);
+}
+
+async function write({ state, icons, framePath, data, hidden }) {
+  const { placement, analysis } = data;
   await sharp(framePath).webp({ quality: 86, effort: 6 }).toFile(join(out, `${state.id}.webp`));
   await onScreen(analysis, placement).toFile(join(out, `${state.id}.saliency.png`));
   return {
     frame: `${state.id}.webp`,
     saliency: `${state.id}.saliency.png`,
     average: await average(framePath),
+    hidden: round(hidden),
     flat: !analysis.saliency.some((value) => value > 0),
     solved: state.solve,
     zoom: round(placement.zoom),
@@ -123,15 +148,22 @@ async function build(state, layout) {
   };
 }
 
-await mkdir(out, { recursive: true });
 await mkdir(work, { recursive: true });
 const layouts = { ...config.layouts };
-const frames = {};
+const rendered = [];
 for (const state of config.states) {
-  if (state.layout === 'dropped') layouts.dropped = dropped(layouts.start, frames.fixed.subject);
-  frames[state.id] = await build(state, layouts[state.layout]);
-  console.log(state.id, frames[state.id].flat ? 'flat analysis' : 'analysis ok', 'zoom', frames[state.id].zoom);
+  if (state.layout === 'dropped') {
+    const fixed = rendered.find((item) => item.state.id === 'fixed');
+    layouts.dropped = dropped(layouts.start, subjectOnScreen(fixed.data.analysis, fixed.data.placement));
+  }
+  const result = await render(state, layouts[state.layout]);
+  console.log(state.id, 'hidden', result.hidden.toFixed(3), 'zoom', round(result.data.placement.zoom));
+  rendered.push(result);
 }
+for (const result of rendered) check(result);
+await mkdir(out, { recursive: true });
+const frames = {};
+for (const result of rendered) frames[result.state.id] = await write(result);
 const normalize = ([x, y]) => [round(x / width), round(y / height)];
 const manifest = {
   screen: config.screen,
