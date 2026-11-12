@@ -297,46 +297,55 @@ fn stage_one(field: &Field, boxes: &[Footprint], settings: &Settings) -> Option<
             pans(1.0 - ch).into_iter().map(|y0| boxes.iter().map(|b| (field.sb.place_y((y0 + ch * b.v0) * field.gh), field.sb.place_y((y0 + ch * b.v1) * field.gh))).collect()).collect()
         })
         .collect();
-    let scored: Vec<Vec<Candidate>> = rows
-        .par_iter()
-        .map(|&(zi, z, cw, ch, mirrored, xi, x0)| {
-            let spans: Vec<(Place, Place)> = boxes
-                .iter()
-                .map(|b| {
-                    let (ta, tb) = if mirrored { (1.0 - b.u1, 1.0 - b.u0) } else { (b.u0, b.u1) };
-                    (field.sb.place_x((x0 + cw * ta) * field.gw), field.sb.place_x((x0 + cw * tb) * field.gw))
-                })
-                .collect();
-            pans(1.0 - ch)
-                .into_iter()
-                .enumerate()
-                .filter_map(|(yi, y0)| {
-                    let frame = Frame { z, x0, y0, cw, ch, mirrored };
-                    let (mut hid, mut busy, mut area) = (0.0f64, 0.0f64, 0.0f64);
-                    for (&(xa, xb), &(ya, yb)) in spans.iter().zip(&lifts[zi][yi]) {
-                        let [s, b] = field.sb.sum_placed(xa, xb, ya, yb);
-                        hid += s;
-                        busy += b;
-                        area += (xb.at - xa.at).max(0.0) * (yb.at - ya.at).max(0.0);
-                    }
-                    let busy = if area > 0.0 { busy / area } else { 0.0 };
-                    let off = frame.off();
-                    let mut cost = BUSY * busy + ZOOMED * (z - 1.0) + OFF_CENTER * off + if mirrored { MIRRORED } else { 0.0 };
-                    if !field.flat {
-                        if hid > hid_c * (1.0 + 1e-9) + 1e-12 {
+    let limit = hid_c * (1.0 + 1e-9) + 1e-12;
+    let mut best: Option<Candidate> = None;
+    for level in 0..zooms {
+        let floor = best.map(|b| b.cost);
+        let scored: Vec<Vec<Candidate>> = rows
+            .par_iter()
+            .filter(|row| row.0 == level)
+            .map(|&(zi, z, cw, ch, mirrored, xi, x0)| {
+                let spans: Vec<(Place, Place)> = boxes
+                    .iter()
+                    .map(|b| {
+                        let (ta, tb) = if mirrored { (1.0 - b.u1, 1.0 - b.u0) } else { (b.u0, b.u1) };
+                        (field.sb.place_x((x0 + cw * ta) * field.gw), field.sb.place_x((x0 + cw * tb) * field.gw))
+                    })
+                    .collect();
+                pans(1.0 - ch)
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(yi, y0)| {
+                        let frame = Frame { z, x0, y0, cw, ch, mirrored };
+                        let off = frame.off();
+                        let settled = ZOOMED * (z - 1.0) + OFF_CENTER * off + if mirrored { MIRRORED } else { 0.0 };
+                        if floor.is_some_and(|f| settled > f) {
                             return None;
                         }
-                        cost += HIDDEN * hid / total + CROPPED * field.crop_loss(&frame, &middle, vis_c) / total;
-                    }
-                    Some(Candidate { zi, xi, yi, frame, off, cost })
-                })
-                .collect()
-        })
-        .collect();
-    let mut best: Option<Candidate> = None;
-    for candidate in scored.iter().flatten() {
-        if best.as_ref().map_or(true, |b| better(candidate, b)) {
-            best = Some(*candidate);
+                        let (mut hid, mut busy, mut area) = (0.0f64, 0.0f64, 0.0f64);
+                        for (&(xa, xb), &(ya, yb)) in spans.iter().zip(&lifts[zi][yi]) {
+                            let [s, b] = field.sb.sum_placed(xa, xb, ya, yb);
+                            hid += s;
+                            if !field.flat && hid > limit {
+                                return None;
+                            }
+                            busy += b;
+                            area += (xb.at - xa.at).max(0.0) * (yb.at - ya.at).max(0.0);
+                        }
+                        let busy = if area > 0.0 { busy / area } else { 0.0 };
+                        let mut cost = BUSY * busy + settled;
+                        if !field.flat {
+                            cost += HIDDEN * hid / total + CROPPED * field.crop_loss(&frame, &middle, vis_c) / total;
+                        }
+                        Some(Candidate { zi, xi, yi, frame, off, cost })
+                    })
+                    .collect()
+            })
+            .collect();
+        for candidate in scored.iter().flatten() {
+            if best.as_ref().map_or(true, |b| better(candidate, b)) {
+                best = Some(*candidate);
+            }
         }
     }
     best.map(|b| b.frame)
