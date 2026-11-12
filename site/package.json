@@ -1,0 +1,53 @@
+{
+  "name": "scooch-site",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173",
+    "typecheck": "tsc --noEmit",
+    "demo": "node scripts/make-demo.mjs",
+    "models": "node scripts/make-models.mjs",
+    "stills": "node scripts/make-stills.mjs",
+    "brand": "node scripts/make-brand.mjs"
+  },
+  "dependencies": {
+    "@fontsource-variable/anybody": "^5.3.0",
+    "@fontsource-variable/instrument-sans": "^5.3.0",
+    "@fontsource-variable/martian-mono": "^5.3.0",
+    "@gsap/react": "^2.1.2",
+    "@phosphor-icons/react": "^2.1.10",
+    "@react-three/drei": "^10.7.9",
+    "@react-three/fiber": "^9.8.2",
+    "@react-three/postprocessing": "^3.2.2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "gsap": "^3.15.1",
+    "lenis": "^1.3.27",
+    "postprocessing": "^6.39.6",
+    "radix-ui": "^1.8.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwind-merge": "^3.7.0",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "@gltf-transform/core": "^4.5.1",
+    "@gltf-transform/extensions": "^4.5.1",
+    "@gltf-transform/functions": "^4.5.1",
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/three": "^0.187.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "meshoptimizer": "^1.3.0",
+    "playwright-core": "^1.65.0",
+    "sharp": "^0.35.5",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}
