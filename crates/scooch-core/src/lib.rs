@@ -1,4 +1,14 @@
-pub use image::RgbImage;
+mod analysis;
+mod blur;
+mod color;
+mod pads;
+mod render;
+mod sat;
+mod solver;
+mod table;
+mod warp;
+
+pub use image::{GrayImage, RgbImage};
 use serde::{Deserialize, Serialize};
 
 pub const TABLE: usize = 257;
@@ -39,6 +49,12 @@ pub struct Analysis {
     pub saliency: Vec<f32>,
     pub busy: Vec<f32>,
     pub subject: Rect,
+    #[serde(default)]
+    pub flat: bool,
+    #[serde(default)]
+    pub source_width: u32,
+    #[serde(default)]
+    pub source_height: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -47,44 +63,38 @@ pub struct Placement {
     pub fy: Vec<f32>,
     pub zoom: f32,
     pub mirrored: bool,
+    #[serde(default)]
+    pub crop: [f32; 4],
+    #[serde(default)]
+    pub shift: [f32; 2],
 }
 
 pub fn analyze(image: &RgbImage) -> Analysis {
-    let (w, h) = image.dimensions();
-    let scale = 320.0 / w.max(h) as f32;
-    let (aw, ah) = (((w as f32 * scale) as u32).max(1), ((h as f32 * scale) as u32).max(1));
-    let n = (aw * ah) as usize;
-    Analysis {
-        width: aw,
-        height: ah,
-        saliency: vec![0.0; n],
-        busy: vec![0.0; n],
-        subject: Rect { x: 0.25, y: 0.25, w: 0.5, h: 0.5 },
-    }
+    analysis::analyze(image)
 }
 
-pub fn solve(analysis: &Analysis, scene: &Scene, _options: &Options, _previous: Option<&Placement>) -> Placement {
-    let image_aspect = analysis.width as f32 / analysis.height as f32;
-    let screen_aspect = scene.width as f32 / scene.height as f32;
-    let (cw, ch) = if image_aspect > screen_aspect { (screen_aspect / image_aspect, 1.0) } else { (1.0, image_aspect / screen_aspect) };
-    let table = |span: f32| (0..TABLE).map(|k| (1.0 - span) / 2.0 + span * k as f32 / (TABLE - 1) as f32).collect();
-    Placement { fx: table(cw), fy: table(ch), zoom: 1.0, mirrored: false }
+pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Option<&Placement>) -> Placement {
+    solver::solve(analysis, scene, options, previous)
 }
 
-pub fn render(image: &RgbImage, placement: &Placement, scene: &Scene, _options: &Options) -> RgbImage {
-    let (sw, sh) = image.dimensions();
-    let lookup = |table: &[f32], t: f32| {
-        let p = t.clamp(0.0, 1.0) * (TABLE - 1) as f32;
-        let i = (p as usize).min(TABLE - 2);
-        table[i] + (table[i + 1] - table[i]) * (p - i as f32)
-    };
-    RgbImage::from_fn(scene.width, scene.height, |x, y| {
-        let u = lookup(&placement.fx, (x as f32 + 0.5) / scene.width as f32);
-        let v = lookup(&placement.fy, (y as f32 + 0.5) / scene.height as f32);
-        let sx = ((u * sw as f32) as u32).min(sw - 1);
-        let sy = ((v * sh as f32) as u32).min(sh - 1);
-        *image.get_pixel(sx, sy)
-    })
+pub fn render(image: &RgbImage, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
+    render::render(image, placement, scene, options)
+}
+
+pub fn fill(image_width: u32, image_height: u32, scene: &Scene) -> Placement {
+    table::fill(image_width, image_height, scene.width, scene.height)
+}
+
+pub fn hidden_share(analysis: &Analysis, scene: &Scene, placement: &Placement) -> f32 {
+    solver::hidden_share(analysis, scene, placement)
+}
+
+pub fn saliency_image(analysis: &Analysis) -> GrayImage {
+    analysis::gray(analysis.width, analysis.height, &analysis.saliency)
+}
+
+pub fn busy_image(analysis: &Analysis) -> GrayImage {
+    analysis::gray(analysis.width, analysis.height, &analysis.busy)
 }
 
 pub fn open(path: &std::path::Path) -> image::ImageResult<RgbImage> {
