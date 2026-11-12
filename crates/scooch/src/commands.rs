@@ -18,6 +18,8 @@ const PICTURE_KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp",
 pub const FLIP_HINT: &str = "Icons still cover part of the picture. Run scooch flip to let Scooch flip it.";
 pub const FLIP_ON: &str = "Scooch may now flip your picture when that clears your icons.";
 pub const FLIP_OFF: &str = "Scooch now keeps your picture the way round it is.";
+pub const OFF_BACK: &str = "Scooch is off. Your wallpaper is back.";
+pub const OFF_LOST: &str = "Scooch is off. Your old wallpaper was not a picture file and cannot be put back by an app, so pick it again in your system settings.";
 pub const GUIDE: &str = "Your wallpaper is not a picture file, so pick a picture for Scooch to move.";
 pub const NO_SCREEN: &str = "No screen was found, so connect one and try again.";
 pub const NO_PICTURE: &str = "Scooch needs a picture file as your wallpaper, so pick one in your system settings or run scooch use with a picture.";
@@ -231,21 +233,41 @@ pub fn off() -> Result<()> {
     desktop.autostart(None)?;
     stop(&store);
     let mut state = store.load();
-    for screen in desktop.screens().unwrap_or_default() {
-        let Some(entry) = state.screens.get(&screen.id) else { continue };
-        restore(desktop.as_ref(), &store, &screen, entry)?;
-    }
+    let back = put_back(&state, desktop.as_ref(), &store)?;
     store.forget_pictures();
     if store.state_file().exists() {
         state.on = false;
         state.problem = None;
-        for entry in state.screens.values_mut() {
-            (entry.output, entry.fingerprint, entry.placement) = (None, None, None);
-        }
+        state.screens.clear();
         store.save(&state)?;
     }
-    println!("Scooch is off. Your wallpaper is back.");
+    println!("{}", off_line(back));
     Ok(())
+}
+
+pub fn put_back(state: &State, desktop: &dyn Desktop, store: &Store) -> Result<bool> {
+    let mut back = true;
+    for screen in desktop.screens().unwrap_or_default() {
+        let Some(entry) = state.screens.get(&screen.id) else { continue };
+        if !entry.unrestorable {
+            restore(desktop, store, &screen, entry)?;
+            continue;
+        }
+        back = false;
+        let showing_ours = desktop.wallpaper(&screen)?.is_some_and(|path| store.owns(&path));
+        if showing_ours && entry.source.is_file() {
+            desktop.set_wallpaper(&screen, &entry.source)?;
+        }
+    }
+    Ok(back)
+}
+
+pub fn off_line(back: bool) -> &'static str {
+    if back {
+        OFF_BACK
+    } else {
+        OFF_LOST
+    }
 }
 
 fn restore(desktop: &dyn Desktop, store: &Store, screen: &Screen, entry: &Entry) -> Result<()> {
@@ -693,6 +715,49 @@ mod tests {
         choose_picture(&mut state, fake.as_ref(), &store, &later).unwrap();
         let entry = &state.screens["main"];
         assert_eq!((entry.source.clone(), entry.original.clone()), (later, default));
+    }
+
+    fn shown_output(fake: &crate::daemon::tests::Fake, store: &Store) -> PathBuf {
+        std::fs::create_dir_all(store.out()).unwrap();
+        let output = store.output("main", 1, "jpg");
+        std::fs::write(&output, b"x").unwrap();
+        fake.show("main", &output);
+        output
+    }
+
+    #[test]
+    fn off_brings_back_a_moving_default() {
+        let (fake, store, default, chosen) = desk("offmoving");
+        let mut state = State::default();
+        choose_picture(&mut state, fake.as_ref(), &store, &chosen).unwrap();
+        shown_output(&fake, &store);
+        assert!(put_back(&state, fake.as_ref(), &store).unwrap());
+        assert_eq!(fake.showing("main"), default);
+        assert_eq!(fake.wallpaper(&crate::daemon::tests::screen("main", 0.0, 1.0)).unwrap(), None);
+        assert_eq!(off_line(true), "Scooch is off. Your wallpaper is back.");
+    }
+
+    #[test]
+    fn off_leaves_the_plain_picture_when_nothing_can_be_put_back() {
+        let (fake, store, default, chosen) = desk("offlost");
+        fake.lost.lock().unwrap().push(default);
+        let mut state = State::default();
+        choose_picture(&mut state, fake.as_ref(), &store, &chosen).unwrap();
+        shown_output(&fake, &store);
+        assert!(!put_back(&state, fake.as_ref(), &store).unwrap());
+        assert_eq!(fake.showing("main"), chosen);
+        assert_eq!(off_line(false), "Scooch is off. Your old wallpaper was not a picture file and cannot be put back by an app, so pick it again in your system settings.");
+    }
+
+    #[test]
+    fn off_leaves_a_wallpaper_the_user_picked_since() {
+        let (fake, store, _, chosen) = desk("offpicked");
+        let mut state = State::default();
+        choose_picture(&mut state, fake.as_ref(), &store, &chosen).unwrap();
+        let mine = crate::daemon::tests::picture(chosen.parent().unwrap(), "mine.png");
+        fake.show("main", &mine);
+        assert!(put_back(&state, fake.as_ref(), &store).unwrap());
+        assert_eq!(fake.showing("main"), mine);
     }
 
     #[test]
