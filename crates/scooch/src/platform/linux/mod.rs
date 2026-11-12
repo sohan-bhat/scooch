@@ -89,7 +89,7 @@ mod system {
         pub fn run_os(program: &str, arguments: &[OsString]) -> Result<Output> {
             Command::new(program)
                 .args(arguments)
-                .env("LC_ALL", "C")
+                .env("LC_ALL", "C.UTF-8")
                 .env_remove("LANGUAGE")
                 .stdin(Stdio::null())
                 .output()
