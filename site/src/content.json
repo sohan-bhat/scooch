@@ -1,0 +1,192 @@
+{
+  "name": "Scooch",
+  "title": "Scooch moves your wallpaper out from under your icons",
+  "description": "Scooch moves your own wallpaper so desktop icons never cover the best part of the picture. Any image, on macOS, Windows and Linux.",
+  "url": "https://sohanbhat.me/scooch/",
+  "github": "https://github.com/sohan-bhat/scooch",
+  "nav": {
+    "skip": "Skip the story",
+    "github": "GitHub",
+    "install": "Install",
+    "home": "Scooch home"
+  },
+  "loading": "Loading the desk",
+  "beats": [
+    {
+      "id": "hero",
+      "title": "Wallpaper that scooches over for your icons.",
+      "action": "Install"
+    },
+    {
+      "id": "problem",
+      "title": "Icons always land on the best part of the picture."
+    },
+    {
+      "id": "sees",
+      "title": "Scooch finds the subject with plain image math.",
+      "support": "No AI and no model files."
+    },
+    {
+      "id": "fix",
+      "title": "Then it moves the picture so nothing important is covered."
+    },
+    {
+      "id": "follow",
+      "title": "Move an icon and the wallpaper follows."
+    },
+    {
+      "id": "rest",
+      "title": "Between changes it draws nothing.",
+      "support": "While it sleeps it uses no CPU and very little memory."
+    },
+    {
+      "id": "end",
+      "title": "Any picture. Mac, Windows and Linux.",
+      "action": "Install"
+    }
+  ],
+  "install": {
+    "title": "Install Scooch",
+    "tabs": [
+      {
+        "id": "macos",
+        "label": "macOS",
+        "command": "curl -LsSf https://sohanbhat.me/scooch/install.sh | sh"
+      },
+      {
+        "id": "windows",
+        "label": "Windows",
+        "command": "irm https://sohanbhat.me/scooch/install.ps1 | iex"
+      },
+      {
+        "id": "linux",
+        "label": "Linux",
+        "command": "curl -LsSf https://sohanbhat.me/scooch/install.sh | sh"
+      }
+    ],
+    "after": "Then run scooch.",
+    "copy": "Copy command",
+    "copied": "Copied"
+  },
+  "facts": [
+    "Works with the picture you already have.",
+    "Uses no AI.",
+    "Runs nothing between changes."
+  ],
+  "footer": {
+    "github": "GitHub",
+    "sources": "Sources",
+    "license": "MIT license"
+  },
+  "stills": {
+    "alt": [
+      "An old beige laptop open on a metal desk at night under an orange arm lamp. The screen shows a fox photo with desktop icons over its head.",
+      "Close on the laptop screen. Desktop icons sit right on the fox's face.",
+      "The screen turns into a map of where the picture matters, with the fox glowing warm on a dark field.",
+      "The fox photo has moved over so the icons sit on plain sky.",
+      "A pointer drags one icon across the screen and the picture shifts again after the drop.",
+      "The lamp is off and the laptop screen is the only light on the desk.",
+      "A wide shot of the desk with the lamp back on low."
+    ]
+  },
+  "missing": {
+    "title": "Page not found",
+    "line": "This page moved out of the way.",
+    "home": "Back to Scooch"
+  },
+  "sources": {
+    "title": "Sources",
+    "line": "Every model, picture, icon and typeface on this site, with its author and license.",
+    "columns": [
+      "What",
+      "Used for",
+      "Author",
+      "License"
+    ],
+    "rows": [
+      {
+        "what": "Classic Laptop",
+        "use": "The laptop",
+        "author": "Arrangemonk",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/classic_laptop"
+      },
+      {
+        "what": "Metal Office Desk",
+        "use": "The desk",
+        "author": "Ulan Cabanilla",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/metal_office_desk"
+      },
+      {
+        "what": "Desk Lamp Arm 01",
+        "use": "The lamp",
+        "author": "Kuutti Siitonen and Yann Kervran",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/desk_lamp_arm_01"
+      },
+      {
+        "what": "Office Notepads",
+        "use": "Notepads on the desk",
+        "author": "Ulan Cabanilla",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/office_notepads"
+      },
+      {
+        "what": "Stationery Supplies",
+        "use": "Pencils, pen, eraser and cup",
+        "author": "Mateusz Sadek",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/stationery_supplies"
+      },
+      {
+        "what": "Studio Small 08",
+        "use": "Reflections in the scene",
+        "author": "Sergej Majboroda",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/studio_small_08"
+      },
+      {
+        "what": "Red fox gazing in the direction of the setting sun",
+        "use": "The wallpaper on the laptop",
+        "author": "Ray Hennessy",
+        "license": "CC0 1.0",
+        "url": "https://commons.wikimedia.org/wiki/File:Red_fox_gazing_in_the_direction_of_the_setting_sun.jpg"
+      },
+      {
+        "what": "Phosphor Icons",
+        "use": "Desktop icons and site icons",
+        "author": "Helena Zhang and Tobias Fried",
+        "license": "MIT",
+        "url": "https://phosphoricons.com"
+      },
+      {
+        "what": "Anybody",
+        "use": "Headlines and the wordmark",
+        "author": "Tyler Finck, Etcetera Type Co",
+        "license": "SIL Open Font License 1.1",
+        "url": "https://fonts.google.com/specimen/Anybody"
+      },
+      {
+        "what": "Instrument Sans",
+        "use": "Body text and icon labels",
+        "author": "Rodrigo Fuenzalida, Instrument",
+        "license": "SIL Open Font License 1.1",
+        "url": "https://fonts.google.com/specimen/Instrument+Sans"
+      },
+      {
+        "what": "Martian Mono",
+        "use": "Install commands",
+        "author": "Roman Shamin, Evil Martians",
+        "license": "SIL Open Font License 1.1",
+        "url": "https://fonts.google.com/specimen/Martian+Mono"
+      }
+    ]
+  },
+  "placeholders": {
+    "beats.rest.support": "Waiting for measured idle CPU and memory numbers from the daemon.",
+    "install.tabs.macos.command": "Install script URL is not live yet.",
+    "install.tabs.windows.command": "Install script URL is not live yet.",
+    "install.tabs.linux.command": "Install script URL is not live yet."
+  }
+}

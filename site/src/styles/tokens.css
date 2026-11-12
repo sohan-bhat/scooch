@@ -1,0 +1,36 @@
+@theme {
+  --color-room: #14110e;
+  --color-room-2: #1f1a15;
+  --color-room-3: #2a231c;
+  --color-steel: #3a3c3f;
+  --color-steel-2: #6b6c6c;
+  --color-plastic: #d8cfbb;
+  --color-paper: #f3ecdc;
+  --color-lamp: #e5591a;
+  --color-lamp-hot: #f26d2c;
+  --color-pad: #f1cf5a;
+  --color-ink: #14110e;
+  --color-rim: #9fb2c8;
+  --color-bulb: #ffb46b;
+
+  --font-display: "Anybody Variable", "Arial Black", sans-serif;
+  --font-text: "Instrument Sans Variable", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Martian Mono Variable", ui-monospace, monospace;
+
+  --text-hero: clamp(2.5rem, 1rem + 3.9vw, 5.2rem);
+  --text-beat: clamp(2.1rem, 1rem + 2.5vw, 3.9rem);
+  --text-support: clamp(1.125rem, 1rem + 0.4vw, 1.4rem);
+  --text-fact: clamp(1.75rem, 1.1rem + 2.4vw, 3.4rem);
+  --text-small: 0.9375rem;
+
+  --radius-pill: 999px;
+  --radius-panel: 1.25rem;
+  --radius-field: 0.75rem;
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in: cubic-bezier(0.55, 0, 0.75, 0.06);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --duration-press: 120ms;
+  --duration-hover: 220ms;
+  --duration-reveal: 900ms;
+}
