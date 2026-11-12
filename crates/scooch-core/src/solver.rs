@@ -350,8 +350,8 @@ fn cells(a: f64, b: f64, n: usize) -> (usize, usize) {
 
 fn profile(field: &Field, frame: &Frame, along_x: bool) -> Vec<f64> {
     let (others, own) = if along_x { (cells(frame.y0, frame.y0 + frame.ch, field.rows), field.columns) } else { (cells(frame.x0, frame.x0 + frame.cw, field.columns), field.rows) };
-    let mut values = Vec::new();
     (0..BINS)
+        .into_par_iter()
         .map(|k| {
             let (ta, tb) = (k as f64 / BINS as f64, (k + 1) as f64 / BINS as f64);
             let (sa, sb) = if along_x {
@@ -364,7 +364,7 @@ fn profile(field: &Field, frame: &Frame, along_x: bool) -> Vec<f64> {
                 (frame.y0 + frame.ch * ta, frame.y0 + frame.ch * tb)
             };
             let (a0, a1) = cells(sa, sb, own);
-            values.clear();
+            let mut values = Vec::with_capacity((a1 - a0) * (others.1 - others.0));
             for a in a0..a1 {
                 for o in others.0..others.1 {
                     let index = if along_x { o * field.columns + a } else { a * field.columns + o };
