@@ -108,17 +108,20 @@ fn no_icons_gives_the_centered_crop_and_the_plain_fill() {
         for (w, h) in [(640u32, 400u32), (360, 640)] {
             let scene = Scene { width: w, height: h, icons: Vec::new() };
             let solved = scooch_core::solve(&analysis, &scene, &options, None);
-            let (cw, ch) = if image.width() as f32 / image.height() as f32 >= w as f32 / h as f32 {
-                ((w as f32 / h as f32) / (image.width() as f32 / image.height() as f32), 1.0)
-            } else {
-                (1.0, (image.width() as f32 / image.height() as f32) / (w as f32 / h as f32))
+            let (image_aspect, screen_aspect) = (image.width() as f64 / image.height() as f64, w as f64 / h as f64);
+            let (cw, ch) = if image_aspect >= screen_aspect { (screen_aspect / image_aspect, 1.0) } else { (1.0, image_aspect / screen_aspect) };
+            let line = |span: f64| -> Vec<f32> {
+                let start = (1.0 - span) / 2.0;
+                let mut out: Vec<f32> = (0..TABLE).map(|k| (start + span * k as f64 / 256.0) as f32).collect();
+                out[TABLE - 1] = (start + span) as f32;
+                out
             };
             let identity = Placement {
-                fx: (0..TABLE).map(|k| (1.0 - cw) / 2.0 + cw * k as f32 / 256.0).collect(),
-                fy: (0..TABLE).map(|k| (1.0 - ch) / 2.0 + ch * k as f32 / 256.0).collect(),
+                fx: line(cw),
+                fy: line(ch),
                 zoom: 1.0,
                 mirrored: false,
-                crop: [(1.0 - cw) / 2.0, (1.0 - ch) / 2.0, cw, ch],
+                crop: [((1.0 - cw) / 2.0) as f32, ((1.0 - ch) / 2.0) as f32, cw as f32, ch as f32],
                 shift: [0.0, 0.0],
             };
             assert_eq!(solved.zoom, 1.0);
