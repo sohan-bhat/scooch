@@ -200,7 +200,7 @@ pub fn describe(display: &str) -> Option<Kind> {
 }
 
 fn read() -> Option<Plist> {
-    let home = dirs::home_dir()?;
+    let home = super::real_home()?;
     parse(&std::fs::read(home.join(INDEX)).ok()?)
 }
 

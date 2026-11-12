@@ -40,7 +40,7 @@ struct Armed {
 
 pub fn run(wake: Wake) -> Result<()> {
     let marker = MainThreadMarker::new().context("Scooch must watch from its main thread, so start it with scooch watch.")?;
-    let home = dirs::home_dir().context("Scooch could not find your home folder.")?;
+    let home = super::real_home().context("Scooch could not find your home folder.")?;
     let wake: Shared = Arc::from(wake);
     let traced = crate::daemon::trace();
     let tag = |name: &'static str| -> Shared {

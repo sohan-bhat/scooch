@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 pub const LABEL: &str = "me.sohanbhat.scooch";
 
 pub fn plist_path() -> Result<PathBuf> {
-    Ok(dirs::home_dir().context("Scooch could not find your home folder.")?.join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
+    Ok(super::real_home().context("Scooch could not find your home folder.")?.join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
 }
 
 pub fn plist(exe: &Path, data: &Path, home: Option<&Path>) -> String {

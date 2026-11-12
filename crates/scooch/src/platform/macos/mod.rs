@@ -27,6 +27,20 @@ fn now_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
 }
 
+pub fn real_home() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+    let mut record: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buffer = vec![0 as libc::c_char; 4096];
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    let status = unsafe { libc::getpwuid_r(libc::getuid(), &mut record, buffer.as_mut_ptr(), buffer.len(), &mut found) };
+    if status != 0 || found.is_null() || record.pw_dir.is_null() {
+        return None;
+    }
+    let home = unsafe { CStr::from_ptr(record.pw_dir) };
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(home.to_bytes()))).filter(|path| path.is_absolute())
+}
+
 pub fn set_recently() -> bool {
     now_millis().saturating_sub(LAST_SET.load(Ordering::SeqCst)) < OWN_ECHO.as_millis() as u64
 }
@@ -210,6 +224,23 @@ mod tests {
 
     fn live() -> bool {
         std::env::var_os("SCOOCH_LIVE").is_some_and(|value| value == "1")
+    }
+
+    #[test]
+    fn the_real_home_ignores_the_home_variable() {
+        let home = real_home().unwrap();
+        assert!(home.is_absolute() && home.is_dir());
+        assert!(home.join("Library").is_dir());
+    }
+
+    #[test]
+    fn live_the_gallery_has_system_pictures() {
+        if !live() {
+            return;
+        }
+        let found = crate::commands::listing(&[], &Mac.gallery());
+        assert!(found.iter().any(|path| path.extension().is_some_and(|kind| kind == "heic")), "{found:?}");
+        assert!(found.iter().all(|path| path.extension().is_none_or(|kind| kind != "madesktop")));
     }
 
     #[test]
