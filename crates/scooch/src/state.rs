@@ -163,9 +163,13 @@ pub fn file_safe(name: &str) -> String {
 }
 
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_parts(path, &[bytes])
+}
+
+pub fn write_parts(path: &Path, parts: &[&[u8]]) -> Result<()> {
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let partial = path.with_file_name(format!(".{name}.{}.part", std::process::id()));
-    let written = fs::write(&partial, bytes).and_then(|()| fs::rename(&partial, path));
+    let written = fs::File::create(&partial).and_then(|mut file| parts.iter().try_for_each(|part| file.write_all(part))).and_then(|()| fs::rename(&partial, path));
     if written.is_err() {
         let _ = fs::remove_file(&partial);
     }

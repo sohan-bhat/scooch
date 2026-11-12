@@ -78,7 +78,23 @@ pub fn adoptable(entry: &Entry, current: &Path, ours: bool) -> bool {
 pub const NOT_A_FILE: &str = "Scooch only moves picture files, so pick a photo as your wallpaper to use it again.";
 
 pub fn trace() -> bool {
-    std::env::var_os("SCOOCH_TRACE").is_some_and(|value| !value.is_empty() && value != "0")
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("SCOOCH_TRACE").is_some_and(|value| !value.is_empty() && value != "0"))
+}
+
+thread_local! {
+    static LAPS: std::cell::RefCell<Vec<(&'static str, u128)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn lap(name: &'static str, since: &mut Instant) {
+    if trace() {
+        LAPS.with(|laps| laps.borrow_mut().push((name, since.elapsed().as_millis())));
+        *since = Instant::now();
+    }
+}
+
+fn laps() -> String {
+    LAPS.with(|laps| laps.borrow_mut().drain(..).map(|(name, millis)| format!("{name} {millis}")).collect::<Vec<_>>().join(", "))
 }
 
 pub fn stamp() -> String {
@@ -95,7 +111,10 @@ impl Daemon {
         let before = self.store.read();
         let mut state = parse(before.as_deref());
         let mut report = Report::default();
-        match self.desktop.snapshot() {
+        let mut clock = Instant::now();
+        let snapshot = self.desktop.snapshot();
+        lap("snapshot", &mut clock);
+        match snapshot {
             Ok(snapshot) => self.pass(&mut state, &snapshot, &mut report),
             Err(error) => report.problem = Some(error.to_string()),
         }
@@ -170,22 +189,29 @@ impl Daemon {
     fn place(&self, entry: &mut Entry, screen: &Screen, scene: &Scene, options: &Options, current: Option<&Path>) -> Result<Outcome> {
         let source = entry.source.clone();
         let mut image: Option<RgbImage> = None;
-        let analysis = cache::analysis(&self.store, &source, || {
-            let decoded = self.decode(&source)?;
+        let mut clock = Instant::now();
+        let key = cache::key(&source)?;
+        let analysis = cache::analysis(&self.store, key, || {
+            let decoded = self.pixels(&source, key)?;
+            lap("decode", &mut clock);
             let made = scooch_core::analyze(&decoded);
             image = Some(decoded);
             Ok(made)
         })?;
+        lap("analysis", &mut clock);
         let placement = scooch_core::solve(&analysis, scene, options, entry.placement.as_ref());
         drop(analysis);
+        lap("solve", &mut clock);
         let mut picture = None;
         if scene::is_identity(&placement) {
             if !scene.icons.is_empty() && options.pads > 0.0 {
                 let decoded = match image.take() {
                     Some(decoded) => decoded,
-                    None => self.decode(&source)?,
+                    None => self.pixels(&source, key)?,
                 };
+                lap("decode", &mut clock);
                 picture = padded(&decoded, &placement, scene, options);
+                lap("pads check", &mut clock);
             }
             if picture.is_none() {
                 if !current.is_some_and(|path| same(path, &source)) {
@@ -207,15 +233,19 @@ impl Daemon {
             None => {
                 let decoded = match image.take() {
                     Some(decoded) => decoded,
-                    None => self.decode(&source)?,
+                    None => self.pixels(&source, key)?,
                 };
-                scooch_core::render(&decoded, &placement, scene, options)
+                lap("decode", &mut clock);
+                let made = scooch_core::render(&decoded, &placement, scene, options);
+                lap("render", &mut clock);
+                made
             }
         };
         drop(image);
         let format = self.desktop.format();
         let bytes = encode(&picture, format)?;
         drop(picture);
+        lap("encode", &mut clock);
         entry.placement = Some(placement);
         if let (true, Some(output)) = (showing_output, &output) {
             if std::fs::read(output).is_ok_and(|old| old == bytes) {
@@ -226,10 +256,12 @@ impl Daemon {
         std::fs::create_dir_all(self.store.out()).with_context(|| format!("Scooch could not make {}, so check the disk.", self.store.out().display()))?;
         write_atomic(&path, &bytes)?;
         drop(bytes);
+        lap("write", &mut clock);
         if let Err(error) = self.show(screen, &path) {
             let _ = std::fs::remove_file(&path);
             return Err(error);
         }
+        lap("set", &mut clock);
         self.store.sweep(&screen.id, Some(&path));
         entry.counter = counter;
         entry.output = Some(path);
@@ -245,6 +277,15 @@ impl Daemon {
             }
             next += 1;
         }
+    }
+
+    fn pixels(&self, source: &Path, key: u64) -> Result<RgbImage> {
+        if let Some(image) = cache::pixels(&self.store, key) {
+            return Ok(image);
+        }
+        let image = self.decode(source)?;
+        cache::keep_pixels(&self.store, key, &image);
+        Ok(image)
     }
 
     fn decode(&self, source: &Path) -> Result<RgbImage> {
@@ -292,6 +333,22 @@ pub fn encode(picture: &RgbImage, format: Format) -> Result<Vec<u8>> {
     })
 }
 
+#[cfg(target_os = "macos")]
+fn relieve() {
+    extern "C" {
+        fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+    }
+    unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn relieve() {
+    unsafe { libc::malloc_trim(0) };
+}
+
+#[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+fn relieve() {}
+
 pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     let signal = Arc::new(Signal::default());
     let daemon = Daemon::new(desktop.clone(), store);
@@ -303,8 +360,9 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             worker.settle(QUIET, LIMIT);
             let started = Instant::now();
             let report = daemon.tick();
+            relieve();
             if tracing {
-                eprintln!("{} tick {} ms {:?}", stamp(), started.elapsed().as_millis(), report.outcomes);
+                eprintln!("{} tick {} ms {:?} {}", stamp(), started.elapsed().as_millis(), report.outcomes, laps());
             }
             if report.problem != said {
                 if let Some(problem) = &report.problem {
@@ -494,6 +552,20 @@ pub mod tests {
         assert_eq!((entry.icons, entry.counter), (2, 2));
         let files: Vec<_> = std::fs::read_dir(daemon.store.out()).unwrap().flatten().map(|file| file.path()).collect();
         assert_eq!(files, vec![daemon.store.output("main", 2, "jpg")]);
+    }
+
+    #[test]
+    fn a_moved_icon_reuses_the_decoded_picture() {
+        let (daemon, fake, original) = rig("pixels", vec![screen("main", 0.0, 1.0)]);
+        let mut state = daemon.store.load();
+        state.options.pads = 0.7;
+        daemon.store.save(&state).unwrap();
+        fake.place(vec![subject()]);
+        daemon.tick();
+        assert!(cache::pixel_file(&daemon.store, cache::key(&original).unwrap()).exists());
+        fake.place(vec![subject(), corner()]);
+        assert!(matches!(outcome(&daemon.tick()), Outcome::Rendered | Outcome::Kept));
+        assert_eq!(fake.decodes.load(Ordering::SeqCst), 1);
     }
 
     #[test]

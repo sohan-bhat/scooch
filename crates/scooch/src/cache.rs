@@ -1,11 +1,14 @@
-use crate::state::{write_atomic, Store};
+use crate::state::{write_atomic, write_parts, Store};
 use anyhow::{Context, Result};
-use scooch_core::Analysis;
+use scooch_core::{Analysis, RgbImage};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const KEPT: usize = 4;
+const MAGIC: &[u8; 8] = b"SCRGB001";
+const PIXEL_LIMIT: u64 = 120 << 20;
 const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 const MIX: u64 = 0xFF51_AFD7_ED55_8CCD;
 
@@ -25,27 +28,70 @@ fn stir(value: u64) -> u64 {
     (value ^ (value >> 29)).wrapping_mul(MIX).rotate_left(27)
 }
 
-pub fn entry(store: &Store, source: &Path) -> Result<PathBuf> {
+pub fn key(source: &Path) -> Result<u64> {
     let bytes = fs::read(source).with_context(|| format!("Scooch could not read {}, so check that the picture is still there.", source.display()))?;
-    let key = digest(&bytes) ^ digest(env!("CARGO_PKG_VERSION").as_bytes()).rotate_left(17);
-    Ok(store.cache().join(format!("{key:016x}.json")))
+    Ok(digest(&bytes) ^ digest(env!("CARGO_PKG_VERSION").as_bytes()).rotate_left(17))
 }
 
-pub fn analysis(store: &Store, source: &Path, fresh: impl FnOnce() -> Result<Analysis>) -> Result<Analysis> {
-    let file = entry(store, source)?;
+pub fn entry(store: &Store, key: u64) -> PathBuf {
+    store.cache().join(format!("{key:016x}.json"))
+}
+
+pub fn pixel_file(store: &Store, key: u64) -> PathBuf {
+    store.cache().join(format!("{key:016x}.rgb"))
+}
+
+pub fn analysis(store: &Store, key: u64, fresh: impl FnOnce() -> Result<Analysis>) -> Result<Analysis> {
+    let file = entry(store, key);
     if let Some(found) = fs::read(&file).ok().and_then(|bytes| serde_json::from_slice::<Analysis>(&bytes).ok()) {
         return Ok(found);
     }
     let made = fresh()?;
     fs::create_dir_all(store.cache())?;
     write_atomic(&file, &serde_json::to_vec(&made)?)?;
-    trim(&store.cache(), KEPT);
+    trim(&store.cache(), "json", KEPT);
     Ok(made)
 }
 
-pub fn trim(folder: &Path, kept: usize) {
+pub fn pixels(store: &Store, key: u64) -> Option<RgbImage> {
+    let mut file = fs::File::open(pixel_file(store, key)).ok()?;
+    let mut header = [0u8; 16];
+    file.read_exact(&mut header).ok()?;
+    if &header[..8] != MAGIC {
+        return None;
+    }
+    let width = u32::from_le_bytes(header[8..12].try_into().ok()?);
+    let height = u32::from_le_bytes(header[12..16].try_into().ok()?);
+    let size = u64::from(width) * u64::from(height) * 3;
+    if size == 0 || size > PIXEL_LIMIT || file.metadata().ok()?.len() != size + 16 {
+        return None;
+    }
+    let mut raw = vec![0u8; size as usize];
+    file.read_exact(&mut raw).ok()?;
+    RgbImage::from_raw(width, height, raw)
+}
+
+pub fn keep_pixels(store: &Store, key: u64, image: &RgbImage) {
+    let size = u64::from(image.width()) * u64::from(image.height()) * 3;
+    if size > PIXEL_LIMIT || fs::create_dir_all(store.cache()).is_err() {
+        return;
+    }
+    let mut header = MAGIC.to_vec();
+    header.extend_from_slice(&image.width().to_le_bytes());
+    header.extend_from_slice(&image.height().to_le_bytes());
+    let file = pixel_file(store, key);
+    if write_parts(&file, &[&header, image.as_raw()]).is_ok() {
+        trim(&store.cache(), "rgb", 1);
+    }
+}
+
+pub fn trim(folder: &Path, kind: &str, kept: usize) {
     let Ok(entries) = fs::read_dir(folder) else { return };
-    let mut files: Vec<(SystemTime, PathBuf)> = entries.flatten().filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path()))).collect();
+    let mut files: Vec<(SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|extension| extension == kind))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
     files.sort();
     let extra = files.len().saturating_sub(kept);
     for (_, path) in files.into_iter().take(extra) {
@@ -72,9 +118,10 @@ mod tests {
         let picture = store.root.join("picture.png");
         let image = crate::scene::sample(64, 40);
         fs::write(&picture, scooch_core::encode_png(&image).unwrap()).unwrap();
-        let first = analysis(&store, &picture, || Ok(scooch_core::analyze(&image))).unwrap();
-        assert!(entry(&store, &picture).unwrap().exists());
-        let again = analysis(&store, &picture, || panic!("the cache was skipped")).unwrap();
+        let key = key(&picture).unwrap();
+        let first = analysis(&store, key, || Ok(scooch_core::analyze(&image))).unwrap();
+        assert!(entry(&store, key).exists());
+        let again = analysis(&store, key, || panic!("the cache was skipped")).unwrap();
         assert_eq!(first, again);
     }
 
@@ -83,19 +130,33 @@ mod tests {
         let store = Store::at(scratch("cache-change"));
         let picture = store.root.join("picture.bin");
         fs::write(&picture, b"one").unwrap();
-        let before = entry(&store, &picture).unwrap();
+        let before = key(&picture).unwrap();
         fs::write(&picture, b"two").unwrap();
-        assert_ne!(before, entry(&store, &picture).unwrap());
+        assert_ne!(before, key(&picture).unwrap());
     }
 
     #[test]
     fn trim_keeps_the_newest_files() {
         let folder = scratch("trim");
-        for name in ["a", "b", "c"] {
+        for name in ["a.json", "b.json", "c.json", "d.rgb"] {
             fs::write(folder.join(name), name).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        trim(&folder, 2);
-        assert!(!folder.join("a").exists() && folder.join("b").exists() && folder.join("c").exists());
+        trim(&folder, "json", 2);
+        assert!(!folder.join("a.json").exists() && folder.join("b.json").exists() && folder.join("c.json").exists() && folder.join("d.rgb").exists());
+    }
+
+    #[test]
+    fn decoded_pixels_round_trip_and_only_the_newest_stays() {
+        let store = Store::at(scratch("pixels"));
+        let image = crate::scene::sample(37, 21);
+        keep_pixels(&store, 1, &image);
+        assert_eq!(pixels(&store, 1), Some(image.clone()));
+        assert_eq!(pixels(&store, 2), None);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        keep_pixels(&store, 2, &image);
+        assert!(!pixel_file(&store, 1).exists() && pixel_file(&store, 2).exists());
+        fs::write(pixel_file(&store, 2), b"SCRGB001short").unwrap();
+        assert_eq!(pixels(&store, 2), None);
     }
 }
