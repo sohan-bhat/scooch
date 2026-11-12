@@ -1,5 +1,5 @@
 use crate::analysis::quantile;
-use crate::sat::Sat;
+use crate::sat::{Place, Sat};
 use crate::table::{self, Curve, STEPS};
 use crate::warp::{self, Pchip, Plan, BINS};
 use crate::{Analysis, Options, Placement, Scene, TABLE};
@@ -283,14 +283,21 @@ fn stage_one(field: &Field, boxes: &[Footprint], settings: &Settings) -> Option<
             }
         }
     }
+    let lifts: Vec<Vec<Vec<(Place, Place)>>> = (0..zooms)
+        .map(|zi| {
+            let z = 1.0 + ZOOM_STEP * zi as f64;
+            let (_, ch) = table::cover(field.image_aspect, field.screen_aspect, z);
+            pans(1.0 - ch).into_iter().map(|y0| boxes.iter().map(|b| (field.sb.place_y((y0 + ch * b.v0) * field.gh), field.sb.place_y((y0 + ch * b.v1) * field.gh))).collect()).collect()
+        })
+        .collect();
     let scored: Vec<Vec<Candidate>> = rows
         .par_iter()
         .map(|&(zi, z, cw, ch, mirrored, xi, x0)| {
-            let spans: Vec<(f64, f64, f64, f64)> = boxes
+            let spans: Vec<(Place, Place)> = boxes
                 .iter()
                 .map(|b| {
                     let (ta, tb) = if mirrored { (1.0 - b.u1, 1.0 - b.u0) } else { (b.u0, b.u1) };
-                    ((x0 + cw * ta) * field.gw, (x0 + cw * tb) * field.gw, ch * b.v0 * field.gh, ch * b.v1 * field.gh)
+                    (field.sb.place_x((x0 + cw * ta) * field.gw), field.sb.place_x((x0 + cw * tb) * field.gw))
                 })
                 .collect();
             pans(1.0 - ch)
@@ -298,13 +305,12 @@ fn stage_one(field: &Field, boxes: &[Footprint], settings: &Settings) -> Option<
                 .enumerate()
                 .filter_map(|(yi, y0)| {
                     let frame = Frame { z, x0, y0, cw, ch, mirrored };
-                    let lift = y0 * field.gh;
                     let (mut hid, mut busy, mut area) = (0.0f64, 0.0f64, 0.0f64);
-                    for &(xa, xb, ya, yb) in &spans {
-                        let [s, b] = field.sb.sum(xa, lift + ya, xb, lift + yb);
+                    for (&(xa, xb), &(ya, yb)) in spans.iter().zip(&lifts[zi][yi]) {
+                        let [s, b] = field.sb.sum_placed(xa, xb, ya, yb);
                         hid += s;
                         busy += b;
-                        area += (xb - xa) * (yb - ya);
+                        area += (xb.at - xa.at).max(0.0) * (yb.at - ya.at).max(0.0);
                     }
                     let busy = if area > 0.0 { busy / area } else { 0.0 };
                     let off = frame.off();

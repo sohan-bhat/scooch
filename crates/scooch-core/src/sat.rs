@@ -1,3 +1,19 @@
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Place {
+    index: usize,
+    frac: f64,
+    pub at: f64,
+}
+
+fn place(v: f64, size: usize) -> Place {
+    if size == 0 {
+        return Place { index: 0, frac: 0.0, at: 0.0 };
+    }
+    let at = if v.is_nan() { 0.0 } else { v.clamp(0.0, size as f64) };
+    let index = (at as usize).min(size - 1);
+    Place { index, frac: at - index as f64, at }
+}
+
 pub struct Sat<const N: usize> {
     width: usize,
     height: usize,
@@ -57,6 +73,41 @@ impl<const N: usize> Sat<N> {
         out
     }
 
+    pub fn place_x(&self, x: f64) -> Place {
+        place(x, self.width)
+    }
+
+    pub fn place_y(&self, y: f64) -> Place {
+        place(y, self.height)
+    }
+
+    #[inline]
+    fn corner(&self, x: Place, y: Place) -> [f64; N] {
+        let stride = self.width + 1;
+        let i = y.index * stride + x.index;
+        let (a, b, c, d) = (&self.sums[i], &self.sums[i + 1], &self.sums[i + stride], &self.sums[i + stride + 1]);
+        let mut out = [0.0f64; N];
+        for k in 0..N {
+            let top = a[k] + (b[k] - a[k]) * x.frac;
+            let bottom = c[k] + (d[k] - c[k]) * x.frac;
+            out[k] = top + (bottom - top) * y.frac;
+        }
+        out
+    }
+
+    #[inline]
+    pub fn sum_placed(&self, xa: Place, xb: Place, ya: Place, yb: Place) -> [f64; N] {
+        if self.width == 0 || self.height == 0 || !(xb.at > xa.at && yb.at > ya.at) {
+            return [0.0; N];
+        }
+        let (p, q, r, s) = (self.corner(xb, yb), self.corner(xa, yb), self.corner(xb, ya), self.corner(xa, ya));
+        let mut out = [0.0f64; N];
+        for k in 0..N {
+            out[k] = (p[k] - q[k] - r[k] + s[k]).max(0.0);
+        }
+        out
+    }
+
     pub fn total(&self) -> [f64; N] {
         self.sums.last().copied().unwrap_or([0.0; N])
     }
@@ -79,6 +130,16 @@ mod tests {
         assert_eq!(sat.sum(-5.0, -5.0, 99.0, 99.0)[0], 66.0);
         assert_eq!(sat.sum(2.0, 1.0, 2.0, 2.0)[0], 0.0);
         assert_eq!(sat.sum(f64::NAN, 0.0, 1.0, 1.0)[0], 0.0);
+    }
+
+    #[test]
+    fn placed_sums_match_plain_sums() {
+        let values: Vec<f32> = (0..35).map(|i| ((i * 7) % 11) as f32).collect();
+        let sat = Sat::new([&values], 7, 5);
+        for (x0, y0, x1, y1) in [(0.3, 0.2, 6.1, 4.9), (-2.0, 1.0, 3.5, 9.0), (2.0, 2.0, 2.0, 3.0), (1.25, 0.5, 6.999, 5.0)] {
+            let placed = sat.sum_placed(sat.place_x(x0), sat.place_x(x1), sat.place_y(y0), sat.place_y(y1));
+            assert!((placed[0] - sat.sum(x0, y0, x1, y1)[0]).abs() < 1e-9);
+        }
     }
 
     #[test]
