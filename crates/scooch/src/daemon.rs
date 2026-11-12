@@ -2,7 +2,7 @@ use crate::platform::{Desktop, Format, Screen, Snapshot};
 use crate::state::{parse, same, write_atomic, Entry, State, Store};
 use crate::{cache, poke, scene};
 use anyhow::{Context, Result};
-use scooch_core::{Options, Placement, Rect, RgbImage, Scene};
+use scooch_core::{Analysis, Options, Placement, Rect, RgbImage, Scene};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -209,50 +209,36 @@ impl Daemon {
         })?;
         lap("analysis", &mut clock);
         let placement = scooch_core::solve(&analysis, scene, options, entry.placement.as_ref());
-        drop(analysis);
         lap("solve", &mut clock);
+        entry.flip_helps = flip_check(&analysis, scene, options, &placement);
+        let pads = scooch_core::pads_active(&analysis, &placement, scene, options);
         let output = entry.output.clone().filter(|path| path.is_file());
         let showing_output = matches!((current, &output), (Some(current), Some(output)) if same(current, output));
-        let mut picture = None;
-        if scene::is_identity(&placement) {
-            if !scene.icons.is_empty() && options.pads > 0.0 {
-                let decoded = match image.take() {
-                    Some(decoded) => decoded,
-                    None => self.pixels(&source, key)?,
-                };
-                lap("decode", &mut clock);
-                picture = padded(&decoded, &placement, scene, options);
-                lap("pads check", &mut clock);
+        if scene::is_identity(&placement) && !pads {
+            drop(analysis);
+            drop(image);
+            let copied = showing_output && entry.placement.as_ref().is_some_and(scene::is_identity);
+            entry.placement = Some(placement);
+            if current.is_some_and(|path| same(path, &source)) {
+                entry.output = None;
+                self.store.sweep(&screen.id, None);
+            } else if !copied {
+                self.plain(entry, screen, current)?;
             }
-            if picture.is_none() {
-                let copied = showing_output && entry.placement.as_ref().is_some_and(scene::is_identity);
-                entry.placement = Some(placement);
-                if current.is_some_and(|path| same(path, &source)) {
-                    entry.output = None;
-                    self.store.sweep(&screen.id, None);
-                } else if !copied {
-                    self.plain(entry, screen, current)?;
-                }
-                return Ok(Outcome::Plain);
-            }
+            return Ok(Outcome::Plain);
         }
-        if picture.is_none() && options.pads <= 0.0 && showing_output && entry.placement.as_ref() == Some(&placement) {
+        if options.pads <= 0.0 && showing_output && entry.placement.as_ref() == Some(&placement) {
             return Ok(Outcome::Kept);
         }
-        let picture = match picture {
-            Some(picture) => picture,
-            None => {
-                let decoded = match image.take() {
-                    Some(decoded) => decoded,
-                    None => self.pixels(&source, key)?,
-                };
-                lap("decode", &mut clock);
-                let made = scooch_core::render(&decoded, &placement, scene, options);
-                lap("render", &mut clock);
-                made
-            }
+        let decoded = match image.take() {
+            Some(decoded) => decoded,
+            None => self.pixels(&source, key)?,
         };
-        drop(image);
+        lap("decode", &mut clock);
+        let picture = scooch_core::render_with(&decoded, &analysis, &placement, scene, options);
+        drop(decoded);
+        drop(analysis);
+        lap("render", &mut clock);
         let format = self.desktop.format();
         let bytes = encode(&picture, format)?;
         drop(picture);
@@ -346,10 +332,23 @@ pub fn merge(mine: &State, before: &State, fresh: &State) -> State {
     merged
 }
 
-fn padded(image: &RgbImage, placement: &Placement, scene: &Scene, options: &Options) -> Option<RgbImage> {
-    let with = scooch_core::render(image, placement, scene, options);
-    let without = scooch_core::render(image, placement, scene, &Options { pads: 0.0, ..*options });
-    (with != without).then_some(with)
+pub const FLIP_WORTH: f32 = 0.05;
+
+pub fn worth_flipping(hidden: f32, mirror: bool) -> bool {
+    !mirror && hidden > FLIP_WORTH
+}
+
+pub fn flip_helps(hidden: f32, flipped: f32) -> bool {
+    flipped < hidden / 2.0
+}
+
+fn flip_check(analysis: &Analysis, scene: &Scene, options: &Options, placement: &Placement) -> bool {
+    let hidden = scooch_core::hidden_share(analysis, scene, placement);
+    if !worth_flipping(hidden, options.mirror) {
+        return false;
+    }
+    let flipped = scooch_core::solve(analysis, scene, &Options { mirror: true, ..*options }, None);
+    flip_helps(hidden, scooch_core::hidden_share(analysis, scene, &flipped))
 }
 
 pub fn encode(picture: &RgbImage, format: Format) -> Result<Vec<u8>> {
@@ -606,6 +605,50 @@ pub mod tests {
         assert_eq!(fake.showing("main"), original);
         assert_eq!(fake.sets.load(Ordering::SeqCst), 0);
         assert_eq!(fake.decodes.load(Ordering::SeqCst), 1);
+    }
+
+    fn stripes(folder: &Path) -> PathBuf {
+        let path = folder.join("stripes.png");
+        let image = RgbImage::from_fn(320, 200, |x, _| if (x / 2) % 2 == 0 { [240, 240, 240].into() } else { [15, 15, 15].into() });
+        std::fs::write(&path, scooch_core::encode_png(&image).unwrap()).unwrap();
+        path
+    }
+
+    fn identity_tick_decodes(pads: f32) -> (Outcome, Outcome, usize, usize, bool) {
+        let folder = scratch("identity");
+        let busy = stripes(&folder);
+        let fake = Fake::new(vec![screen("main", 0.0, 1.0)], &busy);
+        let mut daemon = Daemon::new(fake.clone(), Store::at(folder.join("data")));
+        daemon.grace = Duration::ZERO;
+        let mut state = State { on: true, ..State::default() };
+        state.options.pads = pads;
+        daemon.store.save(&state).unwrap();
+        fake.place(vec![corner()]);
+        let first = outcome(&daemon.tick());
+        let cold = fake.decodes.load(Ordering::SeqCst);
+        let _ = std::fs::remove_file(cache::pixel_file(&daemon.store, cache::key(&busy).unwrap()));
+        fake.place(vec![Rect { x: 120.0, ..corner() }]);
+        let second = outcome(&daemon.tick());
+        let warm = fake.decodes.load(Ordering::SeqCst) - cold;
+        let entry = daemon.store.load().screens["main"].clone();
+        let identity = entry.placement.as_ref().is_some_and(scene::is_identity);
+        (first, second, cold, warm, identity)
+    }
+
+    #[test]
+    fn an_identity_tick_with_pads_on_renders_once_from_one_decode() {
+        let (first, second, cold, warm, identity) = identity_tick_decodes(0.7);
+        assert!(identity, "the engine should keep busy stripes centered");
+        assert_eq!((first, second), (Outcome::Rendered, Outcome::Rendered));
+        assert_eq!((cold, warm), (1, 1));
+    }
+
+    #[test]
+    fn an_identity_tick_with_pads_off_shows_the_picture_without_decoding() {
+        let (first, second, cold, warm, identity) = identity_tick_decodes(0.0);
+        assert!(identity);
+        assert_eq!((first, second), (Outcome::Plain, Outcome::Plain));
+        assert_eq!((cold, warm), (1, 0));
     }
 
     #[test]

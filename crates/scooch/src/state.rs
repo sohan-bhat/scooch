@@ -37,6 +37,8 @@ pub struct Entry {
     pub icons: usize,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub chosen: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_helps: bool,
 }
 
 impl Entry {
