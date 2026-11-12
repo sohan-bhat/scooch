@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 const GAP: u32 = 12;
+const CELL_W: u32 = 640;
+const CELL_H: u32 = 400;
 const PAPER: Rgb<u8> = Rgb([28, 28, 30]);
 
 fn thumb(image: &RgbImage, rects: &[Rect], box_w: u32, box_h: u32) -> RgbImage {
@@ -100,10 +102,10 @@ fn subject_shape(analysis: &Analysis, placement: &scooch_core::Placement) -> f32
     width / height
 }
 
-fn row(name: &str, photo: &RgbImage, analysis: &Analysis, layout: &str, (w, h): (u32, u32), cell_w: u32, cell_h: u32) -> Row {
+fn row(name: &str, photo: &RgbImage, analysis: &Analysis, layout: &str, (w, h): (u32, u32), options: Options) -> Row {
+    let (cell_w, cell_h) = (CELL_W, CELL_H);
     let icons = layouts::layout(layout, analysis, w, h);
     let scene = Scene { width: w, height: h, icons: icons.clone() };
-    let options = Options::default();
     let started = Instant::now();
     let placement = scooch_core::solve(analysis, &scene, &options, None);
     let solved = started.elapsed();
@@ -146,8 +148,8 @@ fn main() {
     let out = PathBuf::from(args.next().unwrap_or_else(|| "sheets".into()));
     let only: Vec<String> = args.collect();
     std::fs::create_dir_all(&out).expect("out folder");
-    let cell_w = 640;
-    let cell_h = 400;
+    let cell_w = CELL_W;
+    let mut strips: Vec<(String, Row)> = Vec::new();
     for path in layouts::photos() {
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
         if !only.is_empty() && !only.contains(&name) {
@@ -165,19 +167,33 @@ fn main() {
             scooch_core::saliency_image(&analysis).save(PathBuf::from(&dir).join(format!("{name}-saliency.png"))).expect("save");
             scooch_core::busy_image(&analysis).save(PathBuf::from(&dir).join(format!("{name}-busy.png"))).expect("save");
         }
-        let main: Vec<Row> = layouts::NAMES.iter().map(|layout| row(&name, &photo, &analysis, layout, (2880, 1800), cell_w, cell_h)).collect();
+        let main: Vec<Row> = layouts::NAMES.iter().map(|layout| row(&name, &photo, &analysis, layout, (2880, 1800), Options::default())).collect();
         compose(header.clone(), &main, cell_w).save(out.join(format!("{name}-a.png"))).expect("save");
         let others = [((1920, 1080), "mac"), ((1920, 1080), "windows"), ((3840, 2160), "cluster"), ((5120, 2880), "mac"), ((1080, 1920), "mac"), ((1080, 1920), "cluster")];
-        let mut extra: Vec<Row> = others.iter().map(|(screen, layout)| row(&name, &photo, &analysis, layout, *screen, cell_w, cell_h)).collect();
-        for (at, layout) in layouts::SHIFTS {
-            if let Some(crop) = layouts::shifted(&photo, &analysis, at) {
+        let mut extra: Vec<Row> = others.iter().map(|(screen, layout)| row(&name, &photo, &analysis, layout, *screen, Options::default())).collect();
+        let crops = layouts::SHIFTS.iter().map(|(at, layout)| (*at, *layout, "@", layouts::shifted(&photo, &analysis, *at))).chain(layouts::EDGES.iter().map(|(at, layout)| (*at, *layout, "^", layouts::edged(&photo, &analysis, *at))));
+        for (at, layout, mark, crop) in crops {
+            if let Some(crop) = crop {
                 let moved = scooch_core::analyze(&crop);
-                let label = format!("{name}@{}", (at * 100.0).round());
+                let label = format!("{name}{mark}{}", (at * 100.0).round());
                 let box_ = moved.subject;
                 println!("{label} crop {}x{} subject x {:.2} to {:.2} y {:.2} to {:.2}", crop.width(), crop.height(), box_.x, box_.x + box_.w, box_.y, box_.y + box_.h);
-                extra.push(row(&label, &crop, &moved, layout, (2880, 1800), cell_w, cell_h));
+                let options = Options { mirror: mark == "@", ..Options::default() };
+                if mark == "^" {
+                    strips.push((label.clone(), row(&label, &crop, &moved, layout, (2880, 1800), options)));
+                }
+                extra.push(row(&label, &crop, &moved, layout, (2880, 1800), options));
             }
         }
         compose(header, &extra, cell_w).save(out.join(format!("{name}-b.png"))).expect("save");
+    }
+    for (side, tag) in [("mac", "^90"), ("windows", "^10")] {
+        let picked: Vec<Row> = strips.iter().filter(|(label, _)| label.ends_with(tag)).map(|(label, r)| {
+            println!("strip sheet {side} row {label}");
+            Row { before: r.before.clone(), after: r.after.clone() }
+        }).collect();
+        if !picked.is_empty() {
+            compose(Vec::new(), &picked, cell_w).save(out.join(format!("strip-{side}.png"))).expect("save");
+        }
     }
 }
