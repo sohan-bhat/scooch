@@ -56,6 +56,11 @@ impl Entry {
 pub const PROGRAM: &str = env!("CARGO_PKG_VERSION");
 
 impl Store {
+    pub fn forget_pictures(&self) {
+        let _ = fs::remove_dir_all(self.out());
+        let _ = fs::remove_dir_all(self.cache());
+    }
+
     pub fn mark(&self, running: Option<&str>) -> Result<()> {
         let mut state = self.load();
         if state.daemon.as_deref() == running {
@@ -66,10 +71,18 @@ impl Store {
     }
 }
 
+pub fn folder_name(linux: bool) -> &'static str {
+    if linux {
+        "scooch"
+    } else {
+        "Scooch"
+    }
+}
+
 pub fn folder() -> PathBuf {
     match std::env::var_os("SCOOCH_HOME") {
         Some(custom) if !custom.is_empty() => PathBuf::from(custom),
-        _ => dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("Scooch"),
+        _ => dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join(folder_name(cfg!(target_os = "linux"))),
     }
 }
 
@@ -251,6 +264,25 @@ mod tests {
             assert!(entry.get(key).is_some(), "{key}");
         }
         assert!(value.get("problem").is_none());
+    }
+
+    #[test]
+    fn the_data_folder_is_lower_case_only_on_linux() {
+        assert_eq!(folder_name(true), "scooch");
+        assert_eq!(folder_name(false), "Scooch");
+    }
+
+    #[test]
+    fn forgetting_pictures_keeps_the_settings() {
+        let store = Store::at(scratch("forget"));
+        store.save(&State { on: true, ..State::default() }).unwrap();
+        fs::create_dir_all(store.out()).unwrap();
+        fs::create_dir_all(store.cache()).unwrap();
+        fs::write(store.output("main", 1, "jpg"), b"x").unwrap();
+        fs::write(store.cache().join("1.rgb"), b"x").unwrap();
+        store.forget_pictures();
+        assert!(!store.out().exists() && !store.cache().exists());
+        assert!(store.load().on);
     }
 
     #[test]

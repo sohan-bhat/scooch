@@ -212,7 +212,7 @@ pub fn off() -> Result<()> {
         let Some(entry) = state.screens.get(&screen.id) else { continue };
         restore(desktop.as_ref(), &store, &screen, entry)?;
     }
-    let _ = std::fs::remove_dir_all(store.out());
+    store.forget_pictures();
     if store.state_file().exists() {
         state.on = false;
         state.problem = None;
