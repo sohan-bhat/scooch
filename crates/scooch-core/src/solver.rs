@@ -131,6 +131,7 @@ struct Field {
     middle: Frame,
     kept: f64,
     edge: f64,
+    exempt: [bool; 4],
 }
 
 impl Field {
@@ -165,8 +166,10 @@ impl Field {
             middle,
             kept: 0.0,
             edge: 0.0,
+            exempt: [true; 4],
         };
         field.kept = field.crop_sum(&middle);
+        field.exempt = field.sides(&middle);
         field.edge = field.border(&middle);
         Some(field)
     }
@@ -183,13 +186,17 @@ impl Field {
         (self.kept - shared).max(0.0)
     }
 
+    fn sides(&self, frame: &Frame) -> [bool; 4] {
+        let (y0, y1) = (frame.y0 * self.gh, (frame.y0 + frame.ch) * self.gh);
+        let (x0, x1) = (frame.x0 * self.gw, (frame.x0 + frame.cw) * self.gw);
+        [y0 <= EDGE_SLACK, y1 >= self.gh - EDGE_SLACK, x0 <= EDGE_SLACK, x1 >= self.gw - EDGE_SLACK]
+    }
+
     fn border(&self, frame: &Frame) -> f64 {
         let (x0, x1) = (frame.x0 * self.gw, (frame.x0 + frame.cw) * self.gw);
         let (y0, y1) = (frame.y0 * self.gh, (frame.y0 + frame.ch) * self.gh);
-        let top = y0 > EDGE_SLACK;
-        let bottom = y1 < self.gh - EDGE_SLACK;
-        let left = x0 > EDGE_SLACK;
-        let right = x1 < self.gw - EDGE_SLACK;
+        let on_edge = self.sides(frame);
+        let [top, bottom, left, right] = std::array::from_fn(|i| !(on_edge[i] && self.exempt[i]));
         let sum = |a: f64, b: f64, c: f64, d: f64| if c > a && d > b { self.sb.sum(a, b, c, d)[0] } else { 0.0 };
         let (inner_top, inner_bottom) = (if top { y0 + 1.0 } else { y0 }, if bottom { y1 - 1.0 } else { y1 });
         let mut out = 0.0;
@@ -708,8 +715,16 @@ mod tests {
         let field = Field::new(&analysis, &Scene { width: 400, height: 200, icons: Vec::new() }).unwrap();
         assert_eq!(field.border(&field.middle), 0.0);
         let inside = Frame { z: 2.0, x0: 0.25, y0: 0.25, cw: 0.5, ch: 0.5, mirrored: false };
-        let ring = 2.0 * 20.0 + 2.0 * 8.0;
-        assert!((field.border(&inside) - ring).abs() < 1e-9, "{}", field.border(&inside));
+        assert_eq!(field.border(&inside), 56.0);
+        let low = Frame { z: 2.0, x0: 0.25, y0: 0.5, cw: 0.5, ch: 0.5, mirrored: false };
+        assert_eq!(field.border(&low), 38.0);
+        assert!((field.cut(&low) - 38.0 / field.size).abs() < 1e-9);
+        let tall = Analysis { source_width: 200, source_height: 400, ..analysis.clone() };
+        let narrow = Field::new(&tall, &Scene { width: 400, height: 200, icons: Vec::new() }).unwrap();
+        assert_eq!(narrow.exempt, [false, false, true, true]);
+        assert!(narrow.edge > 0.0);
+        let bottom = Frame { z: 1.0, x0: 0.0, y0: 0.75, cw: 1.0, ch: 0.25, mirrored: false };
+        assert!(narrow.border(&bottom) > 0.0);
         assert!((field.size - 800f64.sqrt()).abs() < 1e-9);
     }
 }
