@@ -186,7 +186,7 @@ void main() {
 
   vec2 centered = uv - 0.5;
   float tube = 1.0 + 0.07 * exp(-(1.0 - uv.y) * 7.0) + 0.03 * exp(-uv.y * 9.0);
-  float blotch = 1.0 + (fbm(uv * vec2(2.2, 1.6) + 4.0) - 0.5) * 0.08;
+  float blotch = 1.0 + (noise(uv * vec2(2.2, 1.6) + 4.0) * 0.65 + noise(uv * 5.3 + 9.0) * 0.35 - 0.5) * 0.08;
   float corners = 1.0 - 0.32 * pow(dot(centered * vec2(1.0, 1.2), centered * vec2(1.0, 1.2)), 1.4) * 2.2;
   float hum = 1.0 + 0.006 * sin(uTime * 2.1 + uv.y * 7.0);
   vec3 black = vec3(0.016, 0.018, 0.021);

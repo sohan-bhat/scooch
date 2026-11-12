@@ -13,6 +13,17 @@ const desktopSteps: Step[] = [
   { dpr: 1, dof: true, ao: true, grain: true },
   { dpr: 1, dof: false, ao: true, grain: true },
   { dpr: 1, dof: false, ao: false, grain: true },
+  { dpr: 1, dof: false, ao: false, grain: false },
+  { dpr: 0.85, dof: false, ao: false, grain: false },
+  { dpr: 0.7, dof: false, ao: false, grain: false },
+];
+
+const lightSteps: Step[] = [
+  { dpr: 1.5, dof: true, ao: false, grain: true },
+  { dpr: 1.25, dof: true, ao: false, grain: true },
+  { dpr: 1, dof: true, ao: false, grain: true },
+  { dpr: 1, dof: false, ao: false, grain: true },
+  { dpr: 1, dof: false, ao: false, grain: false },
   { dpr: 0.85, dof: false, ao: false, grain: false },
   { dpr: 0.7, dof: false, ao: false, grain: false },
 ];
@@ -21,9 +32,26 @@ const phoneSteps: Step[] = [
   { dpr: 1.5, dof: false, ao: false, grain: true },
   { dpr: 1.25, dof: false, ao: false, grain: true },
   { dpr: 1, dof: false, ao: false, grain: true },
+  { dpr: 1, dof: false, ao: false, grain: false },
   { dpr: 0.85, dof: false, ao: false, grain: false },
   { dpr: 0.7, dof: false, ao: false, grain: false },
 ];
+
+export type Tier = 'full' | 'light';
+
+export function gpuTier(): Tier {
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl2', { powerPreference: 'high-performance' });
+    if (!gl) return 'light';
+    const info = gl.getExtension('WEBGL_debug_renderer_info');
+    const name = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    return /Intel|Mali|Adreno|PowerVR|SwiftShader|llvmpipe|Software/i.test(name) ? 'light' : 'full';
+  } catch {
+    return 'light';
+  }
+}
 
 const MAX_BOKEH = 3.2;
 const GRAIN = 0.05;
@@ -37,11 +65,15 @@ class Quality {
   setDpr: ((dpr: number) => void) | null = null;
   onChange: (() => void) | null = null;
 
-  configure(phone: boolean, deviceDpr: number) {
-    const all = phone ? phoneSteps : desktopSteps;
+  tier: Tier = 'full';
+
+  configure(phone: boolean, deviceDpr: number, tier: Tier) {
+    this.tier = phone ? 'light' : tier;
+    const all = phone ? phoneSteps : tier === 'light' ? lightSteps : desktopSteps;
     const fit = all.filter((step) => step.dpr <= Math.max(deviceDpr, 1) + 0.01);
     this.steps = fit.length > 0 ? fit : [all[all.length - 1]];
-    this.level = Math.max(this.steps.findIndex((step) => step.dpr <= 1.5), 0);
+    const start = phone ? 1.5 : tier === 'light' ? 1 : 1.5;
+    this.level = Math.max(this.steps.findIndex((step) => step.dpr <= start), 0);
   }
 
   get step() {
@@ -81,7 +113,7 @@ class Quality {
   focus(screen: Vector3, camera: Vector3, mix: number, wide: Vector3, out: Vector3, amount: number) {
     const effect = this.dof;
     if (!effect) return;
-    const on = this.step.dof && amount > 0.002 && !window.location.search.includes('nodof');
+    const on = this.step.dof && amount > 0.002;
     effect.blendMode.opacity.value = on ? 1 : 0;
     if (!on) return;
     out.copy(wide).lerp(screen, mix);

@@ -6,7 +6,7 @@ import { suspend } from 'suspend-react';
 import { loadManifest } from '@/story/demo';
 import { pointer, runtime } from '@/story/state';
 import { Post } from './Post';
-import { quality } from './quality';
+import { gpuTier, quality } from './quality';
 import { layoutFor } from './shots';
 import { World } from './World';
 
@@ -79,7 +79,7 @@ export default function Stage({ onProgress, onReady }: { onProgress: (value: num
   const host = useRef<HTMLDivElement>(null);
   const phone = layoutFor(window.innerWidth, window.innerHeight) === 'phone';
   const deviceDpr = window.devicePixelRatio || 1;
-  quality.configure(phone, phone ? Math.min(deviceDpr, 1.5) : deviceDpr);
+  quality.configure(phone, phone ? Math.min(deviceDpr, 1.5) : deviceDpr, gpuTier());
   const dpr = runtime.still >= 0 ? Math.min(deviceDpr, 2) : Math.min(quality.step.dpr, deviceDpr);
 
   return (

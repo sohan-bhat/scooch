@@ -1,6 +1,8 @@
 import { useGLTF } from '@react-three/drei';
+import { useThree } from '@react-three/fiber';
 import { useLayoutEffect, useMemo } from 'react';
-import { Box3, Group, Mesh, MeshStandardMaterial, Object3D, Vector3 } from 'three';
+import { Box3, Group, Mesh, MeshStandardMaterial, Object3D, Vector3, type WebGLRenderer } from 'three';
+import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { asset } from '@/lib/base';
 
 export const DESK_TOP = 0.787;
@@ -16,7 +18,18 @@ const urls = {
   stationery: asset('models/stationery.glb'),
 };
 
-for (const url of Object.values(urls)) useGLTF.preload(url, false);
+const ktx2 = new KTX2Loader().setTranscoderPath(asset('basis/'));
+let supported = false;
+
+function useKtx2(gl: WebGLRenderer) {
+  if (!supported) {
+    ktx2.detectSupport(gl);
+    supported = true;
+  }
+  return (loader: { setKTX2Loader: (value: never) => unknown }) => {
+    loader.setKTX2Loader(ktx2 as never);
+  };
+}
 
 type Placement = { name: string; x: number; z: number; rotation: number; lift?: number };
 
@@ -39,7 +52,7 @@ function prepare(root: Object3D) {
     if (!material.isMeshStandardMaterial) return;
     material.envMapIntensity = material.name === 'metal_office_desk' ? 0.18 : 1;
     if (material.name === 'metal_office_desk' && !material.userData.toned) {
-      material.color.multiplyScalar(0.62);
+      material.color.multiplyScalar(0.5);
       material.userData.toned = true;
     }
   });
@@ -62,11 +75,12 @@ function placeOnDesk(object: Object3D, placement: Placement) {
 }
 
 export function Desk({ onScreen, showProps }: { onScreen: (mesh: Mesh, frame: Group) => void; showProps: boolean }) {
-  const desk = useGLTF(urls.desk, false);
-  const laptop = useGLTF(urls.laptop, false);
-  const lamp = useGLTF(urls.lamp, false);
-  const notepads = useGLTF(urls.notepads, false);
-  const stationery = useGLTF(urls.stationery, false);
+  const extend = useKtx2(useThree((state) => state.gl));
+  const desk = useGLTF(urls.desk, false, true, extend);
+  const laptop = useGLTF(urls.laptop, false, true, extend);
+  const lamp = useGLTF(urls.lamp, false, true, extend);
+  const notepads = useGLTF(urls.notepads, false, true, extend);
+  const stationery = useGLTF(urls.stationery, false, true, extend);
 
   const groups = useMemo(() => {
     for (const model of [desk, laptop, lamp, notepads, stationery]) prepare(model.scene);

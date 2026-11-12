@@ -10,8 +10,10 @@ import {
   MeshStandardMaterial,
   Object3D,
   PerspectiveCamera,
+  PointLight,
   RectAreaLight,
   SpotLight,
+  Vector2,
   Vector3,
 } from 'three';
 import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
@@ -21,6 +23,7 @@ import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { BULB, DESK_TOP, Desk, LAMP, LAPTOP } from './Desk';
 import { quality } from './quality';
+import { useRoomMaterial } from './Room';
 import { Rig, type ScreenFrame } from './rig';
 import { measureScreen, useScreen } from './screen/useScreen';
 import { layoutFor, shots } from './shots';
@@ -30,7 +33,8 @@ RectAreaLightUniformsLib.init();
 const SPOT = 4;
 const BULB_GLOW = 7;
 const RECT = 2.4;
-const GLOW = 4.5;
+const SCREEN_SPOT = 0.09;
+const INNER = 0.5;
 const up = new Vector3(0, 1, 0);
 
 function toWorld(local: Vector3, position: readonly [number, number, number], rotation: number) {
@@ -38,6 +42,8 @@ function toWorld(local: Vector3, position: readonly [number, number, number], ro
 }
 
 export const bulbWorld = toWorld(BULB, LAMP.position, LAMP.rotation);
+const wallCenter = new Vector2(bulbWorld.x + 0.05, bulbWorld.y - 0.2);
+const floorCenter = new Vector2(bulbWorld.x, bulbWorld.z + 0.4);
 const keyboard = toWorld(new Vector3(0.01, 0.05, 0.035), LAPTOP.position, LAPTOP.rotation);
 
 type Built = { mesh: Mesh; frame: Group; screen: ScreenFrame };
@@ -48,15 +54,18 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const [built, setBuilt] = useState<Built | null>(null);
   const spot = useRef<SpotLight>(null);
   const rect = useRef<RectAreaLight>(null);
+  const screenSpot = useRef<SpotLight>(null);
+  const screenTarget = useMemo(() => new Object3D(), []);
   const rim = useRef<DirectionalLight>(null);
-  const glow = useRef<SpotLight>(null);
-  const wallTarget = useMemo(() => { const object = new Object3D(); object.position.set(bulbWorld.x, bulbWorld.y - 0.1, -0.98); return object; }, []);
+  const inner = useRef<PointLight>(null);
   const target = useMemo(() => new Object3D(), []);
   const bulbs = useRef<MeshStandardMaterial[]>([]);
   const focus = useMemo(() => new Vector3(), []);
-  const scratch = useMemo(() => ({ color: new Color(), rest: new Color(), focusA: new Vector3() }), []);
+  const scratch = useMemo(() => ({ color: new Color(), focusA: new Vector3() }), []);
   const room = useMemo(() => tokenColor('room'), []);
   const layout = layoutFor(size.width, size.height);
+  const wall = useRoomMaterial('wall', wallCenter);
+  const floor = useRoomMaterial('floor', floorCenter);
 
   const onScreen = useCallback(
     (mesh: Mesh, frame: Group) => {
@@ -81,12 +90,10 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     scene.background = room;
     target.position.copy(keyboard);
     scene.add(target);
-    scene.add(wallTarget);
     return () => {
       scene.remove(target);
-      scene.remove(wallTarget);
     };
-  }, [scene, room, target, wallTarget]);
+  }, [scene, room, target]);
 
   useEffect(() => {
     if (!built) return;
@@ -105,11 +112,21 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       light.width = built.screen.width;
       light.height = built.screen.height;
     }
+    const glowLight = screenSpot.current;
+    if (glowLight) {
+      const world = built.screen.center.clone().applyMatrix4(built.frame.matrixWorld);
+      const normal = built.screen.normal.clone().transformDirection(built.frame.matrixWorld);
+      glowLight.position.copy(world).addScaledVector(normal, 0.02);
+      screenTarget.position.copy(world).addScaledVector(normal, 1).add(new Vector3(0, -0.45, 0));
+      scene.add(screenTarget);
+      glowLight.target = screenTarget;
+    }
     const key = spot.current;
     if (key) {
       key.target = target;
       key.shadow.needsUpdate = true;
     }
+    gl.shadowMap.autoUpdate = false;
     gl.shadowMap.needsUpdate = true;
     uniforms.uLamp.value.copy(bulbWorld);
     let frames = 0;
@@ -119,10 +136,16 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       else onReady();
     });
     return () => cancelAnimationFrame(handle);
-  }, [built, scene, target, gl, uniforms, onReady]);
+  }, [built, scene, target, screenTarget, gl, uniforms, onReady]);
+
+  const shadowFrames = useRef(0);
 
   useFrame((state, delta) => {
     if (!rig) return;
+    if (shadowFrames.current < 24) {
+      gl.shadowMap.needsUpdate = true;
+      shadowFrames.current += 1;
+    }
     const time = state.clock.elapsedTime;
     const idle = runtime.idle;
     const motion = idle ? 1 : 0;
@@ -143,7 +166,9 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const power = runtime.power;
     const lamp = story.lamp * flicker * power;
     if (spot.current) spot.current.intensity = SPOT * lamp;
-    if (glow.current) glow.current.intensity = GLOW * lamp;
+    if (inner.current) inner.current.intensity = INNER * lamp;
+    wall.uniforms.uLevel.value = lamp;
+    floor.uniforms.uLevel.value = lamp * 0.35;
     const ambient = Math.min(story.lamp, 1) * power;
     scene.environmentIntensity = 0.05 + 0.17 * ambient;
     if (rim.current) rim.current.intensity = 0.12 + 0.2 * ambient;
@@ -179,13 +204,13 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       story.cursorAlpha,
     );
 
-    const light = rect.current;
+    const light = rect.current ?? screenSpot.current;
     if (light) {
       scratch.color.copy(averages[0]).lerp(averages[1], story.mixAB).lerp(averages[2], story.mixBC);
-      scratch.rest.copy(scratch.color).multiplyScalar(0.35);
       const heat = Math.min(Math.max((story.sweep - 0.15) / 0.6, 0), 1);
       light.color.copy(scratch.color);
-      light.intensity = RECT * (1 - heat * 0.55) * (1.5 - 0.5 * Math.min(story.lamp, 1)) * uniforms.uPower.value;
+      const base = rect.current ? RECT : SCREEN_SPOT;
+      light.intensity = base * (1 - heat * 0.55) * (1.5 - 0.5 * Math.min(story.lamp, 1)) * uniforms.uPower.value;
     }
 
     quality.focus(rig.focusPoint(focus), camera.position, story.focus, keyboard, scratch.focusA, story.dof);
@@ -214,9 +239,9 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         shadow-camera-near={0.2}
         shadow-camera-far={3}
       />
-      <spotLight ref={glow} position={bulbWorld} target={wallTarget} color="#ffb46b" angle={1.05} penumbra={1} intensity={GLOW} decay={2} distance={0} />
+      <pointLight ref={inner} position={bulbWorld} color="#ffb46b" intensity={INNER} distance={0.32} decay={2} />
       <directionalLight ref={rim} position={[1.4, 1.8, -1.6]} color={tokenColor("rim")} intensity={0.3} />
-      <rectAreaLight ref={rect} intensity={RECT} />
+      {quality.tier === 'full' ? <rectAreaLight ref={rect} intensity={RECT} /> : <spotLight ref={screenSpot} angle={1.1} penumbra={1} decay={2} distance={0} intensity={0} />}
       <Desk onScreen={onScreen} showProps={!phone} />
       <ContactShadows
         position={[-0.05, DESK_TOP + 0.0015, 0.02]}
@@ -228,13 +253,11 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         frames={1}
         color="#0a0806"
       />
-      <mesh position={[0, 1.6, -0.98]} receiveShadow>
+      <mesh position={[0, 1.6, -0.98]} material={wall}>
         <planeGeometry args={[9, 3.2]} />
-        <meshStandardMaterial color={tokenColor('room-3')} roughness={0.94} metalness={0} />
       </mesh>
-      <mesh rotation-x={-Math.PI / 2} position={[0, 0, 0.6]} receiveShadow>
+      <mesh rotation-x={-Math.PI / 2} position={[0, 0, 0.6]} material={floor}>
         <planeGeometry args={[9, 4]} />
-        <meshStandardMaterial color={tokenColor('room-2')} roughness={0.85} metalness={0} />
       </mesh>
     </>
   );
