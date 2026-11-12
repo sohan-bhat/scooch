@@ -1,0 +1,71 @@
+name: linux
+
+on:
+  push:
+    paths:
+      - "crates/**"
+      - ".github/workflows/linux.yml"
+      - ".github/linux/**"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - desktop: gnome
+            packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
+            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli
+          - desktop: kde
+            packages: xvfb x11-utils plasma-desktop plasma-workspace kwin-x11
+            extras: kde-cli-tools plasma-workspace-wallpapers breeze-icon-theme
+          - desktop: xfce
+            packages: xvfb x11-utils xfdesktop4 xfwm4 xfce4-panel xfconf
+            extras: xfce4-settings xfdesktop4-data gvfs gvfs-daemons
+          - desktop: cinnamon
+            packages: xvfb x11-utils cinnamon nemo gvfs gvfs-daemons libglib2.0-bin
+            extras: cinnamon-desktop-data
+          - desktop: mate
+            packages: xvfb x11-utils caja marco mate-panel gvfs gvfs-daemons libglib2.0-bin
+            extras: mate-desktop-environment-core mate-backgrounds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dbus dbus-x11 dbus-user-session xdg-user-dirs procps
+          sudo apt-get install -y ${{ matrix.packages }}
+          for extra in ${{ matrix.extras }}; do
+            sudo apt-get install -y --no-install-recommends "$extra" || echo "skipped $extra"
+          done
+
+      - name: Build
+        run: cargo build --release -p scooch --bins --examples
+
+      - name: Test
+        run: cargo test --release -p scooch
+
+      - name: Probe
+        if: ${{ !cancelled() }}
+        run: dbus-run-session -- bash .github/linux/${{ matrix.desktop }}.sh ./target/release/examples/linuxprobe linuxprobe
+
+      - name: Upload
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: linuxprobe-${{ matrix.desktop }}
+          path: linuxprobe
+          if-no-files-found: warn
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f linuxprobe/report.md ]; then
+            cat linuxprobe/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
