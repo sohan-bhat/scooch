@@ -1,5 +1,5 @@
 use crate::table::{self, Curve, STEPS};
-use crate::{color, pads, Options, Placement, RgbImage, Scene};
+use crate::{analysis, color, pads, Options, Placement, RgbImage, Scene};
 use rayon::prelude::*;
 use std::borrow::Cow;
 
@@ -118,9 +118,13 @@ pub fn render(image: &RgbImage, placement: &Placement, scene: &Scene, options: &
     let scale_y = sh as f64 / factor as f64;
     let columns = taps(&placement.fx, width as usize, scale_x, source.width() as usize);
     let rows = taps(&placement.fy, height as usize, scale_y, source.height() as usize);
-    let raw = resample(source, &columns, &rows, width as usize);
+    let (raw, found) = if pads::wanted(scene, options) {
+        rayon::join(|| resample(source, &columns, &rows, width as usize), || Some(analysis::analyze(image)))
+    } else {
+        (resample(source, &columns, &rows, width as usize), None)
+    };
     let base = RgbImage::from_raw(width, height, raw).unwrap_or_else(|| RgbImage::new(width, height));
-    pads::apply(base, image, &placement, scene, options)
+    pads::apply(base, found.as_ref(), &placement, scene, options)
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use crate::table::Curve;
-use crate::{analysis, blur, color, solver, Options, Placement, RgbImage, Scene};
+use crate::{blur, color, solver, Analysis, Options, Placement, RgbImage, Scene};
 use rayon::prelude::*;
 
 const GROW: f64 = 0.10;
@@ -19,24 +19,54 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-struct Grid {
+pub fn amount(options: &Options) -> f32 {
+    if options.pads.is_finite() {
+        options.pads.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+pub fn wanted(scene: &Scene, options: &Options) -> bool {
+    amount(options) > 0.0 && scene.width > 0 && scene.height > 0 && !solver::screen_rects(scene).is_empty()
+}
+
+#[derive(Clone, Copy)]
+struct Area {
     x0: usize,
     y0: usize,
     width: usize,
     height: usize,
 }
 
-impl Grid {
+impl Area {
     fn sample(&self, values: &[f32], x: f32, y: f32) -> f32 {
         let fx = (x - self.x0 as f32).clamp(0.0, (self.width - 1) as f32);
         let fy = (y - self.y0 as f32).clamp(0.0, (self.height - 1) as f32);
-        let (ix, iy) = ((fx as usize).min(self.width.saturating_sub(2)), (fy as usize).min(self.height.saturating_sub(2)));
+        let (ix, iy) = (fx as usize, fy as usize);
+        let (jx, jy) = ((ix + 1).min(self.width - 1), (iy + 1).min(self.height - 1));
         let (tx, ty) = (fx - ix as f32, fy - iy as f32);
-        let at = |x: usize, y: usize| values[y.min(self.height - 1) * self.width + x.min(self.width - 1)];
-        let top = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * tx;
-        let bottom = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * tx;
+        let top = values[iy * self.width + ix] + (values[iy * self.width + jx] - values[iy * self.width + ix]) * tx;
+        let bottom = values[jy * self.width + ix] + (values[jy * self.width + jx] - values[jy * self.width + ix]) * tx;
         top + (bottom - top) * ty
     }
+}
+
+#[derive(Clone, Copy)]
+struct Lerp {
+    a: usize,
+    b: usize,
+    t: f32,
+}
+
+fn lerps(curve: &Curve, first: usize, count: usize, out: usize, cells: usize) -> Vec<Lerp> {
+    (first..first + count)
+        .map(|q| {
+            let p = ((curve.at((q * Q + Q / 2) as f64 / out as f64) * cells as f64 - 0.5) as f32).clamp(0.0, (cells - 1) as f32);
+            let a = p as usize;
+            Lerp { a, b: (a + 1).min(cells - 1), t: p - a as f32 }
+        })
+        .collect()
 }
 
 fn rounded_box(px: f64, py: f64, rect: &[f64; 4], radius: f64) -> f64 {
@@ -67,15 +97,24 @@ fn median(values: &mut [f64]) -> f64 {
     values[values.len() / 2]
 }
 
-pub fn apply(base: RgbImage, source: &RgbImage, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
-    let amount = if options.pads.is_finite() { options.pads.clamp(0.0, 1.0) } else { 0.0 };
+fn quarter_span(lo: f64, hi: f64, limit: usize) -> (usize, usize) {
+    let a = ((lo / Q as f64).floor().max(0.0) as usize).min(limit);
+    let b = ((hi / Q as f64).ceil().max(0.0) as usize).min(limit);
+    (a, b.max(a))
+}
+
+pub fn apply(base: RgbImage, found: Option<&Analysis>, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
+    let amount = amount(options);
     let rects = solver::screen_rects(scene);
     let (width, height) = (base.width() as usize, base.height() as usize);
-    if amount <= 0.0 || rects.is_empty() || width == 0 || height == 0 {
+    let Some(found) = found else { return base };
+    let (bw, bh) = (found.width as usize, found.height as usize);
+    if amount <= 0.0 || rects.is_empty() || width == 0 || height == 0 || bw == 0 || found.busy.len() != bw * bh || found.saliency.len() != bw * bh {
         return base;
     }
     let (qw, qh) = (width.div_ceil(Q), height.div_ceil(Q));
     let feather = FEATHER * median(&mut rects.iter().map(|r| r[3] - r[1]).collect::<Vec<_>>());
+    let pad = REACH * feather;
     let grown: Vec<[f64; 4]> = rects
         .iter()
         .map(|r| {
@@ -86,7 +125,6 @@ pub fn apply(base: RgbImage, source: &RgbImage, placement: &Placement, scene: &S
     let padded: Vec<[usize; 4]> = grown
         .iter()
         .map(|g| {
-            let pad = REACH * feather;
             [
                 (g[0] - pad).floor().max(0.0) as usize,
                 (g[1] - pad).floor().max(0.0) as usize,
@@ -99,126 +137,122 @@ pub fn apply(base: RgbImage, source: &RgbImage, placement: &Placement, scene: &S
     if padded.is_empty() {
         return base;
     }
-    let region = Grid {
-        x0: padded.iter().map(|b| b[0] / Q).min().unwrap_or(0),
-        y0: padded.iter().map(|b| b[1] / Q).min().unwrap_or(0),
-        width: 0,
-        height: 0,
-    };
-    let region = Grid {
-        width: padded.iter().map(|b| b[2].div_ceil(Q)).max().unwrap_or(0).min(qw) - region.x0,
-        height: padded.iter().map(|b| b[3].div_ceil(Q)).max().unwrap_or(0).min(qh) - region.y0,
-        ..region
-    };
-    let n = region.width * region.height;
-    let mut inside = vec![false; n];
-    for b in &padded {
-        for qy in b[1] / Q..b[3].div_ceil(Q) {
-            for qx in b[0] / Q..b[2].div_ceil(Q) {
-                inside[(qy - region.y0) * region.width + qx - region.x0] = true;
-            }
-        }
-    }
-    let mut mask = vec![0.0f32; n];
-    for g in &grown {
-        let radius = ROUND * (g[2] - g[0]).min(g[3] - g[1]);
-        let qx0 = ((g[0] / Q as f64).floor().max(region.x0 as f64) as usize).min(region.x0 + region.width);
-        let qx1 = ((g[2] / Q as f64).ceil().max(0.0) as usize + 1).min(region.x0 + region.width);
-        let qy0 = ((g[1] / Q as f64).floor().max(region.y0 as f64) as usize).min(region.y0 + region.height);
-        let qy1 = ((g[3] / Q as f64).ceil().max(0.0) as usize + 1).min(region.y0 + region.height);
-        for qy in qy0..qy1 {
-            for qx in qx0..qx1 {
-                let d = rounded_box((qx * Q) as f64 + 2.0, (qy * Q) as f64 + 2.0, g, radius);
-                let cover = (0.5 - d / Q as f64).clamp(0.0, 1.0) as f32;
-                let cell = &mut mask[(qy - region.y0) * region.width + qx - region.x0];
-                *cell = cell.max(cover);
-            }
-        }
-    }
-    let mask = blur::gaussian(&mask, region.width, region.height, (feather / Q as f64) as f32);
-    let found = analysis::analyze(source);
-    let (bw, bh) = (found.width as usize, found.height as usize);
-    if bw == 0 {
-        return base;
-    }
-    let field = Grid { x0: 0, y0: 0, width: bw, height: bh };
+    let x0 = padded.iter().map(|b| b[0] / Q).min().unwrap_or(0);
+    let y0 = padded.iter().map(|b| b[1] / Q).min().unwrap_or(0);
+    let region = Area { x0, y0, width: padded.iter().map(|b| b[2].div_ceil(Q)).max().unwrap_or(0).min(qw) - x0, height: padded.iter().map(|b| b[3].div_ceil(Q)).max().unwrap_or(0).min(qh) - y0 };
+    let sigma = (CALM * width as f64 / Q as f64) as f32;
+    let margin = (REACH * sigma as f64).ceil() as usize + 1;
+    let cx0 = region.x0.saturating_sub(margin);
+    let cy0 = region.y0.saturating_sub(margin);
+    let calm_area = Area { x0: cx0, y0: cy0, width: (region.x0 + region.width + margin).min(qw) - cx0, height: (region.y0 + region.height + margin).min(qh) - cy0 };
+    let (dx, dy) = (region.x0 - calm_area.x0, region.y0 - calm_area.y0);
+
     let ground: Vec<f32> = found.busy.iter().map(|b| smoothstep(GATE_FROM, GATE_AT, *b)).collect();
     let keep: Vec<f32> = found.saliency.iter().map(|s| smoothstep(PROTECT_FROM, PROTECT_AT, *s)).collect();
     let free: Vec<f32> = widen(&keep, bw, bh, PROTECT_REACH).into_iter().map(|k| 1.0 - k).collect();
-    let sigma = (CALM * width as f64 / Q as f64) as f32;
-    let margin = (REACH * sigma as f64).ceil() as usize + 1;
-    let calm_grid = Grid {
-        x0: region.x0.saturating_sub(margin),
-        y0: region.y0.saturating_sub(margin),
-        width: (region.x0 + region.width + margin).min(qw) - region.x0.saturating_sub(margin),
-        height: (region.y0 + region.height + margin).min(qh) - region.y0.saturating_sub(margin),
-    };
     let (xc, yc) = (Curve::new(&placement.fx), Curve::new(&placement.fy));
-    let gx: Vec<f32> = (calm_grid.x0..calm_grid.x0 + calm_grid.width).map(|qx| (xc.at((qx * Q + 2) as f64 / width as f64) * bw as f64 - 0.5) as f32).collect();
-    let gy: Vec<f32> = (calm_grid.y0..calm_grid.y0 + calm_grid.height).map(|qy| (yc.at((qy * Q + 2) as f64 / height as f64) * bh as f64 - 0.5) as f32).collect();
-    let open: Vec<f32> = (0..calm_grid.width * calm_grid.height).map(|i| field.sample(&free, gx[i % calm_grid.width], gy[i / calm_grid.width])).collect();
-    let (dx, dy) = (region.x0 - calm_grid.x0, region.y0 - calm_grid.y0);
-    let gate: Vec<f32> = (0..n)
-        .map(|i| {
-            let (c, r) = (i % region.width + dx, i / region.width + dy);
-            field.sample(&ground, gx[c], gy[r]) * open[r * calm_grid.width + c]
-        })
-        .collect();
+    let columns = lerps(&xc, calm_area.x0, calm_area.width, width, bw);
+    let rows = lerps(&yc, calm_area.y0, calm_area.height, height, bh);
+    let pick = |values: &[f32], c: &Lerp, r: &Lerp| {
+        let top = values[r.a * bw + c.a] + (values[r.a * bw + c.b] - values[r.a * bw + c.a]) * c.t;
+        let bottom = values[r.b * bw + c.a] + (values[r.b * bw + c.b] - values[r.b * bw + c.a]) * c.t;
+        top + (bottom - top) * r.t
+    };
+    let mut open = vec![0.0f32; calm_area.width * calm_area.height];
+    open.par_chunks_mut(calm_area.width).zip(&rows).for_each(|(line, r)| {
+        for (cell, c) in line.iter_mut().zip(&columns) {
+            *cell = pick(&free, c, r);
+        }
+    });
+    let mut gate = vec![0.0f32; region.width * region.height];
+    gate.par_chunks_mut(region.width).enumerate().for_each(|(j, line)| {
+        let r = &rows[j + dy];
+        for (i, cell) in line.iter_mut().enumerate() {
+            *cell = pick(&ground, &columns[i + dx], r) * open[(j + dy) * calm_area.width + i + dx];
+        }
+    });
     let under = rects.iter().any(|r| {
-        let qx0 = (r[0] / Q as f64).floor() as usize;
-        let qy0 = (r[1] / Q as f64).floor() as usize;
-        let qx1 = ((r[2] / Q as f64).ceil() as usize).max(qx0 + 1).min(region.x0 + region.width);
-        let qy1 = ((r[3] / Q as f64).ceil() as usize).max(qy0 + 1).min(region.y0 + region.height);
-        (qy0.max(region.y0)..qy1).any(|qy| (qx0.max(region.x0)..qx1).any(|qx| gate[(qy - region.y0) * region.width + qx - region.x0] > 0.0))
+        let (qx0, qx1) = quarter_span(r[0], r[2], region.x0 + region.width);
+        let (qy0, qy1) = quarter_span(r[1], r[3], region.y0 + region.height);
+        let (qx0, qy0) = (qx0.max(region.x0), qy0.max(region.y0));
+        let (qx1, qy1) = (qx1.max(qx0 + 1).min(region.x0 + region.width), qy1.max(qy0 + 1).min(region.y0 + region.height));
+        (qy0..qy1).any(|qy| (qx0..qx1).any(|qx| gate[(qy - region.y0) * region.width + qx - region.x0] > 0.0))
     });
     if !under {
         return base;
     }
-    let weight: Vec<f32> = (0..n).map(|i| if inside[i] { mask[i] * gate[i] * amount } else { 0.0 }).collect();
+
+    let mut mask = vec![0.0f32; region.width * region.height];
+    mask.par_chunks_mut(region.width).enumerate().for_each(|(j, line)| {
+        let qy = region.y0 + j;
+        let py = (qy * Q) as f64 + Q as f64 / 2.0;
+        for g in &grown {
+            if py < g[1] - Q as f64 || py > g[3] + Q as f64 {
+                continue;
+            }
+            let radius = ROUND * (g[2] - g[0]).min(g[3] - g[1]);
+            let (qx0, qx1) = quarter_span(g[0] - Q as f64, g[2] + Q as f64, region.x0 + region.width);
+            for qx in qx0.max(region.x0)..qx1 {
+                let d = rounded_box((qx * Q) as f64 + Q as f64 / 2.0, py, g, radius);
+                let cover = (0.5 - d / Q as f64).clamp(0.0, 1.0) as f32;
+                let cell = &mut line[qx - region.x0];
+                *cell = cell.max(cover);
+            }
+        }
+    });
+    let mask = blur::gaussian(&mask, region.width, region.height, (feather / Q as f64) as f32);
+    let mut weight = vec![0.0f32; region.width * region.height];
+    weight.par_chunks_mut(region.width).enumerate().for_each(|(j, line)| {
+        let qy = region.y0 + j;
+        for b in padded.iter().filter(|b| b[1] / Q <= qy && qy < b[3].div_ceil(Q)) {
+            for qx in b[0] / Q..b[2].div_ceil(Q).min(region.x0 + region.width) {
+                let i = qx - region.x0;
+                line[i] = mask[j * region.width + i] * gate[j * region.width + i] * amount;
+            }
+        }
+    });
     if !weight.iter().any(|w| *w > 0.0) {
         return base;
     }
-    let calm = calm_planes(&base, &calm_grid, &open, sigma);
-    blend(base, &padded, &region, &weight, &calm_grid, &calm)
+    let calm = calm_planes(&base, &calm_area, &open, sigma);
+    blend(base, &padded, &region, &weight, &calm_area, &calm)
 }
 
-fn calm_planes(base: &RgbImage, grid: &Grid, open: &[f32], sigma: f32) -> [Vec<f32>; 3] {
+fn calm_planes(base: &RgbImage, area: &Area, open: &[f32], sigma: f32) -> [Vec<f32>; 3] {
     let decode = color::decode_table();
     let (width, height) = (base.width() as usize, base.height() as usize);
     let raw = base.as_raw();
-    let rows: Vec<Vec<[f32; 3]>> = (0..grid.height)
-        .into_par_iter()
-        .map(|r| {
-            let qy = grid.y0 + r;
-            let (y0, y1) = (qy * Q, ((qy + 1) * Q).min(height));
-            (0..grid.width)
-                .map(|c| {
-                    let qx = grid.x0 + c;
-                    let (x0, x1) = (qx * Q, ((qx + 1) * Q).min(width));
-                    let mut acc = [0.0f32; 3];
-                    for y in y0..y1 {
-                        for x in x0..x1 {
-                            let p = &raw[(y * width + x) * 3..(y * width + x) * 3 + 3];
-                            acc[0] += decode[p[0] as usize];
-                            acc[1] += decode[p[1] as usize];
-                            acc[2] += decode[p[2] as usize];
-                        }
-                    }
-                    let scale = open[r * grid.width + c] / ((x1 - x0) * (y1 - y0)).max(1) as f32;
-                    acc.map(|v| v * scale)
-                })
-                .collect()
-        })
-        .collect();
-    let plane = |k: usize| rows.iter().flat_map(|row| row.iter().map(move |p| p[k])).collect::<Vec<f32>>();
-    let planes = [plane(0), plane(1), plane(2), open.to_vec()];
-    let blurred: Vec<Vec<f32>> = planes.par_iter().map(|p| blur::gaussian(p, grid.width, grid.height, sigma)).collect();
+    let mut planes = [vec![0.0f32; area.width * area.height], vec![0.0f32; area.width * area.height], vec![0.0f32; area.width * area.height]];
+    let [p0, p1, p2] = &mut planes;
+    p0.par_chunks_mut(area.width).zip(p1.par_chunks_mut(area.width)).zip(p2.par_chunks_mut(area.width)).enumerate().for_each(|(r, ((l0, l1), l2))| {
+        let qy = area.y0 + r;
+        let (y0, y1) = (qy * Q, ((qy + 1) * Q).min(height));
+        for c in 0..area.width {
+            let qx = area.x0 + c;
+            let (x0, x1) = (qx * Q, ((qx + 1) * Q).min(width));
+            let mut acc = [0.0f32; 3];
+            for y in y0..y1 {
+                for p in raw[(y * width + x0) * 3..(y * width + x1) * 3].chunks_exact(3) {
+                    acc[0] += decode[p[0] as usize];
+                    acc[1] += decode[p[1] as usize];
+                    acc[2] += decode[p[2] as usize];
+                }
+            }
+            let scale = open[r * area.width + c] / ((x1 - x0) * (y1 - y0)).max(1) as f32;
+            l0[c] = acc[0] * scale;
+            l1[c] = acc[1] * scale;
+            l2[c] = acc[2] * scale;
+        }
+    });
+    let [p0, p1, p2] = planes;
+    let sources = [p0, p1, p2, open.to_vec()];
+    let blurred: Vec<Vec<f32>> = sources.par_iter().map(|p| blur::gaussian(p, area.width, area.height, sigma)).collect();
     let share = &blurred[3];
     let normal = |k: usize| blurred[k].iter().zip(share).map(|(v, w)| if *w > 1e-4 { v / w } else { 0.0 }).collect::<Vec<f32>>();
     [normal(0), normal(1), normal(2)]
 }
 
-fn blend(mut base: RgbImage, padded: &[[usize; 4]], region: &Grid, weight: &[f32], calm_grid: &Grid, calm: &[Vec<f32>; 3]) -> RgbImage {
+fn blend(mut base: RgbImage, padded: &[[usize; 4]], region: &Area, weight: &[f32], calm_area: &Area, calm: &[Vec<f32>; 3]) -> RgbImage {
     let decode = color::decode_table();
     let encode = color::encode_table();
     let width = base.width() as usize;
@@ -248,7 +282,7 @@ fn blend(mut base: RgbImage, padded: &[[usize; 4]], region: &Grid, weight: &[f32
                 }
                 let px = &mut line[x * 3..x * 3 + 3];
                 for k in 0..3 {
-                    let soft = calm_grid.sample(&calm[k], qx, qy);
+                    let soft = calm_area.sample(&calm[k], qx, qy);
                     let hard = decode[px[k] as usize];
                     px[k] = color::encode(encode, hard + (soft - hard) * f);
                 }
@@ -261,10 +295,15 @@ fn blend(mut base: RgbImage, padded: &[[usize; 4]], region: &Grid, weight: &[f32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{table, Rect};
+    use crate::{analysis, table, Rect};
 
     fn stripes(w: u32, h: u32) -> RgbImage {
-        RgbImage::from_fn(w, h, |x, y| if (x / 3 + y / 3) % 2 == 0 { image::Rgb([240, 240, 240]) } else { image::Rgb([20, 20, 20]) })
+        RgbImage::from_fn(w, h, |x, y| if (x / 6 + y / 6) % 2 == 0 { image::Rgb([240, 240, 240]) } else { image::Rgb([20, 20, 20]) })
+    }
+
+    fn run(image: &RgbImage, scene: &Scene, options: &Options) -> RgbImage {
+        let found = analysis::analyze(image);
+        apply(image.clone(), Some(&found), &table::fill(image.width(), image.height(), scene.width, scene.height), scene, options)
     }
 
     #[test]
@@ -279,10 +318,8 @@ mod tests {
     fn busy_ground_gets_a_pad_only_near_the_icon() {
         let image = stripes(400, 250);
         let scene = Scene { width: 400, height: 250, icons: vec![Rect { x: 300.0, y: 40.0, w: 60.0, h: 70.0 }] };
-        let placement = table::fill(400, 250, 400, 250);
-        let plain = image.clone();
-        let out = apply(plain.clone(), &image, &placement, &scene, &Options::default());
-        let changed = |x: u32, y: u32| out.get_pixel(x, y) != plain.get_pixel(x, y);
+        let out = run(&image, &scene, &Options::default());
+        let changed = |x: u32, y: u32| out.get_pixel(x, y) != image.get_pixel(x, y);
         assert!((300..360).any(|x| (40..110).any(|y| changed(x, y))));
         assert!((0..150).all(|x| (0..250).all(|y| !changed(x, y))));
         assert!((0..400).all(|x| (200..250).all(|y| !changed(x, y))));
@@ -292,8 +329,7 @@ mod tests {
     fn calm_ground_is_left_bit_identical() {
         let image = RgbImage::from_fn(400, 250, |x, _| image::Rgb([(x / 2) as u8, 120, 200]));
         let scene = Scene { width: 400, height: 250, icons: vec![Rect { x: 300.0, y: 40.0, w: 60.0, h: 70.0 }] };
-        let placement = table::fill(400, 250, 400, 250);
-        let out = apply(image.clone(), &image, &placement, &scene, &Options::default());
+        let out = run(&image, &scene, &Options::default());
         assert_eq!(out.as_raw(), image.as_raw());
     }
 
@@ -301,8 +337,10 @@ mod tests {
     fn zero_strength_pads_do_nothing() {
         let image = stripes(200, 120);
         let scene = Scene { width: 200, height: 120, icons: vec![Rect { x: 20.0, y: 20.0, w: 40.0, h: 40.0 }] };
-        let options = Options { pads: 0.0, ..Options::default() };
-        let out = apply(image.clone(), &image, &table::fill(200, 120, 200, 120), &scene, &options);
+        let out = run(&image, &scene, &Options { pads: 0.0, ..Options::default() });
         assert_eq!(out.as_raw(), image.as_raw());
+        assert!(!wanted(&scene, &Options { pads: 0.0, ..Options::default() }));
+        assert!(!wanted(&Scene { icons: Vec::new(), ..scene.clone() }, &Options::default()));
+        assert!(wanted(&scene, &Options::default()));
     }
 }
