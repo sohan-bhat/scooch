@@ -596,6 +596,19 @@ pub mod tests {
     }
 
     #[test]
+    fn icons_on_calm_ground_keep_the_plain_picture_even_with_pads_on() {
+        let (daemon, fake, original) = rig("calm", vec![screen("main", 0.0, 1.0)]);
+        let mut state = daemon.store.load();
+        state.options.pads = 0.7;
+        daemon.store.save(&state).unwrap();
+        fake.place(vec![corner()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
+        assert_eq!(fake.showing("main"), original);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), 0);
+        assert_eq!(fake.decodes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn a_moved_icon_reuses_the_decoded_picture() {
         let (daemon, fake, original) = rig("pixels", vec![screen("main", 0.0, 1.0)]);
         let mut state = daemon.store.load();
