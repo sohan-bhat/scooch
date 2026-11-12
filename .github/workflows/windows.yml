@@ -1,0 +1,45 @@
+name: windows
+
+on:
+  push:
+    paths:
+      - "crates/**"
+      - ".github/workflows/windows.yml"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release -p scooch --bins --examples
+
+      - name: Test
+        run: cargo test --release -p scooch
+
+      - name: Probe
+        if: ${{ !cancelled() }}
+        continue-on-error: false
+        shell: pwsh
+        run: ./target/release/examples/winprobe.exe winprobe
+
+      - name: Upload
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: winprobe
+          path: winprobe
+          if-no-files-found: warn
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          if (Test-Path winprobe/report.md) {
+            Get-Content winprobe/report.md | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          }
