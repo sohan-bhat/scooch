@@ -177,6 +177,23 @@ pub fn trusted(reported: Option<PathBuf>, display: &str) -> Option<PathBuf> {
     }
 }
 
+pub fn restorable(reported: Option<PathBuf>, display: &str) -> Option<PathBuf> {
+    let Some(store) = read() else { return reported };
+    let space = current_space(display);
+    match kind(&store, display, space.as_deref()) {
+        Some(kind) => keep(kind, reported),
+        None => reported,
+    }
+}
+
+pub fn keep(kind: Kind, reported: Option<PathBuf>) -> Option<PathBuf> {
+    match kind {
+        Kind::Picture(file) => Some(file).filter(|file| file.exists()),
+        Kind::Default => reported,
+        Kind::Other(_) => None,
+    }
+}
+
 pub fn describe(display: &str) -> Option<Kind> {
     let store = read()?;
     kind(&store, display, current_space(display).as_deref())
@@ -342,6 +359,16 @@ mod tests {
         assert_eq!(decide(Kind::Default, Some(DEFAULT_DESKTOP.into()), yes, no, no), None);
         assert_eq!(decide(Kind::Default, Some(DEFAULT_DESKTOP.into()), no, no, yes), Some(PathBuf::from(DEFAULT_DESKTOP)));
         assert_eq!(decide(Kind::Other("com.apple.wallpaper.choice.sonoma".into()), Some(DEFAULT_DESKTOP.into()), yes, yes, yes), None);
+    }
+
+    #[test]
+    fn the_default_and_plain_files_can_be_put_back_but_nothing_else() {
+        let default = PathBuf::from(DEFAULT_DESKTOP);
+        assert_eq!(keep(Kind::Default, Some(default.clone())), Some(default.clone()));
+        assert_eq!(keep(Kind::Default, None), None);
+        assert_eq!(keep(Kind::Picture(default.clone()), Some("/elsewhere.jpg".into())), Some(default));
+        assert_eq!(keep(Kind::Picture("/nowhere/gone.jpg".into()), None), None);
+        assert_eq!(keep(Kind::Other("com.apple.wallpaper.choice.sonoma".into()), Some(DEFAULT_DESKTOP.into())), None);
     }
 
     #[test]

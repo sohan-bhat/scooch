@@ -174,7 +174,7 @@ impl Daemon {
                 (entry.source, entry.original, entry.placement, entry.chosen) = (picture.to_path_buf(), picture.to_path_buf(), None, false);
             }
         }
-        if usable.is_none() && !ours && !settling {
+        if usable.is_none() && !ours && !settling && !chosen {
             anyhow::bail!(NOT_A_FILE);
         }
         let scene = scene::scene(screen, icons);
@@ -465,12 +465,15 @@ pub mod tests {
         pub decodes: AtomicUsize,
         pub snapshots: AtomicUsize,
         pub hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        pub moving: Mutex<Option<PathBuf>>,
+        pub lost: Mutex<Vec<PathBuf>>,
+        pub gallery: Mutex<Vec<PathBuf>>,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens, icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None) })
+            Arc::new(Self { screens, icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()) })
         }
 
         pub fn showing(&self, screen: &str) -> PathBuf {
@@ -504,7 +507,21 @@ pub mod tests {
         }
 
         fn wallpaper(&self, screen: &Screen) -> Result<Option<PathBuf>> {
-            Ok(self.shown.lock().unwrap().get(&screen.id).cloned())
+            let shown = self.shown.lock().unwrap().get(&screen.id).cloned();
+            let special = shown.as_ref().is_some_and(|path| self.moving.lock().unwrap().as_ref() == Some(path) || self.lost.lock().unwrap().contains(path));
+            Ok(shown.filter(|_| !special))
+        }
+
+        fn restorable(&self, screen: &Screen) -> Result<Option<PathBuf>> {
+            let shown = self.shown.lock().unwrap().get(&screen.id).cloned();
+            if shown.as_ref().is_some_and(|path| self.lost.lock().unwrap().contains(path)) {
+                return Ok(None);
+            }
+            Ok(shown)
+        }
+
+        fn gallery(&self) -> Vec<PathBuf> {
+            self.gallery.lock().unwrap().clone()
         }
 
         fn set_wallpaper(&self, screen: &Screen, path: &Path) -> Result<()> {
@@ -741,6 +758,25 @@ pub mod tests {
         fake.show("main", &later);
         daemon.tick();
         assert_eq!(daemon.store.load().screens["main"].source, later);
+    }
+
+    #[test]
+    fn a_picture_chosen_over_a_moving_default_is_shown() {
+        let (daemon, fake, original) = rig("overmoving", vec![screen("main", 0.0, 1.0)]);
+        *fake.moving.lock().unwrap() = Some(original.clone());
+        daemon.tick();
+        assert_eq!(daemon.store.load().problem.as_deref(), Some(NOT_A_FILE));
+        let wanted = picture(original.parent().unwrap(), "wanted.png");
+        let mut state = daemon.store.load();
+        let mut entry = Entry::new(&wanted);
+        (entry.original, entry.chosen) = (original.clone(), true);
+        state.screens.insert("main".into(), entry);
+        daemon.store.save(&state).unwrap();
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert!(daemon.store.owns(&fake.showing("main")));
+        let entry = daemon.store.load().screens["main"].clone();
+        assert_eq!((entry.source, entry.original, entry.chosen), (wanted, original, false));
     }
 
     #[test]

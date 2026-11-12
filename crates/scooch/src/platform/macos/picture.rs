@@ -47,10 +47,17 @@ fn find(marker: MainThreadMarker, id: &str) -> Result<Retained<NSScreen>> {
 }
 
 pub fn wallpaper(marker: MainThreadMarker, id: &str) -> Result<Option<PathBuf>> {
+    Ok(super::store::trusted(reported(marker, id)?, id))
+}
+
+pub fn restorable(marker: MainThreadMarker, id: &str) -> Result<Option<PathBuf>> {
+    Ok(super::store::restorable(reported(marker, id)?, id))
+}
+
+fn reported(marker: MainThreadMarker, id: &str) -> Result<Option<PathBuf>> {
     let screen = find(marker, id)?;
     let url = NSWorkspace::sharedWorkspace().desktopImageURLForScreen(&screen);
-    let reported = url.and_then(|url| url.path()).map(|path| PathBuf::from(path.to_string()));
-    Ok(super::store::trusted(reported, id))
+    Ok(url.and_then(|url| url.path()).map(|path| PathBuf::from(path.to_string())))
 }
 
 pub fn set_wallpaper(marker: MainThreadMarker, id: &str, path: &Path) -> Result<()> {

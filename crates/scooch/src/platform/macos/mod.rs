@@ -123,6 +123,11 @@ impl Desktop for Mac {
     fn consent_hint(&self) -> Option<&'static str> {
         Some(CONSENT_HINT)
     }
+
+    fn restorable(&self, screen: &Screen) -> Result<Option<PathBuf>> {
+        let id = screen.id.clone();
+        on_main(move |marker| picture::restorable(marker, &id))
+    }
 }
 
 impl Mac {

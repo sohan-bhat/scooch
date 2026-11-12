@@ -136,14 +136,7 @@ pub fn switch(image: Option<PathBuf>) -> Result<()> {
     let store = Store::open();
     replace_outdated(&store)?;
     let mut state = store.load();
-    if !state.on {
-        record(&mut state, desktop.as_ref(), &store).ok();
-    }
-    let screens = desktop.screens()?;
-    for screen in &screens {
-        let entry = state.screens.entry(screen.id.clone()).or_insert_with(|| Entry::new(&image));
-        (entry.source, entry.placement, entry.fingerprint, entry.chosen) = (image.clone(), None, None, true);
-    }
+    choose_picture(&mut state, desktop.as_ref(), &store, &image)?;
     state.on = true;
     state.problem = None;
     store.save(&state)?;
@@ -383,25 +376,44 @@ pub fn default_out(image: &Path) -> PathBuf {
     PathBuf::from(format!("{stem}-scooch.jpg"))
 }
 
-fn record(state: &mut State, desktop: &dyn Desktop, store: &Store) -> Result<()> {
-    let mut recorded = 0;
+pub fn recorded(desktop: &dyn Desktop, store: &Store, screen: &Screen, chosen: Option<&Path>) -> Result<Option<Entry>> {
+    let current = desktop.wallpaper(screen)?.filter(|path| path.is_file() && !store.owns(path));
+    let Some(source) = chosen.map(Path::to_path_buf).or(current) else { return Ok(None) };
+    let mut entry = Entry::new(&source);
+    match desktop.restorable(screen)?.filter(|path| !store.owns(path)) {
+        Some(original) => entry.original = original,
+        None => entry.unrestorable = true,
+    }
+    entry.chosen = chosen.is_some();
+    Ok(Some(entry))
+}
+
+pub fn record(state: &mut State, desktop: &dyn Desktop, store: &Store) -> Result<()> {
+    state.screens.clear();
     for screen in desktop.screens()? {
-        let current = desktop.wallpaper(&screen)?.filter(|path| path.is_file() && !store.owns(path));
-        match (current, state.screens.get_mut(&screen.id)) {
-            (Some(current), Some(entry)) => {
-                (entry.source, entry.original, entry.fingerprint, entry.placement) = (current.clone(), current, None, None);
-                recorded += 1;
-            }
-            (Some(current), None) => {
-                state.screens.insert(screen.id.clone(), Entry::new(&current));
-                recorded += 1;
-            }
-            (None, Some(_)) => recorded += 1,
-            (None, None) => {}
+        if let Some(entry) = recorded(desktop, store, &screen, None)? {
+            state.screens.insert(screen.id.clone(), entry);
         }
     }
-    if recorded == 0 {
+    if state.screens.is_empty() {
         bail!(NO_PICTURE);
+    }
+    Ok(())
+}
+
+pub fn choose_picture(state: &mut State, desktop: &dyn Desktop, store: &Store, image: &Path) -> Result<()> {
+    if !state.on {
+        state.screens.clear();
+    }
+    for screen in desktop.screens()? {
+        match state.screens.get_mut(&screen.id) {
+            Some(entry) => (entry.source, entry.placement, entry.fingerprint, entry.chosen) = (image.to_path_buf(), None, None, true),
+            None => {
+                if let Some(entry) = recorded(desktop, store, &screen, Some(image))? {
+                    state.screens.insert(screen.id.clone(), entry);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -586,6 +598,64 @@ mod tests {
         for line in [FLIP_ON, FLIP_OFF, FLIP_HINT] {
             assert!(!line.contains(['—', '–', ';', '(', ')']) && !line.contains(": "), "{line}");
         }
+    }
+
+    fn desk(name: &str) -> (std::sync::Arc<crate::daemon::tests::Fake>, Store, PathBuf, PathBuf) {
+        let folder = crate::state::scratch(name);
+        let default = crate::daemon::tests::picture(&folder, "default.heic");
+        let chosen = crate::daemon::tests::picture(&folder, "chosen.png");
+        let fake = crate::daemon::tests::Fake::new(vec![crate::daemon::tests::screen("main", 0.0, 1.0)], &default);
+        *fake.moving.lock().unwrap() = Some(default.clone());
+        (fake, Store::at(folder.join("data")), default, chosen)
+    }
+
+    #[test]
+    fn a_moving_default_is_recorded_as_the_original() {
+        let (fake, store, default, chosen) = desk("moving");
+        let mut state = State::default();
+        assert!(record(&mut state, fake.as_ref(), &store).is_err());
+        choose_picture(&mut state, fake.as_ref(), &store, &chosen).unwrap();
+        let entry = &state.screens["main"];
+        assert_eq!((entry.source.clone(), entry.original.clone(), entry.unrestorable, entry.chosen), (chosen.clone(), default, false, true));
+    }
+
+    #[test]
+    fn a_wallpaper_no_app_can_set_marks_the_screen() {
+        let (fake, store, default, chosen) = desk("lost");
+        fake.lost.lock().unwrap().push(default);
+        let mut state = State::default();
+        choose_picture(&mut state, fake.as_ref(), &store, &chosen).unwrap();
+        let entry = &state.screens["main"];
+        assert_eq!((entry.original.clone(), entry.unrestorable), (chosen.clone(), true));
+        let text = serde_json::to_string(&state).unwrap();
+        assert!(text.contains("\"unrestorable\":true"));
+    }
+
+    #[test]
+    fn a_second_use_keeps_the_first_original() {
+        let (fake, store, default, chosen) = desk("second");
+        let mut state = State::default();
+        choose_picture(&mut state, fake.as_ref(), &store, &chosen).unwrap();
+        state.on = true;
+        std::fs::create_dir_all(store.out()).unwrap();
+        let output = store.output("main", 1, "jpg");
+        std::fs::write(&output, b"x").unwrap();
+        fake.show("main", &output);
+        let later = crate::daemon::tests::picture(chosen.parent().unwrap(), "later.png");
+        choose_picture(&mut state, fake.as_ref(), &store, &later).unwrap();
+        let entry = &state.screens["main"];
+        assert_eq!((entry.source.clone(), entry.original.clone()), (later, default));
+    }
+
+    #[test]
+    fn a_plain_picture_is_its_own_original() {
+        let (fake, store, _, chosen) = desk("plain");
+        fake.show("main", &chosen);
+        let mut state = State::default();
+        record(&mut state, fake.as_ref(), &store).unwrap();
+        let entry = &state.screens["main"];
+        assert_eq!((entry.source.clone(), entry.original.clone(), entry.unrestorable, entry.chosen), (chosen.clone(), chosen, false, false));
+        assert!(!serde_json::to_string(&state).unwrap().contains("unrestorable"));
     }
 
     #[test]

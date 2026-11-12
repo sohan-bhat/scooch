@@ -58,6 +58,12 @@ pub trait Desktop: Send + Sync {
     fn consent_hint(&self) -> Option<&'static str> {
         None
     }
+    fn restorable(&self, screen: &Screen) -> Result<Option<PathBuf>> {
+        self.wallpaper(screen)
+    }
+    fn gallery(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 pub fn current() -> Result<Box<dyn Desktop>> {

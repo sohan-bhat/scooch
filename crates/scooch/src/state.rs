@@ -41,6 +41,8 @@ pub struct Entry {
     pub chosen: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub flip_helps: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unrestorable: bool,
 }
 
 impl Entry {
