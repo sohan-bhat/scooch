@@ -1,0 +1,94 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: cargo build --release -p scooch --bin scooch --target aarch64-apple-darwin
+      - run: cargo build --release -p scooch --bin scooch --target x86_64-apple-darwin
+      - run: |
+          mkdir out
+          lipo -create -output out/scooch target/aarch64-apple-darwin/release/scooch target/x86_64-apple-darwin/release/scooch
+          codesign --force --sign - --identifier me.sohanbhat.scooch out/scooch
+          tar -czf scooch-macos.tar.gz -C out scooch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: scooch-macos.tar.gz
+
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+      - run: cargo build --release -p scooch --bin scooch --target ${{ matrix.arch }}-unknown-linux-musl
+      - run: tar -czf scooch-linux-${{ matrix.arch }}.tar.gz -C target/${{ matrix.arch }}-unknown-linux-musl/release scooch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: scooch-linux-${{ matrix.arch }}.tar.gz
+
+  windows:
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-pc-windows-msvc
+      - run: cargo build --release -p scooch --bins --target ${{ matrix.arch }}-pc-windows-msvc
+      - shell: pwsh
+        run: |
+          $from = "target/${{ matrix.arch }}-pc-windows-msvc/release"
+          Compress-Archive -Path "$from/scooch.exe", "$from/scoochw.exe" -DestinationPath "scooch-windows-${{ matrix.arch }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: scooch-windows-${{ matrix.arch }}.zip
+
+  publish:
+    needs: [macos, linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - working-directory: dist
+        run: sha256sum scooch-* > SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          notes="docs/releases/$TAG.md"
+          if [ -f "$notes" ]; then
+            gh release create "$TAG" dist/* --title "Scooch ${TAG#v}" --notes-file "$notes"
+          else
+            gh release create "$TAG" dist/* --title "Scooch ${TAG#v}" --generate-notes
+          fi

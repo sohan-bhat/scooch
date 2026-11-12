@@ -1,0 +1,35 @@
+name: install-check
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: curl -LsSf https://sohanbhat.me/scooch/install.sh | sh
+      - run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          scooch --version
+          scooch doctor || true
+
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - run: |
+          irm https://sohanbhat.me/scooch/install.ps1 | iex
+          scooch --version
+          scooch doctor
