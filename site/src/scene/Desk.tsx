@@ -54,6 +54,13 @@ function prepare(root: Object3D) {
     if (material.name === 'metal_office_desk' && !material.userData.toned) {
       material.color.multiplyScalar(0.5);
       material.userData.toned = true;
+      material.onBeforeCompile = (shader) => {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <roughnessmap_fragment>',
+          '#include <roughnessmap_fragment>\n  roughnessFactor = max(roughnessFactor, 0.6);',
+        );
+      };
+      material.customProgramCacheKey = () => 'scooch-desk';
     }
   });
 }
