@@ -185,6 +185,7 @@ mod probe {
         probe.section("1 Session facts", facts);
         probe.section("2 Read", read);
         probe.section("3 Geometry truth", geometry);
+        probe.section("4 Move and events", events);
         probe.save();
         ExitCode::SUCCESS
     }
@@ -687,6 +688,227 @@ mod probe {
             "- corrected constants `Spacing {{ inset: {:.0}, above: {:.0}, gap: {:.0}, below: {:.0}, sides: {:.0} }}` against the current `{:?}`",
             solved.inset, solved.above, solved.gap, solved.below, solved.sides, SPACING
         ));
+    }
+
+    fn virtual_screen() -> (i32, i32, i32, i32) {
+        unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), GetSystemMetrics(SM_CXVIRTUALSCREEN).max(2), GetSystemMetrics(SM_CYVIRTUALSCREEN).max(2)) }
+    }
+
+    fn mouse(x: i32, y: i32, extra: MOUSE_EVENT_FLAGS) -> bool {
+        let (left, top, width, height) = virtual_screen();
+        let dx = (i64::from(x - left) * 65535 / i64::from(width - 1)) as i32;
+        let dy = (i64::from(y - top) * 65535 / i64::from(height - 1)) as i32;
+        let flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | extra;
+        let input = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } };
+        let sent = unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
+        sent == 1
+    }
+
+    fn drag(from: POINT, distance: i32) -> bool {
+        let mut sent = mouse(from.x, from.y, MOUSE_EVENT_FLAGS(0));
+        pump(Duration::from_millis(150));
+        sent &= mouse(from.x, from.y, MOUSEEVENTF_LEFTDOWN);
+        pump(Duration::from_millis(150));
+        for step in 1..=15 {
+            sent &= mouse(from.x + distance * step / 15, from.y, MOUSE_EVENT_FLAGS(0));
+            pump(Duration::from_millis(40));
+        }
+        sent &= mouse(from.x + distance, from.y, MOUSEEVENTF_LEFTUP);
+        sent
+    }
+
+    fn rule_names() -> [&'static str; 4] {
+        ["capture end on the desktop thread", "create or destroy on the list client", "reorder on the list client", "location change of an item on the list"]
+    }
+
+    fn adapter_rule(seen: &Seen, list: isize) -> Option<usize> {
+        let on_list = seen.window == list;
+        if !wakes::event(seen.kind, on_list, seen.object, seen.child) {
+            return None;
+        }
+        wakes::HOOKS.iter().position(|(low, high)| (*low..=*high).contains(&seen.kind))
+    }
+
+    fn candidate(seen: &Seen, list: isize) -> Vec<String> {
+        let mut found = vec![format!("{:#06x} any window", seen.kind)];
+        if seen.window == list {
+            found.push(format!("{:#06x} list object {}", seen.kind, seen.object));
+            if seen.child > 0 {
+                found.push(format!("{:#06x} list object {} item", seen.kind, seen.object));
+            }
+        }
+        found
+    }
+
+    struct Action {
+        name: String,
+        seen: Vec<Seen>,
+        notes: Vec<Note>,
+        settings: Vec<Setting>,
+    }
+
+    fn act(p: &mut Probe, name: &str, work: impl FnOnce(&mut Probe) -> Result<String>) -> Action {
+        let before = mark();
+        let outcome = work(p);
+        pump(SETTLE);
+        let (seen, notes, settings) = since(before);
+        let detail = match outcome {
+            Ok(detail) => detail,
+            Err(error) => format!("failed with {error:#}"),
+        };
+        p.raw(format!("action {name} {detail}"));
+        for event in &seen {
+            p.raw(format!("  event {} {:#06x} hwnd {:#x} class {} object {} child {}", event.at, event.kind, event.window, event.class, event.object, event.child));
+        }
+        for note in &notes {
+            p.raw(format!("  shell {} {} {:#x}", note.0, note.1, note.2));
+        }
+        p.line(format!("- {name} {detail}"));
+        Action { name: name.into(), seen, notes, settings }
+    }
+
+    fn summarize(p: &mut Probe, action: &Action, list: isize) {
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        for seen in &action.seen {
+            let target = if seen.window == list { "list" } else { seen.class.as_str() };
+            *kinds.entry(format!("{:#06x} {} obj {} {}", seen.kind, target, seen.object, if seen.child > 0 { "item" } else { "self" })).or_default() += 1;
+        }
+        let rules: Vec<&str> = (0..4).filter(|rule| action.seen.iter().any(|seen| adapter_rule(seen, list) == Some(*rule))).map(|rule| rule_names()[rule]).collect();
+        let shell_hits = action.notes.iter().filter(|note| note.1 == "root" && (note.2 as u32) & ADAPTER_EVENTS != 0).count();
+        let settings: Vec<String> = action.settings.iter().map(|(_, value)| format!("{value:#x}")).collect();
+        p.line(format!("  - events {}", if kinds.is_empty() { "none".into() } else { kinds.iter().map(|(kind, count)| format!("{kind} x{count}")).collect::<Vec<_>>().join(", ") }));
+        p.line(format!("  - adapter hooks {}", if rules.is_empty() { "silent".into() } else { rules.join(", ") }));
+        p.line(format!("  - adapter shell notification {}", if shell_hits > 0 { format!("fired {shell_hits} times") } else { "silent".into() }));
+        if !settings.is_empty() {
+            p.line(format!("  - setting changes {}", settings.join(" ")));
+        }
+    }
+
+    fn whole_hook(list: HWND) -> Option<HWINEVENTHOOK> {
+        let mut process = 0u32;
+        let thread = unsafe { GetWindowThreadProcessId(list, Some(&mut process)) };
+        if thread == 0 {
+            return None;
+        }
+        let hook = unsafe { SetWinEventHook(EVENT_MIN, EVENT_MAX, None, Some(record), process, thread, WINEVENT_OUTOFCONTEXT) };
+        (!hook.is_invalid()).then_some(hook)
+    }
+
+    fn events(p: &mut Probe) -> Result<()> {
+        let view = shell::view()?;
+        let list = view.list.0 as isize;
+        let hook = whole_hook(view.list).context("could not hook the desktop thread")?;
+        let spot = p.target.unwrap_or(target(&view)?);
+        let (name, folder) = PROBES[0];
+        let font = shell::Font::open()?;
+        let cell = shell::cell(&view, font.line)?;
+        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
+        park_cursor();
+        pump(SETTLE);
+        let mut actions = Vec::new();
+        actions.push(act(p, "move with SelectAndPositionItems", |_| {
+            let pidl = pidl_of(&view, name, folder)?;
+            place(&view, &pidl, spot)?;
+            Ok(format!("to {},{}", spot.x, spot.y))
+        }));
+        actions.push(act(p, "drag 300 px with SendInput", |_| {
+            let shown = shown_name(name, folder);
+            let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect).context("no UI Automation rect for the probe item")?;
+            let from = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + cell.icon / 2.0) as i32 };
+            let pidl = pidl_of(&view, name, folder)?;
+            let (_, before) = position(&view, &pidl)?;
+            let sent = drag(from, 300);
+            pump(Duration::from_millis(800));
+            let (_, after) = position(&view, &pidl)?;
+            Ok(format!("from {},{} sent {sent}, item moved from {},{} to {},{}", from.x, from.y, before.x, before.y, after.x, after.y))
+        }));
+        let fresh = p.desktop.join("scooch-probe-new.txt");
+        let renamed = p.desktop.join("scooch-probe-renamed.txt");
+        p.made.push(fresh.clone());
+        p.made.push(renamed.clone());
+        actions.push(act(p, "create a file", |_| {
+            fs::write(&fresh, b"new")?;
+            Ok("scooch-probe-new.txt".into())
+        }));
+        actions.push(act(p, "rename a file", |_| {
+            fs::rename(&fresh, &renamed)?;
+            Ok("to scooch-probe-renamed.txt".into())
+        }));
+        actions.push(act(p, "delete a file", |_| {
+            fs::remove_file(&renamed)?;
+            Ok("scooch-probe-renamed.txt".into())
+        }));
+        let original = shell::mode(&view)?;
+        let other = if original.1 == 32 { 48 } else { 32 };
+        actions.push(act(p, "change the icon size", |_| {
+            unsafe { view.folder.SetViewModeAndIconSize(FVM_ICON, other) }?;
+            Ok(format!("from {} to {other}", original.1))
+        }));
+        actions.push(act(p, "put the icon size back", |_| {
+            unsafe { view.folder.SetViewModeAndIconSize(original.0, original.1) }?;
+            Ok(format!("to {}", original.1))
+        }));
+        for action in &actions {
+            p.line(format!("- **{}**", action.name));
+            summarize(p, action, list);
+        }
+        park_cursor();
+        pump(SETTLE);
+        let rest = act(p, "rest for 20 s", |_| {
+            pump(Duration::from_secs(20));
+            Ok("no input".into())
+        });
+        summarize(p, &rest, list);
+        let moving = act(p, "move the mouse for 5 s over empty desktop", |_| {
+            let area = work_area().context("no work area")?;
+            let width = area.right - area.left;
+            let height = area.bottom - area.top;
+            let started = Instant::now();
+            let mut step = 0i32;
+            while started.elapsed() < Duration::from_secs(5) {
+                let x = area.left + width * 55 / 100 + (step * 13) % (width * 40 / 100).max(1);
+                let y = area.top + height * 8 / 100 + (step * 7) % (height * 15 / 100).max(1);
+                mouse(x, y, MOUSE_EVENT_FLAGS(0));
+                pump(Duration::from_millis(16));
+                step += 1;
+            }
+            Ok(format!("{step} moves"))
+        });
+        summarize(p, &moving, list);
+        let _ = unsafe { UnhookWinEvent(hook) };
+        smallest(p, &actions, &[&rest, &moving], list);
+        Ok(())
+    }
+
+    fn smallest(p: &mut Probe, actions: &[Action], quiet: &[&Action], list: isize) {
+        let noisy: std::collections::BTreeSet<String> = quiet.iter().flat_map(|action| action.seen.iter().flat_map(|seen| candidate(seen, list))).collect();
+        let mut covers: BTreeMap<String, std::collections::BTreeSet<usize>> = BTreeMap::new();
+        for (index, action) in actions.iter().enumerate() {
+            for seen in &action.seen {
+                for rule in candidate(seen, list) {
+                    if !noisy.contains(&rule) {
+                        covers.entry(rule).or_default().insert(index);
+                    }
+                }
+            }
+        }
+        let mut left: std::collections::BTreeSet<usize> = (0..actions.len()).collect();
+        let mut chosen = Vec::new();
+        while !left.is_empty() {
+            let best = covers.iter().max_by_key(|(_, hits)| hits.intersection(&left).count()).filter(|(_, hits)| hits.intersection(&left).count() > 0).map(|(rule, hits)| (rule.clone(), hits.clone()));
+            let Some((rule, hits)) = best else { break };
+            for index in &hits {
+                left.remove(index);
+            }
+            chosen.push(rule);
+        }
+        let missed: Vec<&str> = left.iter().map(|index| actions[*index].name.as_str()).collect();
+        p.line(String::new());
+        p.line(format!("- rules that fired at rest or during mouse moves {}", if noisy.is_empty() { "none".into() } else { noisy.iter().cloned().collect::<Vec<_>>().join(", ") }));
+        p.line(format!("- smallest hook set silent at rest {}", if chosen.is_empty() { "none".into() } else { chosen.join(", ") }));
+        p.line(format!("- actions no quiet hook catches {}", if missed.is_empty() { "none".into() } else { missed.join(", ") }));
+        let adapter_noise: Vec<&str> = (0..4).filter(|rule| quiet.iter().any(|action| action.seen.iter().any(|seen| adapter_rule(seen, list) == Some(*rule)))).map(|rule| rule_names()[rule]).collect();
+        p.line(format!("- adapter hooks that fired at rest or during mouse moves {}", if adapter_noise.is_empty() { "none".into() } else { adapter_noise.join(", ") }));
     }
 
 }
