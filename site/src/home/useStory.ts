@@ -53,6 +53,24 @@ export function useReveal() {
   }, []);
 }
 
+export function useSolidNav(header: React.RefObject<HTMLElement | null>, end: React.RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const bar = header.current;
+    const marker = end.current;
+    if (!bar || !marker) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        const passed = !entry.isIntersecting && entry.boundingClientRect.top < (entry.rootBounds?.top ?? 0) + 1;
+        if (passed) bar.setAttribute('data-solid', '');
+        else bar.removeAttribute('data-solid');
+      },
+      { rootMargin: `-${bar.offsetHeight}px 0px 0px 0px` },
+    );
+    observer.observe(marker);
+    return () => observer.disconnect();
+  }, [header, end]);
+}
+
 export function useStory(refs: Refs, live: boolean, still: number) {
   useEffect(() => {
     if (!live) return;
