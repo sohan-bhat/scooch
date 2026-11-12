@@ -498,7 +498,8 @@ mod probe {
         if lines != height {
             bail!("GetDIBits copied {lines} of {height} lines");
         }
-        let rgb = data.chunks_exact(4).flat_map(|pixel| [pixel[2], pixel[1], pixel[0]]).collect();
+        let (pixels, _) = data.as_chunks::<4>();
+        let rgb = pixels.iter().flat_map(|pixel| [pixel[2], pixel[1], pixel[0]]).collect();
         RgbImage::from_raw(width as u32, height as u32, rgb).context("the capture did not fit")
     }
 
