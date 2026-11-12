@@ -279,7 +279,25 @@ pub fn doctor() -> Result<()> {
     Ok(())
 }
 
-pub fn render(image: Option<PathBuf>, icons: Option<PathBuf>, out: Option<PathBuf>, json: Option<PathBuf>, saliency: Option<PathBuf>) -> Result<()> {
+pub struct Rendered {
+    pub picture: RgbImage,
+    pub analysis: scooch_core::Analysis,
+    pub report: serde_json::Value,
+}
+
+pub fn rendered(source: &RgbImage, scene: &Scene, fill: bool) -> Rendered {
+    let options = Options::default();
+    let analysis = scooch_core::analyze(source);
+    let plain = scooch_core::fill(source.width(), source.height(), scene);
+    let (placement, options) = if fill { (plain.clone(), Options { pads: 0.0, ..options }) } else { (scooch_core::solve(&analysis, scene, &options, None), options) };
+    let picture = scooch_core::render_with(source, &analysis, &placement, scene, &options);
+    let hidden = scooch_core::hidden_share(&analysis, scene, &placement);
+    let hidden_plain = scooch_core::hidden_share(&analysis, scene, &plain);
+    let report = serde_json::json!({ "scene": scene, "placement": placement, "analysis": analysis, "hidden": hidden, "hidden_plain": hidden_plain });
+    Rendered { picture, analysis, report }
+}
+
+pub fn render(image: Option<PathBuf>, icons: Option<PathBuf>, out: Option<PathBuf>, json: Option<PathBuf>, saliency: Option<PathBuf>, fill: bool) -> Result<()> {
     let Some(image) = image.map_or_else(choose, |image| Ok(Some(image)))? else { return Ok(()) };
     let image = picture_file(&image)?;
     let desktop = desktop().ok();
@@ -287,18 +305,15 @@ pub fn render(image: Option<PathBuf>, icons: Option<PathBuf>, out: Option<PathBu
         Some(file) => read_scene(&file)?,
         None => live_scene(desktop.as_deref())?,
     };
-    let options = Options::default();
     let source = open(&image, desktop.as_deref())?;
-    let analysis = scooch_core::analyze(&source);
-    let placement = scooch_core::solve(&analysis, &scene, &options, None);
-    let picture = scooch_core::render(&source, &placement, &scene, &options);
+    let Rendered { picture, analysis, report } = rendered(&source, &scene, fill);
     drop(source);
     let named = out.is_some();
     let out = out.unwrap_or_else(|| default_out(&image));
     let bytes = if out.extension().is_some_and(|kind| kind.eq_ignore_ascii_case("png")) { scooch_core::encode_png(&picture)? } else { scooch_core::encode_jpeg(&picture, daemon::QUALITY)? };
     std::fs::write(&out, bytes).with_context(|| format!("Scooch could not write {}, so check the folder.", out.display()))?;
     if let Some(path) = json {
-        let body = serde_json::to_vec(&serde_json::json!({ "scene": scene, "placement": placement, "analysis": analysis }))?;
+        let body = serde_json::to_vec(&report)?;
         std::fs::write(&path, body).with_context(|| format!("Scooch could not write {}, so check the folder.", path.display()))?;
     }
     if let Some(path) = saliency {
@@ -494,6 +509,35 @@ mod tests {
         store.mark(None).unwrap();
         assert_eq!(store.load().daemon, None);
         assert!(!String::from_utf8(store.read().unwrap()).unwrap().contains("daemon"));
+    }
+
+    fn subject_scene() -> (RgbImage, Scene) {
+        let source = crate::scene::sample(480, 100);
+        (source, Scene { width: 160, height: 100, icons: vec![Rect { x: 60.0, y: 30.0, w: 40.0, h: 40.0 }] })
+    }
+
+    #[test]
+    fn the_render_report_says_how_much_stays_hidden() {
+        let (source, scene) = subject_scene();
+        let made = rendered(&source, &scene, false);
+        let hidden = made.report["hidden"].as_f64().expect("hidden is written");
+        let plain = made.report["hidden_plain"].as_f64().expect("hidden_plain is written");
+        assert!(hidden <= plain, "{hidden} {plain}");
+        assert!(plain > 0.0);
+        for key in ["scene", "placement", "analysis"] {
+            assert!(made.report.get(key).is_some(), "{key}");
+        }
+    }
+
+    #[test]
+    fn fill_renders_the_plain_desktop() {
+        let (source, scene) = subject_scene();
+        let filled = rendered(&source, &scene, true);
+        let empty = rendered(&source, &Scene { icons: Vec::new(), ..scene.clone() }, false);
+        assert_eq!(filled.picture.as_raw(), empty.picture.as_raw());
+        assert_eq!(scooch_core::encode_jpeg(&filled.picture, 95).unwrap(), scooch_core::encode_jpeg(&empty.picture, 95).unwrap());
+        assert_eq!(filled.report["hidden"], filled.report["hidden_plain"]);
+        assert!(filled.report["hidden"].as_f64().unwrap() > 0.0);
     }
 
     #[test]

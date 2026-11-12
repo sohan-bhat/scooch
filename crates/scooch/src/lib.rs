@@ -39,6 +39,8 @@ enum Command {
         json: Option<PathBuf>,
         #[arg(long, help = "Also write the saliency map as a PNG")]
         saliency: Option<PathBuf>,
+        #[arg(long, help = "Render the picture as a plain fill, the way it looks without Scooch")]
+        fill: bool,
     },
     #[command(about = "Run in the foreground, which is what the login item does")]
     Watch,
@@ -64,7 +66,7 @@ fn dispatch() -> Result<()> {
         Some(Command::Use { image }) => commands::switch(image),
         Some(Command::Off) => commands::off(),
         Some(Command::Status) => commands::status(),
-        Some(Command::Render { image, icons, out, json, saliency }) => commands::render(image, icons, out, json, saliency),
+        Some(Command::Render { image, icons, out, json, saliency, fill }) => commands::render(image, icons, out, json, saliency, fill),
         Some(Command::Watch) => commands::watch(),
         Some(Command::Doctor) => commands::doctor(),
     }
