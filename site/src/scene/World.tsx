@@ -61,7 +61,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const target = useMemo(() => new Object3D(), []);
   const bulbs = useRef<MeshStandardMaterial[]>([]);
   const focus = useMemo(() => new Vector3(), []);
-  const scratch = useMemo(() => ({ color: new Color(), focusA: new Vector3() }), []);
+  const scratch = useMemo(() => ({ color: new Color(), white: new Color(1, 1, 1), focusA: new Vector3() }), []);
   const room = useMemo(() => tokenColor('room'), []);
   const layout = layoutFor(size.width, size.height);
   const wall = useRoomMaterial('wall', wallCenter);
@@ -219,7 +219,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
 
     const light = rect.current ?? screenSpot.current;
     if (light) {
-      scratch.color.copy(averages[0]).lerp(averages[1], story.mixAB).lerp(averages[2], story.mixBC);
+      scratch.color.copy(averages[0]).lerp(averages[1], story.mixAB).lerp(averages[2], story.mixBC).lerp(scratch.white, 0.3);
       const heat = Math.min(Math.max((story.sweep - 0.15) / 0.6, 0), 1);
       light.color.copy(scratch.color);
       const base = rect.current ? RECT : SCREEN_SPOT;
