@@ -1,0 +1,169 @@
+{
+  "binary": "../target/debug/scooch",
+  "screen": {
+    "width": 1100,
+    "height": 900
+  },
+  "photos": {
+    "lighthouse": "photos/chania-lighthouse.jpg",
+    "fox": "photos/arctic-fox.jpg",
+    "astronaut": "photos/astronaut.jpg"
+  },
+  "icon": {
+    "width": 116,
+    "height": 124
+  },
+  "icons": [
+    {
+      "id": "trip",
+      "label": "Trip",
+      "glyph": "folder"
+    },
+    {
+      "id": "work",
+      "label": "Work",
+      "glyph": "folder"
+    },
+    {
+      "id": "notes",
+      "label": "notes.txt",
+      "glyph": "file-text"
+    },
+    {
+      "id": "scan",
+      "label": "scan.pdf",
+      "glyph": "file-pdf"
+    },
+    {
+      "id": "photo",
+      "label": "IMG_2041",
+      "glyph": "file-image"
+    },
+    {
+      "id": "backup",
+      "label": "backup.zip",
+      "glyph": "file-zip"
+    }
+  ],
+  "layouts": {
+    "start": {
+      "trip": [
+        36,
+        30
+      ],
+      "work": [
+        36,
+        170
+      ],
+      "notes": [
+        36,
+        310
+      ],
+      "scan": [
+        498,
+        140
+      ],
+      "photo": [
+        506,
+        300
+      ],
+      "backup": [
+        36,
+        450
+      ]
+    },
+    "dropped": {
+      "trip": [
+        36,
+        30
+      ],
+      "work": [
+        36,
+        170
+      ],
+      "notes": [
+        36,
+        310
+      ],
+      "scan": [
+        498,
+        140
+      ],
+      "photo": [
+        506,
+        300
+      ],
+      "backup": [
+        500,
+        470
+      ]
+    },
+    "moved": {
+      "trip": [
+        36,
+        30
+      ],
+      "work": [
+        36,
+        170
+      ],
+      "notes": [
+        36,
+        310
+      ],
+      "scan": [
+        850,
+        200
+      ],
+      "photo": [
+        506,
+        300
+      ],
+      "backup": [
+        500,
+        470
+      ]
+    }
+  },
+  "states": [
+    {
+      "id": "before",
+      "photo": "lighthouse",
+      "layout": "start",
+      "solve": false
+    },
+    {
+      "id": "fixed",
+      "photo": "lighthouse",
+      "layout": "dropped",
+      "solve": true
+    },
+    {
+      "id": "moved",
+      "photo": "lighthouse",
+      "layout": "moved",
+      "solve": true
+    },
+    {
+      "id": "fox",
+      "photo": "fox",
+      "layout": "moved",
+      "solve": true
+    },
+    {
+      "id": "astronaut",
+      "photo": "astronaut",
+      "layout": "moved",
+      "solve": true
+    }
+  ],
+  "story": {
+    "problem": "before",
+    "fixed": "fixed",
+    "moved": "moved",
+    "any": [
+      "fox",
+      "astronaut"
+    ]
+  }
+}

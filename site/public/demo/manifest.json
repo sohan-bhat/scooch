@@ -1,0 +1,314 @@
+{
+  "screen": {
+    "width": 1100,
+    "height": 900
+  },
+  "icons": [
+    {
+      "id": "trip",
+      "label": "Trip",
+      "glyph": "folder"
+    },
+    {
+      "id": "work",
+      "label": "Work",
+      "glyph": "folder"
+    },
+    {
+      "id": "notes",
+      "label": "notes.txt",
+      "glyph": "file-text"
+    },
+    {
+      "id": "scan",
+      "label": "scan.pdf",
+      "glyph": "file-pdf"
+    },
+    {
+      "id": "photo",
+      "label": "IMG_2041",
+      "glyph": "file-image"
+    },
+    {
+      "id": "backup",
+      "label": "backup.zip",
+      "glyph": "file-zip"
+    }
+  ],
+  "story": {
+    "problem": "before",
+    "fixed": "fixed",
+    "moved": "moved",
+    "any": [
+      "fox",
+      "astronaut"
+    ]
+  },
+  "states": {
+    "before": {
+      "photo": "lighthouse",
+      "frame": "before.webp",
+      "saliency": "before.saliency.png",
+      "flat": true,
+      "solved": false,
+      "zoom": 1,
+      "mirrored": false,
+      "subject": [
+        0.1883,
+        0.25,
+        0.6234,
+        0.5
+      ],
+      "icons": {
+        "trip": [
+          0.0327,
+          0.0333,
+          0.1055,
+          0.1378
+        ],
+        "work": [
+          0.0327,
+          0.1889,
+          0.1055,
+          0.1378
+        ],
+        "notes": [
+          0.0327,
+          0.3444,
+          0.1055,
+          0.1378
+        ],
+        "scan": [
+          0.4527,
+          0.1556,
+          0.1055,
+          0.1378
+        ],
+        "photo": [
+          0.46,
+          0.3333,
+          0.1055,
+          0.1378
+        ],
+        "backup": [
+          0.0327,
+          0.5,
+          0.1055,
+          0.1378
+        ]
+      }
+    },
+    "fixed": {
+      "photo": "lighthouse",
+      "frame": "fixed.webp",
+      "saliency": "fixed.saliency.png",
+      "flat": true,
+      "solved": true,
+      "zoom": 1,
+      "mirrored": false,
+      "subject": [
+        0.1883,
+        0.25,
+        0.6234,
+        0.5
+      ],
+      "icons": {
+        "trip": [
+          0.0327,
+          0.0333,
+          0.1055,
+          0.1378
+        ],
+        "work": [
+          0.0327,
+          0.1889,
+          0.1055,
+          0.1378
+        ],
+        "notes": [
+          0.0327,
+          0.3444,
+          0.1055,
+          0.1378
+        ],
+        "scan": [
+          0.4527,
+          0.1556,
+          0.1055,
+          0.1378
+        ],
+        "photo": [
+          0.46,
+          0.3333,
+          0.1055,
+          0.1378
+        ],
+        "backup": [
+          0.4545,
+          0.5222,
+          0.1055,
+          0.1378
+        ]
+      }
+    },
+    "moved": {
+      "photo": "lighthouse",
+      "frame": "moved.webp",
+      "saliency": "moved.saliency.png",
+      "flat": true,
+      "solved": true,
+      "zoom": 1,
+      "mirrored": false,
+      "subject": [
+        0.1883,
+        0.25,
+        0.6234,
+        0.5
+      ],
+      "icons": {
+        "trip": [
+          0.0327,
+          0.0333,
+          0.1055,
+          0.1378
+        ],
+        "work": [
+          0.0327,
+          0.1889,
+          0.1055,
+          0.1378
+        ],
+        "notes": [
+          0.0327,
+          0.3444,
+          0.1055,
+          0.1378
+        ],
+        "scan": [
+          0.7727,
+          0.2222,
+          0.1055,
+          0.1378
+        ],
+        "photo": [
+          0.46,
+          0.3333,
+          0.1055,
+          0.1378
+        ],
+        "backup": [
+          0.4545,
+          0.5222,
+          0.1055,
+          0.1378
+        ]
+      }
+    },
+    "fox": {
+      "photo": "fox",
+      "frame": "fox.webp",
+      "saliency": "fox.saliency.png",
+      "flat": true,
+      "solved": true,
+      "zoom": 1,
+      "mirrored": false,
+      "subject": [
+        0.1927,
+        0.25,
+        0.6146,
+        0.5
+      ],
+      "icons": {
+        "trip": [
+          0.0327,
+          0.0333,
+          0.1055,
+          0.1378
+        ],
+        "work": [
+          0.0327,
+          0.1889,
+          0.1055,
+          0.1378
+        ],
+        "notes": [
+          0.0327,
+          0.3444,
+          0.1055,
+          0.1378
+        ],
+        "scan": [
+          0.7727,
+          0.2222,
+          0.1055,
+          0.1378
+        ],
+        "photo": [
+          0.46,
+          0.3333,
+          0.1055,
+          0.1378
+        ],
+        "backup": [
+          0.4545,
+          0.5222,
+          0.1055,
+          0.1378
+        ]
+      }
+    },
+    "astronaut": {
+      "photo": "astronaut",
+      "frame": "astronaut.webp",
+      "saliency": "astronaut.saliency.png",
+      "flat": true,
+      "solved": true,
+      "zoom": 1,
+      "mirrored": false,
+      "subject": [
+        0.25,
+        0.1944,
+        0.5,
+        0.6111
+      ],
+      "icons": {
+        "trip": [
+          0.0327,
+          0.0333,
+          0.1055,
+          0.1378
+        ],
+        "work": [
+          0.0327,
+          0.1889,
+          0.1055,
+          0.1378
+        ],
+        "notes": [
+          0.0327,
+          0.3444,
+          0.1055,
+          0.1378
+        ],
+        "scan": [
+          0.7727,
+          0.2222,
+          0.1055,
+          0.1378
+        ],
+        "photo": [
+          0.46,
+          0.3333,
+          0.1055,
+          0.1378
+        ],
+        "backup": [
+          0.4545,
+          0.5222,
+          0.1055,
+          0.1378
+        ]
+      }
+    }
+  }
+}
