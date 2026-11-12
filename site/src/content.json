@@ -37,11 +37,11 @@
     {
       "id": "rest",
       "title": "Between changes it draws nothing.",
-      "support": "At rest it uses no CPU and very little memory."
+      "support": "At rest it uses no CPU and about 7 MB of memory."
     },
     {
       "id": "end",
-      "title": "Any picture. Mac, Windows and Linux.",
+      "title": "It works with any picture on Mac, Windows and Linux.",
       "action": "Install"
     }
   ],
@@ -80,11 +80,11 @@
   },
   "stills": {
     "alt": [
-      "An old beige laptop open on a metal desk at night under an orange arm lamp. The screen shows a fox photo with desktop icons over its head.",
-      "Close on the laptop screen. Desktop icons sit right on the fox's face.",
-      "The screen turns into a map of where the picture matters, with the fox glowing warm on a dark field.",
-      "The fox photo has moved over so the icons sit on plain sky.",
-      "A pointer drags one icon across the screen and the picture shifts again after the drop.",
+      "An old beige laptop open on a metal desk at night under an orange arm lamp. The screen shows a fox photo with desktop icons over its face.",
+      "Close on the laptop screen, where desktop icons sit on the fox's face.",
+      "The screen turns into a map of where the picture matters, glowing warm around the fox on a dim grey copy of the photo.",
+      "The fox photo after Scooch moved it, with the icons beside the fox.",
+      "A pointer drags one icon across the screen, and after the drop the picture shifts again.",
       "The lamp is off and the laptop screen is the only light on the desk.",
       "A wide shot of the desk with the lamp back on low."
     ]
@@ -184,7 +184,6 @@
     ]
   },
   "placeholders": {
-    "beats.rest.support": "Waiting for measured idle CPU and memory numbers from the daemon.",
     "install.tabs.macos.command": "Install script URL is not live yet.",
     "install.tabs.windows.command": "Install script URL is not live yet.",
     "install.tabs.linux.command": "Install script URL is not live yet."
