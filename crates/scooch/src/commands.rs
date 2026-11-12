@@ -1,6 +1,6 @@
 use crate::daemon;
 use crate::platform::{self, Desktop, Screen};
-use crate::state::{same, Entry, State, Store};
+use crate::state::{self, same, Entry, State, Store};
 use crate::{poke, scene};
 use anyhow::{anyhow, bail, Context, Result};
 use scooch_core::{Options, Rect, RgbImage, Scene};
@@ -30,8 +30,23 @@ fn desktop() -> Result<Box<dyn Desktop>> {
     platform::current()
 }
 
+pub fn outdated(state: &State, running: bool, version: &str) -> bool {
+    running && state.daemon.as_deref() != Some(version)
+}
+
+fn replace_outdated(store: &Store) -> Result<()> {
+    if !outdated(&store.load(), store.watcher().is_some(), state::PROGRAM) {
+        return Ok(());
+    }
+    stop(store);
+    store.mark(None)?;
+    println!("Scooch was updated to {}.", state::PROGRAM);
+    Ok(())
+}
+
 pub fn start() -> Result<()> {
     let store = Store::open();
+    replace_outdated(&store)?;
     let mut state = store.load();
     if state.on && store.watcher().is_some() {
         return status();
@@ -113,6 +128,7 @@ pub fn switch(image: Option<PathBuf>) -> Result<()> {
     let desktop = desktop()?;
     desktop.decode(&image).map_err(|_| anyhow!("Scooch cannot read {} as a picture, so pick a JPEG, PNG or HEIC file.", tilde(&image)))?;
     let store = Store::open();
+    replace_outdated(&store)?;
     let mut state = store.load();
     if !state.on {
         record(&mut state, desktop.as_ref(), &store).ok();
@@ -236,8 +252,11 @@ pub fn watch() -> Result<()> {
         println!("Scooch is already running.");
         return Ok(());
     };
+    store.mark(Some(state::PROGRAM))?;
     let desktop: Arc<dyn Desktop> = Arc::from(desktop()?);
-    daemon::watch(desktop, store)
+    let result = daemon::watch(desktop, store.clone());
+    store.mark(None)?;
+    result
 }
 
 pub fn doctor() -> Result<()> {
@@ -451,6 +470,30 @@ mod tests {
                 assert!(!line.contains(word), "{line}");
             }
         }
+    }
+
+    #[test]
+    fn only_a_running_watcher_of_another_version_is_replaced() {
+        let mut state = on();
+        assert!(!outdated(&state, false, "0.2.0"));
+        assert!(outdated(&state, true, "0.2.0"));
+        state.daemon = Some("0.1.0".into());
+        assert!(outdated(&state, true, "0.2.0"));
+        assert!(!outdated(&state, false, "0.2.0"));
+        state.daemon = Some("0.2.0".into());
+        assert!(!outdated(&state, true, "0.2.0"));
+    }
+
+    #[test]
+    fn the_running_version_is_marked_and_cleared() {
+        let store = Store::at(crate::state::scratch("mark"));
+        store.save(&on()).unwrap();
+        store.mark(Some("9.9.9")).unwrap();
+        assert_eq!(store.load().daemon.as_deref(), Some("9.9.9"));
+        assert!(store.load().on);
+        store.mark(None).unwrap();
+        assert_eq!(store.load().daemon, None);
+        assert!(!String::from_utf8(store.read().unwrap()).unwrap().contains("daemon"));
     }
 
     #[test]

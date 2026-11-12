@@ -17,11 +17,13 @@ pub struct State {
     pub screens: BTreeMap<String, Entry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon: Option<String>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { version: VERSION, on: false, options: Options::default(), screens: BTreeMap::new(), problem: None }
+        Self { version: VERSION, on: false, options: Options::default(), screens: BTreeMap::new(), problem: None, daemon: None }
     }
 }
 
@@ -48,6 +50,19 @@ impl Entry {
 
     pub fn shown(&self) -> &Path {
         self.output.as_deref().unwrap_or(&self.source)
+    }
+}
+
+pub const PROGRAM: &str = env!("CARGO_PKG_VERSION");
+
+impl Store {
+    pub fn mark(&self, running: Option<&str>) -> Result<()> {
+        let mut state = self.load();
+        if state.daemon.as_deref() == running {
+            return Ok(());
+        }
+        state.daemon = running.map(str::to_string);
+        self.save(&state)
     }
 }
 

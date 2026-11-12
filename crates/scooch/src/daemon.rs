@@ -385,7 +385,39 @@ fn relieve() {
 #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
 fn relieve() {}
 
+#[cfg(unix)]
+fn on_terminate(store: Store) -> Result<()> {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    static WRITE: AtomicI32 = AtomicI32::new(-1);
+    extern "C" fn terminated(_signal: libc::c_int) {
+        let fd = WRITE.load(Ordering::Relaxed);
+        if fd >= 0 {
+            let byte = 1u8;
+            unsafe { libc::write(fd, &byte as *const u8 as *const libc::c_void, 1) };
+        }
+    }
+    let mut ends = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe(ends.as_mut_ptr()) } != 0 {
+        anyhow::bail!("Scooch could not open a pipe, so restart it with scooch.");
+    }
+    WRITE.store(ends[1], Ordering::SeqCst);
+    unsafe { libc::signal(libc::SIGTERM, terminated as extern "C" fn(libc::c_int) as libc::sighandler_t) };
+    std::thread::Builder::new().name("scooch-term".into()).spawn(move || {
+        let mut byte = [0u8; 1];
+        while unsafe { libc::read(ends[0], byte.as_mut_ptr() as *mut libc::c_void, 1) } < 0 {}
+        let _ = store.mark(None);
+        std::process::exit(0);
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn on_terminate(_store: Store) -> Result<()> {
+    Ok(())
+}
+
 pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
+    on_terminate(store.clone())?;
     let signal = Arc::new(Signal::default());
     let daemon = Daemon::new(desktop.clone(), store);
     let worker = signal.clone();
