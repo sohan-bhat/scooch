@@ -18,6 +18,7 @@ const PICTURE_KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp",
 pub const FLIP_HINT: &str = "Icons still cover part of the picture. Run scooch flip to let Scooch flip it.";
 pub const FLIP_ON: &str = "Scooch may now flip your picture when that clears your icons.";
 pub const FLIP_OFF: &str = "Scooch now keeps your picture the way round it is.";
+pub const GUIDE: &str = "Your wallpaper is not a picture file, so pick a picture for Scooch to move.";
 pub const NO_SCREEN: &str = "No screen was found, so connect one and try again.";
 pub const NO_PICTURE: &str = "Scooch needs a picture file as your wallpaper, so pick one in your system settings or run scooch use with a picture.";
 pub const NO_TERMINAL: &str = "To switch the picture, run scooch use followed by the path of an image.";
@@ -56,8 +57,15 @@ pub fn start() -> Result<()> {
     }
     let desktop = desktop()?;
     if !state.on {
-        record(&mut state, desktop.as_ref(), &store)?;
-        state.on = true;
+        match first_run(record(&mut state, desktop.as_ref(), &store)?, terminal()) {
+            FirstRun::Go => state.on = true,
+            FirstRun::Fail => bail!(NO_PICTURE),
+            FirstRun::Pick => {
+                println!("{GUIDE}");
+                let Some(pick) = choose(&desktop.gallery())? else { return Ok(()) };
+                return switch(Some(pick));
+            }
+        }
     }
     state.problem = None;
     store.save(&state)?;
@@ -405,17 +413,29 @@ pub fn recorded(desktop: &dyn Desktop, store: &Store, screen: &Screen, chosen: O
     Ok(Some(entry))
 }
 
-pub fn record(state: &mut State, desktop: &dyn Desktop, store: &Store) -> Result<()> {
+pub fn record(state: &mut State, desktop: &dyn Desktop, store: &Store) -> Result<bool> {
     state.screens.clear();
     for screen in desktop.screens()? {
         if let Some(entry) = recorded(desktop, store, &screen, None)? {
             state.screens.insert(screen.id.clone(), entry);
         }
     }
-    if state.screens.is_empty() {
-        bail!(NO_PICTURE);
+    Ok(!state.screens.is_empty())
+}
+
+#[derive(Debug, PartialEq)]
+pub enum FirstRun {
+    Go,
+    Pick,
+    Fail,
+}
+
+pub fn first_run(recorded: bool, terminal: bool) -> FirstRun {
+    match (recorded, terminal) {
+        (true, _) => FirstRun::Go,
+        (false, true) => FirstRun::Pick,
+        (false, false) => FirstRun::Fail,
     }
-    Ok(())
 }
 
 pub fn choose_picture(state: &mut State, desktop: &dyn Desktop, store: &Store, image: &Path) -> Result<()> {
@@ -627,10 +647,21 @@ mod tests {
     }
 
     #[test]
+    fn a_first_run_without_a_picture_guides_or_fails() {
+        assert_eq!(first_run(true, false), FirstRun::Go);
+        assert_eq!(first_run(true, true), FirstRun::Go);
+        assert_eq!(first_run(false, true), FirstRun::Pick);
+        assert_eq!(first_run(false, false), FirstRun::Fail);
+        for line in [GUIDE, NO_PICTURE] {
+            assert!(!line.contains(['—', '–', ';', '(', ')']) && !line.contains(": "), "{line}");
+        }
+    }
+
+    #[test]
     fn a_moving_default_is_recorded_as_the_original() {
         let (fake, store, default, chosen) = desk("moving");
         let mut state = State::default();
-        assert!(record(&mut state, fake.as_ref(), &store).is_err());
+        assert!(!record(&mut state, fake.as_ref(), &store).unwrap());
         choose_picture(&mut state, fake.as_ref(), &store, &chosen).unwrap();
         let entry = &state.screens["main"];
         assert_eq!((entry.source.clone(), entry.original.clone(), entry.unrestorable, entry.chosen), (chosen.clone(), default, false, true));
@@ -669,7 +700,7 @@ mod tests {
         let (fake, store, _, chosen) = desk("plain");
         fake.show("main", &chosen);
         let mut state = State::default();
-        record(&mut state, fake.as_ref(), &store).unwrap();
+        assert!(record(&mut state, fake.as_ref(), &store).unwrap());
         let entry = &state.screens["main"];
         assert_eq!((entry.source.clone(), entry.original.clone(), entry.unrestorable, entry.chosen), (chosen.clone(), chosen, false, false));
         assert!(!serde_json::to_string(&state).unwrap().contains("unrestorable"));
