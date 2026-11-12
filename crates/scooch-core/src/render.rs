@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use std::borrow::Cow;
 
 const SHRINK_FROM: f64 = 1.25;
-const CHUNK: usize = 16;
+const CHUNK: usize = 32;
 
 #[derive(Clone, Copy)]
 struct Tap {
@@ -71,25 +71,27 @@ fn resample(source: &RgbImage, columns: &[Tap], rows: &[Tap], width: usize) -> V
     let encode = color::encode_table();
     let raw = source.as_raw();
     let stride = source.width() as usize * 3;
+    let left = columns.iter().flat_map(|t| t.at).min().unwrap_or(0) as usize;
+    let right = columns.iter().flat_map(|t| t.at).max().unwrap_or(0) as usize;
+    let places: Vec<[usize; 4]> = columns.iter().map(|t| t.at.map(|a| (a as usize - left) * 3)).collect();
     let mut out = vec![0u8; width * rows.len() * 3];
     out.par_chunks_mut(width * 3 * CHUNK).enumerate().for_each(|(chunk, block)| {
         let first = chunk * CHUNK;
         let lines = &rows[first..first + block.len() / (width * 3)];
         let lo = lines.iter().flat_map(|t| t.at).min().unwrap_or(0) as usize;
         let hi = lines.iter().flat_map(|t| t.at).max().unwrap_or(0) as usize;
+        let mut linear = vec![0.0f32; (right - left + 1) * 3];
         let mut across = vec![0.0f32; (hi - lo + 1) * width * 3];
         for (r, target) in across.chunks_exact_mut(width * 3).enumerate() {
-            let line = &raw[(lo + r) * stride..(lo + r + 1) * stride];
-            for (tap, px) in columns.iter().zip(target.chunks_exact_mut(3)) {
-                let mut acc = [0.0f32; 3];
-                for k in 0..4 {
-                    let p = &line[tap.at[k] as usize * 3..tap.at[k] as usize * 3 + 3];
-                    let w = tap.weight[k];
-                    acc[0] += w * decode[p[0] as usize];
-                    acc[1] += w * decode[p[1] as usize];
-                    acc[2] += w * decode[p[2] as usize];
+            let start = (lo + r) * stride;
+            for (l, v) in linear.iter_mut().zip(&raw[start + left * 3..start + (right + 1) * 3]) {
+                *l = decode[*v as usize];
+            }
+            for ((tap, at), px) in columns.iter().zip(&places).zip(target.chunks_exact_mut(3)) {
+                let w = tap.weight;
+                for c in 0..3 {
+                    px[c] = w[0] * linear[at[0] + c] + w[1] * linear[at[1] + c] + w[2] * linear[at[2] + c] + w[3] * linear[at[3] + c];
                 }
-                px.copy_from_slice(&acc);
             }
         }
         for (tap, line) in lines.iter().zip(block.chunks_exact_mut(width * 3)) {
