@@ -189,7 +189,7 @@ impl Daemon {
             self.show(screen, &shown)?;
             return Ok(Outcome::Reapplied);
         }
-        let outcome = self.place(entry, screen, &scene, options, current.as_deref())?;
+        let outcome = self.place(entry, screen, &scene, options, current.as_deref().filter(|_| !settling))?;
         entry.fingerprint = Some(fingerprint);
         entry.chosen = false;
         Ok(outcome)
@@ -679,6 +679,12 @@ pub mod tests {
         assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
         assert_eq!(daemon.store.load().screens["main"].source, original);
         assert_eq!(fake.sets.load(Ordering::SeqCst), 1);
+        fake.show("main", &original);
+        fake.place(Vec::new());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
+        let entry = daemon.store.load().screens["main"].clone();
+        assert!(entry.output.as_deref().is_some_and(|output| output.is_file() && daemon.store.owns(output)));
+        assert_eq!(fake.showing("main"), entry.output.unwrap());
     }
 
     #[test]
