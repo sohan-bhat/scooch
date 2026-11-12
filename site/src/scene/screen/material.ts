@@ -92,18 +92,19 @@ vec3 wallpaper(vec2 uv) {
   return mix(mix(a, b, uMixAB), c, uMixBC);
 }
 
-vec3 heatmap(float s, float soft) {
-  float level = clamp(max(s, soft * 0.85), 0.0, 1.0);
-  vec3 color = uRoom * 0.55;
-  color = mix(color, uHeat * 0.55, smoothstep(0.04, 0.45, level));
-  color = mix(color, uHeat * 1.25, smoothstep(0.3, 0.7, level));
-  color = mix(color, uGlow * 1.35, smoothstep(0.62, 0.92, level));
-  color = mix(color, uHot * 1.6, smoothstep(0.9, 1.0, level));
+vec3 heatmap(vec3 photo, float s, float soft) {
+  float level = clamp(max(s, soft * 0.8), 0.0, 1.0);
+  float grey = dot(photo, vec3(0.2126, 0.7152, 0.0722));
+  vec3 base = vec3(grey) * 0.055 * (1.0 - smoothstep(0.35, 0.95, level) * 0.6);
+  vec3 glow = uHeat * smoothstep(0.05, 0.55, level) * 0.8;
+  glow += uGlow * smoothstep(0.45, 0.9, level) * 0.7;
+  glow += uHot * smoothstep(0.9, 1.0, level) * 0.4;
+  glow += uHeat * smoothstep(0.02, 0.35, soft) * 0.12;
   float lines = abs(fract(level * 7.0) - 0.5);
   float width = fwidth(level * 7.0) * 1.2;
   float contour = 1.0 - smoothstep(0.0, width + 0.001, lines - 0.46);
-  color += uGlow * contour * 0.05 * smoothstep(0.05, 0.3, level);
-  return color;
+  glow += uGlow * contour * 0.05 * smoothstep(0.05, 0.3, level);
+  return base + glow;
 }
 
 vec4 atlasCell(float index, float row, vec2 q, vec2 dx, vec2 dy, vec2 scale) {
@@ -141,7 +142,7 @@ void main() {
 
   vec3 photo = wallpaper(uv);
   vec3 color = photo * (1.0 - wet * 0.5);
-  color = mix(color, heatmap(saliency, saliencySoft), reveal);
+  color = mix(color, heatmap(photo, saliency, saliencySoft), reveal);
 
   vec2 ghostScale = vec2(1.0);
   for (int i = 0; i < ICON_SLOTS; i++) {
