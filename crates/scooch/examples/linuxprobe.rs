@@ -13,7 +13,7 @@ mod probe {
     use anyhow::{anyhow, bail, Context, Result};
     use scooch::platform::linux::parse::desktop::{Kind, Session};
     use scooch::platform::linux::parse::geometry::Insets;
-    use scooch::platform::linux::parse::{ding, gio, kde as kde_rules, keyfile, record, xfce as xfce_rules};
+    use scooch::platform::linux::parse::{ding, gio, kde as kde_rules, keyfile, record, wakes, xfce as xfce_rules};
     use scooch::platform::linux::settings::{self, Gsettings, Plasma, Xfconf};
     use scooch::platform::linux::{bus, decode, gnome, gvfs, kde, screens, tool, xfce, Linux};
     use scooch::platform::{Desktop, Screen};
@@ -23,11 +23,14 @@ mod probe {
     use std::fs;
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
-    use std::process::{Child, ExitCode};
-    use std::sync::OnceLock;
+    use std::process::{Child, Command, ExitCode, Stdio};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
     use x11rb::connection::Connection as _;
-    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
+    use x11rb::wrapper::ConnectionExt as _;
+    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, MOTION_NOTIFY_EVENT};
+    use x11rb::protocol::xtest::ConnectionExt as _;
+    use zbus::zvariant;
 
     const FOLDER: &str = "scooch-probe-folder";
     const PROBES: [(&str, bool); 5] = [
@@ -45,6 +48,8 @@ mod probe {
     fn now() -> u128 {
         START.get_or_init(Instant::now).elapsed().as_millis()
     }
+
+    type Events = Arc<Mutex<Vec<(u128, String)>>>;
 
     struct Measure {
         name: String,
@@ -65,7 +70,10 @@ mod probe {
         measures: Vec<Measure>,
         originals: Vec<(Screen, Option<PathBuf>)>,
         recorded: Vec<(String, Option<String>)>,
+        pictures: Vec<PathBuf>,
         daemon: Option<Child>,
+        events: Events,
+        listening: bool,
     }
 
     impl Probe {
@@ -128,11 +136,17 @@ mod probe {
             measures: Vec::new(),
             originals: Vec::new(),
             recorded: Vec::new(),
+            pictures: Vec::new(),
             daemon: None,
+            events: Arc::new(Mutex::new(Vec::new())),
+            listening: false,
         };
         probe.section("1 Session facts", facts);
         probe.section("2 Read", read);
         probe.section("3 Geometry truth from pixels", geometry);
+        probe.section("4 Move and events", events);
+        probe.section("5 Wallpaper", wallpaper);
+        probe.section("6 End to end", end_to_end);
         probe.section("7 Cleanup", cleanup);
         probe.save();
         ExitCode::SUCCESS
@@ -574,14 +588,225 @@ mod probe {
         Ok(())
     }
 
+    fn listen(p: &mut Probe) {
+        if p.listening {
+            return;
+        }
+        p.listening = true;
+        let events = p.events.clone();
+        let push = move |text: String| {
+            if let Ok(mut list) = events.lock() {
+                list.push((now(), text));
+            }
+        };
+        let adapter_push = push.clone();
+        std::thread::spawn(move || {
+            if let Ok(linux) = Linux::open() {
+                let _ = linux.run(Box::new(move || adapter_push("adapter wake".into())));
+            }
+        });
+        for (rule, name) in [(wakes::GVFS_RULE, "gvfs AttributeChanged"), (wakes::DCONF_RULE, "dconf Notify"), (wakes::XFCONF_RULE, "xfconf PropertyChanged"), (wakes::DING_RULE, "DING geometry Changed")] {
+            let push = push.clone();
+            std::thread::spawn(move || {
+                let Ok(connection) = zbus::blocking::Connection::session() else { return };
+                let Ok(messages) = zbus::blocking::MessageIterator::for_match_rule(rule, &connection, Some(256)) else { return };
+                for message in messages.flatten() {
+                    let detail = describe(&message);
+                    push(format!("{name} {detail}"));
+                }
+            });
+        }
+        let mut folders = vec![p.desktop.clone(), kde::config_folder(), kde::config_folder().join("xfce4").join("desktop")];
+        if let Some(data) = dirs::data_dir() {
+            folders.push(data.join("gvfs-metadata"));
+        }
+        folders.push(kde::config_folder().join("dconf"));
+        std::thread::spawn(move || {
+            let Ok(mut inotify) = inotify::Inotify::init() else { return };
+            let mut names = BTreeMap::new();
+            for folder in &folders {
+                let mask = inotify::WatchMask::CREATE | inotify::WatchMask::DELETE | inotify::WatchMask::MOVED_FROM | inotify::WatchMask::MOVED_TO | inotify::WatchMask::CLOSE_WRITE;
+                if let Ok(descriptor) = inotify.watches().add(folder, mask) {
+                    names.insert(descriptor, folder.display().to_string());
+                }
+            }
+            let mut buffer = [0u8; 8192];
+            while let Ok(found) = inotify.read_events_blocking(&mut buffer) {
+                for event in found {
+                    let folder = names.get(&event.wd).cloned().unwrap_or_default();
+                    push(format!("inotify {folder} {:?} {:?}", event.name, event.mask));
+                }
+            }
+        });
+        std::thread::sleep(Duration::from_secs(2));
+    }
 
+    fn describe(message: &zbus::Message) -> String {
+        let body = message.body();
+        if let Ok((a, b)) = body.deserialize::<(String, String)>() {
+            return format!("{a} {b}");
+        }
+        if let Ok((prefix, changes, _)) = body.deserialize::<(String, Vec<String>, String)>() {
+            return format!("{prefix} {changes:?}");
+        }
+        if let Ok((channel, property, _)) = body.deserialize::<(String, String, zvariant::OwnedValue)>() {
+            return format!("{channel} {property}");
+        }
+        String::new()
+    }
 
+    fn act(p: &mut Probe, name: &str, work: impl FnOnce(&mut Probe) -> Result<String>) {
+        let mark = p.events.lock().map(|list| list.len()).unwrap_or(0);
+        let base = now();
+        let detail = work(p).unwrap_or_else(|error| format!("failed with {error:#}"));
+        std::thread::sleep(Duration::from_millis(2500));
+        let seen: Vec<(u128, String)> = p.events.lock().map(|list| list.get(mark..).map(<[_]>::to_vec).unwrap_or_default()).unwrap_or_default();
+        p.line(format!("- **{name}** {detail}"));
+        let wakes: Vec<u128> = seen.iter().filter(|(_, text)| text == "adapter wake").map(|(at, _)| at.saturating_sub(base)).collect();
+        p.line(format!("  - adapter wakes {} first after {:?} ms", wakes.len(), wakes.first()));
+        let mut kinds: BTreeMap<String, (usize, u128)> = BTreeMap::new();
+        for (at, text) in &seen {
+            if text == "adapter wake" {
+                continue;
+            }
+            let key: String = text.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+            let entry = kinds.entry(key).or_insert((0, at.saturating_sub(base)));
+            entry.0 += 1;
+        }
+        for (kind, (count, first)) in kinds {
+            p.line(format!("  - source {kind} x{count} first after {first} ms"));
+        }
+        for (at, text) in seen {
+            p.raw(format!("  event +{} {text}", at.saturating_sub(base)));
+        }
+    }
 
+    fn drag(from: (i16, i16), to: (i16, i16)) -> Result<()> {
+        let (conn, number) = x11rb::connect(None)?;
+        let root = conn.setup().roots.get(number).context("no root")?.root;
+        let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
+        conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, from.0, from.1, 0)?;
+        conn.flush()?;
+        pause(200);
+        conn.xtest_fake_input(BUTTON_PRESS_EVENT, 1, 0, root, 0, 0, 0)?;
+        conn.flush()?;
+        pause(200);
+        for step in 1..=20i32 {
+            let x = from.0 as i32 + (to.0 as i32 - from.0 as i32) * step / 20;
+            let y = from.1 as i32 + (to.1 as i32 - from.1 as i32) * step / 20;
+            conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, x as i16, y as i16, 0)?;
+            conn.flush()?;
+            pause(30);
+        }
+        pause(200);
+        conn.xtest_fake_input(BUTTON_RELEASE_EVENT, 1, 0, root, 0, 0, 0)?;
+        conn.flush()?;
+        conn.sync()?;
+        Ok(())
+    }
 
+    fn move_icon(p: &mut Probe, round: i32) -> Result<String> {
+        let name = PROBES[1].0;
+        let path = p.desktop.join(name);
+        if p.kind == Some(Kind::Gnome) {
+            let monitors = gnome::geometry()?;
+            let prefs = gnome::prefs();
+            let grid = monitors.iter().find_map(|monitor| ding::Grid::new(monitor, prefs.size, gnome::mode(p.session == Session::X11))).context("no DING grid")?;
+            let (x, y) = grid.stored(4 + i64::from(round % 3), 1 + i64::from(round % 4));
+            gvfs::set(&path.clone().into_os_string(), ding::POSITION_KEY, Some(&format!("{x},{y}")))?;
+            return Ok(format!("wrote {x},{y} to {name}"));
+        }
+        if p.session != Session::X11 {
+            bail!("no way to move an icon without a person on this session");
+        }
+        let linux = p.linux()?;
+        let now_rects = icons(&linux);
+        let from = p.measures.iter().find(|measure| measure.name == name).and_then(|measure| measure.adapter).context("no adapter rect for the probe icon")?;
+        let current = now_rects.iter().min_by(|a, b| (a.x - from.x).abs().max((a.y - from.y).abs()).total_cmp(&(b.x - from.x).abs().max((b.y - from.y).abs()))).copied().unwrap_or(from);
+        let start = ((current.x + current.w / 2.0) as i16, (current.y + current.h / 3.0) as i16);
+        let shift = if round % 2 == 0 { 3.0 } else { -3.0 };
+        let end = ((start.0 as f32 + shift * current.w) as i16, (start.1 as f32 + current.h * if round % 3 == 0 { 1.0 } else { 0.0 }) as i16);
+        drag(start, end)?;
+        if let Some(measure) = p.measures.iter_mut().find(|measure| measure.name == name) {
+            measure.adapter = Some(Rect { x: current.x + end.0 as f32 - start.0 as f32, y: current.y + end.1 as f32 - start.1 as f32, ..current });
+        }
+        Ok(format!("dragged from {},{} to {},{}", start.0, start.1, end.0, end.1))
+    }
 
+    fn events(p: &mut Probe) -> Result<()> {
+        listen(p);
+        act(p, "rest for 5 s", |_| {
+            std::thread::sleep(Duration::from_secs(5));
+            Ok("no input".into())
+        });
+        act(p, "move a probe icon", |p| move_icon(p, 0));
+        let fresh = p.desktop.join("scooch-probe-new.txt");
+        let renamed = p.desktop.join("scooch-probe-renamed.txt");
+        p.made.push(fresh.clone());
+        p.made.push(renamed.clone());
+        act(p, "create a file", |_| {
+            fs::write(&fresh, b"new")?;
+            Ok("scooch-probe-new.txt".into())
+        });
+        act(p, "rename a file", |_| {
+            fs::rename(&fresh, &renamed)?;
+            Ok("to scooch-probe-renamed.txt".into())
+        });
+        act(p, "delete a file", |_| {
+            fs::remove_file(&renamed)?;
+            Ok("scooch-probe-renamed.txt".into())
+        });
+        act(p, "create a hidden file", |p| {
+            let hidden = p.desktop.join(".scooch-probe-hidden");
+            p.made.push(hidden.clone());
+            fs::write(&hidden, b"x")?;
+            Ok(".scooch-probe-hidden".into())
+        });
+        Ok(())
+    }
 
+    fn detailed(width: u32, height: u32) -> RgbImage {
+        let mut bytes = Vec::with_capacity(width as usize * height as usize * 3);
+        for y in 0..height {
+            for x in 0..width {
+                let fine = if (x + y) % 2 == 0 { 40i32 } else { -40 };
+                let stripe = if (x / 3 + y / 5) % 2 == 0 { 30i32 } else { -30 };
+                let r = (x * 255 / width.max(1)) as i32 + fine;
+                let g = (y * 255 / height.max(1)) as i32 - fine;
+                let b = 128 + stripe + if (x % 17 == 0) || (y % 13 == 0) { 90 } else { 0 };
+                bytes.extend_from_slice(&[r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8]);
+            }
+        }
+        RgbImage::from_raw(width, height, bytes).unwrap_or_default()
+    }
 
+    fn jpeg(picture: &RgbImage) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut encoder = jpeg_encoder::Encoder::new(&mut out, 95);
+        encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+        encoder.encode(picture.as_raw(), u16::try_from(picture.width())?, u16::try_from(picture.height())?, jpeg_encoder::ColorType::Rgb)?;
+        Ok(out)
+    }
 
+    fn psnr(a: &RgbImage, b: &RgbImage, skip: &[Rect]) -> Option<f64> {
+        if a.dimensions() != b.dimensions() {
+            return None;
+        }
+        let (mut total, mut count) = (0.0f64, 0usize);
+        for (x, y, pixel) in a.enumerate_pixels() {
+            let (fx, fy) = (x as f32, y as f32);
+            if skip.iter().any(|rect| fx >= rect.x - 8.0 && fx < rect.x + rect.w + 8.0 && fy >= rect.y - 8.0 && fy < rect.y + rect.h + 8.0) {
+                continue;
+            }
+            let other = b.get_pixel(x, y);
+            for (one, two) in pixel.0.iter().zip(other.0.iter()) {
+                total += (f64::from(*one) - f64::from(*two)).powi(2);
+            }
+            count += 3;
+        }
+        let mse = total / count.max(1) as f64;
+        Some(if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0f64 * 255.0 / mse).log10() })
+    }
 
     fn keys(p: &Probe, screen: &Screen) -> Vec<(Box<dyn record::Settings>, String)> {
         match p.kind {
@@ -598,6 +823,43 @@ mod probe {
         }
     }
 
+    fn wallpaper(p: &mut Probe) -> Result<()> {
+        let linux = p.linux()?;
+        let screen = linux.screens()?.first().cloned().context("no screen")?;
+        for (store, key) in keys(p, &screen) {
+            let value = store.get(&key).ok().flatten();
+            p.line(format!("- recorded `{key}` = {value:?}"));
+            p.recorded.push((key, value));
+        }
+        let (width, height) = ((screen.frame.w * screen.scale) as u32, (screen.frame.h * screen.scale) as u32);
+        let source = detailed(width, height);
+        let jpeg_path = p.home.join("probe-picture.jpg");
+        let png_path = p.home.join("probe-picture.png");
+        fs::write(&jpeg_path, jpeg(&source)?)?;
+        fs::write(&png_path, scooch_core::encode_png(&source)?)?;
+        p.pictures = vec![jpeg_path.clone(), png_path.clone()];
+        let skip = icons(&linux);
+        for (kind, path) in [("JPEG", jpeg_path), ("PNG", png_path)] {
+            let file = scooch_core::open(&path)?;
+            let started = Instant::now();
+            let set = linux.set_wallpaper(&screen, &path);
+            p.line(format!("- set the {kind} picture {:?} in {} ms", set.as_ref().map_err(|error| error.to_string()), started.elapsed().as_millis()));
+            std::thread::sleep(Duration::from_secs(2));
+            let back = linux.wallpaper(&screen);
+            p.line(format!("  - read back {:?}, same path {}", back.as_ref().map_err(|error| error.to_string()), back.as_ref().is_ok_and(|back| back.as_deref() == Some(path.as_path()))));
+            match capture(p.session, &screen.frame) {
+                Ok(shot) => {
+                    let _ = fs::write(p.out.join(format!("wallpaper-{}.png", kind.to_lowercase())), scooch_core::encode_png(&shot)?);
+                    let local: Vec<Rect> = skip.iter().map(|rect| Rect { x: rect.x - screen.frame.x, y: rect.y - screen.frame.y, ..*rect }).collect();
+                    p.line(format!("  - screen against the picture, icons left out, PSNR {:?}, file against the picture PSNR {:?}", psnr(&shot, &file, &local), psnr(&file, &source, &[])));
+                }
+                Err(error) => p.line(format!("  - capture failed {error:#}")),
+            }
+            p.line(format!("  - record file {:?}", fs::read_to_string(record::file(&p.home)).ok()));
+        }
+        restore(p, &linux, &screen);
+        Ok(())
+    }
 
     fn restore(p: &mut Probe, linux: &Linux, screen: &Screen) {
         let original = p.originals.iter().find(|(seen, _)| seen.id == screen.id).and_then(|(_, path)| path.clone());
@@ -617,8 +879,78 @@ mod probe {
         p.line(format!("- record file left behind {}", record::file(&p.home).exists()));
     }
 
+    fn proc_numbers(process: u32) -> Option<(u64, u64, u64)> {
+        let stat = fs::read_to_string(format!("/proc/{process}/stat")).ok()?;
+        let rest = stat.rsplit_once(')')?.1;
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+        let cpu = (fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?) * 1000 / ticks;
+        let status = fs::read_to_string(format!("/proc/{process}/status")).ok()?;
+        let field = |name: &str| status.lines().find_map(|line| line.strip_prefix(name)).and_then(|rest| rest.split_whitespace().next()).and_then(|value| value.parse::<u64>().ok());
+        Some((cpu, field("VmRSS:")?, field("Threads:")?))
+    }
 
+    fn rendered(home: &Path) -> bool {
+        let Ok(bytes) = fs::read(home.join("state.json")) else { return false };
+        let Ok(state) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false };
+        state["screens"].as_object().is_some_and(|screens| !screens.is_empty() && screens.values().all(|screen| !screen["fingerprint"].is_null()))
+    }
 
+    fn end_to_end(p: &mut Probe) -> Result<()> {
+        let linux = p.linux()?;
+        let screen = linux.screens()?.first().cloned().context("no screen")?;
+        let exe = std::env::current_exe()?;
+        let program = exe.parent().and_then(Path::parent).map(|folder| folder.join("scooch")).filter(|path| path.is_file()).context("the scooch binary is missing, so build with --bins --examples")?;
+        if let Some(picture) = p.pictures.first().cloned() {
+            linux.set_wallpaper(&screen, &picture)?;
+            p.line(format!("- wallpaper set to {}", picture.display()));
+        }
+        fs::write(p.home.join("state.json"), br#"{"version":1,"on":true}"#)?;
+        let log = fs::File::create(p.out.join("watch.log"))?;
+        let child = Command::new(&program).arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn()?;
+        let process = child.id();
+        p.daemon = Some(child);
+        p.line(format!("- started {} as process {process}", program.display()));
+        let home = p.home.clone();
+        let first = wait_until(Duration::from_secs(60), || rendered(&home));
+        p.line(format!("- first render after {:?} ms", first.map(|time| time.as_millis())));
+        let mut times = Vec::new();
+        for round in 1..=5 {
+            let before = linux.wallpaper(&screen).ok().flatten();
+            let moved = Instant::now();
+            let detail = move_icon(p, round).unwrap_or_else(|error| format!("failed {error:#}"));
+            let changed = wait_until(Duration::from_secs(10), || linux.wallpaper(&screen).ok().flatten() != before);
+            let latency = changed.map(|_| moved.elapsed().as_millis());
+            p.line(format!("- move {round} {detail}, new wallpaper after {latency:?} ms"));
+            times.extend(latency);
+            std::thread::sleep(Duration::from_millis(800));
+        }
+        times.sort_unstable();
+        p.line(format!("- median move to new wallpaper {:?} ms", times.get(times.len() / 2)));
+        std::thread::sleep(Duration::from_secs(3));
+        let before = proc_numbers(process);
+        std::thread::sleep(Duration::from_secs(60));
+        let after = proc_numbers(process);
+        p.line(format!("- CPU ms, resident KB and threads before {before:?} and after {after:?} a quiet minute"));
+        if let (Some(before), Some(after)) = (before, after) {
+            p.line(format!("- CPU used while idle {} ms", after.0.saturating_sub(before.0)));
+        }
+        let stopped = unsafe { libc::kill(process as libc::pid_t, libc::SIGTERM) } == 0;
+        let mut code = None;
+        if let Some(child) = p.daemon.as_mut() {
+            code = wait_until(Duration::from_secs(5), || matches!(child.try_wait(), Ok(Some(_)))).map(|_| "ended");
+        }
+        p.line(format!("- SIGTERM sent {stopped}, process {:?}", code.unwrap_or("still running")));
+        if code.is_some() {
+            p.daemon = None;
+        }
+        let trace = fs::read_to_string(p.out.join("watch.log")).unwrap_or_default();
+        p.line(format!("- trace lines {}", trace.lines().count()));
+        for line in trace.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev() {
+            p.line(format!("  - `{line}`"));
+        }
+        Ok(())
+    }
 
     fn cleanup(p: &mut Probe) -> Result<()> {
         if let Some(mut child) = p.daemon.take() {
