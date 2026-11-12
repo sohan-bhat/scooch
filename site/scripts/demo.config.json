@@ -1,6 +1,6 @@
 {
   "binary": "../target/debug/scooch",
-  "photo": "../assets/photos/fox.jpg",
+  "photo": "../assets/photos/balloon-sky.jpg",
   "screen": {
     "width": 1280,
     "height": 960
@@ -72,8 +72,8 @@
   "drag": {
     "icon": "shot",
     "to": [
-      940,
-      400
+      360,
+      640
     ]
   },
   "states": [

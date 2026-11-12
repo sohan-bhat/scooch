@@ -40,19 +40,20 @@
       "frame": "before.webp",
       "saliency": "before.saliency.png",
       "average": [
-        0.4496,
-        0.4483,
-        0.4159
+        0.3627,
+        0.6137,
+        0.7979
       ],
+      "hidden": 0.2376,
       "flat": false,
       "solved": false,
       "zoom": 1,
       "mirrored": false,
       "subject": [
-        0.1506,
-        0.3398,
-        0.6503,
-        0.5904
+        0.148,
+        0.5218,
+        0.1934,
+        0.2939
       ],
       "icons": {
         "trip": [
@@ -97,19 +98,20 @@
       "frame": "fixed.webp",
       "saliency": "fixed.saliency.png",
       "average": [
-        0.4587,
-        0.4525,
-        0.413
+        0.3554,
+        0.6136,
+        0.799
       ],
+      "hidden": 0.0001,
       "flat": false,
       "solved": true,
-      "zoom": 1.05,
+      "zoom": 1,
       "mirrored": false,
       "subject": [
-        0.2247,
-        0.3303,
-        0.6828,
-        0.6199
+        0.3367,
+        0.5249,
+        0.1934,
+        0.2939
       ],
       "icons": {
         "trip": [
@@ -154,19 +156,20 @@
       "frame": "moved.webp",
       "saliency": "moved.saliency.png",
       "average": [
-        0.4762,
-        0.4471,
-        0.3865
+        0.3631,
+        0.6187,
+        0.8006
       ],
+      "hidden": 0.0098,
       "flat": false,
       "solved": true,
-      "zoom": 1.2,
+      "zoom": 1,
       "mirrored": false,
       "subject": [
-        0.2348,
-        0.2828,
-        0.7652,
-        0.7085
+        0.4257,
+        0.4789,
+        0.1934,
+        0.2939
       ],
       "icons": {
         "trip": [
@@ -194,8 +197,8 @@
           0.1563
         ],
         "shot": [
-          0.7344,
-          0.4167,
+          0.2813,
+          0.6667,
           0.1172,
           0.1563
         ],
@@ -215,8 +218,8 @@
       0.2188
     ],
     "to": [
-      0.7344,
-      0.4167
+      0.2813,
+      0.6667
     ]
   }
 }
