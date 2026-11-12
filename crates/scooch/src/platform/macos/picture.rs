@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{msg_send, MainThreadMarker};
-use objc2_app_kit::{NSScreen, NSWorkspace, NSWorkspaceDesktopImageScalingKey};
+use objc2_app_kit::{NSScreen, NSWorkspace, NSWorkspaceDesktopImageAllowClippingKey, NSWorkspaceDesktopImageScalingKey};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{ns_string, NSDictionary, NSNumber, NSString, NSURL};
 use scooch_core::{Rect, RgbImage};
@@ -56,7 +56,8 @@ pub fn set_wallpaper(marker: MainThreadMarker, id: &str, path: &Path) -> Result<
     let screen = find(marker, id)?;
     let url = NSURL::from_file_path(path).ok_or_else(|| anyhow!("{} is not a usable path, so pick another picture.", path.display()))?;
     let fill: Retained<AnyObject> = NSNumber::new_usize(FILL).into();
-    let options = NSDictionary::from_slices(&[unsafe { NSWorkspaceDesktopImageScalingKey }], &[&*fill]);
+    let clip: Retained<AnyObject> = NSNumber::new_bool(true).into();
+    let options = NSDictionary::from_slices(&[unsafe { NSWorkspaceDesktopImageScalingKey }, unsafe { NSWorkspaceDesktopImageAllowClippingKey }], &[&*fill, &*clip]);
     unsafe { NSWorkspace::sharedWorkspace().setDesktopImageURL_forScreen_options_error(&url, &screen, &options) }
         .map_err(|error| anyhow!("macOS did not take {} as the wallpaper and said {}", path.display(), error.localizedDescription()))
 }
