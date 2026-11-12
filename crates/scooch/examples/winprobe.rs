@@ -186,6 +186,9 @@ mod probe {
         probe.section("2 Read", read);
         probe.section("3 Geometry truth", geometry);
         probe.section("4 Move and events", events);
+        probe.section("5 Wallpaper", wallpaper);
+        probe.section("6 End to end", end_to_end);
+        probe.section("7 Cleanup", cleanup);
         probe.save();
         ExitCode::SUCCESS
     }
@@ -911,4 +914,335 @@ mod probe {
         p.line(format!("- adapter hooks that fired at rest or during mouse moves {}", if adapter_noise.is_empty() { "none".into() } else { adapter_noise.join(", ") }));
     }
 
+    fn detailed(width: u32, height: u32) -> RgbImage {
+        let mut bytes = Vec::with_capacity(width as usize * height as usize * 3);
+        for y in 0..height {
+            for x in 0..width {
+                let fine = if (x + y) % 2 == 0 { 40i32 } else { -40 };
+                let stripe = if (x / 3 + y / 5) % 2 == 0 { 30i32 } else { -30 };
+                let r = (x * 255 / width.max(1)) as i32 + fine;
+                let g = (y * 255 / height.max(1)) as i32 - fine;
+                let b = 128 + stripe + if (x % 17 == 0) || (y % 13 == 0) { 90 } else { 0 };
+                bytes.extend_from_slice(&[r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8]);
+            }
+        }
+        RgbImage::from_raw(width, height, bytes).unwrap_or_default()
+    }
+
+    fn jpeg(picture: &RgbImage) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut encoder = jpeg_encoder::Encoder::new(&mut out, 95);
+        encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+        encoder.encode(picture.as_raw(), u16::try_from(picture.width())?, u16::try_from(picture.height())?, jpeg_encoder::ColorType::Rgb)?;
+        Ok(out)
+    }
+
+    fn psnr(a: &RgbImage, b: &RgbImage) -> Option<f64> {
+        if a.dimensions() != b.dimensions() {
+            return None;
+        }
+        let total: f64 = a.as_raw().iter().zip(b.as_raw()).map(|(x, y)| (f64::from(*x) - f64::from(*y)).powi(2)).sum();
+        let mse = total / a.as_raw().len().max(1) as f64;
+        Some(if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0f64 * 255.0 / mse).log10() })
+    }
+
+    fn crop(image: &RgbImage, area: RECT, origin: (i32, i32)) -> Option<RgbImage> {
+        let left = u32::try_from(area.left - origin.0).ok()?;
+        let top = u32::try_from(area.top - origin.1).ok()?;
+        let right = u32::try_from(area.right - origin.0).ok()?.min(image.width());
+        let bottom = u32::try_from(area.bottom - origin.1).ok()?.min(image.height());
+        if right <= left || bottom <= top {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(((right - left) * (bottom - top) * 3) as usize);
+        for y in top..bottom {
+            for x in left..right {
+                bytes.extend_from_slice(&image.get_pixel(x, y).0);
+            }
+        }
+        RgbImage::from_raw(right - left, bottom - top, bytes)
+    }
+
+    fn themes_since(when: SystemTime) -> Vec<PathBuf> {
+        let Some(roaming) = dirs::config_dir() else { return Vec::new() };
+        let mut found = Vec::new();
+        let mut folders = vec![roaming.join(r"Microsoft\Windows\Themes")];
+        while let Some(folder) = folders.pop() {
+            let Ok(entries) = fs::read_dir(&folder) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = entry.metadata() else { continue };
+                if meta.is_dir() {
+                    folders.push(path);
+                } else if meta.modified().is_ok_and(|changed| changed + Duration::from_secs(1) >= when) {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    fn wallpaper(p: &mut Probe) -> Result<()> {
+        let desktop = platform::current()?;
+        let screens = desktop.screens()?;
+        let object = picture::object()?;
+        p.line(format!("- position {:?}", unsafe { object.GetPosition() }.map(|position| position.0)));
+        if p.wallpapers.is_empty() {
+            for screen in &screens {
+                let shown = desktop.wallpaper(screen).ok().flatten();
+                p.wallpapers.push((screen.clone(), shown));
+            }
+        }
+        for (screen, shown) in p.wallpapers.clone() {
+            p.line(format!("- recorded `{}` showing {:?}", screen.id, shown));
+        }
+        let screen = screens.first().context("no screen")?.clone();
+        let (width, height) = (screen.frame.w as u32, screen.frame.h as u32);
+        let source = detailed(width, height);
+        let jpeg_path = p.home.join("probe-picture.jpg");
+        let png_path = p.home.join("probe-picture.png");
+        fs::write(&jpeg_path, jpeg(&source)?)?;
+        fs::write(&png_path, scooch_core::encode_png(&source)?)?;
+        p.pictures = vec![jpeg_path.clone(), png_path.clone()];
+        p.line(format!("- test picture {width}x{height}, JPEG {} bytes, PNG {} bytes", fs::metadata(&jpeg_path)?.len(), fs::metadata(&png_path)?.len()));
+        let system = picture::system_decode(&png_path).map(|decoded| decoded.as_raw().iter().zip(source.as_raw()).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0));
+        p.line(format!("- WIC decode of the PNG, largest channel difference {:?}", system.map_err(|error| error.to_string())));
+        let view = shell::view().ok();
+        let hook = view.as_ref().and_then(|view| whole_hook(view.list));
+        let list = view.as_ref().map_or(0, |view| view.list.0 as isize);
+        let mut scores = Vec::new();
+        for (kind, path) in [("JPEG", jpeg_path.clone()), ("PNG", png_path.clone())] {
+            let file = scooch_core::open(&path)?;
+            let when = SystemTime::now();
+            let base = now();
+            let started = Instant::now();
+            let action = act(p, &format!("set the {kind} picture"), |_| {
+                desktop.set_wallpaper(&screen, &path)?;
+                Ok(format!("in {} ms", started.elapsed().as_millis()))
+            });
+            summarize(p, &action, list);
+            let echo: Vec<String> = action.settings.iter().map(|(at, value)| format!("{value:#x} at +{} ms", at.saturating_sub(base))).collect();
+            p.line(format!("  - WM_SETTINGCHANGE {}", if echo.is_empty() { "none".into() } else { echo.join(", ") }));
+            let back = desktop.wallpaper(&screen);
+            p.line(format!("  - read back {:?}, same path {}", back.as_ref().map_err(|error| error.to_string()), back.as_ref().is_ok_and(|back| back.as_deref() == Some(path.as_path()))));
+            let bytes = fs::read(&path)?;
+            for copy in themes_since(when) {
+                let copied = fs::read(&copy).unwrap_or_default();
+                let equal = copied == bytes;
+                let quality = if equal { Some(f64::INFINITY) } else { scooch_core::open(&copy).ok().and_then(|decoded| psnr(&decoded, &file)) };
+                p.line(format!("  - copy {} {} bytes, equal {equal}, PSNR {:?}", copy.display(), copied.len(), quality));
+                if copy.file_name().is_some_and(|name| name == "TranscodedWallpaper") {
+                    scores.push((kind, equal, quality));
+                }
+            }
+            pump(Duration::from_millis(800));
+            let area = work_area().unwrap_or(rect_area(Some(screen.frame)));
+            if let (Ok(shot), Some(expected)) = (capture(area), crop(&source, area, (screen.frame.x as i32, screen.frame.y as i32))) {
+                p.line(format!("  - screen against the source over the work area, icons included, PSNR {:?}", psnr(&shot, &expected)));
+                let _ = fs::write(p.out.join(format!("wallpaper-{}.png", kind.to_lowercase())), scooch_core::encode_png(&shot)?);
+            }
+        }
+        if let Some(hook) = hook {
+            let _ = unsafe { UnhookWinEvent(hook) };
+        }
+        let best = scores.iter().max_by(|a, b| a.2.unwrap_or(0.0).total_cmp(&b.2.unwrap_or(0.0)));
+        p.line(format!("- Windows keeps {} closer, scores {:?}", best.map_or("neither", |best| best.0), scores));
+        restore(p);
+        Ok(())
+    }
+
+    fn restore(p: &mut Probe) {
+        let Ok(desktop) = platform::current() else { return };
+        for (screen, shown) in p.wallpapers.clone() {
+            match shown {
+                Some(path) => {
+                    let result = desktop.set_wallpaper(&screen, &path);
+                    p.line(format!("- restored `{}` to {} {:?}", screen.id, path.display(), result.map_err(|error| error.to_string())));
+                }
+                None => p.line(format!("- `{}` had no picture file, left as it is", screen.id)),
+            }
+        }
+        pump(Duration::from_millis(500));
+    }
+
+    fn filetime(time: FILETIME) -> u64 {
+        (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+    }
+
+    fn cpu(child: &Child) -> Option<Duration> {
+        let handle = HANDLE(child.as_raw_handle());
+        let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) }.ok()?;
+        Some(Duration::from_nanos((filetime(kernel) + filetime(user)) * 100))
+    }
+
+    fn memory(child: &Child) -> Option<(usize, usize)> {
+        let handle = HANDLE(child.as_raw_handle());
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+        unsafe { GetProcessMemoryInfo(handle, &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS, counters.cb) }.ok()?;
+        Some((counters.WorkingSetSize, counters.PrivateUsage))
+    }
+
+    fn threads(process: u32) -> Option<usize> {
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }.ok()?;
+        let mut entry = THREADENTRY32 { dwSize: size_of::<THREADENTRY32>() as u32, ..Default::default() };
+        let mut count = 0;
+        let mut more = unsafe { Thread32First(snapshot, &mut entry) }.is_ok();
+        while more {
+            if entry.th32OwnerProcessID == process {
+                count += 1;
+            }
+            more = unsafe { Thread32Next(snapshot, &mut entry) }.is_ok();
+        }
+        let _ = unsafe { CloseHandle(snapshot) };
+        Some(count)
+    }
+
+    fn running(program: &str) -> Vec<u32> {
+        let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else { return Vec::new() };
+        let mut entry = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut found = Vec::new();
+        let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+        while more {
+            let length = entry.szExeFile.iter().position(|unit| *unit == 0).unwrap_or(entry.szExeFile.len());
+            if String::from_utf16_lossy(&entry.szExeFile[..length]).eq_ignore_ascii_case(program) {
+                found.push(entry.th32ProcessID);
+            }
+            more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+        }
+        let _ = unsafe { CloseHandle(snapshot) };
+        found
+    }
+
+    fn rendered(home: &Path) -> bool {
+        let Ok(bytes) = fs::read(home.join("state.json")) else { return false };
+        let Ok(state) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false };
+        state["screens"].as_object().is_some_and(|screens| !screens.is_empty() && screens.values().all(|screen| !screen["fingerprint"].is_null()))
+    }
+
+    fn twin() -> Result<PathBuf> {
+        let exe = std::env::current_exe()?;
+        let folder = exe.parent().and_then(Path::parent).context("no build folder")?;
+        let twin = folder.join("scoochw.exe");
+        if !twin.is_file() {
+            bail!("{} is missing, so build with cargo build --release -p scooch --bins --examples", twin.display());
+        }
+        Ok(twin)
+    }
+
+    fn end_to_end(p: &mut Probe) -> Result<()> {
+        let desktop = platform::current()?;
+        let screen = desktop.screens()?.first().context("no screen")?.clone();
+        let twin = twin()?;
+        if let Some(picture) = p.pictures.first().cloned() {
+            desktop.set_wallpaper(&screen, &picture)?;
+            p.line(format!("- wallpaper set to {}", picture.display()));
+        }
+        fs::write(p.home.join("state.json"), br#"{"version":1,"on":true}"#)?;
+        let log = fs::File::create(p.out.join("scoochw.log"))?;
+        let child = Command::new(&twin).arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn()?;
+        let process = child.id();
+        p.line(format!("- started {} as process {process}", twin.display()));
+        p.daemon = Some(child);
+        let home = p.home.clone();
+        let first = wait_until(Duration::from_secs(60), || rendered(&home));
+        p.line(format!("- first render after {:?} ms", first.map(|time| time.as_millis())));
+        let view = shell::view()?;
+        let (name, folder) = PROBES[0];
+        let pidl = pidl_of(&view, name, folder)?;
+        let spot = p.target.unwrap_or(target(&view)?);
+        let mut times = Vec::new();
+        for round in 0..5 {
+            let before = desktop.wallpaper(&screen)?.unwrap_or_default();
+            let at = POINT { x: spot.x + if round % 2 == 0 { 0 } else { 160 }, y: spot.y + 40 * round };
+            place(&view, &pidl, at)?;
+            let moved = Instant::now();
+            let changed = wait_until(Duration::from_secs(10), || desktop.wallpaper(&screen).ok().flatten().is_some_and(|now| now != before));
+            let latency = changed.map(|_| moved.elapsed().as_millis());
+            p.line(format!("- move {} to {},{} new wallpaper after {:?} ms", round + 1, at.x, at.y, latency));
+            times.extend(latency);
+            pump(Duration::from_millis(500));
+        }
+        times.sort_unstable();
+        p.line(format!("- median move to new wallpaper {:?} ms", times.get(times.len() / 2)));
+        park_cursor();
+        pump(Duration::from_secs(3));
+        let Some(child) = p.daemon.as_ref() else { bail!("the daemon handle is gone") };
+        let (cpu_before, quiet_from) = (cpu(child), epoch());
+        pump(Duration::from_secs(60));
+        let Some(child) = p.daemon.as_ref() else { bail!("the daemon handle is gone") };
+        let (cpu_after, quiet_to) = (cpu(child), epoch());
+        let held = memory(child);
+        p.line(format!("- CPU time before {:?} after {:?} over 60 s idle", cpu_before, cpu_after));
+        if let (Some(before), Some(after)) = (cpu_before, cpu_after) {
+            p.line(format!("- CPU used while idle {} ms", after.saturating_sub(before).as_millis()));
+        }
+        p.line(format!("- working set and private bytes {:?}", held));
+        p.line(format!("- threads {:?}", threads(process)));
+        let stopped = scooch::poke::stop(0);
+        let mut code = None;
+        if let Some(child) = p.daemon.as_mut() {
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(5) {
+                if let Ok(Some(status)) = child.try_wait() {
+                    code = Some(status);
+                    break;
+                }
+                pump(Duration::from_millis(50));
+            }
+        }
+        p.line(format!("- stop event sent {stopped}, process ended {:?}", code));
+        if code.is_some() {
+            p.daemon = None;
+        }
+        let trace = fs::read_to_string(p.out.join("scoochw.log")).unwrap_or_default();
+        let quiet: Vec<&str> = trace.lines().filter(|line| line.split_whitespace().next().and_then(|stamp| stamp.parse::<f64>().ok()).is_some_and(|stamp| stamp >= quiet_from && stamp <= quiet_to)).collect();
+        p.line(format!("- trace lines during the idle minute {}", quiet.len()));
+        for line in quiet.iter().take(20) {
+            p.line(format!("  - `{line}`"));
+        }
+        Ok(())
+    }
+
+    fn cleanup(p: &mut Probe) -> Result<()> {
+        if let Some(mut child) = p.daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            p.line("- the daemon was still running and was killed".to_string());
+        }
+        let mut names: Vec<PathBuf> = p.made.clone();
+        names.extend(PROBES.iter().map(|(name, _)| p.desktop.join(name)));
+        for path in names {
+            let removed = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+            if path.exists() {
+                p.line(format!("- could not delete {} {:?}", path.display(), removed.err()));
+            }
+        }
+        if let Ok(view) = shell::view() {
+            if let Some(flags) = p.flags {
+                let mask = (FWF_AUTOARRANGE.0 | FWF_SNAPTOGRID.0) as u32;
+                let result = unsafe { view.folder.SetCurrentFolderFlags(mask, flags & mask) };
+                p.line(format!("- folder flags restored to {flags:#x} {result:?}"));
+            }
+            if let Some((mode, icon)) = p.mode {
+                let result = unsafe { view.folder.SetViewModeAndIconSize(mode, icon) };
+                p.line(format!("- view mode {} and icon size {icon} restored {result:?}", mode.0));
+            }
+        }
+        restore(p);
+        for id in p.notifications.drain(..).filter(|id| *id != 0) {
+            let _ = unsafe { SHChangeNotifyDeregister(id) };
+        }
+        if !p.window.is_invalid() {
+            let _ = unsafe { DestroyWindow(p.window) };
+        }
+        let removed = fs::remove_dir_all(&p.home);
+        p.line(format!("- temp folder removed {:?}", removed.map_err(|error| error.to_string())));
+        let left = running("scoochw.exe");
+        p.line(format!("- scoochw.exe processes left {}", left.len()));
+        if !left.is_empty() {
+            return Err(anyhow!("scoochw.exe is still running as {left:?}"));
+        }
+        Ok(())
+    }
 }
