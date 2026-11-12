@@ -13,6 +13,10 @@ const STRUCTURE_FLOOR: f32 = 0.02;
 const SMOOTH_SIGMA: f32 = 2.0;
 const SALIENCY_FLOOR: f32 = 0.5;
 const CALM_LEVEL: f32 = 0.25;
+const FILL_REACH: f32 = 0.06;
+const FILL_FROM: f32 = 0.30;
+const FILL_AT: f32 = 0.65;
+const FILL_LEVEL: f32 = 0.8;
 const SALIENCY_POWER: f32 = 1.5;
 const TERMS: usize = 10;
 const BACKGROUND_ROUNDS: usize = 5;
@@ -147,11 +151,12 @@ fn solve_square(mut m: [[f64; TERMS + 1]; TERMS]) -> Option<[f64; TERMS]> {
             return None;
         }
         m.swap(c, pivot);
-        for r in 0..TERMS {
+        let lead = m[c];
+        for (r, row) in m.iter_mut().enumerate() {
             if r != c {
-                let f = m[r][c] / m[c][c];
-                for k in c..=TERMS {
-                    m[r][k] -= f * m[c][k];
+                let f = row[c] / lead[c];
+                for (cell, pivot_cell) in row[c..].iter_mut().zip(&lead[c..]) {
+                    *cell -= f * pivot_cell;
                 }
             }
         }
@@ -188,9 +193,10 @@ fn background(lab: &[Vec<f32>; 3], width: usize, height: usize) -> [Vec<f32>; 3]
                 }
             }
         }
-        for r in 0..TERMS {
-            for c in 0..r {
-                normal[r][c] = normal[c][r];
+        let upper = normal;
+        for (r, row) in normal.iter_mut().enumerate() {
+            for (c, cell) in row.iter_mut().enumerate().take(r) {
+                *cell = upper[c][r];
             }
         }
         let mut next = [[0.0f64; TERMS]; 3];
@@ -257,6 +263,18 @@ fn saliency(lab: &[Vec<f32>; 3], contrast: &[f32], width: usize, height: usize) 
     scaled.iter().map(|v| ((v - floor).max(0.0) / span).powf(SALIENCY_POWER)).collect()
 }
 
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn fill(saliency: &[f32], width: usize, height: usize) -> Vec<f32> {
+    let reach = FILL_REACH * width.max(height) as f32;
+    let envelope = blur::gaussian(saliency, width, height, reach);
+    let top = quantile(&envelope, 0.99).max(1e-3);
+    saliency.iter().zip(&envelope).map(|(s, e)| s.max(FILL_LEVEL * smoothstep(FILL_FROM, FILL_AT, (e / top).clamp(0.0, 1.0)))).collect()
+}
+
 fn subject(weights: &[f32], width: usize, height: usize) -> Option<Rect> {
     let (mut total, mut mx, mut my) = (0.0f64, 0.0f64, 0.0f64);
     for y in 0..height {
@@ -294,11 +312,10 @@ pub fn analyze(image: &RgbImage) -> Analysis {
     let lab = lab_planes(image, width, height);
     let (contrast, busy) = rayon::join(|| contrast(&lab, width, height), || busy_from_lightness(&lab[0], width, height));
     let shaped = contrast.iter().any(|c| *c >= STRUCTURE_FLOOR);
-    let mut saliency = saliency(&lab, &contrast, width, height);
-    let found = subject(&saliency, width, height).filter(|_| shaped);
-    if found.is_none() {
-        saliency.iter_mut().for_each(|v| *v = 0.0);
-    }
+    let raw = saliency(&lab, &contrast, width, height);
+    let solid = shaped && subject(&raw, width, height).is_some();
+    let saliency = if solid { fill(&raw, width, height) } else { vec![0.0; width * height] };
+    let found = subject(&saliency, width, height).filter(|_| solid);
     Analysis {
         width: width as u32,
         height: height as u32,
