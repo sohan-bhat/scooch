@@ -79,12 +79,12 @@ export function buildTimeline(elements: Elements, manifest: DemoManifest): Built
   to(timeline, story, { cursorX: restX, cursorY: restY }, { cursorX: restX, cursorY: restY }, 58, 0.1, 'none');
   to(timeline, story, { cursorAlpha: 0 }, { cursorAlpha: 1 }, 58.4, 1.2, EASE.in);
   to(timeline, story, { cursorX: restX, cursorY: restY }, { cursorX: grabX, cursorY: grabY }, 59, 2.6, EASE.camera);
-  to(timeline, story, { grab: 0 }, { grab: 1 }, 61.8, 0.5, EASE.in);
-  to(timeline, story, { drag: 0 }, { drag: 1 }, 62.4, 3.6, EASE.camera);
-  to(timeline, story, { grab: 1 }, { grab: 0 }, 66.1, 0.4, EASE.out);
-  to(timeline, story, { cursorX: grabX, cursorY: grabY }, { cursorX: grabX + 0.05, cursorY: grabY + 0.07 }, 66.6, 1.4, EASE.in);
-  to(timeline, story, { cursorAlpha: 1 }, { cursorAlpha: 0 }, 67.6, 1.2, EASE.out);
-  to(timeline, story, { mixBC: 0 }, { mixBC: 1 }, 66.8, 3, EASE.camera);
+  to(timeline, story, { grab: 0 }, { grab: 1 }, 61.6, 0.5, EASE.in);
+  to(timeline, story, { drag: 0 }, { drag: 1 }, 62.1, 3.2, EASE.camera);
+  to(timeline, story, { grab: 1 }, { grab: 0 }, 65.4, 0.4, EASE.out);
+  to(timeline, story, { cursorX: grabX, cursorY: grabY }, { cursorX: grabX + 0.05, cursorY: grabY + 0.07 }, 66.2, 1.4, EASE.in);
+  to(timeline, story, { cursorAlpha: 1 }, { cursorAlpha: 0 }, 67, 1.2, EASE.out);
+  to(timeline, story, { mixBC: 0 }, { mixBC: 1 }, 67.2, 2.8, EASE.camera);
 
   elements.beats.forEach((element, index) => {
     const beat = beats[index];
