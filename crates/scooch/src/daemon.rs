@@ -884,6 +884,44 @@ pub mod tests {
     }
 
     #[test]
+    fn flipping_is_tried_only_when_icons_hide_enough() {
+        assert!(!worth_flipping(0.05, false));
+        assert!(worth_flipping(0.051, false));
+        assert!(!worth_flipping(0.4, true));
+        assert!(flip_helps(0.4, 0.19));
+        assert!(!flip_helps(0.4, 0.2));
+        assert!(!flip_helps(0.4, 0.35));
+    }
+
+    #[test]
+    fn a_tick_records_whether_flipping_would_help() {
+        let folder = scratch("edge");
+        let edge = folder.join("edge.png");
+        let image = RgbImage::from_fn(160, 100, |x, y| {
+            let (dx, dy) = (x as f32 - 25.0, y as f32 - 50.0);
+            if dx * dx + dy * dy < 625.0 { [250, 240, 220].into() } else { [12, 18, 30].into() }
+        });
+        std::fs::write(&edge, scooch_core::encode_png(&image).unwrap()).unwrap();
+        let fake = Fake::new(vec![screen("main", 0.0, 1.0)], &edge);
+        let mut edgy = Daemon::new(fake.clone(), Store::at(folder.join("data")));
+        edgy.grace = Duration::ZERO;
+        edgy.store.save(&State { on: true, ..State::default() }).unwrap();
+        fake.place(vec![Rect { x: 0.0, y: 5.0, w: 60.0, h: 90.0 }]);
+        edgy.tick();
+        assert!(edgy.store.load().screens["main"].flip_helps);
+        let (daemon, fake, _) = rig("fliphelp", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![Rect { x: 0.0, y: 0.0, w: 160.0, h: 100.0 }]);
+        daemon.tick();
+        assert!(!daemon.store.load().screens["main"].flip_helps);
+        let mut state = daemon.store.load();
+        state.options.mirror = true;
+        daemon.store.save(&state).unwrap();
+        fake.place(vec![subject()]);
+        daemon.tick();
+        assert!(!daemon.store.load().screens["main"].flip_helps);
+    }
+
+    #[test]
     fn settle_turns_a_burst_into_one_tick() {
         let signal = Signal::default();
         for _ in 0..50 {

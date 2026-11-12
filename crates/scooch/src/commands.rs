@@ -15,6 +15,9 @@ const START_PATIENCE: Duration = Duration::from_secs(8);
 const POLL: Duration = Duration::from_millis(100);
 const STOP_PATIENCE: Duration = Duration::from_secs(3);
 const PICTURE_KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", "tiff", "bmp", "avif"];
+pub const FLIP_HINT: &str = "Icons still cover part of the picture. Run scooch flip to let Scooch flip it.";
+pub const FLIP_ON: &str = "Scooch may now flip your picture when that clears your icons.";
+pub const FLIP_OFF: &str = "Scooch now keeps your picture the way round it is.";
 pub const NO_SCREEN: &str = "No screen was found, so connect one and try again.";
 pub const NO_PICTURE: &str = "Scooch needs a picture file as your wallpaper, so pick one in your system settings or run scooch use with a picture.";
 pub const NO_TERMINAL: &str = "To switch the picture, run scooch use followed by the path of an image.";
@@ -101,6 +104,9 @@ pub fn describe(state: &State, running: bool, connected: Option<&[String]>) -> V
     }
     let icons: usize = shown.iter().map(|entry| entry.icons).sum();
     lines.push(format!("Icons    {icons} on {}", plural(shown.len(), "screen")));
+    if !state.options.mirror && shown.iter().any(|entry| entry.flip_helps) {
+        lines.push(FLIP_HINT.into());
+    }
     if let Some(problem) = &state.problem {
         lines.push(problem.clone());
     }
@@ -257,6 +263,26 @@ pub fn watch() -> Result<()> {
     let result = daemon::watch(desktop, store.clone());
     store.mark(None)?;
     result
+}
+
+pub fn flip() -> Result<()> {
+    let store = Store::open();
+    let mut state = store.load();
+    state.options.mirror = !state.options.mirror;
+    store.save(&state)?;
+    if let Some(process) = store.watcher() {
+        poke::send(process);
+    }
+    println!("{}", flip_line(state.options.mirror));
+    Ok(())
+}
+
+pub fn flip_line(mirror: bool) -> &'static str {
+    if mirror {
+        FLIP_ON
+    } else {
+        FLIP_OFF
+    }
 }
 
 pub fn doctor() -> Result<()> {
@@ -538,6 +564,28 @@ mod tests {
         assert_eq!(scooch_core::encode_jpeg(&filled.picture, 95).unwrap(), scooch_core::encode_jpeg(&empty.picture, 95).unwrap());
         assert_eq!(filled.report["hidden"], filled.report["hidden_plain"]);
         assert!(filled.report["hidden"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn status_suggests_flip_only_when_it_would_help() {
+        let mut state = on();
+        assert_eq!(describe(&state, true, None).len(), 3);
+        state.screens.get_mut("main").unwrap().flip_helps = true;
+        let lines = describe(&state, true, None);
+        assert_eq!(lines, vec!["Scooch is on.", "Picture  ~/Pictures/harbor.jpg", "Icons    9 on 1 screen", FLIP_HINT]);
+        let none: Vec<String> = Vec::new();
+        assert!(!describe(&state, true, Some(&none)).contains(&FLIP_HINT.to_string()));
+        state.options.mirror = true;
+        assert_eq!(describe(&state, true, None).len(), 3);
+    }
+
+    #[test]
+    fn flip_toggles_the_mirror_and_says_so() {
+        assert_eq!(flip_line(true), "Scooch may now flip your picture when that clears your icons.");
+        assert_eq!(flip_line(false), "Scooch now keeps your picture the way round it is.");
+        for line in [FLIP_ON, FLIP_OFF, FLIP_HINT] {
+            assert!(!line.contains(['—', '–', ';', '(', ')']) && !line.contains(": "), "{line}");
+        }
     }
 
     #[test]
