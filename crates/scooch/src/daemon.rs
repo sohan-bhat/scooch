@@ -3,6 +3,7 @@ use crate::state::{parse, same, write_atomic, Entry, State, Store};
 use crate::{cache, poke, scene};
 use anyhow::{Context, Result};
 use scooch_core::{Options, Placement, Rect, RgbImage, Scene};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const QUIET: Duration = Duration::from_millis(250);
 pub const LIMIT: Duration = Duration::from_secs(2);
 pub const QUALITY: u8 = 95;
+pub const GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 struct Pending {
@@ -69,6 +71,8 @@ pub struct Report {
 pub struct Daemon {
     pub desktop: Arc<dyn Desktop>,
     pub store: Store,
+    pub grace: Duration,
+    recent: Mutex<HashMap<String, Instant>>,
 }
 
 pub fn adoptable(entry: &Entry, current: &Path, ours: bool) -> bool {
@@ -104,7 +108,11 @@ pub fn stamp() -> String {
 
 impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
-        Self { desktop, store }
+        Self { desktop, store, grace: GRACE, recent: Mutex::new(HashMap::new()) }
+    }
+
+    fn settling(&self, screen: &str) -> bool {
+        self.recent.lock().map(|recent| recent.get(screen).is_some_and(|at| at.elapsed() < self.grace)).unwrap_or(false)
     }
 
     pub fn tick(&self) -> Report {
@@ -151,38 +159,39 @@ impl Daemon {
         let current = self.desktop.wallpaper(screen)?;
         let ours = current.as_deref().is_some_and(|path| self.store.owns(path));
         let usable = current.clone().filter(|path| path.is_file());
+        let settling = self.settling(&screen.id);
         if !state.screens.contains_key(&screen.id) {
-            if ours {
+            if ours || settling {
                 return Ok(Outcome::Skipped);
             }
             let Some(picture) = usable.as_deref() else { anyhow::bail!(NOT_A_FILE) };
             state.screens.insert(screen.id.clone(), Entry::new(picture));
         }
         let entry = state.screens.get_mut(&screen.id).context("the screen entry vanished")?;
-        if let Some(picture) = usable.as_deref() {
+        let chosen = entry.chosen && entry.source.is_file();
+        if let (false, false, Some(picture)) = (settling, chosen, usable.as_deref()) {
             if adoptable(entry, picture, ours) {
-                (entry.source, entry.original, entry.placement) = (picture.to_path_buf(), picture.to_path_buf(), None);
+                (entry.source, entry.original, entry.placement, entry.chosen) = (picture.to_path_buf(), picture.to_path_buf(), None, false);
             }
         }
-        if usable.is_none() && !ours {
+        if usable.is_none() && !ours && !settling {
             anyhow::bail!(NOT_A_FILE);
         }
         let scene = scene::scene(screen, icons);
         entry.icons = scene.icons.len();
         let fingerprint = scene::fingerprint(&entry.source, &scene, options);
         let showing = current.as_deref().is_some_and(|path| same(path, entry.shown()));
-        if entry.fingerprint.as_deref() == Some(fingerprint.as_str()) {
-            if showing && entry.shown().is_file() {
+        if entry.fingerprint.as_deref() == Some(fingerprint.as_str()) && entry.shown().is_file() {
+            if showing || settling {
                 return Ok(Outcome::Unchanged);
             }
-            if entry.shown().is_file() {
-                let shown = entry.shown().to_path_buf();
-                self.show(screen, &shown)?;
-                return Ok(Outcome::Reapplied);
-            }
+            let shown = entry.shown().to_path_buf();
+            self.show(screen, &shown)?;
+            return Ok(Outcome::Reapplied);
         }
         let outcome = self.place(entry, screen, &scene, options, current.as_deref())?;
         entry.fingerprint = Some(fingerprint);
+        entry.chosen = false;
         Ok(outcome)
     }
 
@@ -202,6 +211,8 @@ impl Daemon {
         let placement = scooch_core::solve(&analysis, scene, options, entry.placement.as_ref());
         drop(analysis);
         lap("solve", &mut clock);
+        let output = entry.output.clone().filter(|path| path.is_file());
+        let showing_output = matches!((current, &output), (Some(current), Some(output)) if same(current, output));
         let mut picture = None;
         if scene::is_identity(&placement) {
             if !scene.icons.is_empty() && options.pads > 0.0 {
@@ -214,17 +225,17 @@ impl Daemon {
                 lap("pads check", &mut clock);
             }
             if picture.is_none() {
-                if !current.is_some_and(|path| same(path, &source)) {
-                    self.show(screen, &source)?;
-                }
-                entry.output = None;
+                let copied = showing_output && entry.placement.as_ref().is_some_and(scene::is_identity);
                 entry.placement = Some(placement);
-                self.store.sweep(&screen.id, None);
+                if current.is_some_and(|path| same(path, &source)) {
+                    entry.output = None;
+                    self.store.sweep(&screen.id, None);
+                } else if !copied {
+                    self.plain(entry, screen, current)?;
+                }
                 return Ok(Outcome::Plain);
             }
         }
-        let output = entry.output.clone().filter(|path| path.is_file());
-        let showing_output = matches!((current, &output), (Some(current), Some(output)) if same(current, output));
         if picture.is_none() && options.pads <= 0.0 && showing_output && entry.placement.as_ref() == Some(&placement) {
             return Ok(Outcome::Kept);
         }
@@ -252,26 +263,38 @@ impl Daemon {
                 return Ok(Outcome::Kept);
             }
         }
-        let (counter, path) = self.fresh_name(&screen.id, entry.counter, format, current);
+        self.publish(entry, screen, current, format.extension(), |path| write_atomic(path, &bytes))?;
+        lap("set", &mut clock);
+        Ok(Outcome::Rendered)
+    }
+
+    fn plain(&self, entry: &mut Entry, screen: &Screen, current: Option<&Path>) -> Result<()> {
+        let source = entry.source.clone();
+        let extension = source.extension().map_or("jpg".to_string(), |extension| extension.to_string_lossy().to_ascii_lowercase());
+        self.publish(entry, screen, current, &extension, |path| {
+            let bytes = std::fs::read(&source).with_context(|| format!("Scooch could not read {}, so check that the picture is still there.", source.display()))?;
+            write_atomic(path, &bytes)
+        })
+    }
+
+    fn publish(&self, entry: &mut Entry, screen: &Screen, current: Option<&Path>, extension: &str, write: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+        let (counter, path) = self.fresh_name(&screen.id, entry.counter, extension, current);
         std::fs::create_dir_all(self.store.out()).with_context(|| format!("Scooch could not make {}, so check the disk.", self.store.out().display()))?;
-        write_atomic(&path, &bytes)?;
-        drop(bytes);
-        lap("write", &mut clock);
+        write(&path)?;
         if let Err(error) = self.show(screen, &path) {
             let _ = std::fs::remove_file(&path);
             return Err(error);
         }
-        lap("set", &mut clock);
         self.store.sweep(&screen.id, Some(&path));
         entry.counter = counter;
         entry.output = Some(path);
-        Ok(Outcome::Rendered)
+        Ok(())
     }
 
-    fn fresh_name(&self, screen: &str, counter: u64, format: Format, current: Option<&Path>) -> (u64, PathBuf) {
+    fn fresh_name(&self, screen: &str, counter: u64, extension: &str, current: Option<&Path>) -> (u64, PathBuf) {
         let mut next = counter + 1;
         loop {
-            let path = self.store.output(screen, next, format.extension());
+            let path = self.store.output(screen, next, extension);
             if !path.exists() && !current.is_some_and(|current| same(current, &path)) {
                 return (next, path);
             }
@@ -294,6 +317,9 @@ impl Daemon {
 
     fn show(&self, screen: &Screen, path: &Path) -> Result<()> {
         self.desktop.set_wallpaper(screen, path)?;
+        if let Ok(mut recent) = self.recent.lock() {
+            recent.insert(screen.id.clone(), Instant::now());
+        }
         if trace() {
             eprintln!("{} set {}", stamp(), path.display());
         }
@@ -328,9 +354,20 @@ fn padded(image: &RgbImage, placement: &Placement, scene: &Scene, options: &Opti
 
 pub fn encode(picture: &RgbImage, format: Format) -> Result<Vec<u8>> {
     Ok(match format {
-        Format::Jpeg => scooch_core::encode_jpeg(picture, QUALITY)?,
+        Format::Jpeg => jpeg(picture)?,
         Format::Png => scooch_core::encode_png(picture)?,
     })
+}
+
+fn jpeg(picture: &RgbImage) -> Result<Vec<u8>> {
+    let (Ok(width), Ok(height)) = (u16::try_from(picture.width()), u16::try_from(picture.height())) else {
+        return Ok(scooch_core::encode_jpeg(picture, QUALITY)?);
+    };
+    let mut out = Vec::with_capacity(picture.as_raw().len() / 6);
+    let mut encoder = jpeg_encoder::Encoder::new(&mut out, QUALITY);
+    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+    encoder.encode(picture.as_raw(), width, height, jpeg_encoder::ColorType::Rgb)?;
+    Ok(out)
 }
 
 #[cfg(target_os = "macos")]
@@ -481,7 +518,8 @@ pub mod tests {
         let folder = scratch(name);
         let original = picture(&folder, "original.png");
         let fake = Fake::new(screens, &original);
-        let daemon = Daemon::new(fake.clone(), Store::at(folder.join("data")));
+        let mut daemon = Daemon::new(fake.clone(), Store::at(folder.join("data")));
+        daemon.grace = Duration::ZERO;
         let mut state = State { on: true, ..State::default() };
         state.options.pads = 0.0;
         daemon.store.save(&state).unwrap();
@@ -543,15 +581,18 @@ pub mod tests {
         let (daemon, fake, _) = rig("moved", vec![screen("main", 0.0, 1.0)]);
         fake.place(vec![subject()]);
         daemon.tick();
-        fake.place(vec![corner()]);
+        fake.place(Vec::new());
         assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
         assert!(!daemon.store.output("main", 1, "jpg").exists());
+        assert_eq!(fake.showing("main"), daemon.store.output("main", 2, "png"));
+        assert_eq!(std::fs::read(fake.showing("main")).unwrap(), std::fs::read(&daemon.store.load().screens["main"].source).unwrap());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
         fake.place(vec![subject(), corner()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
         let entry = daemon.store.load().screens["main"].clone();
-        assert_eq!((entry.icons, entry.counter), (2, 2));
+        assert_eq!((entry.icons, entry.counter), (2, 3));
         let files: Vec<_> = std::fs::read_dir(daemon.store.out()).unwrap().flatten().map(|file| file.path()).collect();
-        assert_eq!(files, vec![daemon.store.output("main", 2, "jpg")]);
+        assert_eq!(files, vec![daemon.store.output("main", 3, "jpg")]);
     }
 
     #[test]
@@ -601,14 +642,30 @@ pub mod tests {
         let wanted = picture(original.parent().unwrap(), "wanted.png");
         let mut state = daemon.store.load();
         let entry = state.screens.get_mut("main").unwrap();
-        (entry.source, entry.fingerprint, entry.placement) = (wanted.clone(), None, None);
+        (entry.source, entry.fingerprint, entry.placement, entry.chosen) = (wanted.clone(), None, None, true);
         daemon.store.save(&state).unwrap();
-        fake.show("main", &wanted);
         assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
         let entry = daemon.store.load().screens["main"].clone();
-        assert_eq!(entry.source, wanted);
-        assert_eq!(entry.original, original);
-        assert_eq!(fake.showing("main"), wanted);
+        assert_eq!((entry.source.clone(), entry.original.clone(), entry.chosen), (wanted.clone(), original.clone(), false));
+        assert!(daemon.store.owns(&fake.showing("main")));
+        assert_eq!(std::fs::read(fake.showing("main")).unwrap(), std::fs::read(&wanted).unwrap());
+        let later = picture(original.parent().unwrap(), "later.png");
+        fake.show("main", &later);
+        daemon.tick();
+        assert_eq!(daemon.store.load().screens["main"].source, later);
+    }
+
+    #[test]
+    fn a_stale_read_right_after_a_set_is_not_taken_for_a_change() {
+        let (mut daemon, fake, original) = rig("stale", vec![screen("main", 0.0, 1.0)]);
+        daemon.grace = Duration::from_secs(30);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let chosen = picture(original.parent().unwrap(), "chosen.png");
+        fake.show("main", &chosen);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        assert_eq!(daemon.store.load().screens["main"].source, original);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -718,6 +775,18 @@ pub mod tests {
         assert!(!adoptable(&entry, &folder, false));
         entry.source = picture.clone();
         assert!(!adoptable(&entry, &picture, false));
+    }
+
+    #[test]
+    fn jpeg_output_decodes_to_the_same_size_and_close_colors() {
+        let picture = scene::sample(301, 157);
+        let bytes = encode(&picture, Format::Jpeg).unwrap();
+        let folder = scratch("jpeg");
+        std::fs::write(folder.join("a.jpg"), &bytes).unwrap();
+        let back = scooch_core::open(&folder.join("a.jpg")).unwrap();
+        assert_eq!(back.dimensions(), (301, 157));
+        let error: f64 = picture.as_raw().iter().zip(back.as_raw()).map(|(a, b)| (*a as f64 - *b as f64).abs()).sum::<f64>() / picture.as_raw().len() as f64;
+        assert!(error < 3.0, "{error}");
     }
 
     #[test]

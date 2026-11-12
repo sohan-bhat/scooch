@@ -35,6 +35,8 @@ pub struct Entry {
     pub fingerprint: Option<String>,
     pub placement: Option<Placement>,
     pub icons: usize,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub chosen: bool,
 }
 
 impl Entry {

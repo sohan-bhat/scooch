@@ -118,14 +118,11 @@ pub fn switch(image: Option<PathBuf>) -> Result<()> {
     let screens = desktop.screens()?;
     for screen in &screens {
         let entry = state.screens.entry(screen.id.clone()).or_insert_with(|| Entry::new(&image));
-        (entry.source, entry.placement, entry.fingerprint) = (image.clone(), None, None);
+        (entry.source, entry.placement, entry.fingerprint, entry.chosen) = (image.clone(), None, None, true);
     }
     state.on = true;
     state.problem = None;
     store.save(&state)?;
-    for screen in &screens {
-        desktop.set_wallpaper(screen, &image)?;
-    }
     begin(desktop.as_ref(), &store)?;
     wait(&store);
     print_status(desktop.as_ref(), &store);
