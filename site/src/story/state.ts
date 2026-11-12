@@ -24,4 +24,5 @@ export const runtime = {
   idle: true,
   ready: false,
   power: 0,
+  posed: false,
 };

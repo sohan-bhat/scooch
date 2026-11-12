@@ -74,7 +74,7 @@ export function Install() {
             {install.tabs.map((item) => (
               <TabsContent key={item.id} value={item.id} className="data-[state=active]:animate-[tip-in_240ms_var(--ease-out)]">
                 <div className="flex items-center gap-3 rounded-panel bg-room-2 py-2.5 pr-2.5 pl-5 shadow-[inset_0_0_0_1px_rgb(243_236_220/0.08)]">
-                  <code className="min-w-0 flex-1 overflow-x-auto py-2 font-mono text-[0.875rem] leading-relaxed whitespace-nowrap text-paper [scrollbar-width:thin] tall:text-[0.8125rem]">
+                  <code className="min-w-0 flex-1 overflow-x-auto py-2 font-mono text-[0.875rem] leading-relaxed whitespace-nowrap text-paper [scrollbar-width:thin] tall:text-[0.8125rem] tall:break-all tall:whitespace-normal">
                     <span aria-hidden className="mr-3 text-lamp select-none">$</span>
                     {item.command}
                   </code>

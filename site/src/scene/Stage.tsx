@@ -80,7 +80,7 @@ export default function Stage({ onProgress, onReady }: { onProgress: (value: num
   const phone = layoutFor(window.innerWidth, window.innerHeight) === 'phone';
   const deviceDpr = window.devicePixelRatio || 1;
   quality.configure(phone, phone ? Math.min(deviceDpr, 1.5) : deviceDpr);
-  const dpr = Math.min(quality.step.dpr, deviceDpr);
+  const dpr = runtime.still >= 0 ? Math.min(deviceDpr, 2) : Math.min(quality.step.dpr, deviceDpr);
 
   return (
     <div ref={host} className="absolute inset-0">

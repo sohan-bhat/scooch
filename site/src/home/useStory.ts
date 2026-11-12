@@ -83,6 +83,7 @@ export function useStory(refs: Refs, live: boolean, still: number) {
       refs.section.current?.querySelector('.beats')?.removeAttribute('data-pending');
       if (still >= 0) {
         built.timeline.progress(beatList[Math.min(still, beatList.length - 1)].rest / 100);
+        runtime.posed = true;
         return;
       }
       trigger = ScrollTrigger.create({
@@ -160,7 +161,7 @@ export function introduce(refs: Refs, still: number) {
     if (canvas) canvas.style.opacity = '1';
     let frames = 0;
     const wait = () => {
-      frames += 1;
+      if (runtime.posed) frames += 1;
       if (frames < 30) requestAnimationFrame(wait);
       else (window as Window & { __stillReady?: boolean }).__stillReady = true;
     };
