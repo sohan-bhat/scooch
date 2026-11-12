@@ -14,7 +14,7 @@ export default defineConfig({
   preview: { port: 4173, strictPort: true },
   build: {
     target: 'es2022',
-    chunkSizeWarningLimit: 1600,
+    chunkSizeWarningLimit: 1800,
     rollupOptions: {
       input: {
         main: resolve(root, 'index.html'),

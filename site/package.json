@@ -5,13 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/prerender.mjs",
     "preview": "vite preview --port 4173",
     "typecheck": "tsc --noEmit",
     "demo": "node scripts/make-demo.mjs",
     "models": "node scripts/make-models.mjs",
     "stills": "node scripts/make-stills.mjs",
-    "brand": "node scripts/make-brand.mjs"
+    "brand": "node scripts/make-brand.mjs",
+    "atlas": "node scripts/make-atlas.mjs"
   },
   "dependencies": {
     "@fontsource-variable/anybody": "^5.3.0",
