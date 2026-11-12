@@ -2,8 +2,9 @@ use anyhow::Result;
 use scooch_core::{Rect, RgbImage};
 use std::path::{Path, PathBuf};
 
-#[cfg(target_os = "linux")]
-mod linux;
+#[cfg(any(target_os = "linux", test))]
+#[doc(hidden)]
+pub mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(any(target_os = "windows", test))]
