@@ -78,7 +78,15 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
 }
 
 pub fn render(image: &RgbImage, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
-    render::render(image, placement, scene, options)
+    render::render(image, None, placement, scene, options)
+}
+
+pub fn render_with(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
+    render::render(image, Some(analysis), placement, scene, options)
+}
+
+pub fn pads_active(analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> bool {
+    pads::active(analysis, placement, scene, options)
 }
 
 pub fn fill(image_width: u32, image_height: u32, scene: &Scene) -> Placement {
@@ -98,7 +106,12 @@ pub fn busy_image(analysis: &Analysis) -> GrayImage {
 }
 
 pub fn open(path: &std::path::Path) -> image::ImageResult<RgbImage> {
-    Ok(image::ImageReader::open(path)?.with_guessed_format()?.decode()?.to_rgb8())
+    use image::ImageDecoder;
+    let mut decoder = image::ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
+    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut picture = image::DynamicImage::from_decoder(decoder)?;
+    picture.apply_orientation(orientation);
+    Ok(picture.to_rgb8())
 }
 
 pub fn encode_jpeg(image: &RgbImage, quality: u8) -> image::ImageResult<Vec<u8>> {

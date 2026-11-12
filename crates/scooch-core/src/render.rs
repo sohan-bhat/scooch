@@ -1,5 +1,5 @@
 use crate::table::{self, Curve, STEPS};
-use crate::{analysis, color, pads, Options, Placement, RgbImage, Scene};
+use crate::{analysis, color, pads, Analysis, Options, Placement, RgbImage, Scene};
 use rayon::prelude::*;
 use std::borrow::Cow;
 
@@ -48,7 +48,7 @@ fn shrink(image: &RgbImage, factor: u32) -> RgbImage {
         let mut sums = vec![[0.0f32; 3]; w as usize];
         for sy in y0..y1 {
             let line = &raw[(sy * sw * 3) as usize..((sy + 1) * sw * 3) as usize];
-            for (sx, p) in line.chunks_exact(3).enumerate() {
+            for (sx, p) in line.as_chunks::<3>().0.iter().enumerate() {
                 let target = &mut sums[sx / factor as usize];
                 target[0] += decode[p[0] as usize];
                 target[1] += decode[p[1] as usize];
@@ -87,7 +87,7 @@ fn resample(source: &RgbImage, columns: &[Tap], rows: &[Tap], width: usize) -> V
             for (l, v) in linear.iter_mut().zip(&raw[start + left * 3..start + (right + 1) * 3]) {
                 *l = decode[*v as usize];
             }
-            for ((tap, at), px) in columns.iter().zip(&places).zip(target.chunks_exact_mut(3)) {
+            for ((tap, at), px) in columns.iter().zip(&places).zip(target.as_chunks_mut::<3>().0.iter_mut()) {
                 let w = tap.weight;
                 for c in 0..3 {
                     px[c] = w[0] * linear[at[0] + c] + w[1] * linear[at[1] + c] + w[2] * linear[at[2] + c] + w[3] * linear[at[3] + c];
@@ -105,7 +105,7 @@ fn resample(source: &RgbImage, columns: &[Tap], rows: &[Tap], width: usize) -> V
     out
 }
 
-pub fn render(image: &RgbImage, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
+pub fn render(image: &RgbImage, given: Option<&Analysis>, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
     let (width, height) = (scene.width, scene.height);
     let (sw, sh) = image.dimensions();
     if width == 0 || height == 0 || sw == 0 || sh == 0 {
@@ -120,13 +120,16 @@ pub fn render(image: &RgbImage, placement: &Placement, scene: &Scene, options: &
     let scale_y = sh as f64 / factor as f64;
     let columns = taps(&placement.fx, width as usize, scale_x, source.width() as usize);
     let rows = taps(&placement.fy, height as usize, scale_y, source.height() as usize);
-    let (raw, found) = if pads::wanted(scene, options) {
-        rayon::join(|| resample(source, &columns, &rows, width as usize), || Some(analysis::analyze(image)))
-    } else {
-        (resample(source, &columns, &rows, width as usize), None)
+    let (raw, found) = match (pads::wanted(scene, options), given) {
+        (false, _) => (resample(source, &columns, &rows, width as usize), None),
+        (true, Some(given)) => (resample(source, &columns, &rows, width as usize), Some(Cow::Borrowed(given))),
+        (true, None) => {
+            let (raw, made) = rayon::join(|| resample(source, &columns, &rows, width as usize), || analysis::analyze(image));
+            (raw, Some(Cow::Owned(made)))
+        }
     };
     let base = RgbImage::from_raw(width, height, raw).unwrap_or_else(|| RgbImage::new(width, height));
-    pads::apply(base, found.as_ref(), &placement, scene, options)
+    pads::apply(base, found.as_deref(), &placement, scene, options)
 }
 
 #[cfg(test)]
@@ -150,7 +153,7 @@ mod tests {
     fn a_matching_screen_copies_the_source() {
         let image = checker(64, 40);
         let scene = Scene { width: 64, height: 40, icons: Vec::new() };
-        let out = render(&image, &table::fill(64, 40, 64, 40), &scene, &Options::default());
+        let out = render(&image, None, &table::fill(64, 40, 64, 40), &scene, &Options::default());
         assert_eq!(out.as_raw(), image.as_raw());
     }
 
@@ -158,7 +161,7 @@ mod tests {
     fn a_large_source_is_shrunk_first() {
         let image = RgbImage::from_pixel(400, 300, image::Rgb([200, 30, 90]));
         let scene = Scene { width: 40, height: 30, icons: Vec::new() };
-        let out = render(&image, &table::fill(400, 300, 40, 30), &scene, &Options::default());
+        let out = render(&image, None, &table::fill(400, 300, 40, 30), &scene, &Options::default());
         assert_eq!(out.dimensions(), (40, 30));
         assert!(out.pixels().all(|p| p.0 == [200, 30, 90]));
         let shrunk = shrink(&image, 3);
@@ -173,7 +176,7 @@ mod tests {
         let mut placement = table::fill(32, 16, 32, 16);
         placement.fx = table::line(1.0, 0.0);
         placement.mirrored = true;
-        let out = render(&image, &placement, &scene, &Options::default());
+        let out = render(&image, None, &placement, &scene, &Options::default());
         for y in 0..16 {
             for x in 0..32 {
                 assert_eq!(out.get_pixel(x, y), image.get_pixel(31 - x, y));
@@ -187,8 +190,8 @@ mod tests {
         let scene = Scene { width: 30, height: 20, icons: Vec::new() };
         let mut broken = table::fill(30, 20, 30, 20);
         broken.fx = vec![f32::NAN; 3];
-        let out = render(&image, &broken, &scene, &Options::default());
+        let out = render(&image, None, &broken, &scene, &Options::default());
         assert_eq!(out.as_raw(), image.as_raw());
-        assert_eq!(render(&image, &broken, &Scene { width: 0, height: 9, icons: Vec::new() }, &Options::default()).dimensions(), (0, 9));
+        assert_eq!(render(&image, None, &broken, &Scene { width: 0, height: 9, icons: Vec::new() }, &Options::default()).dimensions(), (0, 9));
     }
 }

@@ -1,4 +1,4 @@
-use crate::table::Curve;
+use crate::table::{self, Curve};
 use crate::{blur, color, solver, Analysis, Options, Placement, RgbImage, Scene};
 use rayon::prelude::*;
 
@@ -46,14 +46,84 @@ struct Lerp {
     t: f32,
 }
 
+fn lerp_at(curve: &Curve, q: usize, out: usize, cells: usize) -> Lerp {
+    let p = ((curve.at((q * Q + Q / 2) as f64 / out as f64) * cells as f64 - 0.5) as f32).clamp(0.0, (cells - 1) as f32);
+    let a = p as usize;
+    Lerp { a, b: (a + 1).min(cells - 1), t: p - a as f32 }
+}
+
 fn lerps(curve: &Curve, first: usize, count: usize, out: usize, cells: usize) -> Vec<Lerp> {
-    (first..first + count)
-        .map(|q| {
-            let p = ((curve.at((q * Q + Q / 2) as f64 / out as f64) * cells as f64 - 0.5) as f32).clamp(0.0, (cells - 1) as f32);
-            let a = p as usize;
-            Lerp { a, b: (a + 1).min(cells - 1), t: p - a as f32 }
+    (first..first + count).map(|q| lerp_at(curve, q, out, cells)).collect()
+}
+
+struct Gate {
+    cells: usize,
+    rows: usize,
+    ground: Vec<f32>,
+    free: Vec<f32>,
+    xc: Curve,
+    yc: Curve,
+    width: usize,
+    height: usize,
+}
+
+impl Gate {
+    fn new(found: &Analysis, placement: &Placement, width: usize, height: usize) -> Option<Self> {
+        let (bw, bh) = (found.width as usize, found.height as usize);
+        if bw == 0 || bh == 0 || found.busy.len() != bw * bh || found.saliency.len() != bw * bh || width == 0 || height == 0 {
+            return None;
+        }
+        let ground = found.busy.iter().map(|b| smoothstep(GATE_FROM, GATE_AT, *b)).collect();
+        let keep: Vec<f32> = found.saliency.iter().map(|s| smoothstep(PROTECT_FROM, PROTECT_AT, *s)).collect();
+        let free = widen(&keep, bw, bh, PROTECT_REACH).into_iter().map(|k| 1.0 - k).collect();
+        Some(Self { cells: bw, rows: bh, ground, free, xc: Curve::new(&placement.fx), yc: Curve::new(&placement.fy), width, height })
+    }
+
+    fn pick(&self, values: &[f32], c: &Lerp, r: &Lerp) -> f32 {
+        let w = self.cells;
+        let top = values[r.a * w + c.a] + (values[r.a * w + c.b] - values[r.a * w + c.a]) * c.t;
+        let bottom = values[r.b * w + c.a] + (values[r.b * w + c.b] - values[r.b * w + c.a]) * c.t;
+        top + (bottom - top) * r.t
+    }
+
+    fn columns(&self, first: usize, count: usize) -> Vec<Lerp> {
+        lerps(&self.xc, first, count, self.width, self.cells)
+    }
+
+    fn lines(&self, first: usize, count: usize) -> Vec<Lerp> {
+        lerps(&self.yc, first, count, self.height, self.rows)
+    }
+
+    fn under(&self, rects: &[[f64; 4]]) -> bool {
+        let (qw, qh) = (self.width.div_ceil(Q), self.height.div_ceil(Q));
+        rects.iter().any(|r| {
+            let (qx0, qx1) = quarter_span(r[0], r[2], qw);
+            let (qy0, qy1) = quarter_span(r[1], r[3], qh);
+            let (qx1, qy1) = (qx1.max(qx0 + 1).min(qw), qy1.max(qy0 + 1).min(qh));
+            (qy0..qy1).any(|qy| {
+                let row = lerp_at(&self.yc, qy, self.height, self.rows);
+                (qx0..qx1).any(|qx| {
+                    let column = lerp_at(&self.xc, qx, self.width, self.cells);
+                    self.pick(&self.ground, &column, &row) * self.pick(&self.free, &column, &row) > 0.0
+                })
+            })
         })
-        .collect()
+    }
+}
+
+pub fn active(found: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> bool {
+    let rects = solver::screen_rects(scene);
+    if !wanted(scene, options) || rects.is_empty() {
+        return false;
+    }
+    let fallback;
+    let placement = if table::usable(&placement.fx) && table::usable(&placement.fy) {
+        placement
+    } else {
+        fallback = table::fill(found.source_width, found.source_height, scene.width, scene.height);
+        &fallback
+    };
+    Gate::new(found, placement, scene.width as usize, scene.height as usize).is_some_and(|gate| gate.under(&rects))
 }
 
 fn rounded_box(px: f64, py: f64, rect: &[f64; 4], radius: f64) -> f64 {
@@ -95,8 +165,7 @@ pub fn apply(base: RgbImage, found: Option<&Analysis>, placement: &Placement, sc
     let rects = solver::screen_rects(scene);
     let (width, height) = (base.width() as usize, base.height() as usize);
     let Some(found) = found else { return base };
-    let (bw, bh) = (found.width as usize, found.height as usize);
-    if amount <= 0.0 || rects.is_empty() || width == 0 || height == 0 || bw == 0 || found.busy.len() != bw * bh || found.saliency.len() != bw * bh {
+    if amount <= 0.0 || rects.is_empty() || width == 0 || height == 0 {
         return base;
     }
     let (qw, qh) = (width.div_ceil(Q), height.div_ceil(Q));
@@ -134,40 +203,25 @@ pub fn apply(base: RgbImage, found: Option<&Analysis>, placement: &Placement, sc
     let calm_area = Area { x0: cx0, y0: cy0, width: (region.x0 + region.width + margin).min(qw) - cx0, height: (region.y0 + region.height + margin).min(qh) - cy0 };
     let (dx, dy) = (region.x0 - calm_area.x0, region.y0 - calm_area.y0);
 
-    let ground: Vec<f32> = found.busy.iter().map(|b| smoothstep(GATE_FROM, GATE_AT, *b)).collect();
-    let keep: Vec<f32> = found.saliency.iter().map(|s| smoothstep(PROTECT_FROM, PROTECT_AT, *s)).collect();
-    let free: Vec<f32> = widen(&keep, bw, bh, PROTECT_REACH).into_iter().map(|k| 1.0 - k).collect();
-    let (xc, yc) = (Curve::new(&placement.fx), Curve::new(&placement.fy));
-    let columns = lerps(&xc, calm_area.x0, calm_area.width, width, bw);
-    let rows = lerps(&yc, calm_area.y0, calm_area.height, height, bh);
-    let pick = |values: &[f32], c: &Lerp, r: &Lerp| {
-        let top = values[r.a * bw + c.a] + (values[r.a * bw + c.b] - values[r.a * bw + c.a]) * c.t;
-        let bottom = values[r.b * bw + c.a] + (values[r.b * bw + c.b] - values[r.b * bw + c.a]) * c.t;
-        top + (bottom - top) * r.t
-    };
+    let Some(gates) = Gate::new(found, placement, width, height) else { return base };
+    if !gates.under(&rects) {
+        return base;
+    }
+    let columns = gates.columns(calm_area.x0, calm_area.width);
+    let rows = gates.lines(calm_area.y0, calm_area.height);
     let mut open = vec![0.0f32; calm_area.width * calm_area.height];
     open.par_chunks_mut(calm_area.width).zip(&rows).for_each(|(line, r)| {
         for (cell, c) in line.iter_mut().zip(&columns) {
-            *cell = pick(&free, c, r);
+            *cell = gates.pick(&gates.free, c, r);
         }
     });
     let mut gate = vec![0.0f32; region.width * region.height];
     gate.par_chunks_mut(region.width).enumerate().for_each(|(j, line)| {
         let r = &rows[j + dy];
         for (i, cell) in line.iter_mut().enumerate() {
-            *cell = pick(&ground, &columns[i + dx], r) * open[(j + dy) * calm_area.width + i + dx];
+            *cell = gates.pick(&gates.ground, &columns[i + dx], r) * open[(j + dy) * calm_area.width + i + dx];
         }
     });
-    let under = rects.iter().any(|r| {
-        let (qx0, qx1) = quarter_span(r[0], r[2], region.x0 + region.width);
-        let (qy0, qy1) = quarter_span(r[1], r[3], region.y0 + region.height);
-        let (qx0, qy0) = (qx0.max(region.x0), qy0.max(region.y0));
-        let (qx1, qy1) = (qx1.max(qx0 + 1).min(region.x0 + region.width), qy1.max(qy0 + 1).min(region.y0 + region.height));
-        (qy0..qy1).any(|qy| (qx0..qx1).any(|qx| gate[(qy - region.y0) * region.width + qx - region.x0] > 0.0))
-    });
-    if !under {
-        return base;
-    }
 
     let mut mask = vec![0.0f32; region.width * region.height];
     mask.par_chunks_mut(region.width).enumerate().for_each(|(j, line)| {
@@ -219,7 +273,7 @@ fn calm_planes(base: &RgbImage, area: &Area, open: &[f32], sigma: f32) -> [Vec<f
             let (x0, x1) = (qx * Q, ((qx + 1) * Q).min(width));
             let mut acc = [0.0f32; 3];
             for y in y0..y1 {
-                for p in raw[(y * width + x0) * 3..(y * width + x1) * 3].chunks_exact(3) {
+                for p in raw[(y * width + x0) * 3..(y * width + x1) * 3].as_chunks::<3>().0 {
                     acc[0] += decode[p[0] as usize];
                     acc[1] += decode[p[1] as usize];
                     acc[2] += decode[p[2] as usize];
