@@ -10,21 +10,24 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(target_os = "linux")]
 mod probe {
-    use anyhow::Result;
+    use anyhow::{anyhow, bail, Context, Result};
     use scooch::platform::linux::parse::desktop::{Kind, Session};
-    use scooch::platform::linux::parse::{ding, gio, kde as kde_rules, record, xfce as xfce_rules};
+    use scooch::platform::linux::parse::geometry::Insets;
+    use scooch::platform::linux::parse::{ding, gio, kde as kde_rules, keyfile, record, xfce as xfce_rules};
     use scooch::platform::linux::settings::{self, Gsettings, Plasma, Xfconf};
     use scooch::platform::linux::{bus, decode, gnome, gvfs, kde, screens, tool, xfce, Linux};
     use scooch::platform::{Desktop, Screen};
-    use scooch_core::Rect;
+    use scooch_core::{Rect, RgbImage};
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::fs;
     use std::io::Write as _;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::{Child, ExitCode};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
 
     const FOLDER: &str = "scooch-probe-folder";
     const PROBES: [(&str, bool); 5] = [
@@ -34,11 +37,20 @@ mod probe {
         ("scooch-probe-u with spaces that wraps.txt", false),
         ("scooch-probe-v-a-name-long-enough-that-the-desktop-has-to-cut-it-after-two-lines.txt", false),
     ];
+    const SHOW_WAIT: Duration = Duration::from_secs(10);
+    const SETTLE: Duration = Duration::from_millis(1500);
 
     static START: OnceLock<Instant> = OnceLock::new();
 
     fn now() -> u128 {
         START.get_or_init(Instant::now).elapsed().as_millis()
+    }
+
+    struct Measure {
+        name: String,
+        adapter: Option<Rect>,
+        pixels: Option<Rect>,
+        stored: String,
     }
 
     struct Probe {
@@ -50,6 +62,7 @@ mod probe {
         kind: Option<Kind>,
         session: Session,
         made: Vec<PathBuf>,
+        measures: Vec<Measure>,
         originals: Vec<(Screen, Option<PathBuf>)>,
         recorded: Vec<(String, Option<String>)>,
         daemon: Option<Child>,
@@ -112,11 +125,14 @@ mod probe {
             kind,
             session,
             made: Vec::new(),
+            measures: Vec::new(),
             originals: Vec::new(),
             recorded: Vec::new(),
             daemon: None,
         };
         probe.section("1 Session facts", facts);
+        probe.section("2 Read", read);
+        probe.section("3 Geometry truth from pixels", geometry);
         probe.section("7 Cleanup", cleanup);
         probe.save();
         ExitCode::SUCCESS
@@ -343,20 +359,220 @@ mod probe {
         }
     }
 
+    fn icons(linux: &Linux) -> Vec<Rect> {
+        linux.snapshot().map(|snapshot| snapshot.icons).unwrap_or_default()
+    }
 
+    fn maybe_icons(linux: &Option<Linux>) -> Vec<Rect> {
+        linux.as_ref().map(icons).unwrap_or_default()
+    }
 
+    fn new_rect(before: &[Rect], after: &[Rect]) -> Option<Rect> {
+        let fresh: Vec<Rect> = after.iter().filter(|rect| !before.iter().any(|old| (old.x - rect.x).abs() < 1.0 && (old.y - rect.y).abs() < 1.0)).copied().collect();
+        (fresh.len() == 1).then(|| fresh[0])
+    }
 
+    fn stored(p: &Probe, path: &Path) -> String {
+        match p.kind {
+            Some(Kind::Gnome) => gvfs::metadata(&[path.as_os_str().to_os_string()]).ok().and_then(|found| found.first().and_then(|info| info.attributes.get(ding::POSITION_KEY).cloned())).unwrap_or_else(|| "none".into()),
+            Some(Kind::Kde) => {
+                let url = format!("desktop:/{}", path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default());
+                let all = kde_rules::containments(&kde::groups(kde_rules::APPLETS));
+                let found = all.iter().find(|containment| containment.screen == 0).and_then(|containment| containment.general.get("positions").cloned()).unwrap_or_default();
+                let at = found.replace("\\,", ",").find(&url).map(|at| found.replace("\\,", ",")[at..].chars().take(url.len() + 12).collect::<String>());
+                at.unwrap_or_else(|| "not in positions, sorted mode".into())
+            }
+            Some(Kind::Xfce) => {
+                let id = path.display().to_string();
+                let folder = kde::config_folder().join("xfce4").join("desktop");
+                let yaml = fs::read_to_string(folder.join(xfce_rules::YAML_FILE)).ok().map(|text| xfce_rules::configs(&scooch::platform::linux::parse::yaml::parse(&text)));
+                if let Some(configs) = yaml {
+                    return configs.iter().find_map(|config| config.icons.get(&id).map(|(row, col)| format!("row {row} col {col}"))).unwrap_or_else(|| "none".into());
+                }
+                let rc = fs::read_to_string(folder.join(xfce_rules::LATEST_RC)).map(|text| xfce_rules::rc_positions(&keyfile::parse(&text))).unwrap_or_default();
+                rc.get(&id).map(|(row, col)| format!("row {row} col {col}")).unwrap_or_else(|| "none".into())
+            }
+            _ => gvfs::metadata(&[path.as_os_str().to_os_string()]).ok().and_then(|found| found.first().map(|info| format!("{:?}", info.attributes))).unwrap_or_else(|| "none".into()),
+        }
+    }
 
+    fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> Option<Duration> {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            if done() {
+                return Some(started.elapsed());
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        done().then(|| started.elapsed())
+    }
 
+    fn primary_frame(p: &Probe) -> Option<Rect> {
+        let found = screens::read(p.session).ok()?;
+        found.iter().find(|found| found.primary).or(found.first()).map(|found| found.screen.frame)
+    }
 
+    fn read(p: &mut Probe) -> Result<()> {
+        let linux = p.linux().ok();
+        let frame = primary_frame(p).context("no screen")?;
+        for (name, folder) in PROBES {
+            let path = p.desktop.join(name);
+            let before = maybe_icons(&linux);
+            let quiet_a = capture(p.session, &frame).ok();
+            std::thread::sleep(Duration::from_millis(300));
+            let quiet_b = capture(p.session, &frame).ok();
+            let made = if folder { fs::create_dir_all(&path) } else { fs::write(&path, b"scooch probe") };
+            made.with_context(|| format!("could not create {}", path.display()))?;
+            p.made.push(path.clone());
+            let shown = wait_until(SHOW_WAIT, || maybe_icons(&linux).len() > before.len());
+            std::thread::sleep(SETTLE);
+            let after = maybe_icons(&linux);
+            let shot = capture(p.session, &frame).ok();
+            let adapter = new_rect(&before, &after);
+            let pixels = match (&quiet_a, &quiet_b, &shot) {
+                (Some(a), Some(b), Some(c)) => changed_box(a, b, c, (frame.x as i32, frame.y as i32)),
+                _ => None,
+            };
+            let index = p.measures.len();
+            if let Some(shot) = &shot {
+                let _ = fs::write(p.out.join(format!("after-{index}.png")), scooch_core::encode_png(shot)?);
+            }
+            if let Some(before) = &quiet_b {
+                let _ = fs::write(p.out.join(format!("before-{index}.png")), scooch_core::encode_png(before)?);
+            }
+            let stored = stored(p, &path);
+            p.line(format!("- {name} shown after {:?} ms, adapter icons {} to {}", shown.map(|time| time.as_millis()), before.len(), after.len()));
+            p.measures.push(Measure { name: name.into(), adapter, pixels, stored });
+        }
+        p.line(String::new());
+        p.line("| item | stored | adapter rect |".to_string());
+        p.line("|---|---|---|".to_string());
+        let rows: Vec<String> = p.measures.iter().map(|m| format!("| {} | {} | {} |", m.name, m.stored, m.adapter.as_ref().map_or("none".into(), show))).collect();
+        for row in rows {
+            p.line(row);
+        }
+        Ok(())
+    }
 
+    fn capture(session: Session, area: &Rect) -> Result<RgbImage> {
+        match session {
+            Session::X11 => capture_x11(area),
+            Session::Wayland => capture_gnome(area),
+        }
+    }
 
+    fn capture_x11(area: &Rect) -> Result<RgbImage> {
+        let (conn, number) = x11rb::connect(None)?;
+        let root = conn.setup().roots.get(number).context("no root")?.root;
+        let (width, height) = (area.w as u16, area.h as u16);
+        let reply = conn.get_image(ImageFormat::Z_PIXMAP, root, area.x as i16, area.y as i16, width, height, !0)?.reply()?;
+        let pixels = width as usize * height as usize;
+        if reply.data.len() < pixels * 4 {
+            bail!("the X image has {} bytes for {pixels} pixels at depth {}", reply.data.len(), reply.depth);
+        }
+        let rgb = reply.data.as_chunks::<4>().0.iter().take(pixels).flat_map(|pixel| [pixel[2], pixel[1], pixel[0]]).collect();
+        RgbImage::from_raw(width as u32, height as u32, rgb).context("the capture did not fit")
+    }
 
+    fn screenshot_bus() -> Result<zbus::blocking::Connection> {
+        static SHOT: OnceLock<Option<zbus::blocking::Connection>> = OnceLock::new();
+        SHOT.get_or_init(|| {
+            let connection = zbus::blocking::Connection::session().ok()?;
+            connection.request_name("org.gnome.Screenshot").ok()?;
+            Some(connection)
+        })
+        .clone()
+        .ok_or_else(|| anyhow!("could not own org.gnome.Screenshot"))
+    }
 
+    fn capture_gnome(area: &Rect) -> Result<RgbImage> {
+        let connection = screenshot_bus()?;
+        let file = std::env::temp_dir().join(format!("scooch-shot-{}-{}.png", std::process::id(), now()));
+        let reply = connection.call_method(Some("org.gnome.Shell.Screenshot"), "/org/gnome/Shell/Screenshot", Some("org.gnome.Shell.Screenshot"), "Screenshot", &(false, false, file.to_string_lossy().as_ref()))?;
+        let (done, used): (bool, String) = reply.body().deserialize()?;
+        if !done {
+            bail!("the shell refused the screenshot");
+        }
+        let image = scooch_core::open(Path::new(&used))?;
+        let _ = fs::remove_file(&used);
+        crop(&image, area).context("the screenshot is smaller than the screen")
+    }
 
+    fn crop(image: &RgbImage, area: &Rect) -> Option<RgbImage> {
+        let (left, top) = (area.x.max(0.0) as u32, area.y.max(0.0) as u32);
+        let right = ((area.x + area.w) as u32).min(image.width());
+        let bottom = ((area.y + area.h) as u32).min(image.height());
+        if right <= left || bottom <= top {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(((right - left) * (bottom - top) * 3) as usize);
+        for y in top..bottom {
+            for x in left..right {
+                bytes.extend_from_slice(&image.get_pixel(x, y).0);
+            }
+        }
+        RgbImage::from_raw(right - left, bottom - top, bytes)
+    }
 
+    fn changed_box(quiet_a: &RgbImage, before: &RgbImage, after: &RgbImage, origin: (i32, i32)) -> Option<Rect> {
+        if before.dimensions() != after.dimensions() || quiet_a.dimensions() != before.dimensions() {
+            return None;
+        }
+        let differs = |a: &[u8], b: &[u8]| a.iter().zip(b).any(|(x, y)| x.abs_diff(*y) > 10);
+        let (mut left, mut top, mut right, mut bottom) = (u32::MAX, u32::MAX, 0u32, 0u32);
+        for (x, y, pixel) in after.enumerate_pixels() {
+            let old = before.get_pixel(x, y);
+            if differs(&pixel.0, &old.0) && !differs(&quiet_a.get_pixel(x, y).0, &old.0) {
+                (left, top, right, bottom) = (left.min(x), top.min(y), right.max(x), bottom.max(y));
+            }
+        }
+        (left != u32::MAX).then(|| Rect { x: origin.0 as f32 + left as f32, y: origin.1 as f32 + top as f32, w: (right - left + 1) as f32, h: (bottom - top + 1) as f32 })
+    }
 
+    fn margins(rect: &Rect, truth: &Rect) -> [f32; 4] {
+        [truth.x - rect.x, truth.y - rect.y, rect.x + rect.w - (truth.x + truth.w), rect.y + rect.h - (truth.y + truth.h)]
+    }
 
+    fn geometry(p: &mut Probe) -> Result<()> {
+        p.line("| item | adapter | pixels | margins left top right bottom |".to_string());
+        p.line("|---|---|---|---|".to_string());
+        let mut lows = [f32::MAX; 4];
+        let mut rows = Vec::new();
+        for measure in &p.measures {
+            let edges = match (&measure.adapter, &measure.pixels) {
+                (Some(adapter), Some(pixels)) => {
+                    let edges = margins(adapter, pixels);
+                    for (low, edge) in lows.iter_mut().zip(edges) {
+                        *low = low.min(edge);
+                    }
+                    format!("{edges:?}")
+                }
+                _ => "none".into(),
+            };
+            rows.push(format!("| {} | {} | {} | {edges} |", measure.name, measure.adapter.as_ref().map_or("none".into(), show), measure.pixels.as_ref().map_or("none".into(), show)));
+        }
+        for row in rows {
+            p.line(row);
+        }
+        if lows[0] == f32::MAX {
+            p.line("- no measurement to solve from".to_string());
+            return Ok(());
+        }
+        let current = match p.kind {
+            Some(Kind::Gnome) => ding::INSETS,
+            Some(Kind::Kde) => kde_rules::INSETS,
+            Some(Kind::Xfce) => xfce_rules::INSETS,
+            _ => Insets { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 },
+        };
+        let solved = Insets { left: current.left + lows[0].floor() as f64, top: current.top + lows[1].floor() as f64, right: current.right + lows[2].floor() as f64, bottom: current.bottom + lows[3].floor() as f64 };
+        p.line(format!("- smallest margins over every probe {lows:?}, negative means the drawing spills past the adapter rect"));
+        p.line(format!("- corrected constants `Insets {{ left: {:.0}, top: {:.0}, right: {:.0}, bottom: {:.0} }}` against the current `{current:?}`", solved.left, solved.top, solved.right, solved.bottom));
+        let placed: Vec<Rect> = p.measures.iter().filter_map(|measure| measure.pixels).collect();
+        for pair in placed.windows(2) {
+            p.line(format!("- pixel step between neighbours {:.0},{:.0}", pair[1].x - pair[0].x, pair[1].y - pair[0].y));
+        }
+        Ok(())
+    }
 
 
 
