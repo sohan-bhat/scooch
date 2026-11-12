@@ -365,46 +365,64 @@ struct Shifted {
     after: f32,
 }
 
-fn shifted_cases() -> &'static [Shifted] {
-    static CELL: OnceLock<Vec<Shifted>> = OnceLock::new();
-    CELL.get_or_init(|| {
-        let options = Options::default();
-        let (w, h) = (2880, 1800);
-        let mut out = Vec::new();
-        for photo in photos() {
-            for (at, layout) in layouts::SHIFTS {
-                let Some(crop) = layouts::shifted(&photo.image, &photo.analysis, at) else { continue };
-                let crop = small(&crop, 1600);
-                let analysis = scooch_core::analyze(&crop);
-                let scene = Scene { width: w, height: h, icons: layouts::layout(layout, &analysis, w, h) };
-                let placement = scooch_core::solve(&analysis, &scene, &options, None);
-                let label = format!("{}@{}", photo.name, (at * 100.0).round());
-                check_placement(&placement, &label);
-                let centered = scooch_core::fill(crop.width(), crop.height(), &scene);
-                let before = scooch_core::hidden_share(&analysis, &scene, &centered);
-                let after = scooch_core::hidden_share(&analysis, &scene, &placement);
-                println!("{label:20} hidden {before:.3} -> {after:.3} zoom {:.2} shift {:?}", placement.zoom, placement.shift);
-                out.push(Shifted { label, before, after });
-            }
+fn shifted_set(edge: bool, options: Options) -> Vec<Shifted> {
+    let (w, h) = (2880, 1800);
+    let mut out = Vec::new();
+    for photo in photos() {
+        let spots = if edge { layouts::EDGES } else { layouts::SHIFTS };
+        for (at, layout) in spots {
+            let crop = if edge { layouts::edged(&photo.image, &photo.analysis, at) } else { layouts::shifted(&photo.image, &photo.analysis, at) };
+            let Some(crop) = crop else { continue };
+            let crop = small(&crop, 1600);
+            let analysis = scooch_core::analyze(&crop);
+            let scene = Scene { width: w, height: h, icons: layouts::layout(layout, &analysis, w, h) };
+            let placement = scooch_core::solve(&analysis, &scene, &options, None);
+            let label = format!("{}@{}", photo.name, (at * 100.0).round());
+            check_placement(&placement, &label);
+            let centered = scooch_core::fill(crop.width(), crop.height(), &scene);
+            let before = scooch_core::hidden_share(&analysis, &scene, &centered);
+            let after = scooch_core::hidden_share(&analysis, &scene, &placement);
+            println!("{label:20} hidden {before:.3} -> {after:.3} zoom {:.2} mirrored {} shift {:?}", placement.zoom, placement.mirrored, placement.shift);
+            out.push(Shifted { label, before, after });
         }
-        out
-    })
+    }
+    out
+}
+
+fn touching() -> &'static [Shifted] {
+    static CELL: OnceLock<Vec<Shifted>> = OnceLock::new();
+    CELL.get_or_init(|| shifted_set(false, Options { mirror: true, ..Options::default() }))
+}
+
+fn behind_strip() -> &'static [Shifted] {
+    static CELL: OnceLock<Vec<Shifted>> = OnceLock::new();
+    CELL.get_or_init(|| shifted_set(true, Options::default()))
+}
+
+fn assert_most_clear(cases: &[Shifted]) {
+    let collided: Vec<&Shifted> = cases.iter().filter(|c| c.before > 0.02).collect();
+    let cleared = collided.iter().filter(|c| c.after < 0.5 * c.before).count();
+    let missed: Vec<&str> = collided.iter().filter(|c| c.after >= 0.5 * c.before).map(|c| c.label.as_str()).collect();
+    assert!(collided.len() >= 6, "only {} cases collide", collided.len());
+    assert!(3 * cleared >= 2 * collided.len(), "{cleared} of {} cleared, missed {missed:?}", collided.len());
 }
 
 #[test]
 fn shifted_subjects_never_hide_more() {
-    let cases = shifted_cases();
-    assert!(cases.len() >= 10, "{}", cases.len());
-    for case in cases {
-        assert!(case.after <= case.before, "{} {} > {}", case.label, case.after, case.before);
+    for cases in [touching(), behind_strip()] {
+        assert!(cases.len() >= 10, "{}", cases.len());
+        for case in cases {
+            assert!(case.after <= case.before, "{} {} > {}", case.label, case.after, case.before);
+        }
     }
 }
 
 #[test]
-#[ignore = "fails today: at 78 and 22 percent the subject sits within reach of the screen edge, see the engine report"]
-fn most_shifted_subjects_slide_clear() {
-    let collided: Vec<&Shifted> = shifted_cases().iter().filter(|c| c.before >= 0.02).collect();
-    let cleared = collided.iter().filter(|c| c.after < 0.5 * c.before).count();
-    let missed: Vec<&str> = collided.iter().filter(|c| c.after >= 0.5 * c.before).map(|c| c.label.as_str()).collect();
-    assert!(3 * cleared >= 2 * collided.len(), "{cleared} of {} cleared, missed {missed:?}", collided.len());
+fn subjects_touching_the_edge_clear_with_a_flip() {
+    assert_most_clear(touching());
+}
+
+#[test]
+fn subjects_with_a_strip_behind_slide_clear() {
+    assert_most_clear(behind_strip());
 }
