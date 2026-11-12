@@ -74,6 +74,32 @@ fn compose(header: Vec<RgbImage>, rows: &[Row], cell_w: u32) -> RgbImage {
     sheet
 }
 
+fn through(values: &[f32], source: f32) -> f32 {
+    let falling = values[values.len() - 1] < values[0];
+    for (k, pair) in values.windows(2).enumerate() {
+        let (a, b) = if falling { (pair[1], pair[0]) } else { (pair[0], pair[1]) };
+        if source >= a && source <= b && b > a {
+            let t = (source - a) / (b - a);
+            let t = if falling { 1.0 - t } else { t };
+            return (k as f32 + t) / (values.len() - 1) as f32;
+        }
+    }
+    if (source < values[0]) != falling { 0.0 } else { 1.0 }
+}
+
+fn subject_shape(analysis: &Analysis, placement: &scooch_core::Placement) -> f32 {
+    let s = analysis.subject;
+    let [x0, y0, cw, ch] = placement.crop;
+    let (a, b) = (s.x.max(x0), (s.x + s.w).min(x0 + cw));
+    let (c, d) = (s.y.max(y0), (s.y + s.h).min(y0 + ch));
+    if b <= a || d <= c {
+        return 1.0;
+    }
+    let width = (through(&placement.fx, b) - through(&placement.fx, a)).abs() / ((b - a) / cw);
+    let height = (through(&placement.fy, d) - through(&placement.fy, c)).abs() / ((d - c) / ch);
+    width / height
+}
+
 fn row(name: &str, photo: &RgbImage, analysis: &Analysis, layout: &str, (w, h): (u32, u32), cell_w: u32, cell_h: u32) -> Row {
     let icons = layouts::layout(layout, analysis, w, h);
     let scene = Scene { width: w, height: h, icons: icons.clone() };
@@ -89,7 +115,8 @@ fn row(name: &str, photo: &RgbImage, analysis: &Analysis, layout: &str, (w, h): 
     let hidden_before = scooch_core::hidden_share(analysis, &scene, &fill);
     let hidden_after = scooch_core::hidden_share(analysis, &scene, &placement);
     println!(
-        "{name:16} {w}x{h} {layout:9} zoom {:.2} mirror {} crop [{:.3} {:.3} {:.3} {:.3}] shift [{:+.3} {:+.3}] hidden {:.3} -> {:.3} solve {:.1} ms render {:.0} ms",
+        "{name:16} {w}x{h} {layout:9} shape {:.3} zoom {:.2} mirror {} crop [{:.3} {:.3} {:.3} {:.3}] shift [{:+.3} {:+.3}] hidden {:.3} -> {:.3} solve {:.1} ms render {:.0} ms",
+        subject_shape(analysis, &placement),
         placement.zoom,
         placement.mirrored,
         placement.crop[0],
