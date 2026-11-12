@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/scooch-core", "crates/scooch"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/sohan-bhat/scooch"
+authors = ["Sohan Bhat"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "abort"
+
+[profile.dev]
+debug = 0
+
+[profile.dev.package."*"]
+opt-level = 2
