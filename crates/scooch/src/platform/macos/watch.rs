@@ -182,7 +182,9 @@ fn arm(file: &'static File) -> bool {
 extern "C" fn touched(context: *mut c_void) {
     let armed = unsafe { &*(context as *const Armed) };
     let flags = unsafe { sys::dispatch_source_get_data(armed.source) };
-    (armed.file.wake)();
+    if !super::set_recently() {
+        (armed.file.wake)();
+    }
     if flags & (sys::NOTE_DELETE | sys::NOTE_RENAME) != 0 {
         unsafe { sys::dispatch_source_cancel(armed.source) };
         arm(armed.file);

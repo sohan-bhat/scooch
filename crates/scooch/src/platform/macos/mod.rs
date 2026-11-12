@@ -13,9 +13,20 @@ use objc2_foundation::{ns_string, NSProcessInfo};
 use scooch_core::RgbImage;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
+static LAST_SET: AtomicU64 = AtomicU64::new(0);
+const OWN_ECHO: Duration = Duration::from_secs(1);
+
+fn now_millis() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
+}
+
+pub fn set_recently() -> bool {
+    now_millis().saturating_sub(LAST_SET.load(Ordering::SeqCst)) < OWN_ECHO.as_millis() as u64
+}
 
 pub fn on_main<T: Send>(work: impl FnOnce(MainThreadMarker) -> T + Send) -> T {
     if let Some(marker) = MainThreadMarker::new() {
@@ -68,7 +79,9 @@ impl Desktop for Mac {
     fn set_wallpaper(&self, screen: &Screen, path: &Path) -> Result<()> {
         let id = screen.id.clone();
         let path = path.to_path_buf();
-        on_main(move |marker| picture::set_wallpaper(marker, &id, &path))
+        let result = on_main(move |marker| picture::set_wallpaper(marker, &id, &path));
+        LAST_SET.store(now_millis(), Ordering::SeqCst);
+        result
     }
 
     fn run(&self, wake: Wake) -> Result<()> {
