@@ -96,6 +96,15 @@ mod probe {
         static SETTINGS: RefCell<Vec<Setting>> = const { RefCell::new(Vec::new()) };
     }
 
+    struct Measure {
+        name: String,
+        at: (f32, f32),
+        label: Label,
+        adapter: Rect,
+        automation: Option<Rect>,
+        pixels: Option<Rect>,
+    }
+
     struct Probe {
         out: PathBuf,
         report: Vec<String>,
@@ -175,6 +184,7 @@ mod probe {
         probe.section("Setup", setup);
         probe.section("1 Session facts", facts);
         probe.section("2 Read", read);
+        probe.section("3 Geometry truth", geometry);
         probe.save();
         ExitCode::SUCCESS
     }
@@ -456,6 +466,227 @@ mod probe {
             p.line(format!("| {} | {},{} | {}x{} | {} |", item.name, item.at.x, item.at.y, label.width, label.height, show(rect)));
         }
         Ok(())
+    }
+
+    fn capture(area: RECT) -> Result<RgbImage> {
+        let width = area.right - area.left;
+        let height = area.bottom - area.top;
+        if width <= 0 || height <= 0 {
+            bail!("the capture area is empty");
+        }
+        let screen = unsafe { GetDC(None) };
+        if screen.is_invalid() {
+            bail!("no screen device context");
+        }
+        let memory = unsafe { CreateCompatibleDC(Some(screen)) };
+        let bitmap = unsafe { CreateCompatibleBitmap(screen, width, height) };
+        let old = unsafe { SelectObject(memory, bitmap.into()) };
+        let copied = unsafe { BitBlt(memory, 0, 0, width, height, Some(screen), area.left, area.top, SRCCOPY) };
+        unsafe { SelectObject(memory, old) };
+        let header = BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: width, biHeight: -height, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() };
+        let mut info = BITMAPINFO { bmiHeader: header, ..Default::default() };
+        let mut data = vec![0u8; width as usize * height as usize * 4];
+        let lines = unsafe { GetDIBits(memory, bitmap, 0, height as u32, Some(data.as_mut_ptr() as *mut c_void), &mut info, DIB_RGB_COLORS) };
+        let _ = unsafe { DeleteObject(bitmap.into()) };
+        let _ = unsafe { DeleteDC(memory) };
+        unsafe { ReleaseDC(None, screen) };
+        copied?;
+        if lines != height {
+            bail!("GetDIBits copied {lines} of {height} lines");
+        }
+        let rgb = data.chunks_exact(4).flat_map(|pixel| [pixel[2], pixel[1], pixel[0]]).collect();
+        RgbImage::from_raw(width as u32, height as u32, rgb).context("the capture did not fit")
+    }
+
+    fn changed_box(before: &RgbImage, after: &RgbImage, origin: (i32, i32)) -> Option<Rect> {
+        if before.dimensions() != after.dimensions() {
+            return None;
+        }
+        let (mut left, mut top, mut right, mut bottom) = (u32::MAX, u32::MAX, 0u32, 0u32);
+        for (x, y, pixel) in after.enumerate_pixels() {
+            let old = before.get_pixel(x, y);
+            if pixel.0.iter().zip(old.0.iter()).any(|(a, b)| a.abs_diff(*b) > 10) {
+                (left, top, right, bottom) = (left.min(x), top.min(y), right.max(x), bottom.max(y));
+            }
+        }
+        (left != u32::MAX).then(|| Rect { x: origin.0 as f32 + left as f32, y: origin.1 as f32 + top as f32, w: (right - left + 1) as f32, h: (bottom - top + 1) as f32 })
+    }
+
+    fn automation_rects(automation: &IUIAutomation, list: HWND) -> Result<Vec<(String, Rect)>> {
+        let element = unsafe { automation.ElementFromHandle(list) }?;
+        let condition = unsafe { automation.CreateTrueCondition() }?;
+        let found = unsafe { element.FindAll(TreeScope_Children, &condition) }?;
+        let count = unsafe { found.Length() }?;
+        let mut out = Vec::new();
+        for index in 0..count {
+            let Ok(child) = (unsafe { found.GetElement(index) }) else { continue };
+            let name = unsafe { child.CurrentName() }.map(|name| name.to_string()).unwrap_or_default();
+            let Ok(rect) = (unsafe { child.CurrentBoundingRectangle() }) else { continue };
+            out.push((name, rect_of(rect)));
+        }
+        Ok(out)
+    }
+
+    fn pidl_of(view: &shell::View, name: &str, folder: bool) -> Result<com::Pidl> {
+        let shell_folder: ::windows::Win32::UI::Shell::IShellFolder = unsafe { view.folder.GetFolder() }?;
+        for pidl in shell::pidls(view)? {
+            let seen = shell::name(&shell_folder, &pidl);
+            if seen == name || seen == shown_name(name, folder) {
+                return Ok(pidl);
+            }
+        }
+        bail!("{name} is not in the view")
+    }
+
+    fn position(view: &shell::View, pidl: &com::Pidl) -> Result<(POINT, POINT)> {
+        let client = unsafe { view.folder.GetItemPosition(pidl.0) }?;
+        let mut screen = [client];
+        unsafe { MapWindowPoints(Some(view.list), None, &mut screen) };
+        Ok((client, screen[0]))
+    }
+
+    fn place(view: &shell::View, pidl: &com::Pidl, at: POINT) -> Result<()> {
+        let list = [pidl.0 as *const ITEMIDLIST];
+        let points = [at];
+        unsafe { view.folder.SelectAndPositionItems(1, list.as_ptr(), Some(points.as_ptr()), SVSI_POSITIONITEM.0 as u32) }?;
+        Ok(())
+    }
+
+    fn target(view: &shell::View) -> Result<POINT> {
+        let mut client = RECT::default();
+        unsafe { GetClientRect(view.list, &mut client) }?;
+        let primary = display_monitors().first().map(|(rect, _)| *rect);
+        let mut origin = [POINT { x: 0, y: 0 }];
+        unsafe { MapWindowPoints(Some(view.list), None, &mut origin) };
+        let center = match primary {
+            Some(rect) => POINT { x: (rect.x + rect.w / 2.0) as i32 - origin[0].x, y: (rect.y + rect.h / 3.0) as i32 - origin[0].y },
+            None => POINT { x: client.right / 2, y: client.bottom / 3 },
+        };
+        Ok(center)
+    }
+
+    fn park_cursor() {
+        if let Some(area) = work_area() {
+            let _ = unsafe { SetCursorPos(area.right - 20, area.top + 20) };
+        }
+    }
+
+    fn geometry(p: &mut Probe) -> Result<()> {
+        let view = shell::view()?;
+        let font = shell::Font::open()?;
+        let cell = shell::cell(&view, font.line)?;
+        let wrap = cell.wrap(&SPACING).round() as i32;
+        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
+        let spot = target(&view)?;
+        p.target = Some(spot);
+        let mut spot_screen = [spot];
+        unsafe { MapWindowPoints(Some(view.list), None, &mut spot_screen) };
+        let reach = (cell.width.max(cell.icon) * 2.0) as i32 + 40;
+        let area = RECT { left: spot_screen[0].x - reach, top: spot_screen[0].y - reach / 2, right: spot_screen[0].x + reach, bottom: spot_screen[0].y + reach * 2 };
+        p.line(format!("- target spot {},{} in list coordinates, capture area {}", spot.x, spot.y, show(&rect_of(area))));
+        park_cursor();
+        let mut measured = Vec::new();
+        for (index, (name, folder)) in PROBES.iter().enumerate() {
+            let result = (|| -> Result<Measure> {
+                let pidl = pidl_of(&view, name, *folder)?;
+                let (home, _) = position(&view, &pidl)?;
+                pump(Duration::from_millis(300));
+                let before = capture(area)?;
+                place(&view, &pidl, spot)?;
+                pump(Duration::from_millis(700));
+                let after = capture(area)?;
+                let (_, at) = position(&view, &pidl)?;
+                let shown = shown_name(name, *folder);
+                let automation = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown || seen == name).map(|(_, rect)| rect);
+                let pixels = changed_box(&before, &after, (area.left, area.top));
+                let _ = fs::write(p.out.join(format!("before-{index}.png")), scooch_core::encode_png(&before)?);
+                let _ = fs::write(p.out.join(format!("after-{index}.png")), scooch_core::encode_png(&after)?);
+                place(&view, &pidl, home)?;
+                pump(Duration::from_millis(400));
+                let label = font.measure(&shown, wrap);
+                let at = (at.x as f32, at.y as f32);
+                Ok(Measure { name: shown, at, label, adapter: layout::item_rect(at, &cell, label, &SPACING), automation, pixels })
+            })();
+            match result {
+                Ok(measure) => measured.push(measure),
+                Err(error) => p.line(format!("- {name} could not be measured {error:#}")),
+            }
+        }
+        let monitors = display_monitors();
+        if let Some((primary, _)) = monitors.first() {
+            if let Ok(shot) = capture(rect_area(Some(*primary))) {
+                let _ = fs::write(p.out.join("screen.png"), scooch_core::encode_png(&shot)?);
+                p.raw(format!("full screen capture of {}", show(primary)));
+            }
+        }
+        p.line(String::new());
+        p.line("| item | position | label | adapter | UI Automation | pixels | margins to UIA | margins to pixels |".to_string());
+        p.line("|---|---|---|---|---|---|---|---|".to_string());
+        for measure in &measured {
+            let to = |truth: &Option<Rect>| truth.map_or("none".to_string(), |truth| format!("{:?}", margins(&measure.adapter, &truth)));
+            p.line(format!(
+                "| {} | {:.0},{:.0} | {:.0}x{:.0} | {} | {} | {} | {} | {} |",
+                measure.name,
+                measure.at.0,
+                measure.at.1,
+                measure.label.width,
+                measure.label.height,
+                show(&measure.adapter),
+                measure.automation.as_ref().map_or("none".into(), show),
+                measure.pixels.as_ref().map_or("none".into(), show),
+                to(&measure.automation),
+                to(&measure.pixels)
+            ));
+        }
+        solve(p, &measured, &cell);
+        Ok(())
+    }
+
+    fn rect_area(rect: Option<Rect>) -> RECT {
+        rect.map_or(RECT::default(), |rect| RECT { left: rect.x as i32, top: rect.y as i32, right: (rect.x + rect.w) as i32, bottom: (rect.y + rect.h) as i32 })
+    }
+
+    fn union(a: Option<Rect>, b: Option<Rect>) -> Option<Rect> {
+        match (a, b) {
+            (Some(a), Some(b)) => layout::union(&[a, b]),
+            (one, other) => one.or(other),
+        }
+    }
+
+    fn solve(p: &mut Probe, measured: &[Measure], cell: &Cell) {
+        let mut above = f32::MIN;
+        let mut tail = f32::MIN;
+        let mut sides = f32::MIN;
+        let mut offsets = Vec::new();
+        let mut fits = Vec::new();
+        for measure in measured {
+            let Some(truth) = union(measure.automation, measure.pixels) else { continue };
+            let lines = layout::lines(cell, measure.label);
+            above = above.max(measure.at.1 - truth.y);
+            tail = tail.max(truth.y + truth.h - (measure.at.1 + cell.icon + lines * cell.line));
+            let anchor = measure.at.0 + cell.icon / 2.0;
+            let half = (anchor - truth.x).max(truth.x + truth.w - anchor);
+            let content = cell.icon.max(measure.label.width.min(cell.wrap(&SPACING)));
+            sides = sides.max(2.0 * half - content);
+            offsets.push(format!("{} {:.1}", measure.name, truth.x + truth.w / 2.0 - measure.at.0));
+            let edges = margins(&measure.adapter, &truth);
+            fits.push((measure.name.clone(), edges.iter().all(|edge| *edge >= 0.0 && *edge < 8.0)));
+        }
+        if above == f32::MIN {
+            p.line("- no measurement to solve from".to_string());
+            return;
+        }
+        p.line(String::new());
+        p.line(format!("- truth center minus reported x, expected {} under the current reading, {}", cell.icon / 2.0, offsets.join(", ")));
+        for (name, fit) in &fits {
+            p.line(format!("- {name} {}", if *fit { "fits, every edge inside 0 to 8 px" } else { "does not fit the 0 to 8 px rule" }));
+        }
+        let solved = Spacing { inset: SPACING.inset, above: above.ceil().max(0.0), gap: SPACING.gap, below: (tail.ceil() - SPACING.gap).max(0.0), sides: sides.ceil().max(0.0) };
+        p.line(format!("- needed above {above:.1}, below the label lines {tail:.1}, both sides together {sides:.1}"));
+        p.line(format!(
+            "- corrected constants `Spacing {{ inset: {:.0}, above: {:.0}, gap: {:.0}, below: {:.0}, sides: {:.0} }}` against the current `{:?}`",
+            solved.inset, solved.above, solved.gap, solved.below, solved.sides, SPACING
+        ));
     }
 
 }
