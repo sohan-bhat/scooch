@@ -1,12 +1,22 @@
+mod cache;
+mod commands;
+mod daemon;
 mod platform;
+mod poke;
+mod scene;
+mod state;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
-use scooch_core::{Options, Rect, Scene};
 use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
+#[used]
+#[link_section = "__TEXT,__info_plist"]
+static INFO: [u8; include_bytes!("Info.plist").len()] = *include_bytes!("Info.plist");
+
 #[derive(Parser)]
-#[command(name = "scooch", version, about = "Wallpaper that scooches over for your desktop icons.")]
+#[command(name = "scooch", version, about = "Wallpaper that scooches over for your desktop icons.", after_help = "Run scooch with nothing after it to turn it on or see how it is doing.")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -14,63 +24,45 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Switch the picture on every screen")]
+    Use { image: Option<PathBuf> },
+    #[command(about = "Stop, remove the login item and put your wallpaper back")]
+    Off,
+    #[command(about = "Show whether Scooch is on and what it shows")]
+    Status,
+    #[command(about = "Render one picture to a file without touching your wallpaper")]
     Render {
-        image: PathBuf,
-        #[arg(long)]
-        icons: PathBuf,
-        #[arg(long)]
-        out: PathBuf,
-        #[arg(long)]
+        image: Option<PathBuf>,
+        #[arg(long, help = "A JSON file with the screen width, height and icon rectangles, or your real desktop when left out")]
+        icons: Option<PathBuf>,
+        #[arg(long, help = "Where to write the picture, or a name next to you when left out")]
+        out: Option<PathBuf>,
+        #[arg(long, help = "Also write the scene, placement and analysis as JSON")]
         json: Option<PathBuf>,
+        #[arg(long, help = "Also write the saliency map as a PNG")]
+        saliency: Option<PathBuf>,
     },
+    #[command(about = "Run in the foreground, which is what the login item does")]
+    Watch,
+    #[command(about = "Check permissions and the desktop")]
     Doctor,
 }
 
-#[derive(serde::Deserialize)]
-struct SceneFile {
-    width: u32,
-    height: u32,
-    icons: Vec<[f32; 4]>,
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
 }
 
-fn main() -> Result<()> {
+fn run() -> Result<()> {
     match Cli::parse().command {
-        Some(Command::Render { image, icons, out, json }) => render(image, icons, out, json),
-        Some(Command::Doctor) | None => doctor(),
+        None => commands::start(),
+        Some(Command::Use { image }) => commands::switch(image),
+        Some(Command::Off) => commands::off(),
+        Some(Command::Status) => commands::status(),
+        Some(Command::Render { image, icons, out, json, saliency }) => commands::render(image, icons, out, json, saliency),
+        Some(Command::Watch) => commands::watch(),
+        Some(Command::Doctor) => commands::doctor(),
     }
-}
-
-fn render(image: PathBuf, icons: PathBuf, out: PathBuf, json: Option<PathBuf>) -> Result<()> {
-    let file: SceneFile = serde_json::from_slice(&std::fs::read(&icons).with_context(|| format!("reading {}", icons.display()))?)?;
-    let scene = Scene {
-        width: file.width,
-        height: file.height,
-        icons: file.icons.iter().map(|r| Rect { x: r[0], y: r[1], w: r[2], h: r[3] }).collect(),
-    };
-    let options = Options::default();
-    let source = scooch_core::open(&image).with_context(|| format!("opening {}", image.display()))?;
-    let analysis = scooch_core::analyze(&source);
-    let placement = scooch_core::solve(&analysis, &scene, &options, None);
-    let picture = scooch_core::render(&source, &placement, &scene, &options);
-    let bytes = match out.extension().and_then(|e| e.to_str()) {
-        Some("png") => scooch_core::encode_png(&picture)?,
-        _ => scooch_core::encode_jpeg(&picture, 95)?,
-    };
-    std::fs::write(&out, bytes)?;
-    if let Some(path) = json {
-        std::fs::write(path, serde_json::to_vec(&serde_json::json!({ "scene": scene, "placement": placement, "analysis": analysis }))?)?;
-    }
-    Ok(())
-}
-
-fn doctor() -> Result<()> {
-    let desktop = platform::current()?;
-    println!("{}", desktop.name());
-    for (name, result) in desktop.check() {
-        match result {
-            Ok(detail) => println!("ok    {name}  {detail}"),
-            Err(error) => println!("fail  {name}  {error}"),
-        }
-    }
-    Ok(())
 }
