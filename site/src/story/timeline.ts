@@ -13,7 +13,7 @@ export const beats = [
   { id: 'hero', start: 0, end: 12, enter: -1, leave: 6.5, rest: 2 },
   { id: 'problem', start: 12, end: 27, enter: 15.6, leave: 23.4, rest: 21 },
   { id: 'sees', start: 27, end: 44, enter: 31, leave: 41.4, rest: 38 },
-  { id: 'fix', start: 44, end: 58, enter: 45.2, leave: 55.6, rest: 54 },
+  { id: 'fix', start: 44, end: 58, enter: 46.4, leave: 55.6, rest: 54 },
   { id: 'follow', start: 58, end: 72, enter: 59, leave: 69.8, rest: 64.2 },
   { id: 'rest', start: 72, end: 88, enter: 78, leave: 85.6, rest: 83 },
   { id: 'end', start: 88, end: 100, enter: 93.2, leave: -1, rest: 99.6 },
@@ -69,7 +69,7 @@ export function buildTimeline(elements: Elements, manifest: DemoManifest): Built
   to(timeline, story, { sweep: 0 }, { sweep: 1 }, 31.4, 5.2, EASE.camera);
   to(timeline, story, { sweep: 1 }, { sweep: 0 }, 39.6, 4, EASE.camera);
 
-  to(timeline, story, { mixAB: 0 }, { mixAB: 1 }, 47.4, 4.6, EASE.camera);
+  to(timeline, story, { mixAB: 0 }, { mixAB: 1 }, 44.4, 3.6, EASE.camera);
 
   const icon = manifest.frames.before.icons[manifest.drag.icon];
   const grabX = manifest.drag.from[0] + icon[2] * 0.42;
