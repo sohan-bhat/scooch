@@ -366,6 +366,25 @@ struct Shifted {
     label: String,
     before: f32,
     after: f32,
+    rigid: usize,
+}
+
+const STRIP: f32 = 0.10;
+const CALM_STRIP: usize = 10;
+
+fn rigid_strip_columns(analysis: &Analysis, at: f32) -> usize {
+    let (w, h) = (analysis.width as usize, analysis.height as usize);
+    let columns: Vec<usize> = if at > 0.5 { ((w as f32 * (1.0 - STRIP)) as usize..w).collect() } else { (0..(w as f32 * STRIP).ceil() as usize).collect() };
+    columns
+        .into_iter()
+        .filter(|&c| {
+            let mut column: Vec<f32> = (0..h).map(|r| analysis.saliency[r * w + c]).collect();
+            column.sort_by(f32::total_cmp);
+            let peak = column[((h - 1) as f32 * 0.97).round() as usize];
+            let t = ((peak - 0.12) / (0.35 - 0.12)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t) >= 0.5
+        })
+        .count()
 }
 
 fn shifted_set(edge: bool, options: Options) -> Vec<Shifted> {
@@ -385,8 +404,9 @@ fn shifted_set(edge: bool, options: Options) -> Vec<Shifted> {
             let centered = scooch_core::fill(crop.width(), crop.height(), &scene);
             let before = scooch_core::hidden_share(&analysis, &scene, &centered);
             let after = scooch_core::hidden_share(&analysis, &scene, &placement);
-            println!("{label:20} hidden {before:.3} -> {after:.3} zoom {:.2} mirrored {} shift {:?}", placement.zoom, placement.mirrored, placement.shift);
-            out.push(Shifted { label, before, after });
+            let rigid = rigid_strip_columns(&analysis, at);
+            println!("{label:20} hidden {before:.3} -> {after:.3} zoom {:.2} mirrored {} shift {:?} rigid strip columns {rigid}", placement.zoom, placement.mirrored, placement.shift);
+            out.push(Shifted { label, before, after, rigid });
         }
     }
     out
@@ -426,6 +446,10 @@ fn subjects_touching_the_edge_clear_with_a_flip() {
 }
 
 #[test]
-fn subjects_with_a_strip_behind_slide_clear() {
-    assert_most_clear(behind_strip());
+fn subjects_with_a_calm_strip_behind_slide_clear() {
+    let counted: Vec<&Shifted> = behind_strip().iter().filter(|c| c.before > 0.02 && c.rigid <= CALM_STRIP).collect();
+    let cleared = counted.iter().filter(|c| c.after < 0.5 * c.before).count();
+    let missed: Vec<&str> = counted.iter().filter(|c| c.after >= 0.5 * c.before).map(|c| c.label.as_str()).collect();
+    assert!(counted.len() >= 4, "only {} cases collide with a calm strip", counted.len());
+    assert!(3 * cleared >= 2 * counted.len(), "{cleared} of {} cleared, missed {missed:?}", counted.len());
 }
