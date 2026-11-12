@@ -11,7 +11,7 @@ const desktopSteps: Step[] = [
   { dpr: 1.5, dof: true, ao: true, grain: true },
   { dpr: 1.25, dof: true, ao: true, grain: true },
   { dpr: 1, dof: true, ao: true, grain: true },
-  { dpr: 1, dof: false, ao: true, grain: true },
+  { dpr: 1, dof: true, ao: false, grain: true },
   { dpr: 1, dof: false, ao: false, grain: true },
   { dpr: 1, dof: false, ao: false, grain: false },
   { dpr: 0.85, dof: false, ao: false, grain: false },
@@ -19,9 +19,8 @@ const desktopSteps: Step[] = [
 ];
 
 const lightSteps: Step[] = [
-  { dpr: 1.5, dof: true, ao: false, grain: true },
-  { dpr: 1.25, dof: true, ao: false, grain: true },
-  { dpr: 1, dof: true, ao: false, grain: true },
+  { dpr: 1.5, dof: false, ao: false, grain: true },
+  { dpr: 1.25, dof: false, ao: false, grain: true },
   { dpr: 1, dof: false, ao: false, grain: true },
   { dpr: 1, dof: false, ao: false, grain: false },
   { dpr: 0.85, dof: false, ao: false, grain: false },
@@ -72,7 +71,7 @@ class Quality {
     const all = phone ? phoneSteps : tier === 'light' ? lightSteps : desktopSteps;
     const fit = all.filter((step) => step.dpr <= Math.max(deviceDpr, 1) + 0.01);
     this.steps = fit.length > 0 ? fit : [all[all.length - 1]];
-    const start = phone ? 1.5 : tier === 'light' ? 1 : 1.5;
+    const start = phone ? 1.25 : tier === 'light' ? 0.85 : 1;
     this.level = Math.max(this.steps.findIndex((step) => step.dpr <= start), 0);
   }
 

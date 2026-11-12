@@ -99,13 +99,14 @@ export default function Stage({ onProgress, onReady }: { onProgress: (value: num
         <Pauser host={host} />
         {runtime.still < 0 && (
           <PerformanceMonitor
-            ms={250}
-            iterations={8}
+            ms={200}
+            iterations={6}
             threshold={0.7}
-            flipflops={8}
-            bounds={(refresh) => (refresh > 90 ? [52, 88] : [50, 58.5])}
+            flipflops={4}
+            bounds={(refresh) => (refresh > 90 ? [58, 88] : [55, 58.5])}
             onDecline={() => quality.down()}
             onIncline={() => quality.up()}
+            onFallback={() => quality.down()}
           />
         )}
       </Canvas>
