@@ -1,6 +1,7 @@
 mod finder;
 mod launchd;
 mod picture;
+mod store;
 mod sys;
 mod watch;
 
@@ -143,13 +144,21 @@ impl Mac {
     fn check_wallpaper(&self) -> Result<String> {
         let mut found = Vec::new();
         for screen in self.screens()? {
-            let path = self.wallpaper(&screen)?.ok_or_else(|| anyhow!("macOS reports no wallpaper"))?;
-            if !path.is_file() {
-                return Err(anyhow!("{} is not a picture file", path.display()));
-            }
+            let Some(path) = self.wallpaper(&screen)?.filter(|path| path.is_file()) else {
+                return Err(anyhow!("{}, so Scooch leaves it alone until you pick a picture file", kind_words(store::describe(&screen.id))));
+            };
             found.push(path.display().to_string());
         }
         Ok(found.join(" and "))
+    }
+}
+
+fn kind_words(kind: Option<store::Kind>) -> &'static str {
+    match kind {
+        Some(store::Kind::Default) => "the macOS default wallpaper, which moves",
+        Some(store::Kind::Picture(_)) => "a picture macOS cannot read",
+        Some(store::Kind::Other(_)) => "a dynamic, shuffled or color wallpaper",
+        None => "not a picture file",
     }
 }
 
@@ -208,7 +217,9 @@ mod tests {
             return;
         }
         let screen = Mac.screens().unwrap().remove(0);
-        let path = Mac.wallpaper(&screen).unwrap().unwrap();
+        let shown = Mac.wallpaper(&screen).unwrap();
+        assert!(shown.is_some() || store::describe(&screen.id).is_some());
+        let path = shown.unwrap_or_else(|| PathBuf::from(store::DEFAULT_DESKTOP));
         assert!(path.is_file(), "{}", path.display());
         let image = Mac.decode(&path).unwrap();
         assert!(image.width() > 0 && image.height() > 0);
