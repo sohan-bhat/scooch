@@ -61,6 +61,13 @@ pub fn gaussian_extended(values: &[f32], width: usize, height: usize, sigma: f32
     out
 }
 
+pub fn gaussian_boxes(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
+    if width == 0 || height == 0 || values.len() != width * height || !(sigma > 0.0) || !sigma.is_finite() {
+        return values.to_vec();
+    }
+    boxed(values, width, height, sigma)
+}
+
 fn kernel(sigma: f32) -> Vec<f32> {
     let radius = (3.0 * sigma).ceil().max(1.0) as usize;
     let mut weights: Vec<f32> = (0..=2 * radius)

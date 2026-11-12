@@ -39,19 +39,6 @@ struct Area {
     height: usize,
 }
 
-impl Area {
-    fn sample(&self, values: &[f32], x: f32, y: f32) -> f32 {
-        let fx = (x - self.x0 as f32).clamp(0.0, (self.width - 1) as f32);
-        let fy = (y - self.y0 as f32).clamp(0.0, (self.height - 1) as f32);
-        let (ix, iy) = (fx as usize, fy as usize);
-        let (jx, jy) = ((ix + 1).min(self.width - 1), (iy + 1).min(self.height - 1));
-        let (tx, ty) = (fx - ix as f32, fy - iy as f32);
-        let top = values[iy * self.width + ix] + (values[iy * self.width + jx] - values[iy * self.width + ix]) * tx;
-        let bottom = values[jy * self.width + ix] + (values[jy * self.width + jx] - values[jy * self.width + ix]) * tx;
-        top + (bottom - top) * ty
-    }
-}
-
 #[derive(Clone, Copy)]
 struct Lerp {
     a: usize,
@@ -200,7 +187,7 @@ pub fn apply(base: RgbImage, found: Option<&Analysis>, placement: &Placement, sc
             }
         }
     });
-    let mask = blur::gaussian(&mask, region.width, region.height, (feather / Q as f64) as f32);
+    let mask = blur::gaussian_boxes(&mask, region.width, region.height, (feather / Q as f64) as f32);
     let mut weight = vec![0.0f32; region.width * region.height];
     weight.par_chunks_mut(region.width).enumerate().for_each(|(j, line)| {
         let qy = region.y0 + j;
@@ -246,10 +233,24 @@ fn calm_planes(base: &RgbImage, area: &Area, open: &[f32], sigma: f32) -> [Vec<f
     });
     let [p0, p1, p2] = planes;
     let sources = [p0, p1, p2, open.to_vec()];
-    let blurred: Vec<Vec<f32>> = sources.par_iter().map(|p| blur::gaussian(p, area.width, area.height, sigma)).collect();
+    let blurred: Vec<Vec<f32>> = sources.par_iter().map(|p| blur::gaussian_boxes(p, area.width, area.height, sigma)).collect();
     let share = &blurred[3];
     let normal = |k: usize| blurred[k].iter().zip(share).map(|(v, w)| if *w > 1e-4 { v / w } else { 0.0 }).collect::<Vec<f32>>();
     [normal(0), normal(1), normal(2)]
+}
+
+fn row_at(values: &[f32], area: &Area, y: f32) -> Vec<f32> {
+    let fy = (y - area.y0 as f32).clamp(0.0, (area.height - 1) as f32);
+    let (a, b) = (fy as usize, (fy as usize + 1).min(area.height - 1));
+    let t = fy - a as f32;
+    let (top, bottom) = (&values[a * area.width..(a + 1) * area.width], &values[b * area.width..(b + 1) * area.width]);
+    top.iter().zip(bottom).map(|(p, q)| p + (q - p) * t).collect()
+}
+
+fn along(row: &[f32], area: &Area, x: f32) -> f32 {
+    let fx = (x - area.x0 as f32).clamp(0.0, (area.width - 1) as f32);
+    let (a, b) = (fx as usize, (fx as usize + 1).min(area.width - 1));
+    row[a] + (row[b] - row[a]) * (fx - a as f32)
 }
 
 fn blend(mut base: RgbImage, padded: &[[usize; 4]], region: &Area, weight: &[f32], calm_area: &Area, calm: &[Vec<f32>; 3]) -> RgbImage {
@@ -273,18 +274,22 @@ fn blend(mut base: RgbImage, padded: &[[usize; 4]], region: &Area, weight: &[f32
             }
         }
         let qy = (y as f32 + 0.5) / Q as f32 - 0.5;
+        let strength = row_at(weight, region, qy);
+        if !strength.iter().any(|w| *w > 0.0) {
+            return;
+        }
+        let soft = [row_at(&calm[0], calm_area, qy), row_at(&calm[1], calm_area, qy), row_at(&calm[2], calm_area, qy)];
         for (a, b) in merged {
             for x in a..b {
                 let qx = (x as f32 + 0.5) / Q as f32 - 0.5;
-                let f = region.sample(weight, qx, qy);
+                let f = along(&strength, region, qx);
                 if f <= 0.0 {
                     continue;
                 }
                 let px = &mut line[x * 3..x * 3 + 3];
                 for k in 0..3 {
-                    let soft = calm_area.sample(&calm[k], qx, qy);
                     let hard = decode[px[k] as usize];
-                    px[k] = color::encode(encode, hard + (soft - hard) * f);
+                    px[k] = color::encode(encode, hard + (along(&soft[k], calm_area, qx) - hard) * f);
                 }
             }
         }
