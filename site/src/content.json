@@ -1,7 +1,7 @@
 {
   "name": "Scooch",
   "title": "Scooch moves your wallpaper out from under your icons",
-  "description": "Scooch moves your own wallpaper so desktop icons never cover the best part of the picture. Any image, on macOS, Windows and Linux.",
+  "description": "Scooch moves your own wallpaper so desktop icons stay off the best part of the picture. It works with any image on macOS, Windows and Linux.",
   "url": "https://sohanbhat.me/scooch/",
   "github": "https://github.com/sohan-bhat/scooch",
   "nav": {
