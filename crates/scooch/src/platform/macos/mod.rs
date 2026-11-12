@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
+const GALLERY: [&str; 2] = ["/System/Library/Desktop Pictures", "/Library/Desktop Pictures"];
 const CONSENT_HINT: &str = "If macOS asks to let scooch control Finder, choose Allow.";
 static LAST_SET: AtomicU64 = AtomicU64::new(0);
 const OWN_ECHO: Duration = Duration::from_secs(1);
@@ -127,6 +128,10 @@ impl Desktop for Mac {
     fn restorable(&self, screen: &Screen) -> Result<Option<PathBuf>> {
         let id = screen.id.clone();
         on_main(move |marker| picture::restorable(marker, &id))
+    }
+
+    fn gallery(&self) -> Vec<PathBuf> {
+        GALLERY.iter().map(PathBuf::from).collect()
     }
 }
 

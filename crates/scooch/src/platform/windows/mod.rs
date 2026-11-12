@@ -104,6 +104,10 @@ mod system {
         fn decode(&self, path: &Path) -> Result<RgbImage> {
             picture::decode(path)
         }
+
+        fn gallery(&self) -> Vec<std::path::PathBuf> {
+            std::env::var_os("WINDIR").map(|dir| crate::platform::folder_and_children(&Path::new(&dir).join("Web").join("Wallpaper"))).unwrap_or_default()
+        }
     }
 
     impl Win {

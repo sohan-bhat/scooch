@@ -129,9 +129,9 @@ pub fn tilde(path: &Path) -> String {
 }
 
 pub fn switch(image: Option<PathBuf>) -> Result<()> {
-    let Some(image) = image.map_or_else(choose, |image| Ok(Some(image)))? else { return Ok(()) };
-    let image = picture_file(&image)?;
     let desktop = desktop()?;
+    let Some(image) = image.map_or_else(|| choose(&desktop.gallery()), |image| Ok(Some(image)))? else { return Ok(()) };
+    let image = picture_file(&image)?;
     desktop.decode(&image).map_err(|_| anyhow!("Scooch cannot read {} as a picture, so pick a JPEG, PNG or HEIC file.", tilde(&image)))?;
     let store = Store::open();
     replace_outdated(&store)?;
@@ -162,20 +162,36 @@ fn expand(path: &Path) -> PathBuf {
     }
 }
 
-fn choose() -> Result<Option<PathBuf>> {
-    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+fn terminal() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+fn choose(gallery: &[PathBuf]) -> Result<Option<PathBuf>> {
+    if !terminal() {
         println!("{NO_TERMINAL}");
         std::process::exit(2);
     }
     let mut folders: Vec<PathBuf> = [dirs::picture_dir(), dirs::download_dir(), dirs::desktop_dir()].into_iter().flatten().collect();
     folders.extend(std::env::current_dir().ok());
-    let found = pictures(&folders);
+    let found = listing(&folders, gallery);
     if found.is_empty() {
         bail!("No pictures were found in Pictures, Downloads, Desktop or this folder, so run scooch use with the path of an image.");
     }
     let labels: Vec<String> = found.iter().map(|path| tilde(path)).collect();
     let picked = dialoguer::FuzzySelect::new().with_prompt("Pick a picture").items(&labels).default(0).max_length(12).interact_opt()?;
     Ok(picked.map(|index| found[index].clone()))
+}
+
+pub fn listing(own: &[PathBuf], gallery: &[PathBuf]) -> Vec<PathBuf> {
+    let mut found = pictures(own);
+    let mut extra = pictures(gallery);
+    extra.sort_by_cached_key(|path| (path.file_name().map(|name| name.to_string_lossy().to_lowercase()), path.clone()));
+    for path in extra {
+        if !found.iter().any(|seen| same(seen, &path)) {
+            found.push(path);
+        }
+    }
+    found
 }
 
 pub fn pictures(folders: &[PathBuf]) -> Vec<PathBuf> {
@@ -317,9 +333,10 @@ pub fn rendered(source: &RgbImage, scene: &Scene, fill: bool) -> Rendered {
 }
 
 pub fn render(image: Option<PathBuf>, icons: Option<PathBuf>, out: Option<PathBuf>, json: Option<PathBuf>, saliency: Option<PathBuf>, fill: bool) -> Result<()> {
-    let Some(image) = image.map_or_else(choose, |image| Ok(Some(image)))? else { return Ok(()) };
-    let image = picture_file(&image)?;
     let desktop = desktop().ok();
+    let gallery = desktop.as_ref().map(|desktop| desktop.gallery()).unwrap_or_default();
+    let Some(image) = image.map_or_else(|| choose(&gallery), |image| Ok(Some(image)))? else { return Ok(()) };
+    let image = picture_file(&image)?;
     let scene = match icons {
         Some(file) => read_scene(&file)?,
         None => live_scene(desktop.as_deref())?,
@@ -656,6 +673,30 @@ mod tests {
         let entry = &state.screens["main"];
         assert_eq!((entry.source.clone(), entry.original.clone(), entry.unrestorable, entry.chosen), (chosen.clone(), chosen, false, false));
         assert!(!serde_json::to_string(&state).unwrap().contains("unrestorable"));
+    }
+
+    #[test]
+    fn the_picker_lists_own_pictures_first_then_the_gallery_by_name() {
+        let own = crate::state::scratch("own");
+        let system = crate::state::scratch("system");
+        let nested = system.join("Nature");
+        std::fs::create_dir_all(&nested).unwrap();
+        let aged = |path: &Path, age: u64| {
+            std::fs::write(path, b"x").unwrap();
+            std::fs::File::options().write(true).open(path).unwrap().set_modified(SystemTime::now() - Duration::from_secs(age)).unwrap();
+        };
+        aged(&own.join("old.jpg"), 300);
+        aged(&own.join("new.png"), 10);
+        aged(&system.join("Zebra.heic"), 1);
+        aged(&system.join("apple.jpg"), 5000);
+        aged(&system.join("Look.madesktop"), 1);
+        aged(&nested.join("Meadow.jpg"), 1);
+        let gallery = crate::platform::folder_and_children(&system);
+        assert_eq!(gallery, vec![system.clone(), nested.clone()]);
+        let found = listing(std::slice::from_ref(&own), &[gallery.clone(), vec![own.clone(), system.clone()]].concat());
+        assert_eq!(found, vec![own.join("new.png"), own.join("old.jpg"), system.join("apple.jpg"), nested.join("Meadow.jpg"), system.join("Zebra.heic")]);
+        assert!(listing(&[], &[]).is_empty());
+        assert_eq!(listing(&[], &gallery).len(), 3);
     }
 
     #[test]

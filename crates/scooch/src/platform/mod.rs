@@ -66,6 +66,16 @@ pub trait Desktop: Send + Sync {
     }
 }
 
+pub fn folder_and_children(root: &Path) -> Vec<PathBuf> {
+    let mut folders = vec![root.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(root) {
+        let mut children: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
+        children.sort();
+        folders.extend(children);
+    }
+    folders
+}
+
 pub fn current() -> Result<Box<dyn Desktop>> {
     #[cfg(target_os = "macos")]
     return macos::desktop();

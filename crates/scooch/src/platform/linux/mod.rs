@@ -270,6 +270,10 @@ mod system {
         fn decode(&self, path: &Path) -> Result<RgbImage> {
             decode(path)
         }
+
+        fn gallery(&self) -> Vec<std::path::PathBuf> {
+            crate::platform::folder_and_children(Path::new("/usr/share/backgrounds"))
+        }
     }
 
     pub fn decode(path: &Path) -> Result<RgbImage> {
