@@ -1,4 +1,5 @@
 pub mod desktop;
+pub mod ding;
 pub mod entry;
 pub mod geometry;
 pub mod gio;
