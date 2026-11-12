@@ -29,7 +29,8 @@ jpeg-encoder = { version = "0.7", features = ["simd"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_System_Console"] }
+dunce = "1"
+windows = { version = "0.62", features = ["Win32_Security", "Win32_System_Console", "Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
