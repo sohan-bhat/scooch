@@ -16,36 +16,43 @@ pub struct Screen {
     pub scale: f32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
     pub screens: Vec<Screen>,
     pub icons: Vec<Rect>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Format {
     Jpeg,
     Png,
 }
 
-pub trait Desktop: Send + Sync {
-    fn name(&self) -> String;
-    fn snapshot(&self) -> Result<Snapshot>;
-    fn wallpaper(&self, screen: &Screen) -> Result<Option<PathBuf>>;
-    fn set_wallpaper(&self, screen: &Screen, path: &Path) -> Result<()>;
-    fn run(&self, wake: Box<dyn Fn() + Send + Sync>) -> Result<()>;
-    fn autostart(&self, exe: Option<&Path>) -> Result<()>;
-    fn check(&self) -> Vec<(String, Result<String>)>;
-    fn format(&self) -> Format {
-        Format::Jpeg
-    }
-    fn decode(&self, path: &Path) -> Result<RgbImage> {
-        Ok(image_open(path)?)
+impl Format {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Format::Jpeg => "jpg",
+            Format::Png => "png",
+        }
     }
 }
 
-pub fn image_open(path: &Path) -> Result<RgbImage> {
-    Ok(scooch_core::open(path)?)
+pub type Wake = Box<dyn Fn() + Send + Sync>;
+
+pub trait Desktop: Send + Sync {
+    fn name(&self) -> String;
+    fn snapshot(&self) -> Result<Snapshot>;
+    fn screens(&self) -> Result<Vec<Screen>> {
+        Ok(self.snapshot()?.screens)
+    }
+    fn wallpaper(&self, screen: &Screen) -> Result<Option<PathBuf>>;
+    fn set_wallpaper(&self, screen: &Screen, path: &Path) -> Result<()>;
+    fn run(&self, wake: Wake) -> Result<()>;
+    fn autostart(&self, exe: Option<&Path>) -> Result<()>;
+    fn check(&self) -> Vec<(String, Result<String>)>;
+    fn format(&self) -> Format;
+    fn decode(&self, path: &Path) -> Result<RgbImage>;
 }
 
 pub fn current() -> Result<Box<dyn Desktop>> {
@@ -56,5 +63,5 @@ pub fn current() -> Result<Box<dyn Desktop>> {
     #[cfg(target_os = "linux")]
     return linux::desktop();
     #[allow(unreachable_code)]
-    Err(anyhow::anyhow!("Scooch does not support this system yet"))
+    Err(anyhow::anyhow!("Scooch does not run on this system yet."))
 }
