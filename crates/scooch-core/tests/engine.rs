@@ -280,3 +280,81 @@ fn busy_ground_under_icons_gets_pads() {
     let far = (0..w / 3).all(|x| (0..h).all(|y| padded.get_pixel(x, y) == plain.get_pixel(x, y)));
     assert!(far, "pads reached pixels far from every icon");
 }
+
+fn exif(orientation: u16) -> Vec<u8> {
+    let mut out = vec![0x49, 0x49, 0x2A, 0x00, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0];
+    out.extend_from_slice(&orientation.to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    out
+}
+
+fn write_jpeg(path: &std::path::Path, picture: &RgbImage, orientation: Option<u16>) {
+    use image::ImageEncoder;
+    let mut bytes = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95);
+    if let Some(value) = orientation {
+        encoder.set_exif_metadata(exif(value)).unwrap();
+    }
+    encoder.write_image(picture.as_raw(), picture.width(), picture.height(), image::ExtendedColorType::Rgb8).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn open_turns_the_picture_by_its_exif_orientation() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let marked = RgbImage::from_fn(64, 32, |x, y| if x < 12 && y < 12 { image::Rgb([230, 30, 30]) } else { image::Rgb([60, 90, 140]) });
+    let red = |p: &image::Rgb<u8>| p[0] > 170 && p[1] < 100 && p[2] < 100;
+    let plain = dir.join("scooch-orientation-none.jpg");
+    write_jpeg(&plain, &marked, None);
+    let opened = scooch_core::open(&plain).unwrap();
+    assert_eq!(opened.as_raw(), image::open(&plain).unwrap().to_rgb8().as_raw());
+    assert_eq!(opened.dimensions(), (64, 32));
+    assert!(red(opened.get_pixel(3, 3)));
+    let six = dir.join("scooch-orientation-6.jpg");
+    write_jpeg(&six, &marked, Some(6));
+    let turned = scooch_core::open(&six).unwrap();
+    assert_eq!(turned.dimensions(), (32, 64));
+    assert!(red(turned.get_pixel(28, 3)) && !red(turned.get_pixel(3, 3)) && !red(turned.get_pixel(3, 60)));
+    let three = dir.join("scooch-orientation-3.jpg");
+    write_jpeg(&three, &marked, Some(3));
+    let flipped = scooch_core::open(&three).unwrap();
+    assert_eq!(flipped.dimensions(), (64, 32));
+    assert!(red(flipped.get_pixel(60, 28)) && !red(flipped.get_pixel(3, 3)));
+}
+
+#[test]
+fn render_with_matches_render_byte_for_byte() {
+    let options = Options::default();
+    for photo in photos().iter().step_by(3) {
+        let picture = small(&photo.image, 1200);
+        let analysis = scooch_core::analyze(&picture);
+        let (w, h) = (960, 600);
+        for layout in ["mac", "scattered", "none"] {
+            let scene = Scene { width: w, height: h, icons: layouts::layout(layout, &analysis, w, h) };
+            let placement = scooch_core::solve(&analysis, &scene, &options, None);
+            let a = scooch_core::render(&picture, &placement, &scene, &options);
+            let b = scooch_core::render_with(&picture, &analysis, &placement, &scene, &options);
+            assert_eq!(a.as_raw(), b.as_raw(), "{} {layout}", photo.name);
+        }
+    }
+}
+
+#[test]
+fn pads_active_never_misses_a_pad() {
+    let options = Options::default();
+    let bare = Options { pads: 0.0, ..options };
+    let (w, h) = (960, 600);
+    for photo in photos() {
+        for layout in layouts::NAMES {
+            let scene = Scene { width: w, height: h, icons: layouts::layout(layout, &photo.analysis, w, h) };
+            let placement = scooch_core::solve(&photo.analysis, &scene, &options, None);
+            let active = scooch_core::pads_active(&photo.analysis, &placement, &scene, &options);
+            assert!(!scooch_core::pads_active(&photo.analysis, &placement, &scene, &bare));
+            if !active {
+                let padded = scooch_core::render_with(&photo.image, &photo.analysis, &placement, &scene, &options);
+                let plain = scooch_core::render_with(&photo.image, &photo.analysis, &placement, &scene, &bare);
+                assert_eq!(padded.as_raw(), plain.as_raw(), "{} {layout}", photo.name);
+            }
+        }
+    }
+}
