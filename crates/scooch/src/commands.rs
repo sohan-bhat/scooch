@@ -1,5 +1,5 @@
-use crate::daemon::{self, encode};
-use crate::platform::{self, Desktop, Format, Screen};
+use crate::daemon;
+use crate::platform::{self, Desktop, Screen};
 use crate::state::{same, Entry, State, Store};
 use crate::{poke, scene};
 use anyhow::{anyhow, bail, Context, Result};
@@ -274,8 +274,8 @@ pub fn render(image: Option<PathBuf>, icons: Option<PathBuf>, out: Option<PathBu
     drop(source);
     let named = out.is_some();
     let out = out.unwrap_or_else(|| default_out(&image));
-    let format = if out.extension().is_some_and(|kind| kind.eq_ignore_ascii_case("png")) { Format::Png } else { Format::Jpeg };
-    std::fs::write(&out, encode(&picture, format)?).with_context(|| format!("Scooch could not write {}, so check the folder.", out.display()))?;
+    let bytes = if out.extension().is_some_and(|kind| kind.eq_ignore_ascii_case("png")) { scooch_core::encode_png(&picture)? } else { scooch_core::encode_jpeg(&picture, daemon::QUALITY)? };
+    std::fs::write(&out, bytes).with_context(|| format!("Scooch could not write {}, so check the folder.", out.display()))?;
     if let Some(path) = json {
         let body = serde_json::to_vec(&serde_json::json!({ "scene": scene, "placement": placement, "analysis": analysis }))?;
         std::fs::write(&path, body).with_context(|| format!("Scooch could not write {}, so check the folder.", path.display()))?;
