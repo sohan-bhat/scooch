@@ -5,7 +5,7 @@ export type Toggle = { enabled: boolean };
 
 type Step = { dpr: number; dof: boolean; ao: boolean; grain: boolean };
 
-const desktopSteps: Step[] = [
+const fullSteps: Step[] = [
   { dpr: 2, dof: true, ao: true, grain: true },
   { dpr: 1.75, dof: true, ao: true, grain: true },
   { dpr: 1.5, dof: true, ao: true, grain: true },
@@ -13,8 +13,8 @@ const desktopSteps: Step[] = [
   { dpr: 1, dof: true, ao: true, grain: true },
   { dpr: 1, dof: true, ao: false, grain: true },
   { dpr: 1, dof: false, ao: false, grain: true },
-  { dpr: 1, dof: false, ao: false, grain: false },
-  { dpr: 0.85, dof: false, ao: false, grain: false },
+  { dpr: 0.85, dof: false, ao: false, grain: true },
+  { dpr: 0.7, dof: false, ao: false, grain: true },
   { dpr: 0.7, dof: false, ao: false, grain: false },
 ];
 
@@ -22,41 +22,42 @@ const lightSteps: Step[] = [
   { dpr: 1.5, dof: false, ao: false, grain: true },
   { dpr: 1.25, dof: false, ao: false, grain: true },
   { dpr: 1, dof: false, ao: false, grain: true },
-  { dpr: 1, dof: false, ao: false, grain: false },
-  { dpr: 0.85, dof: false, ao: false, grain: false },
-  { dpr: 0.7, dof: false, ao: false, grain: false },
-];
-
-const phoneSteps: Step[] = [
-  { dpr: 1.5, dof: false, ao: false, grain: true },
-  { dpr: 1.25, dof: false, ao: false, grain: true },
-  { dpr: 1, dof: false, ao: false, grain: true },
-  { dpr: 1, dof: false, ao: false, grain: false },
-  { dpr: 0.85, dof: false, ao: false, grain: false },
+  { dpr: 0.85, dof: false, ao: false, grain: true },
+  { dpr: 0.7, dof: false, ao: false, grain: true },
   { dpr: 0.7, dof: false, ao: false, grain: false },
 ];
 
 export type Tier = 'full' | 'light';
+export type GpuClass = 'low' | 'mid' | 'high';
 
-export function gpuTier(): Tier {
+export function gpuClass(): { gpu: GpuClass; renderer: string } {
   try {
     const canvas = document.createElement('canvas');
     const gl = canvas.getContext('webgl2', { powerPreference: 'high-performance' });
-    if (!gl) return 'light';
+    if (!gl) return { gpu: 'low', renderer: 'none' };
     const info = gl.getExtension('WEBGL_debug_renderer_info');
-    const name = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+    const renderer = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
     gl.getExtension('WEBGL_lose_context')?.loseContext();
-    return /Intel|Mali|Adreno|PowerVR|SwiftShader|llvmpipe|Software/i.test(name) ? 'light' : 'full';
+    const mobile = /Android|iPhone|iPad|Mobi/i.test(navigator.userAgent);
+    if (mobile || /Intel|Mali|Adreno|PowerVR|SwiftShader|llvmpipe|Software|Basic Render/i.test(renderer)) return { gpu: 'low', renderer };
+    if (/Radeon|AMD/i.test(renderer)) return { gpu: 'mid', renderer };
+    return { gpu: 'high', renderer };
   } catch {
-    return 'light';
+    return { gpu: 'low', renderer: 'unknown' };
   }
 }
+
+const starts: Record<GpuClass, Step> = {
+  high: { dpr: 1.5, dof: true, ao: true, grain: true },
+  mid: { dpr: 1, dof: true, ao: false, grain: true },
+  low: { dpr: 0.7, dof: false, ao: false, grain: true },
+};
 
 const MAX_BOKEH = 3.2;
 const GRAIN = 0.05;
 
 class Quality {
-  steps: Step[] = desktopSteps;
+  steps: Step[] = fullSteps;
   level = 0;
   dof: DepthOfFieldEffect | null = null;
   ao: Toggle | null = null;
@@ -65,28 +66,39 @@ class Quality {
   onChange: (() => void) | null = null;
 
   tier: Tier = 'full';
+  gpu: GpuClass = 'high';
 
-  configure(phone: boolean, deviceDpr: number, tier: Tier) {
-    this.tier = phone ? 'light' : tier;
-    const all = phone ? phoneSteps : tier === 'light' ? lightSteps : desktopSteps;
+  configure(phone: boolean, deviceDpr: number, gpu: GpuClass) {
+    this.gpu = phone ? 'low' : gpu;
+    this.tier = this.gpu === 'low' ? 'light' : 'full';
+    const all = this.tier === 'light' ? lightSteps : fullSteps;
     const fit = all.filter((step) => step.dpr <= Math.max(deviceDpr, 1) + 0.01);
     this.steps = fit.length > 0 ? fit : [all[all.length - 1]];
-    const start = phone ? 1.25 : tier === 'light' ? 0.85 : 1;
-    this.level = Math.max(this.steps.findIndex((step) => step.dpr <= start), 0);
+    const start = phone ? { dpr: 1, dof: false, ao: false, grain: true } : starts[this.gpu];
+    const index = this.steps.findIndex((step) => step.dpr <= start.dpr && step.ao === start.ao && step.dof === start.dof && step.grain === start.grain);
+    this.level = index >= 0 ? index : 0;
   }
 
   get step() {
     return this.steps[Math.min(this.level, this.steps.length - 1)];
   }
 
+  canDown() {
+    return this.level < this.steps.length - 1;
+  }
+
+  canUp() {
+    return this.level > 0;
+  }
+
   down() {
-    if (this.level >= this.steps.length - 1) return;
+    if (!this.canDown()) return;
     this.level += 1;
     this.apply();
   }
 
   up() {
-    if (this.level <= 0) return;
+    if (!this.canUp()) return;
     this.level -= 1;
     this.apply();
   }

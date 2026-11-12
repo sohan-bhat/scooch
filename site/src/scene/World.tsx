@@ -130,13 +130,26 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     gl.shadowMap.needsUpdate = true;
     uniforms.uLamp.value.copy(bulbWorld);
     let frames = 0;
-    let handle = requestAnimationFrame(function wait() {
+    let handle = 0;
+    let cancelled = false;
+    const wait = () => {
       frames += 1;
       if (frames < 3) handle = requestAnimationFrame(wait);
       else onReady();
-    });
-    return () => cancelAnimationFrame(handle);
-  }, [built, scene, target, screenTarget, gl, uniforms, onReady]);
+    };
+    gl.compileAsync(scene, camera)
+      .catch(() => undefined)
+      .then(() => {
+        if (cancelled) return;
+        runtime.compiled = true;
+        runtime.resume?.();
+        handle = requestAnimationFrame(wait);
+      });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(handle);
+    };
+  }, [built, scene, camera, target, screenTarget, gl, uniforms, onReady]);
 
   const shadowFrames = useRef(0);
 

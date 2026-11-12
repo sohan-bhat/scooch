@@ -25,4 +25,6 @@ export const runtime = {
   ready: false,
   power: 0,
   posed: false,
+  compiled: false,
+  resume: null as (() => void) | null,
 };

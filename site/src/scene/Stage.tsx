@@ -1,4 +1,3 @@
-import { PerformanceMonitor } from '@react-three/drei';
 import { Canvas, useThree } from '@react-three/fiber';
 import { Suspense, useEffect, useRef } from 'react';
 import { DefaultLoadingManager, setConsoleFunction } from 'three';
@@ -6,7 +5,8 @@ import { suspend } from 'suspend-react';
 import { loadManifest } from '@/story/demo';
 import { pointer, runtime } from '@/story/state';
 import { Post } from './Post';
-import { gpuTier, quality } from './quality';
+import { Governor } from './Governor';
+import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { World } from './World';
 
@@ -43,7 +43,8 @@ function Pauser({ host }: { host: React.RefObject<HTMLDivElement | null> }) {
   useEffect(() => {
     quality.setDpr = setDpr;
     let visible = true;
-    const sync = () => setFrameloop(visible && !document.hidden ? 'always' : 'never');
+    const sync = () => setFrameloop(runtime.compiled && visible && !document.hidden ? 'always' : 'never');
+    runtime.resume = sync;
     const observer = new IntersectionObserver(([entry]) => {
       visible = entry.isIntersecting;
       sync();
@@ -59,6 +60,7 @@ function Pauser({ host }: { host: React.RefObject<HTMLDivElement | null> }) {
     return () => {
       observer.disconnect();
       document.removeEventListener('visibilitychange', sync);
+      runtime.resume = null;
       window.removeEventListener('pointermove', move);
     };
   }, [host, setFrameloop, setDpr]);
@@ -77,15 +79,17 @@ function Scene({ phone, onReady }: { phone: boolean; onReady: () => void }) {
 
 export default function Stage({ onProgress, onReady }: { onProgress: (value: number) => void; onReady: () => void }) {
   const host = useRef<HTMLDivElement>(null);
+  const fade = useRef<HTMLCanvasElement>(null);
   const phone = layoutFor(window.innerWidth, window.innerHeight) === 'phone';
   const deviceDpr = window.devicePixelRatio || 1;
-  quality.configure(phone, phone ? Math.min(deviceDpr, 1.5) : deviceDpr, gpuTier());
+  quality.configure(phone, phone ? Math.min(deviceDpr, 1.5) : deviceDpr, gpuClass().gpu);
   const dpr = runtime.still >= 0 ? Math.min(deviceDpr, 2) : Math.min(quality.step.dpr, deviceDpr);
 
   return (
     <div ref={host} className="absolute inset-0">
       <Canvas
         shadows="percentage"
+        frameloop="never"
         dpr={dpr}
         gl={{ antialias: false, powerPreference: 'high-performance', stencil: false, alpha: false }}
         camera={{ fov: 30, near: 0.03, far: 9, position: [0, 1.3, 1.6] }}
@@ -97,19 +101,9 @@ export default function Stage({ onProgress, onReady }: { onProgress: (value: num
         </Suspense>
         <Progress onProgress={onProgress} />
         <Pauser host={host} />
-        {runtime.still < 0 && (
-          <PerformanceMonitor
-            ms={200}
-            iterations={6}
-            threshold={0.7}
-            flipflops={4}
-            bounds={(refresh) => (refresh > 90 ? [58, 88] : [55, 58.5])}
-            onDecline={() => quality.down()}
-            onIncline={() => quality.up()}
-            onFallback={() => quality.down()}
-          />
-        )}
+        {runtime.still < 0 && <Governor fade={fade} />}
       </Canvas>
+      <canvas ref={fade} aria-hidden className="pointer-events-none absolute inset-0 h-full w-full opacity-0" />
     </div>
   );
 }
