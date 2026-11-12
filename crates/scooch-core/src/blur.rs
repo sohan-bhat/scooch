@@ -1,4 +1,4 @@
-const EXACT_LIMIT: f32 = 4.0;
+const EXACT_LIMIT: f32 = 3.0;
 
 pub fn gaussian(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
     if width == 0 || height == 0 || values.len() != width * height || !(sigma > 0.0) || !sigma.is_finite() {
@@ -9,6 +9,56 @@ pub fn gaussian(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<
     } else {
         boxed(values, width, height, sigma)
     }
+}
+
+fn reflection(i: isize, n: usize) -> Vec<(usize, f32)> {
+    let last = n as isize - 1;
+    if last <= 0 {
+        return vec![(0, 1.0)];
+    }
+    if i < 0 {
+        let mut out: Vec<(usize, f32)> = reflection(-i, n).into_iter().map(|(k, c)| (k, -c)).collect();
+        out.push((0, 2.0));
+        out
+    } else if i > last {
+        let mut out: Vec<(usize, f32)> = reflection(2 * last - i, n).into_iter().map(|(k, c)| (k, -c)).collect();
+        out.push((last as usize, 2.0));
+        out
+    } else {
+        vec![(i as usize, 1.0)]
+    }
+}
+
+pub fn gaussian_extended(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
+    if width == 0 || height == 0 || values.len() != width * height || !(sigma > 0.0) || !sigma.is_finite() {
+        return values.to_vec();
+    }
+    let pad = (3.0 * sigma).ceil() as usize + 1;
+    let (wide, tall) = (width + 2 * pad, height + 2 * pad);
+    let across: Vec<Vec<(usize, f32)>> = (0..wide).map(|x| reflection(x as isize - pad as isize, width)).collect();
+    let mut padded = vec![0.0f32; wide * tall];
+    for (line, target) in values.chunks_exact(width).zip(padded[pad * wide..].chunks_exact_mut(wide)) {
+        target[pad..pad + width].copy_from_slice(line);
+        for x in (0..pad).chain(pad + width..wide) {
+            target[x] = across[x].iter().map(|(k, c)| c * line[*k]).sum();
+        }
+    }
+    for y in (0..pad).chain(pad + height..tall) {
+        let mix = reflection(y as isize - pad as isize, height);
+        let mut row = vec![0.0f32; wide];
+        for (k, c) in mix {
+            for (r, v) in row.iter_mut().zip(&padded[(k + pad) * wide..(k + pad + 1) * wide]) {
+                *r += c * v;
+            }
+        }
+        padded[y * wide..(y + 1) * wide].copy_from_slice(&row);
+    }
+    let blurred = gaussian(&padded, wide, tall, sigma);
+    let mut out = Vec::with_capacity(width * height);
+    for y in 0..height {
+        out.extend_from_slice(&blurred[(y + pad) * wide + pad..(y + pad) * wide + pad + width]);
+    }
+    out
 }
 
 fn kernel(sigma: f32) -> Vec<f32> {
@@ -158,6 +208,17 @@ mod tests {
             let variance: f32 = out.iter().enumerate().map(|(i, v)| v * (i as f32 - (n / 2) as f32).powi(2)).sum();
             assert!((variance.sqrt() - sigma).abs() < 0.15 * sigma, "{sigma} {}", variance.sqrt());
         }
+    }
+
+    #[test]
+    fn extended_edges_keep_a_tilted_plane() {
+        let (w, h) = (50, 30);
+        let plane: Vec<f32> = (0..w * h).map(|i| 0.3 + 0.01 * (i % w) as f32 - 0.02 * (i / w) as f32).collect();
+        for sigma in [2.0, 8.0, 32.0] {
+            let out = gaussian_extended(&plane, w, h, sigma);
+            assert!(out.iter().zip(&plane).all(|(a, b)| (a - b).abs() < 1e-3), "{sigma}");
+        }
+        assert!((gaussian_extended(&[0.25], 1, 1, 8.0)[0] - 0.25).abs() < 1e-6);
     }
 
     #[test]
