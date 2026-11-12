@@ -15,6 +15,8 @@ const START_PATIENCE: Duration = Duration::from_secs(8);
 const POLL: Duration = Duration::from_millis(100);
 const STOP_PATIENCE: Duration = Duration::from_secs(3);
 const PICTURE_KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", "tiff", "bmp", "avif"];
+pub const NO_SCREEN: &str = "No screen was found, so connect one and try again.";
+pub const NO_PICTURE: &str = "Scooch needs a picture file as your wallpaper, so pick one in your system settings or run scooch use with a picture.";
 pub const NO_TERMINAL: &str = "To switch the picture, run scooch use followed by the path of an image.";
 
 #[derive(serde::Deserialize)]
@@ -42,7 +44,7 @@ pub fn start() -> Result<()> {
     state.problem = None;
     store.save(&state)?;
     begin(desktop.as_ref(), &store)?;
-    wait(&store);
+    wait(&store, desktop.consent_hint());
     print_status(desktop.as_ref(), &store);
     Ok(())
 }
@@ -124,7 +126,7 @@ pub fn switch(image: Option<PathBuf>) -> Result<()> {
     state.problem = None;
     store.save(&state)?;
     begin(desktop.as_ref(), &store)?;
-    wait(&store);
+    wait(&store, desktop.consent_hint());
     print_status(desktop.as_ref(), &store);
     Ok(())
 }
@@ -312,7 +314,7 @@ fn read_scene(file: &Path) -> Result<Scene> {
 fn live_scene(desktop: Option<&dyn Desktop>) -> Result<Scene> {
     let desktop = desktop.context("Scooch cannot read this desktop yet, so pass the icons with --icons and a file.")?;
     let snapshot = desktop.snapshot()?;
-    let screen = snapshot.screens.first().context("macOS reports no screens, so connect one and try again.")?;
+    let screen = snapshot.screens.first().context(NO_SCREEN)?;
     Ok(scene::scene(screen, &snapshot.icons))
 }
 
@@ -339,7 +341,7 @@ fn record(state: &mut State, desktop: &dyn Desktop, store: &Store) -> Result<()>
         }
     }
     if recorded == 0 {
-        bail!("Scooch needs a picture file as your wallpaper, so pick one in System Settings or run scooch use with a picture.");
+        bail!(NO_PICTURE);
     }
     Ok(())
 }
@@ -354,7 +356,7 @@ fn begin(desktop: &dyn Desktop, store: &Store) -> Result<()> {
     desktop.autostart(Some(&exe.canonicalize().unwrap_or(exe)))
 }
 
-fn wait(store: &Store) {
+fn wait(store: &Store, hint: Option<&str>) {
     let started = Instant::now();
     let mut hinted = false;
     while started.elapsed() < PATIENCE {
@@ -365,8 +367,8 @@ fn wait(store: &Store) {
         if !running && started.elapsed() > START_PATIENCE {
             return;
         }
-        if !hinted && started.elapsed() >= HINT_AFTER {
-            println!("If macOS asks to let scooch control Finder, choose Allow.");
+        if let (false, true, Some(hint)) = (hinted, started.elapsed() >= HINT_AFTER, hint) {
+            println!("{hint}");
             hinted = true;
         }
         std::thread::sleep(POLL);
@@ -440,6 +442,15 @@ mod tests {
         std::fs::create_dir(folder.join("album.jpg")).unwrap();
         let found = pictures(&[folder.clone(), other.clone(), folder.clone()]);
         assert_eq!(found, vec![folder.join("new.PNG"), other.join("mid.heic"), folder.join("old.jpg")]);
+    }
+
+    #[test]
+    fn shared_sentences_name_no_system() {
+        for line in [NO_SCREEN, NO_PICTURE, NO_TERMINAL, crate::daemon::NOT_A_FILE] {
+            for word in ["macOS", "Finder", "System Settings", "Windows", "GNOME", "login item"] {
+                assert!(!line.contains(word), "{line}");
+            }
+        }
     }
 
     #[test]

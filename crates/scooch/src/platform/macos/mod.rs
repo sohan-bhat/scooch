@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
+const CONSENT_HINT: &str = "If macOS asks to let scooch control Finder, choose Allow.";
 static LAST_SET: AtomicU64 = AtomicU64::new(0);
 const OWN_ECHO: Duration = Duration::from_secs(1);
 
@@ -118,6 +119,10 @@ impl Desktop for Mac {
     fn decode(&self, path: &Path) -> Result<RgbImage> {
         autoreleasepool(|_| picture::decode(path))
     }
+
+    fn consent_hint(&self) -> Option<&'static str> {
+        Some(CONSENT_HINT)
+    }
 }
 
 impl Mac {
@@ -195,6 +200,11 @@ mod tests {
 
     fn live() -> bool {
         std::env::var_os("SCOOCH_LIVE").is_some_and(|value| value == "1")
+    }
+
+    #[test]
+    fn the_consent_hint_names_finder() {
+        assert_eq!(Mac.consent_hint(), Some("If macOS asks to let scooch control Finder, choose Allow."));
     }
 
     #[test]

@@ -55,6 +55,9 @@ pub trait Desktop: Send + Sync {
     fn check(&self) -> Vec<(String, Result<String>)>;
     fn format(&self) -> Format;
     fn decode(&self, path: &Path) -> Result<RgbImage>;
+    fn consent_hint(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 pub fn current() -> Result<Box<dyn Desktop>> {

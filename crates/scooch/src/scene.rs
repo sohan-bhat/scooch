@@ -91,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn the_order_finder_reports_does_not_matter() {
+    fn the_order_icons_arrive_in_does_not_matter() {
         let a = Rect { x: 10.0, y: 10.0, w: 64.0, h: 100.0 };
         let b = Rect { x: 200.0, y: 10.0, w: 64.0, h: 100.0 };
         assert_eq!(scene(&retina(), &[a, b]), scene(&retina(), &[b, a]));
