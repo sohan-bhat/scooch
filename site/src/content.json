@@ -80,11 +80,11 @@
   },
   "stills": {
     "alt": [
-      "An old beige laptop open on a metal desk at night under an orange arm lamp. The screen shows a fox photo with desktop icons over its face.",
-      "Close on the laptop screen, where desktop icons sit on the fox's face.",
-      "The screen turns into a map of where the picture matters, glowing warm around the fox on a dim grey copy of the photo.",
-      "The fox photo after Scooch moved it, with the icons beside the fox.",
-      "A pointer drags one icon across the screen, and after the drop the picture shifts again.",
+      "An old beige laptop open on a metal desk at night under an orange arm lamp. The screen shows a hot air balloon on a blue sky with desktop icons over it.",
+      "Close on the laptop screen, where desktop icons sit on the balloon.",
+      "The screen turns into a map of where the picture matters, glowing warm on the balloon over a dim grey copy of the photo.",
+      "The balloon photo after Scooch moved it, with every icon on open sky.",
+      "A pointer drags one icon onto the balloon, and after the drop the picture moves the balloon clear again.",
       "The lamp is off and the laptop screen is the only light on the desk.",
       "A wide shot of the desk with the lamp back on low."
     ]
@@ -147,11 +147,11 @@
         "url": "https://polyhaven.com/a/studio_small_08"
       },
       {
-        "what": "Red fox gazing in the direction of the setting sun",
+        "what": "Hot air balloon in blue sky",
         "use": "The wallpaper on the laptop",
-        "author": "Ray Hennessy",
+        "author": "Kupono Kuwamura",
         "license": "CC0 1.0",
-        "url": "https://commons.wikimedia.org/wiki/File:Red_fox_gazing_in_the_direction_of_the_setting_sun.jpg"
+        "url": "https://commons.wikimedia.org/wiki/File:Hot_air_balloon_in_blue_sky_(Unsplash).jpg"
       },
       {
         "what": "Phosphor Icons",
