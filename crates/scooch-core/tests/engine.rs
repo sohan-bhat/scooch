@@ -358,3 +358,53 @@ fn pads_active_never_misses_a_pad() {
         }
     }
 }
+
+struct Shifted {
+    label: String,
+    before: f32,
+    after: f32,
+}
+
+fn shifted_cases() -> &'static [Shifted] {
+    static CELL: OnceLock<Vec<Shifted>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let options = Options::default();
+        let (w, h) = (2880, 1800);
+        let mut out = Vec::new();
+        for photo in photos() {
+            for (at, layout) in layouts::SHIFTS {
+                let Some(crop) = layouts::shifted(&photo.image, &photo.analysis, at) else { continue };
+                let crop = small(&crop, 1600);
+                let analysis = scooch_core::analyze(&crop);
+                let scene = Scene { width: w, height: h, icons: layouts::layout(layout, &analysis, w, h) };
+                let placement = scooch_core::solve(&analysis, &scene, &options, None);
+                let label = format!("{}@{}", photo.name, (at * 100.0).round());
+                check_placement(&placement, &label);
+                let centered = scooch_core::fill(crop.width(), crop.height(), &scene);
+                let before = scooch_core::hidden_share(&analysis, &scene, &centered);
+                let after = scooch_core::hidden_share(&analysis, &scene, &placement);
+                println!("{label:20} hidden {before:.3} -> {after:.3} zoom {:.2} shift {:?}", placement.zoom, placement.shift);
+                out.push(Shifted { label, before, after });
+            }
+        }
+        out
+    })
+}
+
+#[test]
+fn shifted_subjects_never_hide_more() {
+    let cases = shifted_cases();
+    assert!(cases.len() >= 10, "{}", cases.len());
+    for case in cases {
+        assert!(case.after <= case.before, "{} {} > {}", case.label, case.after, case.before);
+    }
+}
+
+#[test]
+#[ignore = "fails today: at 78 and 22 percent the subject sits within reach of the screen edge, see the engine report"]
+fn most_shifted_subjects_slide_clear() {
+    let collided: Vec<&Shifted> = shifted_cases().iter().filter(|c| c.before >= 0.02).collect();
+    let cleared = collided.iter().filter(|c| c.after < 0.5 * c.before).count();
+    let missed: Vec<&str> = collided.iter().filter(|c| c.after >= 0.5 * c.before).map(|c| c.label.as_str()).collect();
+    assert!(3 * cleared >= 2 * collided.len(), "{cleared} of {} cleared, missed {missed:?}", collided.len());
+}
