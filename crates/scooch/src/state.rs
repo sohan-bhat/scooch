@@ -52,7 +52,7 @@ impl Entry {
 pub fn folder() -> PathBuf {
     match std::env::var_os("SCOOCH_HOME") {
         Some(custom) if !custom.is_empty() => PathBuf::from(custom),
-        _ => dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("Scooch"),
+        _ => dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("Scooch"),
     }
 }
 
@@ -72,7 +72,7 @@ impl Store {
 
     pub fn at(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
-        Self { root: root.canonicalize().unwrap_or(root) }
+        Self { root: canonical(&root).unwrap_or(root) }
     }
 
     pub fn state_file(&self) -> PathBuf {
@@ -111,8 +111,8 @@ impl Store {
         if path.starts_with(&out) {
             return true;
         }
-        let out = out.canonicalize().unwrap_or(out);
-        path.canonicalize().is_ok_and(|real| real.starts_with(&out)) || path.starts_with(&out)
+        let out = canonical(&out).unwrap_or(out);
+        canonical(path).is_ok_and(|real| real.starts_with(&out)) || path.starts_with(&out)
     }
 
     pub fn output(&self, screen: &str, counter: u64, extension: &str) -> PathBuf {
@@ -157,7 +157,14 @@ pub fn parse(bytes: Option<&[u8]>) -> State {
 }
 
 pub fn same(a: &Path, b: &Path) -> bool {
-    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+    a == b || matches!((canonical(a), canonical(b)), (Ok(a), Ok(b)) if a == b)
+}
+
+pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(windows)]
+    return dunce::canonicalize(path);
+    #[cfg(not(windows))]
+    path.canonicalize()
 }
 
 pub fn file_safe(name: &str) -> String {
@@ -325,6 +332,14 @@ mod tests {
             std::os::unix::fs::symlink(&real, &link).unwrap();
             assert!(same(&real, &link));
         }
+    }
+
+    #[test]
+    fn canonical_paths_have_no_verbatim_prefix() {
+        let folder = scratch("canonical");
+        let real = canonical(&folder.join(".")).unwrap();
+        assert!(!real.to_string_lossy().starts_with(r"\\?\"), "{}", real.display());
+        assert!(same(&real, &folder));
     }
 
     #[test]
