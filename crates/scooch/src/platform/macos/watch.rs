@@ -115,9 +115,14 @@ fn mouse(wake: Shared) {
         let at = unsafe { event.as_ref() }.locationInWindow();
         down.store(pack(at.x, at.y), Ordering::Relaxed);
     });
+    let traced = crate::daemon::trace();
     let on_up = RcBlock::new(move |event: NonNull<NSEvent>| {
         let at = unsafe { event.as_ref() }.locationInWindow();
-        if dragged(pressed.swap(u64::MAX, Ordering::Relaxed), at.x, at.y) && finder_in_front() {
+        let moved = dragged(pressed.swap(u64::MAX, Ordering::Relaxed), at.x, at.y);
+        if traced {
+            eprintln!("{} mouse up, dragged {moved}, Finder in front {}", crate::daemon::stamp(), finder_in_front());
+        }
+        if moved && finder_in_front() {
             wake();
         }
     });

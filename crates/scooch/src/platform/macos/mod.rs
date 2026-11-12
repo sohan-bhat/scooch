@@ -165,3 +165,74 @@ fn check_login() -> Result<String> {
         (false, _) => "not installed".into(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn live() -> bool {
+        std::env::var_os("SCOOCH_LIVE").is_some_and(|value| value == "1")
+    }
+
+    #[test]
+    fn live_screens_have_stable_ids_and_scales() {
+        if !live() {
+            return;
+        }
+        let screens = Mac.screens().unwrap();
+        assert!(!screens.is_empty());
+        for screen in &screens {
+            assert_eq!(screen.id.len(), 36, "{}", screen.id);
+            assert!(screen.scale >= 1.0 && screen.frame.w > 0.0 && screen.frame.h > 0.0);
+        }
+        assert_eq!(screens, Mac.screens().unwrap());
+    }
+
+    #[test]
+    fn live_wallpaper_decodes_through_imageio() {
+        if !live() {
+            return;
+        }
+        let screen = Mac.screens().unwrap().remove(0);
+        let path = Mac.wallpaper(&screen).unwrap().unwrap();
+        assert!(path.is_file(), "{}", path.display());
+        let image = Mac.decode(&path).unwrap();
+        assert!(image.width() > 0 && image.height() > 0);
+    }
+
+    #[test]
+    fn live_a_probe_icon_is_found_where_finder_put_it() {
+        if !live() {
+            return;
+        }
+        let home = dirs::home_dir().unwrap();
+        let name = format!("scooch-probe-live-{}", std::process::id());
+        let probe = home.join("Desktop").join(&name);
+        std::fs::write(&probe, b"x").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let script = format!("tell application \"Finder\" to set desktop position of item \"{name}\" of desktop to {{333, 444}}");
+        let moved = Command::new("/usr/bin/osascript").arg("-e").arg(script).output();
+        let snapshot = Mac.snapshot();
+        std::fs::remove_file(&probe).unwrap();
+        assert!(moved.unwrap().status.success());
+        let icons = snapshot.unwrap().icons;
+        let found = icons.iter().find(|icon| icon.x < 333.0 && icon.x + icon.w > 333.0 && icon.y < 444.0 && icon.y + icon.h > 444.0).copied();
+        let found = found.expect("no icon covers the probe");
+        assert!((found.y - (444.0 - 32.0)).abs() < 0.5, "{found:?}");
+        assert!((found.x + found.w / 2.0 - 333.0).abs() < 0.5, "{found:?}");
+    }
+
+    #[test]
+    fn live_the_login_item_installs_and_leaves_no_trace() {
+        if !live() {
+            return;
+        }
+        let folder = crate::state::scratch("launchd");
+        launchd::install(Path::new("/usr/bin/true"), &folder).unwrap();
+        let installed = (launchd::installed(), launchd::loaded());
+        launchd::remove().unwrap();
+        assert_eq!(installed, (true, true));
+        assert!(!launchd::installed() && !launchd::loaded());
+    }
+}
