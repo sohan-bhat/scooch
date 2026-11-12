@@ -37,7 +37,7 @@
     {
       "id": "rest",
       "title": "Between changes it draws nothing.",
-      "support": "While it sleeps it uses no CPU and very little memory."
+      "support": "At rest it uses no CPU and very little memory."
     },
     {
       "id": "end",

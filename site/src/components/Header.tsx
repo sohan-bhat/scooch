@@ -5,7 +5,7 @@ import { asset } from '@/lib/base';
 export function Header() {
   return (
     <header className="page-gutter absolute inset-x-0 top-0 z-30 flex h-18 items-center justify-between gap-4 tall:h-16">
-      <a href={asset('')} className="wordmark rounded-sm py-1 text-[1.65rem] text-paper tall:text-[1.4rem]" aria-label={content.nav.home}>
+      <a href={asset('')} className="wordmark rounded-sm py-1 text-[1.65rem] text-paper transition-colors duration-(--duration-hover) ease-(--ease-out) hover-fine:text-plastic active:text-pad tall:text-[1.4rem]" aria-label={content.nav.home}>
         {content.name}
       </a>
       <nav aria-label="Site">

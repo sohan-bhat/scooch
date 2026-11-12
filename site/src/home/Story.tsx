@@ -18,7 +18,7 @@ export function Story({ live, beats, canvas, section, onProgress, onReady }: Pro
       <div className="stage sticky top-0 h-svh w-full overflow-hidden bg-room">
         <div
           aria-hidden
-          className="stage-glow absolute inset-0 bg-[radial-gradient(60%_55%_at_62%_44%,rgb(229_89_26/0.13),transparent_70%),radial-gradient(90%_70%_at_50%_100%,rgb(31_26_21/0.9),transparent)] tall:bg-[radial-gradient(90%_40%_at_50%_30%,rgb(229_89_26/0.13),transparent_70%)]"
+          className="stage-glow absolute inset-0 bg-[radial-gradient(50%_55%_at_70%_40%,rgb(229_89_26/0.13),transparent_70%),radial-gradient(90%_70%_at_50%_100%,rgb(31_26_21/0.9),transparent)] tall:bg-[radial-gradient(90%_40%_at_50%_30%,rgb(229_89_26/0.13),transparent_70%)]"
         />
         <div ref={canvas} className="absolute inset-0 opacity-0">
           {live ? (
@@ -27,7 +27,7 @@ export function Story({ live, beats, canvas, section, onProgress, onReady }: Pro
             </Suspense>
           ) : null}
         </div>
-        <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-[46svh] bg-gradient-to-t from-room via-room/85 to-transparent wide:hidden" />
+        <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-[46svh] bg-gradient-to-t from-room via-room/85 to-transparent wide:h-[16svh] wide:via-room/40" />
         <Beats refs={beats} />
       </div>
     </section>

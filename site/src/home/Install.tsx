@@ -84,7 +84,7 @@ export function Install() {
             ))}
             <p className="text-(length:--text-support) text-plastic">
               {install.after.replace(/scooch\.$/, '')}
-              <code className="rounded-md bg-room-2 px-2 py-0.5 font-mono text-[0.9em] text-paper">scooch</code>.
+              <code className="mx-0.5 rounded-md bg-room-2 px-1.5 py-0.5 font-mono text-[0.9em] text-paper">scooch</code>.
             </p>
           </Tabs>
         </TooltipProvider>

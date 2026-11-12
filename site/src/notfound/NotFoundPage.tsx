@@ -9,7 +9,7 @@ export function NotFoundPage() {
     <main className="page-gutter relative grid min-h-dvh place-items-center overflow-hidden py-24">
       <div aria-hidden className="absolute inset-0 bg-[radial-gradient(50%_45%_at_50%_42%,rgb(229_89_26/0.16),transparent_70%)]" />
       <div className="relative flex flex-col items-center gap-8 text-center">
-        <a href={asset('')} className="wordmark rounded-sm text-[clamp(4rem,14vw,10rem)] text-paper" aria-label={missing.home}>
+        <a href={asset('')} className="wordmark rounded-sm text-[clamp(4rem,14vw,10rem)] text-paper transition-colors duration-(--duration-hover) ease-(--ease-out) hover-fine:text-plastic" aria-label={missing.home}>
           {content.name}
         </a>
         <h1 className="sr-only">{missing.title}</h1>

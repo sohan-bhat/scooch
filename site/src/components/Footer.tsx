@@ -6,7 +6,7 @@ export function Footer() {
   return (
     <footer className="page-gutter border-t border-paper/10 py-12">
       <div className="flex flex-wrap items-center justify-between gap-x-10 gap-y-6">
-        <a href={asset('')} className="wordmark rounded-sm text-[2rem] text-paper">
+        <a href={asset('')} className="wordmark rounded-sm text-[2rem] text-paper transition-colors duration-(--duration-hover) ease-(--ease-out) hover-fine:text-plastic active:text-pad">
           {content.name}
         </a>
         <ul className="flex flex-wrap items-center gap-x-8 gap-y-3 text-[0.9375rem] font-medium">

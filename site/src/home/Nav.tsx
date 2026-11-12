@@ -11,9 +11,9 @@ type Refs = {
 
 export function Nav({ progress, meter, action, skip }: Refs) {
   return (
-    <header className="page-gutter pointer-events-none fixed inset-x-0 top-0 z-30 flex h-18 items-center justify-between gap-4 tall:h-16">
+    <header className="page-gutter pointer-events-none fixed inset-x-0 top-0 z-30 flex h-18 items-center justify-between gap-4 before:absolute before:inset-x-0 before:top-0 before:-z-10 before:h-28 before:bg-gradient-to-b before:from-room/85 before:via-room/45 before:to-transparent tall:h-16">
       <div className="pointer-events-auto flex flex-col gap-1.5">
-        <a href="#top" className="wordmark rounded-sm py-1 text-[1.65rem] text-paper tall:text-[1.4rem]" aria-label={content.nav.home}>
+        <a href="#top" className="wordmark rounded-sm py-1 text-[1.65rem] text-paper transition-colors duration-(--duration-hover) ease-(--ease-out) hover-fine:text-plastic active:text-pad tall:text-[1.4rem]" aria-label={content.nav.home}>
           {content.name}
         </a>
         <span
