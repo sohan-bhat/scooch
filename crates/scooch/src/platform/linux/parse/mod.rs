@@ -4,5 +4,6 @@ pub mod entry;
 pub mod geometry;
 pub mod gio;
 pub mod gvariant;
+pub mod kde;
 pub mod keyfile;
 pub mod record;
