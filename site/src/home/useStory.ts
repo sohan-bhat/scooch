@@ -58,14 +58,16 @@ export function useSolidNav(header: React.RefObject<HTMLElement | null>, end: Re
     const bar = header.current;
     const marker = end.current;
     if (!bar || !marker) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        const passed = !entry.isIntersecting && entry.boundingClientRect.top < (entry.rootBounds?.top ?? 0) + 1;
-        if (passed) bar.setAttribute('data-solid', '');
-        else bar.removeAttribute('data-solid');
-      },
-      { rootMargin: `-${bar.offsetHeight}px 0px 0px 0px` },
-    );
+    const story = document.getElementById('story');
+    if (!story || story.offsetHeight === 0) {
+      bar.setAttribute('data-solid', '');
+      return;
+    }
+    const observer = new IntersectionObserver(([entry]) => {
+      const unpinned = entry.isIntersecting || entry.boundingClientRect.top < 0;
+      if (unpinned) bar.setAttribute('data-solid', '');
+      else bar.removeAttribute('data-solid');
+    });
     observer.observe(marker);
     return () => observer.disconnect();
   }, [header, end]);
