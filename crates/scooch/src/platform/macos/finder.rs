@@ -89,7 +89,8 @@ pub fn item_rect(center: (f32, f32), view: &View, label: Label) -> Rect {
 
 pub fn access(ask: bool) -> Access {
     let finder = finder();
-    let descriptor: Ref = unsafe { msg_send![&*finder, aeDesc] };
+    let descriptor: *const sys::AeDesc = unsafe { msg_send![&*finder, aeDesc] };
+    let descriptor = descriptor as Ref;
     let wild = code(b"****");
     match unsafe { sys::AEDeterminePermissionToAutomateTarget(descriptor, wild, wild, u8::from(ask)) } {
         0 => Access::Allowed,
@@ -285,7 +286,7 @@ const fn code(text: &[u8; 4]) -> u32 {
     u32::from_be_bytes(*text)
 }
 
-fn preference(application: &str, key: &str) -> Option<Retained<AnyObject>> {
+pub fn preference(application: &str, key: &str) -> Option<Retained<AnyObject>> {
     let application = NSString::from_str(application);
     let key = NSString::from_str(key);
     unsafe {

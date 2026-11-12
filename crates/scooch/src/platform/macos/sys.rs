@@ -5,11 +5,24 @@ use std::ffi::{c_char, c_void};
 
 pub type Ref = *const c_void;
 
+#[repr(C)]
+pub struct AeDesc {
+    pub kind: u32,
+    pub data: *mut c_void,
+}
+
+unsafe impl objc2::encode::RefEncode for AeDesc {
+    const ENCODING_REF: objc2::encode::Encoding = objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Struct(
+        "AEDesc",
+        &[objc2::encode::Encoding::UInt, objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Struct("OpaqueAEDataStorageType", &[])))],
+    ));
+}
+
 pub struct Owned(pub Ref);
 
 impl Owned {
     pub fn new(pointer: Ref) -> Option<Self> {
-        (!pointer.is_null()).then_some(Self(pointer))
+        (!pointer.is_null()).then(|| Self(pointer))
     }
 }
 
@@ -54,6 +67,8 @@ extern "C" {
     pub fn CFPreferencesCopyAppValue(key: Ref, application: Ref) -> Ref;
     pub fn CFPreferencesAppSynchronize(application: Ref) -> u8;
     pub fn CFUUIDCreateString(allocator: Ref, uuid: Ref) -> Ref;
+    pub fn CFDataCreate(allocator: Ref, bytes: *const u8, length: isize) -> Ref;
+    pub fn CFPropertyListCreateWithData(allocator: Ref, data: Ref, options: usize, format: *mut isize, error: *mut Ref) -> Ref;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -79,6 +94,8 @@ extern "C" {
     pub fn CGImageSourceCreateWithURL(url: Ref, options: Ref) -> Ref;
     pub fn CGImageSourceCopyPropertiesAtIndex(source: Ref, index: usize, options: Ref) -> Ref;
     pub fn CGImageSourceCreateThumbnailAtIndex(source: Ref, index: usize, options: Ref) -> Ref;
+    pub fn CGImageSourceGetCount(source: Ref) -> usize;
+    pub fn CGImageSourceGetType(source: Ref) -> Ref;
 }
 
 #[link(name = "CoreServices", kind = "framework")]
@@ -110,4 +127,14 @@ extern "C" {
 
 pub fn main_queue() -> Ref {
     unsafe { &_dispatch_main_q as *const c_void }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_null_pointer_is_never_released() {
+        assert!(Owned::new(std::ptr::null()).is_none());
+    }
 }
