@@ -16,11 +16,11 @@ const CROPPED: f64 = 1.5;
 const ZOOMED: f64 = 0.6;
 const OFF_CENTER: f64 = 0.15;
 const MIRRORED: f64 = 0.25;
-const DISTORTION: f64 = 0.6;
-const BUSY_SHARE: f32 = 0.5;
-const PROFILE_RANK: f64 = 0.95;
-const GAIN_FLOOR: f64 = 0.02;
-const GAIN_SHARE: f64 = 0.15;
+const BORDER: f64 = 2.0;
+const DISTORTION: f64 = 1.5;
+const PEAK_RANK: f64 = 0.97;
+const SOLID: f32 = 0.5;
+const EDGE_SLACK: f64 = 0.5;
 const KEEP_FLOOR: f64 = 0.02;
 const KEEP_SHARE: f64 = 0.10;
 const EPS: f64 = 1e-9;
@@ -41,7 +41,7 @@ pub fn screen_rects(scene: &Scene) -> Vec<[f64; 4]> {
         .iter()
         .filter_map(|r| {
             let (x, y, w, h) = (r.x as f64, r.y as f64, r.w as f64, r.h as f64);
-            if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
+            if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) || w <= 0.0 || h <= 0.0 {
                 return None;
             }
             let rect = [x.max(0.0), y.max(0.0), (x + w).min(width), (y + h).min(height)];
@@ -81,64 +81,7 @@ fn settings(options: &Options) -> Settings {
     Settings { strength, max_zoom, mirror: options.mirror }
 }
 
-struct Field {
-    gw: f64,
-    gh: f64,
-    columns: usize,
-    rows: usize,
-    importance: Vec<f32>,
-    sb: Sat<2>,
-    imp: Sat<1>,
-    total_s: f64,
-    total_i: f64,
-    image_aspect: f64,
-    screen_aspect: f64,
-    flat: bool,
-}
-
-impl Field {
-    fn new(analysis: &Analysis, scene: &Scene) -> Option<Self> {
-        let (columns, rows) = (analysis.width as usize, analysis.height as usize);
-        let n = columns * rows;
-        if n == 0 || analysis.saliency.len() != n || analysis.busy.len() != n || scene.width == 0 || scene.height == 0 {
-            return None;
-        }
-        let clean = |v: &f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
-        let saliency: Vec<f32> = if analysis.flat { vec![0.0; n] } else { analysis.saliency.iter().map(clean).collect() };
-        let busy: Vec<f32> = analysis.busy.iter().map(clean).collect();
-        let importance: Vec<f32> = saliency.iter().zip(&busy).map(|(s, b)| s.max(BUSY_SHARE * b)).collect();
-        let sb = Sat::new([&saliency, &busy], columns, rows);
-        let imp = Sat::new([&importance], columns, rows);
-        let image_aspect = if analysis.source_width > 0 && analysis.source_height > 0 { table::aspect(analysis.source_width, analysis.source_height) } else { table::aspect(analysis.width, analysis.height) };
-        Some(Self {
-            gw: columns as f64,
-            gh: rows as f64,
-            columns,
-            rows,
-            total_s: sb.total()[0],
-            total_i: imp.total()[0],
-            importance,
-            sb,
-            imp,
-            image_aspect,
-            screen_aspect: table::aspect(scene.width, scene.height),
-            flat: analysis.flat,
-        })
-    }
-
-    fn crop_sum(&self, frame: &Frame) -> f64 {
-        self.sb.sum(frame.x0 * self.gw, frame.y0 * self.gh, (frame.x0 + frame.cw) * self.gw, (frame.y0 + frame.ch) * self.gh)[0]
-    }
-
-    fn crop_loss(&self, frame: &Frame, middle: &Frame, kept: f64) -> f64 {
-        let (x0, x1) = (frame.x0.max(middle.x0), (frame.x0 + frame.cw).min(middle.x0 + middle.cw));
-        let (y0, y1) = (frame.y0.max(middle.y0), (frame.y0 + frame.ch).min(middle.y0 + middle.ch));
-        let shared = if x1 > x0 && y1 > y0 { self.sb.sum(x0 * self.gw, y0 * self.gh, x1 * self.gw, y1 * self.gh)[0] } else { 0.0 };
-        (kept - shared).max(0.0)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Frame {
     z: f64,
     x0: f64,
@@ -165,6 +108,117 @@ impl Frame {
         let [x0, y0, cw, ch] = placement.crop.map(|v| v as f64);
         let ok = [x0, y0, cw, ch, placement.zoom as f64].iter().all(|v| v.is_finite()) && cw > 0.0 && ch > 0.0 && x0 >= -1e-4 && y0 >= -1e-4 && x0 + cw <= 1.0 + 1e-4 && y0 + ch <= 1.0 + 1e-4;
         ok.then_some(Self { z: placement.zoom as f64, x0, y0, cw, ch, mirrored: placement.mirrored })
+    }
+
+    fn settled(&self) -> f64 {
+        ZOOMED * (self.z - 1.0).max(0.0) + OFF_CENTER * self.off() + if self.mirrored { MIRRORED } else { 0.0 }
+    }
+}
+
+struct Field {
+    gw: f64,
+    gh: f64,
+    columns: usize,
+    rows: usize,
+    saliency: Vec<f32>,
+    busy: Vec<f32>,
+    sb: Sat<2>,
+    total_s: f64,
+    size: f64,
+    image_aspect: f64,
+    screen_aspect: f64,
+    flat: bool,
+    middle: Frame,
+    kept: f64,
+    edge: f64,
+}
+
+impl Field {
+    fn new(analysis: &Analysis, scene: &Scene) -> Option<Self> {
+        let (columns, rows) = (analysis.width as usize, analysis.height as usize);
+        let n = columns * rows;
+        if n == 0 || analysis.saliency.len() != n || analysis.busy.len() != n || scene.width == 0 || scene.height == 0 {
+            return None;
+        }
+        let clean = |v: &f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        let saliency: Vec<f32> = if analysis.flat { vec![0.0; n] } else { analysis.saliency.iter().map(clean).collect() };
+        let busy: Vec<f32> = analysis.busy.iter().map(clean).collect();
+        let sb = Sat::new([&saliency, &busy], columns, rows);
+        let image_aspect = if analysis.source_width > 0 && analysis.source_height > 0 { table::aspect(analysis.source_width, analysis.source_height) } else { table::aspect(analysis.width, analysis.height) };
+        let screen_aspect = table::aspect(scene.width, scene.height);
+        let (cw, ch) = table::cover(image_aspect, screen_aspect, 1.0);
+        let middle = Frame { z: 1.0, x0: (1.0 - cw) / 2.0, y0: (1.0 - ch) / 2.0, cw, ch, mirrored: false };
+        let solid = saliency.iter().filter(|s| **s >= SOLID).count() as f64;
+        let mut field = Self {
+            gw: columns as f64,
+            gh: rows as f64,
+            columns,
+            rows,
+            total_s: sb.total()[0],
+            saliency,
+            busy,
+            sb,
+            size: solid.sqrt().max(1.0),
+            image_aspect,
+            screen_aspect,
+            flat: analysis.flat,
+            middle,
+            kept: 0.0,
+            edge: 0.0,
+        };
+        field.kept = field.crop_sum(&middle);
+        field.edge = field.border(&middle);
+        Some(field)
+    }
+
+    fn crop_sum(&self, frame: &Frame) -> f64 {
+        self.sb.sum(frame.x0 * self.gw, frame.y0 * self.gh, (frame.x0 + frame.cw) * self.gw, (frame.y0 + frame.ch) * self.gh)[0]
+    }
+
+    fn crop_loss(&self, frame: &Frame) -> f64 {
+        let middle = &self.middle;
+        let (x0, x1) = (frame.x0.max(middle.x0), (frame.x0 + frame.cw).min(middle.x0 + middle.cw));
+        let (y0, y1) = (frame.y0.max(middle.y0), (frame.y0 + frame.ch).min(middle.y0 + middle.ch));
+        let shared = if x1 > x0 && y1 > y0 { self.sb.sum(x0 * self.gw, y0 * self.gh, x1 * self.gw, y1 * self.gh)[0] } else { 0.0 };
+        (self.kept - shared).max(0.0)
+    }
+
+    fn border(&self, frame: &Frame) -> f64 {
+        let (x0, x1) = (frame.x0 * self.gw, (frame.x0 + frame.cw) * self.gw);
+        let (y0, y1) = (frame.y0 * self.gh, (frame.y0 + frame.ch) * self.gh);
+        let top = y0 > EDGE_SLACK;
+        let bottom = y1 < self.gh - EDGE_SLACK;
+        let left = x0 > EDGE_SLACK;
+        let right = x1 < self.gw - EDGE_SLACK;
+        let sum = |a: f64, b: f64, c: f64, d: f64| if c > a && d > b { self.sb.sum(a, b, c, d)[0] } else { 0.0 };
+        let (inner_top, inner_bottom) = (if top { y0 + 1.0 } else { y0 }, if bottom { y1 - 1.0 } else { y1 });
+        let mut out = 0.0;
+        if top {
+            out += sum(x0, y0, x1, y0 + 1.0);
+        }
+        if bottom {
+            out += sum(x0, y1 - 1.0, x1, y1);
+        }
+        if left {
+            out += sum(x0, inner_top, x0 + 1.0, inner_bottom);
+        }
+        if right {
+            out += sum(x1 - 1.0, inner_top, x1, inner_bottom);
+        }
+        out
+    }
+
+    fn cut(&self, frame: &Frame) -> f64 {
+        (self.border(frame) - self.edge).max(0.0) / self.size
+    }
+
+    fn frame_cost(&self, frame: &Frame, hid: f64, busy: f64) -> f64 {
+        let mut cost = BUSY * busy + frame.settled();
+        if !self.flat {
+            let total = self.total_s.max(EPS);
+            cost += HIDDEN * hid / total + CROPPED * self.crop_loss(frame) / total + BORDER * self.cut(frame);
+        }
+        cost
     }
 }
 
@@ -250,11 +304,6 @@ fn pans(slack: f64) -> Vec<f64> {
     }
 }
 
-fn centered(field: &Field) -> Frame {
-    let (cw, ch) = table::cover(field.image_aspect, field.screen_aspect, 1.0);
-    Frame { z: 1.0, x0: (1.0 - cw) / 2.0, y0: (1.0 - ch) / 2.0, cw, ch, mirrored: false }
-}
-
 fn under_icons(field: &Field, boxes: &[Footprint], x: &AxisMap, y: &AxisMap) -> (f64, f64) {
     let (mut hid, mut busy, mut area) = (0.0f64, 0.0f64, 0.0f64);
     for b in boxes {
@@ -268,15 +317,17 @@ fn under_icons(field: &Field, boxes: &[Footprint], x: &AxisMap, y: &AxisMap) -> 
     (hid, if area > 0.0 { busy / area } else { 0.0 })
 }
 
-fn stage_one(field: &Field, boxes: &[Footprint], settings: &Settings) -> Option<Frame> {
-    let middle = centered(field);
+fn zoom_levels(settings: &Settings) -> usize {
+    ((settings.max_zoom - 1.0) / ZOOM_STEP + 1e-6).floor() as usize + 1
+}
+
+fn stage_one(field: &Field, boxes: &[Footprint], settings: &Settings) -> Option<Vec<Frame>> {
+    let middle = field.middle;
     let (hid_c, busy_c) = under_icons(field, boxes, &AxisMap::x(&middle, None), &AxisMap::y(&middle, None));
     if hid_c <= 0.0 && busy_c <= 0.0 {
         return None;
     }
-    let vis_c = field.crop_sum(&middle);
-    let total = field.total_s.max(EPS);
-    let zooms = ((settings.max_zoom - 1.0) / ZOOM_STEP + 1e-6).floor() as usize + 1;
+    let zooms = zoom_levels(settings);
     let mut rows = Vec::new();
     for zi in 0..zooms {
         for mirrored in [false, true] {
@@ -298,57 +349,49 @@ fn stage_one(field: &Field, boxes: &[Footprint], settings: &Settings) -> Option<
         })
         .collect();
     let limit = hid_c * (1.0 + 1e-9) + 1e-12;
-    let mut best: Option<Candidate> = None;
-    for level in 0..zooms {
-        let floor = best.map(|b| b.cost);
-        let scored: Vec<Vec<Candidate>> = rows
-            .par_iter()
-            .filter(|row| row.0 == level)
-            .map(|&(zi, z, cw, ch, mirrored, xi, x0)| {
-                let spans: Vec<(Place, Place)> = boxes
-                    .iter()
-                    .map(|b| {
-                        let (ta, tb) = if mirrored { (1.0 - b.u1, 1.0 - b.u0) } else { (b.u0, b.u1) };
-                        (field.sb.place_x((x0 + cw * ta) * field.gw), field.sb.place_x((x0 + cw * tb) * field.gw))
-                    })
-                    .collect();
-                pans(1.0 - ch)
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(yi, y0)| {
-                        let frame = Frame { z, x0, y0, cw, ch, mirrored };
-                        let off = frame.off();
-                        let settled = ZOOMED * (z - 1.0) + OFF_CENTER * off + if mirrored { MIRRORED } else { 0.0 };
-                        if floor.is_some_and(|f| settled > f) {
+    let scored: Vec<Vec<Candidate>> = rows
+        .par_iter()
+        .map(|&(zi, z, cw, ch, mirrored, xi, x0)| {
+            let spans: Vec<(Place, Place)> = boxes
+                .iter()
+                .map(|b| {
+                    let (ta, tb) = if mirrored { (1.0 - b.u1, 1.0 - b.u0) } else { (b.u0, b.u1) };
+                    (field.sb.place_x((x0 + cw * ta) * field.gw), field.sb.place_x((x0 + cw * tb) * field.gw))
+                })
+                .collect();
+            pans(1.0 - ch)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(yi, y0)| {
+                    let frame = Frame { z, x0, y0, cw, ch, mirrored };
+                    let (mut hid, mut busy, mut area) = (0.0f64, 0.0f64, 0.0f64);
+                    for (&(xa, xb), &(ya, yb)) in spans.iter().zip(&lifts[zi][yi]) {
+                        let [s, b] = field.sb.sum_placed(xa, xb, ya, yb);
+                        hid += s;
+                        if !field.flat && hid > limit {
                             return None;
                         }
-                        let (mut hid, mut busy, mut area) = (0.0f64, 0.0f64, 0.0f64);
-                        for (&(xa, xb), &(ya, yb)) in spans.iter().zip(&lifts[zi][yi]) {
-                            let [s, b] = field.sb.sum_placed(xa, xb, ya, yb);
-                            hid += s;
-                            if !field.flat && hid > limit {
-                                return None;
-                            }
-                            busy += b;
-                            area += (xb.at - xa.at).max(0.0) * (yb.at - ya.at).max(0.0);
-                        }
-                        let busy = if area > 0.0 { busy / area } else { 0.0 };
-                        let mut cost = BUSY * busy + settled;
-                        if !field.flat {
-                            cost += HIDDEN * hid / total + CROPPED * field.crop_loss(&frame, &middle, vis_c) / total;
-                        }
-                        Some(Candidate { zi, xi, yi, frame, off, cost })
-                    })
-                    .collect()
-            })
-            .collect();
-        for candidate in scored.iter().flatten() {
-            if best.as_ref().map_or(true, |b| better(candidate, b)) {
-                best = Some(*candidate);
-            }
+                        busy += b;
+                        area += (xb.at - xa.at).max(0.0) * (yb.at - ya.at).max(0.0);
+                    }
+                    let busy = if area > 0.0 { busy / area } else { 0.0 };
+                    Some(Candidate { zi, xi, yi, frame, off: frame.off(), cost: field.frame_cost(&frame, hid, busy) })
+                })
+                .collect()
+        })
+        .collect();
+    let mut best: Vec<Option<Candidate>> = vec![None; zooms];
+    for candidate in scored.iter().flatten() {
+        let slot = &mut best[candidate.zi];
+        if slot.as_ref().is_none_or(|b| better(candidate, b)) {
+            *slot = Some(*candidate);
         }
     }
-    best.map(|b| b.frame)
+    let mut frames: Vec<Frame> = best.into_iter().flatten().map(|c| c.frame).collect();
+    if !frames.contains(&middle) {
+        frames.insert(0, middle);
+    }
+    Some(frames)
 }
 
 fn cells(a: f64, b: f64, n: usize) -> (usize, usize) {
@@ -357,9 +400,14 @@ fn cells(a: f64, b: f64, n: usize) -> (usize, usize) {
     (lo, hi)
 }
 
-fn profile(field: &Field, frame: &Frame, along_x: bool) -> Vec<f64> {
+struct Profile {
+    peak: Vec<f64>,
+    busy: Vec<f64>,
+}
+
+fn profile(field: &Field, frame: &Frame, along_x: bool) -> Profile {
     let (others, own) = if along_x { (cells(frame.y0, frame.y0 + frame.ch, field.rows), field.columns) } else { (cells(frame.x0, frame.x0 + frame.cw, field.columns), field.rows) };
-    (0..BINS)
+    let bins: Vec<(f64, f64)> = (0..BINS)
         .into_par_iter()
         .map(|k| {
             let (ta, tb) = (k as f64 / BINS as f64, (k + 1) as f64 / BINS as f64);
@@ -374,15 +422,19 @@ fn profile(field: &Field, frame: &Frame, along_x: bool) -> Vec<f64> {
             };
             let (a0, a1) = cells(sa, sb, own);
             let mut values = Vec::with_capacity((a1 - a0) * (others.1 - others.0));
+            let mut busy = 0.0f64;
             for a in a0..a1 {
                 for o in others.0..others.1 {
                     let index = if along_x { o * field.columns + a } else { a * field.columns + o };
-                    values.push(field.importance[index]);
+                    values.push(field.saliency[index]);
+                    busy += field.busy[index] as f64;
                 }
             }
-            quantile(&values, PROFILE_RANK) as f64
+            let count = values.len().max(1) as f64;
+            (quantile(&values, PEAK_RANK) as f64, busy / count)
         })
-        .collect()
+        .collect();
+    Profile { peak: bins.iter().map(|b| b.0).collect(), busy: bins.iter().map(|b| b.1).collect() }
 }
 
 struct Bend {
@@ -390,43 +442,26 @@ struct Bend {
     curve: Pchip,
 }
 
-fn hidden_importance(field: &Field, boxes: &[Footprint], x: &AxisMap, y: &AxisMap) -> f64 {
-    let mut sum = 0.0;
-    for b in boxes {
-        let (xa, xb) = x.interval(b.u0, b.u1);
-        let (ya, yb) = y.interval(b.v0, b.v1);
-        sum += field.imp.sum(xa * field.gw, ya * field.gh, xb * field.gw, yb * field.gh)[0];
-    }
-    sum / field.total_i.max(EPS)
-}
-
-fn bend(field: &Field, boxes: &[Footprint], frame: &Frame, along_x: bool, other: &AxisMap, strength: f64) -> Option<Bend> {
-    let plan = Plan::new(&profile(field, frame, along_x), strength)?;
-    let own = |curve: Option<&Pchip>| -> f64 {
-        if along_x {
-            hidden_importance(field, boxes, &AxisMap::x(frame, curve), other)
-        } else {
-            hidden_importance(field, boxes, other, &AxisMap::y(frame, curve))
-        }
-    };
-    let base = own(None);
-    let mut best: Option<(f64, f64, f64, Pchip)> = None;
+fn bend(field: &Field, boxes: &[Footprint], frame: &Frame, along_x: bool, other: &AxisMap, profile: &Profile, strength: f64) -> Option<Bend> {
+    let plan = Plan::new(&profile.peak, &profile.busy, strength)?;
+    let total = field.total_s.max(EPS);
+    let mut best: Option<(f64, f64, Pchip)> = None;
     for shift in plan.shifts() {
         let scales = plan.scales(shift);
         let curve = Pchip::from_scales(&scales);
-        let hid = if shift == 0.0 { base } else { own(Some(&curve)) };
-        let cost = hid + DISTORTION * plan.penalty(&scales);
+        let own = if along_x { AxisMap::x(frame, Some(&curve)) } else { AxisMap::y(frame, Some(&curve)) };
+        let (hid, busy) = if along_x { under_icons(field, boxes, &own, other) } else { under_icons(field, boxes, other, &own) };
+        let cost = HIDDEN * hid / total + BUSY * busy + DISTORTION * warp::penalty(&scales, &profile.peak, &profile.busy);
         let wins = match &best {
             None => true,
-            Some((c, _, s, _)) => cost < c - TIE || ((cost - c).abs() <= TIE && shift.abs() < s.abs()),
+            Some((c, s, _)) => cost < c - TIE || ((cost - c).abs() <= TIE && shift.abs() < s.abs()),
         };
         if wins {
-            best = Some((cost, hid, shift, curve));
+            best = Some((cost, shift, curve));
         }
     }
-    let (_, hid, shift, curve) = best?;
-    let gain = base - hid;
-    (shift != 0.0 && gain >= GAIN_FLOOR && gain >= GAIN_SHARE * base).then_some(Bend { shift, curve })
+    let (_, shift, curve) = best?;
+    (shift != 0.0).then_some(Bend { shift, curve })
 }
 
 fn assemble(frame: &Frame, x: Option<&Bend>, y: Option<&Bend>) -> Placement {
@@ -442,47 +477,7 @@ fn assemble(frame: &Frame, x: Option<&Bend>, y: Option<&Bend>) -> Placement {
     }
 }
 
-fn hidden_saliency(field: &Field, boxes: &[Footprint], placement: &Placement) -> f64 {
-    if field.flat || !(table::usable(&placement.fx) && table::usable(&placement.fy)) {
-        return 0.0;
-    }
-    let (xc, yc) = (Curve::new(&placement.fx), Curve::new(&placement.fy));
-    let mut hid = 0.0;
-    for b in boxes {
-        let (p, q) = (xc.at(b.u0), xc.at(b.u1));
-        let (r, s) = (yc.at(b.v0), yc.at(b.v1));
-        hid += field.sb.sum(p.min(q) * field.gw, r.min(s) * field.gh, p.max(q) * field.gw, r.max(s) * field.gh)[0];
-    }
-    hid / field.total_s.max(EPS)
-}
-
-fn distortion(field: &Field, frame: &Frame, values: &[f32], along_x: bool) -> f64 {
-    let profile = profile(field, frame, along_x);
-    let (start, span, mirrored) = if along_x { (frame.x0, frame.cw, frame.mirrored) } else { (frame.y0, frame.ch, false) };
-    let display = |v: f32| {
-        let t = (v as f64 - start) / span;
-        if mirrored {
-            1.0 - t
-        } else {
-            t
-        }
-    };
-    let mut sum = 0.0;
-    for pair in values.windows(2) {
-        let (a, b) = (display(pair[0]), display(pair[1]));
-        let dt = (b - a).abs();
-        if dt <= 0.0 {
-            continue;
-        }
-        let scale = (1.0 / STEPS as f64) / dt;
-        let bin = (((a + b) / 2.0) * BINS as f64).floor().clamp(0.0, (BINS - 1) as f64) as usize;
-        sum += warp::penalty(&[scale], &[profile[bin]]) * dt;
-    }
-    sum
-}
-
-fn score(field: &Field, boxes: &[Footprint], placement: &Placement, vis_c: f64) -> f64 {
-    let Some(frame) = Frame::of(placement) else { return f64::INFINITY };
+fn through_tables(field: &Field, boxes: &[Footprint], placement: &Placement) -> (f64, f64) {
     let (xc, yc) = (Curve::new(&placement.fx), Curve::new(&placement.fy));
     let (mut hid, mut busy, mut area) = (0.0f64, 0.0f64, 0.0f64);
     for b in boxes {
@@ -494,13 +489,60 @@ fn score(field: &Field, boxes: &[Footprint], placement: &Placement, vis_c: f64) 
         busy += z;
         area += (xb - xa) * (yb - ya);
     }
-    let busy = if area > 0.0 { busy / area } else { 0.0 };
-    let total = field.total_s.max(EPS);
-    let mut cost = BUSY * busy + ZOOMED * (frame.z - 1.0).max(0.0) + OFF_CENTER * frame.off() + if frame.mirrored { MIRRORED } else { 0.0 };
-    if !field.flat {
-        cost += HIDDEN * hid / total + CROPPED * field.crop_loss(&frame, &centered(field), vis_c) / total;
+    (hid, if area > 0.0 { busy / area } else { 0.0 })
+}
+
+fn hidden_saliency(field: &Field, boxes: &[Footprint], placement: &Placement) -> f64 {
+    if field.flat || !(table::usable(&placement.fx) && table::usable(&placement.fy)) {
+        return 0.0;
     }
-    cost + DISTORTION * (distortion(field, &frame, &placement.fx, true) + distortion(field, &frame, &placement.fy, false))
+    through_tables(field, boxes, placement).0 / field.total_s.max(EPS)
+}
+
+fn bin_scales(values: &[f32], start: f64, span: f64, mirrored: bool) -> Vec<f64> {
+    let display: Vec<f64> = values
+        .iter()
+        .map(|v| {
+            let t = (*v as f64 - start) / span;
+            if mirrored {
+                1.0 - t
+            } else {
+                t
+            }
+        })
+        .collect();
+    let last = display.len() - 1;
+    let mut edges = Vec::with_capacity(BINS + 1);
+    let mut j = 0usize;
+    for k in 0..=BINS {
+        let target = k as f64 / BINS as f64;
+        while j + 1 < last && display[j + 1] < target {
+            j += 1;
+        }
+        let (a, b) = (display[j], display[j + 1]);
+        let frac = if b > a { ((target - a) / (b - a)).clamp(0.0, 1.0) } else { 0.0 };
+        edges.push((j as f64 + frac) / last as f64);
+    }
+    edges.windows(2).map(|e| (1.0 / BINS as f64) / (e[1] - e[0]).max(1e-9)).collect()
+}
+
+fn distortion(placement: &Placement, frame: &Frame, x: &Profile, y: &Profile) -> f64 {
+    let sx = bin_scales(&placement.fx, frame.x0, frame.cw, frame.mirrored);
+    let sy = bin_scales(&placement.fy, frame.y0, frame.ch, false);
+    DISTORTION * (warp::penalty(&sx, &x.peak, &x.busy) + warp::penalty(&sy, &y.peak, &y.busy))
+}
+
+fn score(field: &Field, boxes: &[Footprint], placement: &Placement, profiles: Option<(&Profile, &Profile)>) -> f64 {
+    let Some(frame) = Frame::of(placement) else { return f64::INFINITY };
+    let (hid, busy) = through_tables(field, boxes, placement);
+    let base = field.frame_cost(&frame, hid, busy);
+    let bent = placement.shift != [0.0, 0.0];
+    let warp = match (bent, profiles) {
+        (false, _) => 0.0,
+        (true, Some((x, y))) => distortion(placement, &frame, x, y),
+        (true, None) => distortion(placement, &frame, &profile(field, &frame, true), &profile(field, &frame, false)),
+    };
+    base + warp
 }
 
 fn fits(field: &Field, previous: &Placement, settings: &Settings) -> bool {
@@ -515,22 +557,55 @@ fn fits(field: &Field, previous: &Placement, settings: &Settings) -> bool {
         && ((shape - field.screen_aspect) / field.screen_aspect).abs() < 1e-3
 }
 
-fn fresh(field: &Field, boxes: &[Footprint], settings: &Settings, fallback: &Placement) -> Placement {
-    let Some(frame) = stage_one(field, boxes, settings) else { return fallback.clone() };
-    let plain = assemble(&frame, None, None);
-    if field.flat || settings.strength <= 0.0 {
-        return plain;
+struct Choice {
+    placement: Placement,
+    cost: f64,
+}
+
+fn ranks_before(a: &Choice, b: &Choice) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if a.cost < b.cost - TIE {
+        return Ordering::Less;
     }
-    let along = bend(field, boxes, &frame, true, &AxisMap::y(&frame, None), settings.strength);
-    let across = bend(field, boxes, &frame, false, &AxisMap::x(&frame, along.as_ref().map(|b| &b.curve)), settings.strength);
-    let limit = hidden_saliency(field, boxes, fallback);
-    let warped = assemble(&frame, along.as_ref(), across.as_ref());
-    for choice in [warped, plain] {
-        if table::usable(&choice.fx) && table::usable(&choice.fy) && hidden_saliency(field, boxes, &choice) <= limit {
-            return choice;
+    if a.cost > b.cost + TIE {
+        return Ordering::Greater;
+    }
+    let moved = |c: &Choice| (c.placement.shift[0].abs() + c.placement.shift[1].abs()) as f64;
+    a.placement
+        .zoom
+        .total_cmp(&b.placement.zoom)
+        .then(moved(a).total_cmp(&moved(b)))
+        .then(a.placement.mirrored.cmp(&b.placement.mirrored))
+        .then(a.placement.crop[0].total_cmp(&b.placement.crop[0]))
+        .then(a.placement.crop[1].total_cmp(&b.placement.crop[1]))
+}
+
+fn choices(field: &Field, boxes: &[Footprint], frame: &Frame, settings: &Settings) -> Vec<Choice> {
+    let plain = assemble(frame, None, None);
+    let mut out = vec![Choice { cost: score(field, boxes, &plain, None), placement: plain }];
+    if field.flat || settings.strength <= 0.0 {
+        return out;
+    }
+    let (px, py) = (profile(field, frame, true), profile(field, frame, false));
+    let along = bend(field, boxes, frame, true, &AxisMap::y(frame, None), &px, settings.strength);
+    let across = bend(field, boxes, frame, false, &AxisMap::x(frame, along.as_ref().map(|b| &b.curve)), &py, settings.strength);
+    if along.is_some() || across.is_some() {
+        let warped = assemble(frame, along.as_ref(), across.as_ref());
+        if table::usable(&warped.fx) && table::usable(&warped.fy) {
+            out.push(Choice { cost: score(field, boxes, &warped, Some((&px, &py))), placement: warped });
         }
     }
-    fallback.clone()
+    out
+}
+
+fn fresh(field: &Field, boxes: &[Footprint], settings: &Settings, fallback: &Placement) -> Placement {
+    let Some(frames) = stage_one(field, boxes, settings) else { return fallback.clone() };
+    let mut all: Vec<Choice> = frames.par_iter().flat_map(|frame| choices(field, boxes, frame, settings)).collect();
+    all.sort_by(ranks_before);
+    let limit = hidden_saliency(field, boxes, fallback);
+    all.into_iter()
+        .find(|c| table::usable(&c.placement.fx) && table::usable(&c.placement.fy) && hidden_saliency(field, boxes, &c.placement) <= limit)
+        .map_or_else(|| fallback.clone(), |c| c.placement)
 }
 
 fn source_size(analysis: &Analysis) -> (u32, u32) {
@@ -555,8 +630,7 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
     if *old == new {
         return new;
     }
-    let vis_c = field.crop_sum(&centered(&field));
-    let (cost_new, cost_old) = (score(&field, &boxes, &new, vis_c), score(&field, &boxes, old, vis_c));
+    let (cost_new, cost_old) = (score(&field, &boxes, &new, None), score(&field, &boxes, old, None));
     if cost_new < cost_old - (KEEP_FLOOR + KEEP_SHARE * cost_old) {
         new
     } else {
@@ -615,5 +689,27 @@ mod tests {
         assert_eq!(cells(0.0, 1.0, 10), (0, 10));
         assert_eq!(cells(0.999, 1.0, 10), (9, 10));
         assert_eq!(cells(0.2, 0.3, 10), (2, 3));
+    }
+
+    #[test]
+    fn straight_tables_have_unit_scales() {
+        let scales = bin_scales(&table::line(0.2, 0.8), 0.2, 0.6, false);
+        assert_eq!(scales.len(), BINS);
+        assert!(scales.iter().all(|s| (s - 1.0).abs() < 1e-4), "{scales:?}");
+        let flipped = bin_scales(&table::line(0.8, 0.2), 0.2, 0.6, true);
+        assert!(flipped.iter().all(|s| (s - 1.0).abs() < 1e-4));
+    }
+
+    #[test]
+    fn the_border_skips_sides_on_the_image_edge() {
+        let (w, h) = (40usize, 20usize);
+        let saliency = vec![1.0f32; w * h];
+        let analysis = Analysis { width: w as u32, height: h as u32, saliency, busy: vec![0.0; w * h], subject: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, flat: false, source_width: 400, source_height: 200 };
+        let field = Field::new(&analysis, &Scene { width: 400, height: 200, icons: Vec::new() }).unwrap();
+        assert_eq!(field.border(&field.middle), 0.0);
+        let inside = Frame { z: 2.0, x0: 0.25, y0: 0.25, cw: 0.5, ch: 0.5, mirrored: false };
+        let ring = 2.0 * 20.0 + 2.0 * 8.0;
+        assert!((field.border(&inside) - ring).abs() < 1e-9, "{}", field.border(&inside));
+        assert!((field.size - 800f64.sqrt()).abs() < 1e-9);
     }
 }
