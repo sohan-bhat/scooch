@@ -1,7 +1,7 @@
 const EXACT_LIMIT: f32 = 3.0;
 
 pub fn gaussian(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
-    if width == 0 || height == 0 || values.len() != width * height || !(sigma > 0.0) || !sigma.is_finite() {
+    if width == 0 || height == 0 || values.len() != width * height || sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
         return values.to_vec();
     }
     if sigma <= EXACT_LIMIT {
@@ -30,7 +30,7 @@ fn reflection(i: isize, n: usize) -> Vec<(usize, f32)> {
 }
 
 pub fn gaussian_extended(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
-    if width == 0 || height == 0 || values.len() != width * height || !(sigma > 0.0) || !sigma.is_finite() {
+    if width == 0 || height == 0 || values.len() != width * height || sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
         return values.to_vec();
     }
     let pad = (3.0 * sigma).ceil() as usize + 1;
@@ -62,7 +62,7 @@ pub fn gaussian_extended(values: &[f32], width: usize, height: usize, sigma: f32
 }
 
 pub fn gaussian_boxes(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
-    if width == 0 || height == 0 || values.len() != width * height || !(sigma > 0.0) || !sigma.is_finite() {
+    if width == 0 || height == 0 || values.len() != width * height || sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
         return values.to_vec();
     }
     boxed(values, width, height, sigma)
