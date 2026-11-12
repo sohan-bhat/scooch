@@ -129,6 +129,13 @@ impl Field {
     fn crop_sum(&self, frame: &Frame) -> f64 {
         self.sb.sum(frame.x0 * self.gw, frame.y0 * self.gh, (frame.x0 + frame.cw) * self.gw, (frame.y0 + frame.ch) * self.gh)[0]
     }
+
+    fn crop_loss(&self, frame: &Frame, middle: &Frame, kept: f64) -> f64 {
+        let (x0, x1) = (frame.x0.max(middle.x0), (frame.x0 + frame.cw).min(middle.x0 + middle.cw));
+        let (y0, y1) = (frame.y0.max(middle.y0), (frame.y0 + frame.ch).min(middle.y0 + middle.ch));
+        let shared = if x1 > x0 && y1 > y0 { self.sb.sum(x0 * self.gw, y0 * self.gh, x1 * self.gw, y1 * self.gh)[0] } else { 0.0 };
+        (kept - shared).max(0.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -319,8 +326,7 @@ fn stage_one(field: &Field, boxes: &[Footprint], settings: &Settings) -> Option<
                         if hid > hid_c * (1.0 + 1e-9) + 1e-12 {
                             return None;
                         }
-                        let vis = field.crop_sum(&frame);
-                        cost += HIDDEN * hid / total + CROPPED * (vis_c - vis).max(0.0) / total;
+                        cost += HIDDEN * hid / total + CROPPED * field.crop_loss(&frame, &middle, vis_c) / total;
                     }
                     Some(Candidate { zi, xi, yi, frame, off, cost })
                 })
@@ -483,7 +489,7 @@ fn score(field: &Field, boxes: &[Footprint], placement: &Placement, vis_c: f64) 
     let total = field.total_s.max(EPS);
     let mut cost = BUSY * busy + ZOOMED * (frame.z - 1.0).max(0.0) + OFF_CENTER * frame.off() + if frame.mirrored { MIRRORED } else { 0.0 };
     if !field.flat {
-        cost += HIDDEN * hid / total + CROPPED * (vis_c - field.crop_sum(&frame)).max(0.0) / total;
+        cost += HIDDEN * hid / total + CROPPED * field.crop_loss(&frame, &centered(field), vis_c) / total;
     }
     cost + DISTORTION * (distortion(field, &frame, &placement.fx, true) + distortion(field, &frame, &placement.fy, false))
 }
