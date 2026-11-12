@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
 import { dedup, flatten, join, meshopt, prune, textureCompress, weld } from '@gltf-transform/functions';
+import { ktx2 } from 'ktx2-encoder/gltf-transform';
 import { MeshoptEncoder } from 'meshoptimizer';
 import sharp from 'sharp';
 
@@ -17,7 +18,7 @@ const models = [
     id: 'classic_laptop',
     resolution: '4k',
     file: 'laptop.glb',
-    textures: { color: 2048, normal: 2048, arm: 1024 },
+    textures: { color: 2048, normal: 1024, arm: 1024 },
     pivots: ['classic_laptop_screen'],
   },
   {
@@ -107,9 +108,18 @@ function shareOcclusion(document) {
   }
 }
 
-function webp(slots, size, quality) {
-  return textureCompress({ encoder: sharp, targetFormat: 'webp', slots, resize: [size, size], quality, effort: 90 });
+async function imageDecoder(buffer) {
+  const { data, info } = await sharp(buffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  return { data: new Uint8Array(data), width: info.width, height: info.height };
 }
+
+function resized(slots, size) {
+  return textureCompress({ encoder: sharp, targetFormat: 'png', slots, resize: [size, size] });
+}
+
+const color = { isUASTC: false, qualityLevel: 210, compressionLevel: 3, isSetKTX2SRGBTransferFunc: true, isPerceptual: true, generateMipmap: true, imageDecoder };
+const data = { isUASTC: false, qualityLevel: 190, compressionLevel: 3, isSetKTX2SRGBTransferFunc: false, isPerceptual: false, generateMipmap: true, imageDecoder };
+const normal = { isUASTC: true, needSupercompression: true, enableRDO: true, rdoQualityLevel: 2.5, isSetKTX2SRGBTransferFunc: false, isPerceptual: false, generateMipmap: true, imageDecoder };
 
 async function buildModel(io, model) {
   const document = await io.read(await fetchModel(model));
@@ -120,9 +130,12 @@ async function buildModel(io, model) {
   if (model.merge) steps.push(flatten(), join());
   steps.push(
     weld(),
-    webp(/baseColor/, model.textures.color, 84),
-    webp(/normal/, model.textures.normal, 90),
-    webp(/metallicRoughness|occlusion/, model.textures.arm, 82),
+    resized(/baseColor/, model.textures.color),
+    resized(/normal/, model.textures.normal),
+    resized(/metallicRoughness|occlusion/, model.textures.arm),
+    ktx2({ ...color, slots: /baseColor/ }),
+    ktx2({ ...data, slots: /metallicRoughness|occlusion/ }),
+    ktx2({ ...normal, slots: /normal/ }),
     meshopt({ encoder: MeshoptEncoder, level: 'medium' }),
   );
   await document.transform(...steps);
