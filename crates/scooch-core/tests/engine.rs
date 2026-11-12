@@ -87,11 +87,16 @@ fn a_warped_placement_has_valid_tables() {
     let analysis = scooch_core::analyze(&image);
     let icons: Vec<Rect> = (0..4).map(|i| Rect { x: 300.0 + 40.0 * (i % 2) as f32, y: 140.0 + 60.0 * (i / 2) as f32, w: 36.0, h: 56.0 }).collect();
     let scene = Scene { width: 640, height: 400, icons };
-    let placement = scooch_core::solve(&analysis, &scene, &Options::default(), None);
+    let fixed = Options { max_zoom: 1.0, ..Options::default() };
+    let placement = scooch_core::solve(&analysis, &scene, &fixed, None);
     check_placement(&placement, "block");
     assert_ne!(placement.shift, [0.0, 0.0], "{placement:?}");
-    let mirrored = scooch_core::solve(&analysis, &scene, &Options { mirror: true, ..Options::default() }, None);
+    let centered = scooch_core::fill(640, 400, &scene);
+    assert!(scooch_core::hidden_share(&analysis, &scene, &placement) < scooch_core::hidden_share(&analysis, &scene, &centered));
+    let mirrored = scooch_core::solve(&analysis, &scene, &Options { mirror: true, ..fixed }, None);
     check_placement(&mirrored, "block mirrored");
+    let gentle = scooch_core::solve(&analysis, &scene, &Options { strength: 0.0, ..fixed }, None);
+    assert_eq!(gentle.shift, [0.0, 0.0]);
 }
 
 #[test]
