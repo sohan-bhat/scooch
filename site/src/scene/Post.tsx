@@ -42,7 +42,7 @@ export function Post({ phone }: { phone: boolean }) {
     <EffectComposer multisampling={0} frameBufferType={HalfFloatType}>
       {!phone && <N8AO ref={ao} halfRes quality="performance" aoRadius={0.18} distanceFalloff={0.5} intensity={1.4} />}
       {!phone && <DepthOfField ref={dof} focusDistance={1} focusRange={0.2} bokehScale={0} resolutionScale={0.5} />}
-      <Bloom mipmapBlur luminanceThreshold={1.05} luminanceSmoothing={0.2} intensity={0.6} radius={0.7} />
+      <Bloom mipmapBlur levels={6} luminanceThreshold={1.05} luminanceSmoothing={0.2} intensity={0.6} radius={0.7} />
       <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
       <SMAA />
       <Vignette offset={0.3} darkness={0.62} />

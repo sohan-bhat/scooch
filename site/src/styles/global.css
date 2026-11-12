@@ -27,7 +27,7 @@
   font-display: swap;
   font-weight: 100 900;
   font-stretch: 50% 150%;
-  src: url("@fontsource-variable/anybody/files/anybody-latin-wdth-normal.woff2") format("woff2-variations");
+  src: url("@fontsource-variable/anybody/files/anybody-latin-wdth-normal.woff2") format("woff2");
 }
 
 @font-face {
@@ -36,7 +36,7 @@
   font-display: swap;
   font-weight: 400 700;
   font-stretch: 75% 100%;
-  src: url("@fontsource-variable/instrument-sans/files/instrument-sans-latin-wdth-normal.woff2") format("woff2-variations");
+  src: url("@fontsource-variable/instrument-sans/files/instrument-sans-latin-wdth-normal.woff2") format("woff2");
 }
 
 @font-face {
@@ -44,7 +44,7 @@
   font-style: normal;
   font-display: swap;
   font-weight: 100 800;
-  src: url("@fontsource-variable/martian-mono/files/martian-mono-latin-wght-normal.woff2") format("woff2-variations");
+  src: url("@fontsource-variable/martian-mono/files/martian-mono-latin-wght-normal.woff2") format("woff2");
 }
 
 @layer base {

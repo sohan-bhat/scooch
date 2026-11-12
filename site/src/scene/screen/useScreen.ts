@@ -30,7 +30,6 @@ export function useScreen(manifest: DemoManifest) {
     for (const texture of [frameA, frameB, frameC]) prepareTexture(texture, true, 8);
     prepareTexture(saliency, false, 1);
     prepareTexture(atlas, true, 8);
-    atlas.premultiplyAlpha = true;
     const { material, uniforms } = createScreenMaterial();
     uniforms.uFrameA.value = frameA;
     uniforms.uFrameB.value = frameB;

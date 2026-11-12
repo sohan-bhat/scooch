@@ -92,8 +92,7 @@ vec3 wallpaper(vec2 uv) {
   return mix(mix(a, b, uMixAB), c, uMixBC);
 }
 
-vec3 heatmap(float s, vec2 uv) {
-  float soft = texture(uSaliency, uv, 2.5).r;
+vec3 heatmap(float s, float soft) {
   float level = clamp(max(s, soft * 0.85), 0.0, 1.0);
   vec3 color = uRoom * 0.55;
   color = mix(color, uHeat * 0.55, smoothstep(0.04, 0.45, level));
@@ -110,7 +109,10 @@ vec3 heatmap(float s, vec2 uv) {
 vec4 atlasCell(float index, float row, vec2 q, vec2 dx, vec2 dy, vec2 scale) {
   vec2 cell = vec2(mod(index, GRID), row + floor(index / GRID));
   vec2 at = (cell + clamp(q, 0.002, 0.998)) / GRID;
-  return textureGrad(uAtlas, at, dx * scale, dy * scale);
+  vec2 size = vec2(textureSize(uAtlas, 0));
+  float footprint = max(length(dx * scale * size), length(dy * scale * size));
+  float lod = clamp(log2(max(footprint, 1e-4)), 0.0, 10.0);
+  return clamp(textureLod(uAtlas, at, lod), 0.0, 1.0);
 }
 
 void main() {
@@ -119,6 +121,8 @@ void main() {
   vec2 dy = dFdy(uv);
   float inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
 
+  float saliency = texture(uSaliency, uv).r;
+  float saliencySoft = textureLod(uSaliency, uv, 2.5).r;
   float reveal = step(0.5, uSweep);
   float wet = 0.0;
   float rim = 0.0;
@@ -127,20 +131,17 @@ void main() {
     float diagonal = (paper.x + uv.y) / (uAspect + 1.0);
     float warp = fbm(paper * 2.3 + vec2(0.0, uTime * 0.025));
     float wobble = (warp - 0.5) * 0.13;
-    float feather = (fbm(paper * 13.0 + warp * 3.0) - 0.5) * 0.024;
+    float feather = (fbm(paper * 9.0 + warp * 2.5) - 0.5) * 0.02;
     float front = mix(-0.2, 1.2, uSweep);
     float behind = front - (diagonal + wobble + feather);
     reveal = smoothstep(0.0, 0.055, behind);
-    wet = smoothstep(-0.035, 0.0, behind) * (1.0 - smoothstep(0.0, 0.07, behind));
-    rim = exp(-abs(behind) * 170.0) * (0.6 + 0.5 * fbm(paper * 40.0)) + exp(-max(behind, 0.0) * 30.0) * step(0.0, behind) * 0.12;
+    wet = smoothstep(-0.06, 0.0, behind) * (1.0 - smoothstep(0.0, 0.08, behind));
+    rim = exp(-abs(behind) * 110.0) * (0.5 + 0.4 * fbm(paper * 30.0)) + exp(-max(behind, 0.0) * 24.0) * step(0.0, behind) * 0.14;
   }
 
   vec3 photo = wallpaper(uv);
   vec3 color = photo * (1.0 - wet * 0.5);
-  if (reveal > 0.0) {
-    float s = texture(uSaliency, uv).r;
-    color = mix(color, heatmap(s, uv), reveal);
-  }
+  color = mix(color, heatmap(saliency, saliencySoft), reveal);
 
   vec2 ghostScale = vec2(1.0);
   for (int i = 0; i < ICON_SLOTS; i++) {
@@ -153,7 +154,7 @@ void main() {
       vec4 outline = atlasCell(float(i), 2.0, q, dx, dy, scale);
       vec4 icon = mix(filled, outline, reveal);
       float alpha = icon.a * (1.0 - uGhost[i] * 0.45);
-      color = color * (1.0 - alpha) + icon.rgb * (1.0 - uGhost[i] * 0.45);
+      color = color * (1.0 - alpha) + icon.rgb * alpha;
     }
   }
 
@@ -162,7 +163,7 @@ void main() {
     float hit = step(0.0, q.x) * step(q.x, 1.0) * step(0.0, q.y) * step(q.y, 1.0);
     if (hit > 0.0) {
       vec4 pointer = atlasCell(${CURSOR_CELL}.0, 0.0, q, dx, dy, 1.0 / (uCursorSize * GRID));
-      color = color * (1.0 - pointer.a * uCursor.z) + pointer.rgb * uCursor.z;
+      color = color * (1.0 - pointer.a * uCursor.z) + pointer.rgb * pointer.a * uCursor.z;
     }
   }
 
