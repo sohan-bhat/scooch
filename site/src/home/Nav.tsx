@@ -14,7 +14,7 @@ export function Nav({ header, progress, meter, action, skip }: Refs) {
   return (
     <header
       ref={header}
-      className="page-gutter pointer-events-none fixed inset-x-0 top-0 z-30 flex h-18 items-center justify-between gap-4 border-b border-transparent transition-[background-color,border-color] duration-200 ease-(--ease-out) before:absolute before:inset-x-0 before:top-0 before:-z-10 before:h-28 before:bg-gradient-to-b before:from-room/85 before:via-room/45 before:to-transparent before:transition-opacity before:duration-200 data-solid:pointer-events-auto data-solid:border-paper/10 data-solid:bg-room data-solid:before:opacity-0 tall:h-16"
+      className="site-nav page-gutter pointer-events-none fixed inset-x-0 top-0 z-30 flex h-18 items-center justify-between gap-4 border-b border-transparent transition-[background-color,border-color] duration-200 ease-(--ease-out) before:absolute before:inset-x-0 before:top-0 before:-z-10 before:h-28 before:bg-gradient-to-b before:from-room/85 before:via-room/45 before:to-transparent before:transition-opacity before:duration-200 data-solid:pointer-events-auto data-solid:border-paper/10 data-solid:bg-room data-solid:before:opacity-0 tall:h-16"
     >
       <div className="pointer-events-auto flex flex-col gap-1.5">
         <a href="#top" className="wordmark rounded-sm py-1 text-[1.65rem] text-paper transition-colors duration-(--duration-hover) ease-(--ease-out) hover-fine:text-plastic active:text-pad tall:text-[1.4rem]" aria-label={content.nav.home}>

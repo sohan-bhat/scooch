@@ -15,11 +15,12 @@ export const place: Record<string, string> = {
 type Beat = (typeof content.beats)[number];
 
 export function BeatCopy({ beat, index, live }: { beat: Beat; index: number; live: boolean }) {
-  const Heading = index === 0 ? 'h1' : 'h2';
+  const Heading = index > 0 ? 'h2' : live ? 'h1' : 'p';
+  const role = Heading === 'p' ? { role: 'heading', 'aria-level': 1 } : {};
   const split = live ? { 'data-split': '' } : {};
   return (
     <>
-      <Heading {...split} className={cn('text-paper', index === 0 ? 'text-(length:--text-hero)' : 'text-(length:--text-beat)')}>
+      <Heading {...split} {...role} className={cn('text-paper', index === 0 ? 'text-(length:--text-hero)' : 'text-(length:--text-beat)')}>
         {beat.title}
       </Heading>
       {'support' in beat && beat.support ? (

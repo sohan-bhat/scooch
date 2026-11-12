@@ -79,7 +79,8 @@
 
   h1,
   h2,
-  h3 {
+  h3,
+  [role="heading"] {
     font-family: var(--font-display);
     font-weight: 700;
     font-stretch: 100%;
@@ -149,26 +150,39 @@ html.lenis body {
   margin-bottom: -0.08em;
 }
 
-.stills {
+.story,
+.story-only {
   display: none;
 }
 
-.stills-mode .stills {
-  display: block;
+html.js:not(.stills-mode) .story,
+html.js:not(.stills-mode) .story-only {
+  display: revert-layer;
 }
 
-.stills-mode .story,
-.stills-mode .story-only {
+html.js:not(.stills-mode) .stills {
   display: none;
+}
+
+html:not(.js) .site-nav,
+html.stills-mode .site-nav {
+  pointer-events: auto;
+  background: var(--color-room);
+  border-bottom-color: color-mix(in oklab, var(--color-paper) 10%, transparent);
+}
+
+html:not(.js) .site-nav::before,
+html.stills-mode .site-nav::before {
+  opacity: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .story,
-  .story-only {
+  html.js:not(.stills-mode) .story,
+  html.js:not(.stills-mode) .story-only {
     display: none;
   }
 
-  .stills {
+  html.js:not(.stills-mode) .stills {
     display: block;
   }
 
