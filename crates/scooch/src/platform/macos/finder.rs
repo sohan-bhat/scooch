@@ -184,8 +184,16 @@ fn names() -> Result<Vec<String>> {
 
 fn fetch(property_code: u32) -> Result<Option<Retained<NSAppleEventDescriptor>>> {
     match send(property_code) {
-        Err(WOULD_ASK) if access(true) == Access::Allowed => send(property_code).or_else(failure),
+        Err(WOULD_ASK | TIMED_OUT) if consent() => send(property_code).or_else(failure),
         other => other.or_else(failure),
+    }
+}
+
+fn consent() -> bool {
+    match access(false) {
+        Access::Allowed => true,
+        Access::WouldAsk => access(true) == Access::Allowed,
+        _ => false,
     }
 }
 
