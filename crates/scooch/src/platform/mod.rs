@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "windows")]
-mod windows;
+#[cfg(any(target_os = "windows", test))]
+#[doc(hidden)]
+pub mod windows;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Screen {
