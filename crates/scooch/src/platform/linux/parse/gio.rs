@@ -1,6 +1,5 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::ffi::OsString;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 pub const BATCH: usize = 200;
@@ -76,12 +75,12 @@ pub fn uri_path(uri: &str) -> Option<PathBuf> {
         _ => return None,
     };
     let rest = rest.split(['?', '#']).next().unwrap_or(rest);
-    Some(PathBuf::from(OsString::from_vec(decode(rest))))
+    Some(bytes::to_path(decode(rest)))
 }
 
 pub fn path_uri(path: &Path) -> String {
     let mut out = String::from("file://");
-    for byte in path.as_os_str().as_bytes() {
+    for byte in bytes::of_path(path).iter() {
         let keep = byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' | b':' | b'@');
         if keep {
             out.push(*byte as char);
@@ -90,6 +89,36 @@ pub fn path_uri(path: &Path) -> String {
         }
     }
     out
+}
+
+pub mod bytes {
+    use super::Cow;
+    use std::path::{Path, PathBuf};
+
+    #[cfg(unix)]
+    pub fn to_path(bytes: Vec<u8>) -> PathBuf {
+        use std::os::unix::ffi::OsStringExt;
+        PathBuf::from(std::ffi::OsString::from_vec(bytes))
+    }
+
+    #[cfg(not(unix))]
+    pub fn to_path(bytes: Vec<u8>) -> PathBuf {
+        PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[cfg(unix)]
+    pub fn of_path(path: &Path) -> Cow<'_, [u8]> {
+        use std::os::unix::ffi::OsStrExt;
+        Cow::Borrowed(path.as_os_str().as_bytes())
+    }
+
+    #[cfg(not(unix))]
+    pub fn of_path(path: &Path) -> Cow<'_, [u8]> {
+        match path.to_string_lossy() {
+            Cow::Borrowed(text) => Cow::Borrowed(text.as_bytes()),
+            Cow::Owned(text) => Cow::Owned(text.into_bytes()),
+        }
+    }
 }
 
 pub fn location(text: &str) -> Option<PathBuf> {

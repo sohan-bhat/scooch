@@ -2,7 +2,6 @@ use super::geometry::Insets;
 use super::keyfile::{find, Group};
 use scooch_core::Rect;
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 pub const FOLDER: &str = "org.kde.plasma.folder";
@@ -149,7 +148,7 @@ pub fn occupied(positions: Option<&Positions>, present: &dyn Fn(&str) -> bool, c
 pub fn item_path(url: &str, desktop: &Path) -> Option<PathBuf> {
     if let Some(rest) = url.strip_prefix("desktop:/") {
         let rest = rest.trim_start_matches('/');
-        return Some(desktop.join(std::ffi::OsString::from_vec(super::gio::decode(rest))));
+        return Some(desktop.join(super::gio::bytes::to_path(super::gio::decode(rest))));
     }
     super::gio::uri_path(url)
 }
