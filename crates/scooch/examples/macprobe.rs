@@ -2161,6 +2161,7 @@ mod probe {
         seen: Vec<Seen>,
         log: Vec<String>,
         old: Option<PathBuf>,
+        old_still: Option<RgbImage>,
         old_tables: Option<Vec<u8>>,
     }
 
@@ -2218,6 +2219,7 @@ mod probe {
         let baseline = grab(display)?;
         let old = platform::current().ok().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
         let old_tables = old.as_deref().and_then(|old| tables_of(p, old));
+        let old_still = old.as_deref().and_then(|path| objc2::rc::autoreleasepool(|_| picture::decode(path)).ok()).map(|image| halved(&image));
         let menu = (30.0 * screen.scale) as usize;
         let lines = daemon_log(p).lines().count();
         drag(from, to);
@@ -2243,7 +2245,7 @@ mod probe {
             }
         }
         let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).collect();
-        Some(Dragged { dropped, seen, log, old, old_tables })
+        Some(Dragged { dropped, seen, log, old, old_still, old_tables })
     }
 
     fn logged(dragged: &Dragged, word: &str) -> Option<f64> {
@@ -2277,7 +2279,7 @@ mod probe {
         let desktop = platform::current().ok();
         let new = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
         let decode = |path: &Option<PathBuf>| path.as_deref().and_then(|path| objc2::rc::autoreleasepool(|_| picture::decode(path)).ok()).map(|image| halved(&image));
-        let (Some(old_still), Some(new_still)) = (decode(&dragged.old), decode(&new)) else {
+        let (Some(old_still), Some(new_still)) = (dragged.old_still.clone(), decode(&new)) else {
             p.line(format!("- {label}: the two stills could not be read, old {:?} new {new:?}", dragged.old));
             return false;
         };
@@ -2531,6 +2533,11 @@ mod probe {
         }
         set_motion(p, false);
         std::thread::sleep(Duration::from_millis(500));
+        let from = position(p, name).unwrap_or(subject);
+        let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
+        let (_, warm_log) = wallpaper_after(p, &screen, |_| drag(from, to));
+        p.line(format!("- a drag with reduce motion off again, so the next move has tables, log {warm_log:?}"));
+        quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
         let window = cover(marker, &screen)?;
         let target = if position(p, name).is_some_and(|at| (at.0 - subject.0).abs() < 5.0) { aside } else { subject };
         let (covered, covered_log) = wallpaper_after(p, &screen, |p| {
@@ -2542,8 +2549,9 @@ mod probe {
         drop(window);
         spin(0.4);
         let tick = |log: &[String]| log.iter().find_map(|line| line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<u64>().ok()));
-        p.line(format!("- a move while a window covers the whole desktop: new wallpaper after {covered:?} ms, tick {:?} ms against {:?} ms with glide off, log {covered_log:?}", tick(&covered_log), tick(&off_log)));
-        if covered.is_none() || tick(&covered_log).zip(tick(&off_log)).is_some_and(|(with, without)| with > without + 400 + 300) {
+        let hidden = covered_log.iter().any(|line| line.contains("glide skipped, hidden") || line.contains("glide skipped, helper budget"));
+        p.line(format!("- a move while a window covers the whole desktop: new wallpaper after {covered:?} ms, the daemon answered hidden {hidden}, tick {:?} ms against {:?} ms with glide off, log {covered_log:?}", tick(&covered_log), tick(&off_log)));
+        if covered.is_none() || !hidden || tick(&covered_log).zip(tick(&off_log)).is_some_and(|(with, without)| with > without + 400 + 300) {
             p.fail("a covered desktop delayed the plain swap");
         }
         std::thread::sleep(Duration::from_millis(1500));
