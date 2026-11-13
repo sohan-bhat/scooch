@@ -14,6 +14,7 @@ const HINT_AFTER: Duration = Duration::from_secs(4);
 const START_PATIENCE: Duration = Duration::from_secs(8);
 const POLL: Duration = Duration::from_millis(100);
 pub const STOP_PATIENCE: Duration = daemon::STOP_CAP.saturating_add(Duration::from_secs(2));
+pub const UNREADABLE_OFF: &str = "Scooch is off. It could not read its record of your wallpapers, so pick them again in your system settings.";
 pub const STOP_FAILED: &str = "Scooch could not stop its background program, so run scooch off again in a moment.";
 pub const NO_RESTORER: &str = "Nothing is running to switch them back, so run scooch off again to give up on them or scooch to turn Scooch back on.";
 const PICTURE_KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", "tiff", "bmp", "avif"];
@@ -250,6 +251,13 @@ pub fn off() -> Result<()> {
     desktop.screens()?;
     stop(&store)?;
     match wind_down(desktop.as_ref(), &store)? {
+        Off::Unreadable => {
+            desktop.autostart(None)?;
+            if let Some(line) = store.aside_line() {
+                println!("{line}");
+            }
+            println!("{UNREADABLE_OFF}");
+        }
         Off::Done { lost } => {
             desktop.autostart(None)?;
             println!("{}", off_line(!lost));
@@ -268,6 +276,7 @@ pub fn off() -> Result<()> {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Off {
+    Unreadable,
     Done { lost: bool },
     Pending(usize),
     GaveUp(usize),
@@ -277,6 +286,12 @@ pub fn wind_down(desktop: &dyn Desktop, store: &Store) -> Result<Off> {
     let screens = desktop.screens()?;
     let known = desktop.known().ok().flatten();
     let mut state = store.load();
+    if state.screens.is_empty() && store.aside_file().is_file() {
+        state.on = false;
+        state.restoring = false;
+        store.save(&state)?;
+        return Ok(Off::Unreadable);
+    }
     let was_restoring = state.restoring;
     let settled = daemon::settle_screens(&mut state, desktop, store, &screens, known.as_deref())?;
     let off = match (state.screens.len(), was_restoring) {
@@ -1023,6 +1038,17 @@ mod tests {
         state.screens.insert("R".into(), Entry::new(Path::new("/p/a.jpg")));
         assert_eq!(describe(&state, true, None), vec!["Scooch is off. 1 desktops or screens switch back the next time they show."]);
         assert_eq!(describe(&state, false, None)[1], NO_RESTORER);
+    }
+
+    #[test]
+    fn off_after_an_unreadable_record_deletes_nothing() {
+        let (fake, store, _, _) = pair("unreadableoff");
+        std::fs::write(store.state_file(), b"{ broken").unwrap();
+        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Unreadable);
+        assert!(store.output("L", 1, "jpg").exists() && store.output("R", 1, "jpg").exists());
+        assert!(store.aside_file().is_file());
+        assert!(!store.load().on);
+        assert!(!UNREADABLE_OFF.contains(['—', ';', '(']) && !UNREADABLE_OFF.contains(": "));
     }
 
     #[test]

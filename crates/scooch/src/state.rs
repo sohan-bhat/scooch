@@ -248,7 +248,12 @@ pub fn write_parts(path: &Path, parts: &[&[u8]]) -> Result<()> {
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let serial = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let partial = path.with_file_name(format!(".{name}.{}.{serial}.part", std::process::id()));
-    let written = fs::File::create(&partial).and_then(|mut file| parts.iter().try_for_each(|part| file.write_all(part))).and_then(|()| fs::rename(&partial, path));
+    let written = fs::File::create(&partial)
+        .and_then(|mut file| {
+            parts.iter().try_for_each(|part| file.write_all(part))?;
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&partial, path));
     if written.is_err() {
         let _ = fs::remove_file(&partial);
     }
