@@ -10,7 +10,7 @@ pub const LATEST_RC: &str = "icons.screen.latest.rc";
 pub const VERSION_GROUP: &str = "xfdesktop-version-4.10.3+";
 pub const MIN_MARGIN: i64 = 8;
 pub const DEFAULT_ICON_SIZE: f64 = 48.0;
-pub const INSETS: Insets = Insets { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+pub const INSETS: Insets = Insets { left: 2.0, top: 6.0, right: 8.0, bottom: 6.0 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Style {

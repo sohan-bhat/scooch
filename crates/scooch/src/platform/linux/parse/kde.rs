@@ -8,11 +8,12 @@ pub const FOLDER: &str = "org.kde.plasma.folder";
 pub const APPLETS: &str = "plasma-org.kde.plasma.desktop-appletsrc";
 pub const SHELL: &str = "plasmashellrc";
 pub const IMAGE_PLUGIN: &str = "org.kde.image";
-pub const INSETS: Insets = Insets { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+pub const INSETS: Insets = Insets { left: 6.0, top: 10.0, right: 5.0, bottom: 5.0 };
 pub const PLASMA6_SIZES: [f64; 10] = [22.0, 32.0, 48.0, 64.0, 96.0, 128.0, 160.0, 192.0, 224.0, 256.0];
 pub const PLASMA5_SIZES: [f64; 7] = [22.0, 32.0, 48.0, 64.0, 96.0, 128.0, 256.0];
 pub const SMALL_ICON: f64 = 16.0;
 pub const GRID_UNIT: f64 = 18.0;
+pub const PLASMA5_GRID_UNIT: f64 = 21.0;
 pub const SMALL_SPACING: f64 = 4.0;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -175,7 +176,7 @@ impl Layout {
             text_lines: containment.setting("textLines").unwrap_or(2) as f64,
             rows_first: containment.setting("arrangement").unwrap_or(0) == 0,
             right_to_left: containment.setting("alignment").unwrap_or(0) != 0,
-            grid_unit: GRID_UNIT,
+            grid_unit: if plasma6 { GRID_UNIT } else { PLASMA5_GRID_UNIT },
         }
     }
 
@@ -456,6 +457,12 @@ mod tests {
         assert_eq!(columns.rect(10, &area), Rect { x: 112.0, y: 115.0, w: 112.0, h: 115.0 });
         let mirrored = Layout { right_to_left: true, ..layout };
         assert_eq!(mirrored.rect(0, &area).x, 1920.0 - 112.0);
+    }
+
+    #[test]
+    fn plasma5_cells_match_the_measured_desktop() {
+        let layout = Layout { plasma6: false, icon: 64.0, label_width: 1.0, text_lines: 2.0, rows_first: true, right_to_left: false, grid_unit: PLASMA5_GRID_UNIT };
+        assert_eq!(layout.cell(1920.0, 1030.0), (120.0, 128.0));
     }
 
     #[test]

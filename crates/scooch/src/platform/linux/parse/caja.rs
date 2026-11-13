@@ -11,9 +11,10 @@ pub const STANDARD_ICON: f64 = 48.0;
 pub const MAX_TEXT_WIDTH: f64 = 135.0;
 pub const LABEL_OFFSET: f64 = 1.0;
 pub const TEXT_PADDING_Y: f64 = 1.0;
-pub const LINE: f64 = 16.0;
+pub const LINE: f64 = 21.0;
+pub const TEXT_PADDING_X: f64 = 4.0;
 pub const LINKS: [(&str, &str); 4] = [("computer", "computer-icon-visible"), ("home", "home-icon-visible"), ("trash", "trash-icon-visible"), ("network", "network-icon-visible")];
-pub const INSETS: Insets = Insets { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+pub const INSETS: Insets = Insets { left: 0.0, top: -2.0, right: 0.0, bottom: 0.0 };
 
 pub fn zoom_index(name: &str) -> i64 {
     match name.trim().trim_matches('\'') {
@@ -96,7 +97,7 @@ impl Layout {
         let icon = icon_size(self.zoom) * scale;
         let left = self.left + at.0 * units;
         let top = self.top + at.1 * units;
-        let wide = icon.max(MAX_TEXT_WIDTH * units);
+        let wide = icon.max(MAX_TEXT_WIDTH * units + 2.0 * TEXT_PADDING_X);
         let tall = icon + LABEL_OFFSET + self.lines * LINE + 2.0 * TEXT_PADDING_Y;
         let center = left + icon / 2.0;
         Rect { x: (center - wide / 2.0) as f32, y: top as f32, w: wide as f32, h: tall as f32 }
@@ -112,7 +113,7 @@ mod tests {
     fn a_standard_icon_has_a_label_box_under_it() {
         let layout = Layout { zoom: 3, left: 0.0, top: 32.0, lines: 3.0 };
         let rect = layout.rect((10.0, 10.0), 1.0);
-        assert_eq!(rect, Rect { x: 10.0 + 24.0 - 67.5, y: 42.0, w: 135.0, h: 48.0 + 1.0 + 48.0 + 2.0 });
+        assert_eq!(rect, Rect { x: 10.0 + 24.0 - 71.5, y: 42.0, w: 143.0, h: 48.0 + 1.0 + 63.0 + 2.0 });
     }
 
     #[test]
@@ -120,8 +121,8 @@ mod tests {
         let layout = Layout { zoom: 4, left: 0.0, top: 0.0, lines: 2.0 };
         assert_eq!(layout.units(), 1.5);
         let rect = layout.rect((100.0, 40.0), 1.0);
-        assert_eq!((rect.y, rect.w), (60.0, 202.5));
-        assert_eq!(rect.x, 150.0 + 36.0 - 101.25);
+        assert_eq!((rect.y, rect.w), (60.0, 210.5));
+        assert_eq!(rect.x, 150.0 + 36.0 - 105.25);
         let big = Layout { zoom: 3, left: 0.0, top: 0.0, lines: 1.0 }.rect((0.0, 0.0), 4.0);
         assert_eq!(big.w, 192.0);
     }

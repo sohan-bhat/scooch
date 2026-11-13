@@ -8,7 +8,7 @@ pub const POSITION_KEY: &str = "metadata::nautilus-icon-position";
 pub const BUS_NAME: &str = "com.rastersoft.dingextension";
 pub const ACTIONS_PATH: &str = "/com/rastersoft/dingextension/control";
 pub const GTK4_FORK_BUS_NAME: &str = "com.desktop.dingextension";
-pub const INSETS: Insets = Insets { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+pub const INSETS: Insets = Insets { left: 0.0, top: 6.0, right: 5.0, bottom: -3.0 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Size {
@@ -431,7 +431,8 @@ mod tests {
         let doubled = Monitor { x: 0.0, y: 0.0, width: 3840.0, height: 2160.0, zoom: 2.0, margins: [64.0, 0.0, 0.0, 0.0], window: Some([64.0, 0.0, 0.0, 0.0]), index: 0, primary: 0 };
         let mut grids = vec![Grid::new(&doubled, size("standard"), Mode::default()).unwrap()];
         let placed = place(&mut grids, &[Item::default()], &prefs());
-        let found = rects(&grids, &placed, &[screen("DP-1", 0.0, 1920.0, 1080.0, 2.0)], &INSETS);
+        let none = Insets { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+        let found = rects(&grids, &placed, &[screen("DP-1", 0.0, 1920.0, 1080.0, 2.0)], &none);
         assert_eq!(found, vec![Rect { x: 2.0, y: 34.0, w: 124.0, h: 112.0 }]);
     }
 
