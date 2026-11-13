@@ -423,17 +423,32 @@ impl Gpu {
         Ok(encoder)
     }
 
-    pub fn snapshot(&self, width: u32, height: u32, layers: &[(Look, f32)]) -> Result<RgbImage, String> {
-        let target = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("snapshot"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    fn target(&self, width: u32, height: u32) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen"),
+            size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: OUTPUT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
-        });
+        })
+    }
+
+    pub fn time(&self, width: u32, height: u32, layers: &[(Look, f32)]) -> Result<std::time::Duration, String> {
+        let target = self.target(width, height);
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|error| format!("the device did not go idle {error}"))?;
+        let started = std::time::Instant::now();
+        let encoder = self.encode(&view, layers)?;
+        self.queue.submit([encoder.finish()]);
+        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|error| format!("the frame did not finish {error}"))?;
+        Ok(started.elapsed())
+    }
+
+    pub fn snapshot(&self, width: u32, height: u32, layers: &[(Look, f32)]) -> Result<RgbImage, String> {
+        let target = self.target(width, height);
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.encode(&view, layers)?;
         let row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;

@@ -30,6 +30,7 @@ pub struct Gpu {
     pipelines: Arc<Mutex<Vec<Pipeline>>>,
     scenes: Arc<Result<glide::Pipes, String>>,
     pub name: String,
+    pub kind: &'static str,
 }
 
 #[derive(Clone)]
@@ -74,9 +75,16 @@ impl Gpu {
         };
         let info = adapter.get_info();
         let name = format!("{} {:?} {:?}", info.name, info.device_type, info.backend);
+        let kind = match info.device_type {
+            wgpu::DeviceType::Cpu => "cpu",
+            wgpu::DeviceType::IntegratedGpu => "integrated",
+            wgpu::DeviceType::DiscreteGpu => "discrete",
+            wgpu::DeviceType::VirtualGpu => "virtual",
+            wgpu::DeviceType::Other => "other",
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|error| format!("request device {error}"))?;
         let scenes = Arc::new(glide::pipes(&device));
-        let gpu = Self { instance, adapter, device, queue, composition, pipelines: Arc::new(Mutex::new(Vec::new())), scenes, name };
+        let gpu = Self { instance, adapter, device, queue, composition, pipelines: Arc::new(Mutex::new(Vec::new())), scenes, name, kind };
         gpu.pipeline(wgpu::TextureFormat::Bgra8Unorm);
         Ok(gpu)
     }
