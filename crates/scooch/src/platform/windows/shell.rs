@@ -17,6 +17,7 @@ use ::windows::Win32::UI::Shell::{
     IEnumIDList, IFolderView2, IShellBrowser, IShellFolder, IShellView, IShellWindows, ShellWindows, StrRetToStrW, CSIDL_DESKTOP, FOLDERVIEWMODE, SHGDN_NORMAL, SID_STopLevelBrowser, SVGIO_ALLVIEW, SWC_DESKTOP,
     SWFO_NEEDDISPATCH,
 };
+use ::windows::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use ::windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetShellWindow, IsWindowVisible, SystemParametersInfoW, SPI_GETICONTITLELOGFONT, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS};
 
 pub const UNREADABLE: &str = "Scooch could not read the desktop icons, so it will try again at the next change.";
@@ -134,9 +135,17 @@ pub struct Font {
 }
 
 impl Font {
-    pub fn open() -> Result<Font> {
+    pub fn open(view: &View) -> Result<Font> {
+        Self::for_dpi(unsafe { GetDpiForWindow(view.list) })
+    }
+
+    pub fn for_dpi(dpi: u32) -> Result<Font> {
         let mut logical = LOGFONTW::default();
-        unsafe { SystemParametersInfoW(SPI_GETICONTITLELOGFONT, size_of::<LOGFONTW>() as u32, Some(&mut logical as *mut LOGFONTW as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) }?;
+        let pointer = Some(&mut logical as *mut LOGFONTW as *mut c_void);
+        let size = size_of::<LOGFONTW>() as u32;
+        if dpi == 0 || unsafe { SystemParametersInfoForDpi(SPI_GETICONTITLELOGFONT.0, size, pointer, 0, dpi) }.is_err() {
+            unsafe { SystemParametersInfoW(SPI_GETICONTITLELOGFONT, size, Some(&mut logical as *mut LOGFONTW as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) }?;
+        }
         let font = unsafe { CreateFontIndirectW(&logical) };
         if font.is_invalid() {
             bail!("Windows has no icon title font.");
@@ -191,7 +200,7 @@ pub fn icons() -> Result<Vec<Rect>> {
     if items.is_empty() {
         return Ok(Vec::new());
     }
-    let font = Font::open().context(UNREADABLE)?;
+    let font = Font::open(&view).context(UNREADABLE)?;
     let cell = cell(&view, font.line).context(UNREADABLE)?;
     Ok(rects(&items, &cell, &font, &SPACING))
 }
