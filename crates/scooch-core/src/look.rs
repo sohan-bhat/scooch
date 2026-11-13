@@ -5,6 +5,7 @@ use rayon::prelude::*;
 use std::collections::VecDeque;
 
 pub const P: usize = 16;
+pub const HOLD: (f32, f32) = (-0.6, 0.4);
 const BELONG_SALIENCY: (f32, f32) = (0.10, 0.35);
 const BELONG_BUSY: (f32, f32) = (0.20, 0.45);
 const BELONG_SPREAD: f32 = 0.35;
@@ -18,9 +19,10 @@ const SKY_JUMP: f32 = 0.03;
 const SKY_SPREAD: f32 = 0.15;
 const SKY_EDGE: (f32, f32) = (0.4, 0.6);
 const TINT_SPREAD: f32 = 0.5;
+const TINT_FLOOR: f32 = 0.02;
 const RIPPLE_CALM: (f32, f32) = (0.25, 0.45);
 const VOLUME: f32 = 0.35;
-const OPEN_RAMP: f32 = 0.7;
+const OPEN_RAMP: f32 = 0.45;
 const OPEN_SPREAD: f32 = 0.15;
 const LIGHT_SPREAD: f32 = 0.08;
 
@@ -95,7 +97,7 @@ fn byte(v: f32) -> u8 {
 pub fn none(grid: Grid, width: usize, height: usize) -> Scenic {
     let paint_grid = Grid::of(width, height, P);
     Scenic {
-        field: vec![FAR; grid.w * grid.h],
+        field: vec![HOLD.1; grid.w * grid.h],
         look: vec![0; grid.w * grid.h * 4],
         paints: vec![0; paint_grid.w * paint_grid.h * 4 * LAYERS],
         paint_grid,
@@ -126,10 +128,10 @@ pub fn build(base: &Base, input: &Sampled, options: &Options, materials: &Materi
         .zip(&sky)
         .map(|(c, s)| if options.scenery == Scenery::Auto { c * smoothstep(SEAM.0, SEAM.1, (2.0 * s - 1.0).abs()) } else { *c })
         .collect();
-    let clouds = shape::clouds(base);
+    let clouds = shape::clouds(base, |i| sky[i] > 0.0);
     let mixed: Vec<f32> = base.d.iter().zip(&clouds).zip(&sky).map(|((l, c), s)| l + (c - l) * s).collect();
     let shade = blurred(&shape::shade(base), &grid, spread(OPEN_SPREAD));
-    let billows = shape::billows(&grid, u);
+    let billows = shape::billows(&grid, u, |i| sky[i] > 0.0 && base.d[i] < FAR * u * 0.5);
     let light: Vec<f32> = (0..cells)
         .into_par_iter()
         .map(|i| {
@@ -150,19 +152,36 @@ pub fn build(base: &Base, input: &Sampled, options: &Options, materials: &Materi
         })
         .collect();
     let paint_grid = Grid::of(width, height, P);
-    let channels: Vec<Vec<f32>> = (0..3).map(|k| blurred(&lab.iter().map(|c| c[k]).collect::<Vec<f32>>(), &grid, spread(TINT_SPREAD))).collect();
-    let rough = blurred(input.busy, &grid, spread(TINT_SPREAD));
-    let mut paints = vec![0u8; paint_grid.w * paint_grid.h * 4 * LAYERS];
-    let plane = paint_grid.w * paint_grid.h * 4;
+    let step = P / grid.cell;
+    let pool = |values: &dyn Fn(usize) -> f32| -> Vec<f32> {
+        (0..paint_grid.w * paint_grid.h)
+            .map(|i| {
+                let (px, py) = ((i % paint_grid.w) * step, (i / paint_grid.w) * step);
+                let (mut sum, mut count) = (0.0f32, 0.0f32);
+                for y in py..(py + step).min(grid.h) {
+                    for x in px..(px + step).min(grid.w) {
+                        sum += values(y * grid.w + x);
+                        count += 1.0;
+                    }
+                }
+                sum / count.max(1.0)
+            })
+            .collect()
+    };
+    let wide = spread(TINT_SPREAD) / step as f32;
+    let weight = |i: usize| raw[i] + TINT_FLOOR;
+    let share = blur::gaussian(&pool(&weight), paint_grid.w, paint_grid.h, wide);
+    let channels: Vec<Vec<f32>> = (0..3)
+        .into_par_iter()
+        .map(|k| blur::gaussian(&pool(&|i| lab[i][k] * weight(i)), paint_grid.w, paint_grid.h, wide).iter().zip(&share).map(|(v, w)| v / w.max(1e-6)).collect())
+        .collect();
+    let rough = blur::gaussian(&pool(&|i| input.busy[i]), paint_grid.w, paint_grid.h, wide);
     let tones: Vec<(paint::Tones, f32)> = (0..paint_grid.w * paint_grid.h)
         .into_par_iter()
-        .map(|i| {
-            let (px, py) = paint_grid.center(i);
-            let (gx, gy) = (grid.at(px), grid.at(py));
-            let local = [grid.linear(&channels[0], gx, gy), grid.linear(&channels[1], gx, gy), grid.linear(&channels[2], gx, gy)];
-            (paint::tones(materials, local), 1.0 - smoothstep(RIPPLE_CALM.0, RIPPLE_CALM.1, grid.linear(&rough, gx, gy)))
-        })
+        .map(|i| (paint::tones(materials, [channels[0][i], channels[1][i], channels[2][i]]), 1.0 - smoothstep(RIPPLE_CALM.0, RIPPLE_CALM.1, rough[i])))
         .collect();
+    let mut paints = vec![0u8; paint_grid.w * paint_grid.h * 4 * LAYERS];
+    let plane = paint_grid.w * paint_grid.h * 4;
     for (i, (t, still)) in tones.iter().enumerate() {
         for (layer, rgb) in t.colors.iter().enumerate() {
             let alpha = match layer {
@@ -178,5 +197,5 @@ pub fn build(base: &Base, input: &Sampled, options: &Options, materials: &Materi
             paints[at + 3] = byte(alpha);
         }
     }
-    Scenic { field: mixed.iter().map(|d| d / u).collect(), look, paints, paint_grid, belong }
+    Scenic { field: mixed.iter().map(|d| (d / u).clamp(HOLD.0, HOLD.1)).collect(), look, paints, paint_grid, belong }
 }
