@@ -1,4 +1,4 @@
-import type { DepthOfFieldEffect, NoiseEffect } from 'postprocessing';
+import type { DepthOfFieldEffect, EffectComposer, NoiseEffect } from 'postprocessing';
 import type { Vector3 } from 'three';
 
 export type Toggle = { enabled: boolean };
@@ -30,21 +30,45 @@ const lightSteps: Step[] = [
 export type Tier = 'full' | 'light';
 export type GpuClass = 'low' | 'mid' | 'high';
 
-export function gpuClass(): { gpu: GpuClass; renderer: string } {
+type Probe = { gpu: GpuClass; renderer: string; extensions: Set<string> };
+
+const compressed = [
+  'WEBGL_compressed_texture_astc',
+  'WEBGL_compressed_texture_etc1',
+  'WEBGL_compressed_texture_etc',
+  'WEBGL_compressed_texture_s3tc',
+  'EXT_texture_compression_bptc',
+  'WEBGL_compressed_texture_pvrtc',
+  'WEBKIT_WEBGL_compressed_texture_pvrtc',
+];
+
+let probed: Probe | null = null;
+
+function classify(renderer: string): GpuClass {
+  const mobile = /Android|iPhone|iPad|Mobi/i.test(navigator.userAgent);
+  if (mobile || /Intel|Mali|Adreno|PowerVR|SwiftShader|llvmpipe|Software|Basic Render/i.test(renderer)) return 'low';
+  if (/Radeon|AMD/i.test(renderer)) return 'mid';
+  return 'high';
+}
+
+export function gpuClass(): Probe {
+  if (probed) return probed;
+  const extensions = new Set<string>();
   try {
     const canvas = document.createElement('canvas');
     const gl = canvas.getContext('webgl2', { powerPreference: 'high-performance' });
-    if (!gl) return { gpu: 'low', renderer: 'none' };
+    if (!gl) return (probed = { gpu: 'low', renderer: 'none', extensions });
     const info = gl.getExtension('WEBGL_debug_renderer_info');
     const renderer = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+    for (const name of compressed) if (gl.getExtension(name)) extensions.add(name);
+    const astc = gl.getExtension('WEBGL_compressed_texture_astc');
+    if (astc?.getSupportedProfiles().includes('hdr')) extensions.add('astc-hdr');
     gl.getExtension('WEBGL_lose_context')?.loseContext();
-    const mobile = /Android|iPhone|iPad|Mobi/i.test(navigator.userAgent);
-    if (mobile || /Intel|Mali|Adreno|PowerVR|SwiftShader|llvmpipe|Software|Basic Render/i.test(renderer)) return { gpu: 'low', renderer };
-    if (/Radeon|AMD/i.test(renderer)) return { gpu: 'mid', renderer };
-    return { gpu: 'high', renderer };
+    probed = { gpu: classify(renderer), renderer, extensions };
   } catch {
-    return { gpu: 'low', renderer: 'unknown' };
+    probed = { gpu: 'low', renderer: 'unknown', extensions };
   }
+  return probed;
 }
 
 const starts: Record<GpuClass, Step> = {
@@ -62,6 +86,7 @@ class Quality {
   dof: DepthOfFieldEffect | null = null;
   ao: Toggle | null = null;
   noise: NoiseEffect | null = null;
+  composer: EffectComposer | null = null;
   setDpr: ((dpr: number) => void) | null = null;
   onChange: (() => void) | null = null;
 

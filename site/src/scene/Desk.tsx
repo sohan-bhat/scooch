@@ -1,34 +1,128 @@
 import { useGLTF } from '@react-three/drei';
 import { useThree } from '@react-three/fiber';
-import { useLayoutEffect, useMemo } from 'react';
-import { Box3, Group, Mesh, MeshStandardMaterial, Object3D, Vector3, type WebGLRenderer } from 'three';
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { Box3, Group, Mesh, MeshStandardMaterial, Object3D, Vector3, type Texture, type WebGLRenderer } from 'three';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { asset } from '@/lib/base';
+import { runtime } from '@/story/state';
+import { gpuClass } from './quality';
+import { layoutFor } from './shots';
 
 export const DESK_TOP = 0.787;
 export const LAPTOP = { position: [0.13, DESK_TOP, 0.05] as const, rotation: -0.21, scale: 0.5, lid: -0.16 };
 export const LAMP = { position: [0.04, DESK_TOP, -0.44] as const, rotation: Math.PI + 0.38 };
 export const BULB = new Vector3(-0.005, 0.69, -0.177);
 
-const urls = {
-  desk: asset('models/desk.glb'),
-  laptop: asset('models/laptop.glb'),
-  lamp: asset('models/lamp.glb'),
-  notepads: asset('models/notepads.glb'),
-  stationery: asset('models/stationery.glb'),
-};
+const names = ['desk', 'laptop', 'lamp', 'notepads', 'stationery'] as const;
+type Name = (typeof names)[number];
 
+function pick(folder: string) {
+  return Object.fromEntries(names.map((name) => [name, asset(`${folder}/${name}.glb`)])) as Record<Name, string>;
+}
+
+const full = pick('models');
+const lite = !new URLSearchParams(window.location.search).has('still');
+const urls = lite ? pick('models/lite') : full;
+
+const support = gpuClass();
 const ktx2 = new KTX2Loader().setTranscoderPath(asset('basis/'));
-let supported = false;
+ktx2.detectSupport({
+  extensions: {
+    has: (name: string) => support.extensions.has(name),
+    get: () => ({ getSupportedProfiles: () => (support.extensions.has('astc-hdr') ? ['ldr', 'hdr'] : ['ldr']) }),
+  },
+} as never);
 
-function useKtx2(gl: WebGLRenderer) {
-  if (!supported) {
-    ktx2.detectSupport(gl);
-    supported = true;
+function extend(loader: { setKTX2Loader: (value: never) => unknown }) {
+  loader.setKTX2Loader(ktx2 as never);
+}
+
+for (const name of names) useGLTF.preload(urls[name], false, true, extend as never);
+
+const slots = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap'] as const;
+
+function standardMaterials(root: Object3D) {
+  const found = new Map<string, Set<MeshStandardMaterial>>();
+  root.traverse((child) => {
+    const mesh = child as Mesh;
+    const material = mesh.material as MeshStandardMaterial | undefined;
+    if (!mesh.isMesh || !material?.isMeshStandardMaterial) return;
+    if (!found.has(material.name)) found.set(material.name, new Set());
+    found.get(material.name)?.add(material);
+  });
+  return found;
+}
+
+function nextFrame() {
+  return new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+async function swapTextures(gl: WebGLRenderer, scene: Object3D, source: Object3D, cancelled: () => boolean) {
+  const sources = standardMaterials(source);
+  const targets = standardMaterials(scene);
+  const swaps: [MeshStandardMaterial, (typeof slots)[number], Texture][] = [];
+  for (const [materialName, found] of sources) {
+    const from = [...found][0];
+    for (const material of targets.get(materialName) ?? []) {
+      for (const slot of slots) {
+        const next = from[slot];
+        if (next && material[slot] && material[slot] !== next) swaps.push([material, slot, next]);
+      }
+    }
   }
-  return (loader: { setKTX2Loader: (value: never) => unknown }) => {
-    loader.setKTX2Loader(ktx2 as never);
-  };
+  const uploaded = new Set<Texture>();
+  for (const [, , texture] of swaps) {
+    if (uploaded.has(texture)) continue;
+    uploaded.add(texture);
+    await nextFrame();
+    if (cancelled()) return false;
+    gl.initTexture(texture);
+  }
+  const replaced = new Set<Texture>();
+  for (const [material, slot, texture] of swaps) {
+    const previous = material[slot];
+    if (previous) replaced.add(previous);
+    material[slot] = texture;
+  }
+  for (const texture of replaced) if (!uploaded.has(texture)) texture.dispose();
+  return true;
+}
+
+function Sharpen({ name, onDone }: { name: Name; onDone: () => void }) {
+  const gl = useThree((state) => state.gl);
+  const scene = useThree((state) => state.scene);
+  const gltf = useGLTF(full[name], false, true, extend);
+  useEffect(() => {
+    let stopped = false;
+    void swapTextures(gl, scene, gltf.scene, () => stopped).then((done) => {
+      if (done && !stopped) onDone();
+    });
+    return () => {
+      stopped = true;
+    };
+  }, [gl, scene, gltf, onDone]);
+  return null;
+}
+
+function Sharpener() {
+  const [index, setIndex] = useState(-1);
+  const next = useCallback(() => setIndex((value) => value + 1), []);
+  useEffect(() => {
+    if (!lite) return;
+    let timer = 0;
+    const begin = () => {
+      if (runtime.ready && layoutFor(window.innerWidth, window.innerHeight) !== 'phone') setIndex(0);
+      else timer = window.setTimeout(begin, 400);
+    };
+    timer = window.setTimeout(begin, 400);
+    return () => window.clearTimeout(timer);
+  }, []);
+  if (index < 0 || index >= names.length) return null;
+  return (
+    <Suspense fallback={null}>
+      <Sharpen key={names[index]} name={names[index]} onDone={next} />
+    </Suspense>
+  );
 }
 
 type Placement = { name: string; x: number; z: number; rotation: number; lift?: number };
@@ -82,7 +176,6 @@ function placeOnDesk(object: Object3D, placement: Placement) {
 }
 
 export function Desk({ onScreen, showProps }: { onScreen: (mesh: Mesh, frame: Group) => void; showProps: boolean }) {
-  const extend = useKtx2(useThree((state) => state.gl));
   const desk = useGLTF(urls.desk, false, true, extend);
   const laptop = useGLTF(urls.laptop, false, true, extend);
   const lamp = useGLTF(urls.lamp, false, true, extend);
@@ -138,6 +231,7 @@ export function Desk({ onScreen, showProps }: { onScreen: (mesh: Mesh, frame: Gr
         <primitive object={lamp.scene} />
       </group>
       <primitive object={groups.placed} visible={showProps} />
+      <Sharpener />
     </group>
   );
 }
