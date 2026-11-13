@@ -1,5 +1,5 @@
 use crate::platform::{Desktop, Format, Screen, Snapshot};
-use crate::state::{display_of, file_safe, parse, same, write_atomic, Entry, State, Store, Tally};
+use crate::state::{display_of, file_safe, parse, same, write_atomic, Entry, Lock, State, Store, Tally};
 use crate::{cache, poke, scene};
 use anyhow::{Context, Result};
 use scooch_core::{Analysis, Options, Placement, RgbImage, Scene};
@@ -879,6 +879,31 @@ fn finish(store: &Store, stop: &Stop) -> ! {
     std::process::exit(0)
 }
 
+pub const LOCK_PATIENCE: Duration = Duration::from_secs(7);
+const LOCK_POLL: Duration = Duration::from_millis(100);
+pub const ALREADY: &str = "Scooch is already running.";
+
+pub fn hold(store: &Store, patience: Duration, poll: Duration) -> Result<Option<Lock>> {
+    let started = Instant::now();
+    loop {
+        if let Some(lock) = store.lock()? {
+            return Ok(Some(lock));
+        }
+        if started.elapsed() >= patience {
+            return Ok(None);
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+pub fn gave_up(state: &State) -> Result<()> {
+    if state.on || state.restoring {
+        anyhow::bail!(ALREADY);
+    }
+    println!("{ALREADY}");
+    Ok(())
+}
+
 pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     let signal = Arc::new(Signal::default());
     let stop = Arc::new(Stop::default());
@@ -892,9 +917,8 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             finish(&stopped, &stopper);
         },
     )?;
-    let Some(_lock) = store.lock()? else {
-        println!("Scooch is already running.");
-        return Ok(());
+    let Some(_lock) = hold(&store, LOCK_PATIENCE, LOCK_POLL)? else {
+        return gave_up(&store.load());
     };
     if let Err(error) = store.mark(Some(crate::state::PROGRAM)) {
         eprintln!("{error}");
@@ -1952,6 +1976,23 @@ pub mod tests {
         assert_eq!(unloads(), 2);
         release(fake.as_ref(), &daemon.store, &Report::default(), &Stop::default());
         assert_eq!(unloads(), 2);
+    }
+
+    #[test]
+    fn a_new_daemon_waits_for_the_old_one_to_let_go() {
+        let store = Store::at(scratch("handover"));
+        let old = store.lock().unwrap().unwrap();
+        assert!(hold(&store, Duration::from_millis(200), Duration::from_millis(20)).unwrap().is_none());
+        let letting_go = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(old);
+        });
+        assert!(hold(&store, Duration::from_secs(5), Duration::from_millis(20)).unwrap().is_some());
+        letting_go.join().unwrap();
+        assert_eq!(LOCK_PATIENCE, Duration::from_secs(7));
+        assert_eq!(gave_up(&State { on: true, ..State::default() }).unwrap_err().to_string(), ALREADY);
+        assert!(gave_up(&State { restoring: true, ..State::default() }).is_err());
+        assert!(gave_up(&State::default()).is_ok());
     }
 
     #[test]
