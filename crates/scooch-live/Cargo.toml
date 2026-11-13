@@ -1,0 +1,13 @@
+[package]
+name = "scooch-live"
+description = "Draws Scooch's live wallpaper frames on the GPU."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["wgsl", "dx12", "metal"] }
+raw-window-handle = "0.6"
+pollster = "0.4"
