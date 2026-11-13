@@ -2,7 +2,7 @@ use std::path::Path;
 
 pub const GNOME_KEYS: [&str; 3] = ["/org/gnome/desktop/background/", "/org/gnome/desktop/interface/color-scheme", "/org/gnome/shell/extensions/ding/"];
 pub const CINNAMON_KEYS: [&str; 2] = ["/org/cinnamon/desktop/background/", "/org/nemo/desktop/"];
-pub const MATE_KEYS: [&str; 2] = ["/org/mate/desktop/background/", "/org/mate/caja/desktop/"];
+pub const MATE_KEYS: [&str; 3] = ["/org/mate/desktop/background/", "/org/mate/caja/desktop/", "/org/mate/caja/icon-view/"];
 pub const GVFS_RULE: &str = "type='signal',interface='org.gtk.vfs.Metadata',member='AttributeChanged'";
 pub const DCONF_RULE: &str = "type='signal',interface='ca.desrt.dconf.Writer',member='Notify'";
 pub const XFCONF_RULE: &str = "type='signal',interface='org.xfce.Xfconf',member='PropertyChanged'";
@@ -43,6 +43,10 @@ pub fn wallpaper_property(channel: &str, property: &str) -> bool {
 
 pub fn kde_file(name: &str) -> bool {
     name == super::kde::APPLETS || name == super::kde::SHELL
+}
+
+pub fn desktop_metadata(name: &str) -> bool {
+    name == super::nemo::METADATA_FILE
 }
 
 pub fn xfce_file(name: &str) -> bool {
@@ -106,6 +110,8 @@ mod tests {
         assert!(xfce_file("icons.screen0-1904x1064.rc"));
         assert!(xfce_file("icons.screen.latest.rc"));
         assert!(!xfce_file("icons.screen0.yaml.new"));
+        assert!(desktop_metadata("desktop-metadata"));
+        assert!(!desktop_metadata("desktop-metadata.LT1Q2"));
     }
 
     #[test]

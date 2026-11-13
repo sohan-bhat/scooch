@@ -1,3 +1,4 @@
+pub mod caja;
 pub mod desktop;
 pub mod ding;
 pub mod entry;
@@ -6,6 +7,7 @@ pub mod gio;
 pub mod gvariant;
 pub mod kde;
 pub mod keyfile;
+pub mod nemo;
 pub mod record;
 pub mod wakes;
 pub mod xfce;
