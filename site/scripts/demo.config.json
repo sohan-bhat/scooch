@@ -43,36 +43,36 @@
   ],
   "layouts": {
     "start": {
-      "trip": [
-        40,
-        40
-      ],
-      "taxes": [
-        40,
-        210
-      ],
       "notes": [
-        40,
-        380
+        130,
+        540
       ],
       "resume": [
-        40,
-        550
+        280,
+        600
       ],
-      "shot": [
-        210,
-        210
+      "taxes": [
+        150,
+        710
+      ],
+      "trip": [
+        980,
+        90
       ],
       "recipes": [
-        210,
-        380
+        1110,
+        140
+      ],
+      "shot": [
+        1030,
+        250
       ]
     }
   },
   "drag": {
     "icon": "shot",
     "to": [
-      360,
+      510,
       640
     ]
   },
@@ -100,9 +100,10 @@
   },
   "pictures": [
     {
-      "id": "frost",
-      "photo": "../assets/photos/frosty-tree.jpg",
+      "id": "swans",
+      "photo": "../assets/photos/two-swans.jpg",
       "layout": "start"
     }
-  ]
+  ],
+  "bundle": "../target/release/examples/bundle"
 }

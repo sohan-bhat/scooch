@@ -9,6 +9,7 @@ const run = promisify(execFile);
 const site = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const config = JSON.parse(await readFile(join(site, 'scripts', 'demo.config.json'), 'utf8'));
 const binary = resolve(site, process.env.SCOOCH_BIN ?? config.binary);
+const bundler = resolve(site, process.env.SCOOCH_BUNDLE ?? config.bundle);
 const photo = resolve(site, config.photo);
 const work = join(site, '.cache', 'demo');
 const out = join(site, 'public', 'demo');
@@ -175,6 +176,50 @@ function tables(results) {
   );
 }
 
+function objects(layout) {
+  return { width, height, icons: rects(layout).map(([x, y, w, h]) => ({ x, y, w, h })) };
+}
+
+async function scenery(id, source, layouts) {
+  const folder = join(work, `scenery-${id}`);
+  const target = join(out, 'scenery', id);
+  await mkdir(folder, { recursive: true });
+  await mkdir(target, { recursive: true });
+  const files = [];
+  for (const [index, layout] of layouts.entries()) {
+    const file = join(folder, `layout-${index}.json`);
+    await writeFile(file, JSON.stringify(objects(layout)));
+    files.push(file);
+  }
+  try {
+    await run(bundler, [source, ...files, folder]);
+  } catch (error) {
+    fail(`The scenery bundle export failed for ${id}. Build it with cargo build --release -p scooch-core --example bundle.\n${error.stderr ?? error.message}`);
+  }
+  const bundle = JSON.parse(await readFile(join(folder, 'bundle.json'), 'utf8'));
+  await sharp(join(folder, bundle.canvas.file)).toFile(join(target, bundle.canvas.file));
+  for (const state of bundle.states) {
+    const tables = state.tables;
+    for (const key of ['map', 'field', 'look', 'pad', 'ramps']) await writeFile(join(target, tables[key].file), await readFile(join(folder, tables[key].file)));
+    const raw = await sharp(join(folder, tables.paints.file)).ensureAlpha().raw().toBuffer();
+    tables.paints.file = tables.paints.file.replace(/\.png$/, '.bin');
+    tables.paints.format = 'rgba8';
+    await writeFile(join(target, tables.paints.file), raw);
+  }
+  return { folder: `scenery/${id}`, ...bundle };
+}
+
+async function fillMap(id, placement) {
+  const long = Math.max(width, height);
+  const map = new Float32Array(long * 2);
+  for (let i = 0; i < long; i++) {
+    map[i] = lookup(placement.fx, (Math.min(i, width - 1) + 0.5) / width);
+    map[long + i] = lookup(placement.fy, (Math.min(i, height - 1) + 0.5) / height);
+  }
+  await writeFile(join(out, 'scenery', id, 'fill.map.bin'), Buffer.from(map.buffer));
+  return { file: 'fill.map.bin', format: 'f32le', width: long, height: 2 };
+}
+
 async function picture(entry) {
   const source = resolve(site, entry.photo);
   const states = [
@@ -190,7 +235,6 @@ async function picture(entry) {
   for (const result of results) check(result);
   return {
     id: entry.id,
-    photo: await writePhoto(results, source, `${entry.id}.webp`),
     order: states.map((state) => state.id),
     tables: tables(results),
     frames: Object.fromEntries(
@@ -202,6 +246,7 @@ async function picture(entry) {
       ),
     ),
     icons: Object.fromEntries(config.icons.map((icon, index) => [icon.id, rects(config.layouts[entry.layout])[index].map((value, at) => round(value / (at % 2 === 0 ? width : height)))])),
+    scenery: await scenery(entry.id, source, [config.layouts[entry.layout]]),
   };
 }
 
@@ -250,6 +295,9 @@ const manifest = {
     to: normalize(layouts.dropped[config.drag.icon]),
   },
 };
+const before = rendered.find((result) => result.state.id === 'before');
+manifest.scenery = await scenery('main', photo, [layouts.start, layouts.dropped]);
+manifest.scenery.fill = await fillMap('main', before.data.placement);
 manifest.pictures = [];
 for (const entry of config.pictures ?? []) manifest.pictures.push(await picture(entry));
 await writeFile(join(out, 'manifest.json'), JSON.stringify(manifest, null, 2));
