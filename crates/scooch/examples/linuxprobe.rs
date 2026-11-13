@@ -648,7 +648,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let current = match p.kind {
             Some(Kind::Gnome) => ding::INSETS,
             Some(Kind::Kde) => kde_rules::INSETS,
-            Some(Kind::Xfce) => xfce_rules::INSETS,
+            Some(Kind::Xfce) => if xfce::version().is_some_and(|version| version >= (4, 19)) { xfce_rules::INSETS_4_20 } else { xfce_rules::INSETS },
             Some(Kind::Cinnamon) => nemo::INSETS,
             Some(Kind::Mate) => caja::INSETS,
             _ => Insets { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 },
@@ -829,6 +829,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let row = ((ly / grid.cell_h).floor() as i64).clamp(0, grid.rows - 1);
             let (sx, sy) = grid.stored(column, row);
             gvfs::set(&path.clone().into_os_string(), ding::POSITION_KEY, Some(&format!("{sx},{sy}")))?;
+            if let Some(measure) = p.measures.iter_mut().find(|measure| measure.name == name) {
+                if let Some(rect) = measure.adapter.as_mut() {
+                    rect.x = sx as f32 * scale;
+                    rect.y = sy as f32 * scale;
+                }
+            }
             return Ok(format!("wrote {sx},{sy}, column {column} row {row}, to {name}"));
         }
         if p.session != Session::X11 {
@@ -1247,10 +1253,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let landed = icon.is_some_and(|icon| inside(&second_frame, (icon.x + icon.w / 2.0, icon.y + icon.h / 2.0)));
         p.line(format!("- moved the probe icon toward `{}`, {detail}, the adapter now reads it at {}, inside that monitor {landed}", second.id, icon.as_ref().map_or("nothing".into(), show)));
         if let Ok(snapshot) = linux.snapshot() {
-            for screen in &snapshot.screens {
-                let mine: Vec<String> = snapshot.icons.iter().filter(|icon| touches(&screen.frame, icon)).map(show).collect();
-                p.line(format!("- screen `{}` gets {} icons {mine:?}", screen.id, mine.len()));
+            for found in &all {
+                let mine: Vec<String> = snapshot.icons.iter().filter(|icon| touches(&found.screen.frame, icon)).map(show).collect();
+                let arranged = snapshot.screens.iter().any(|screen| screen.id == found.screen.id);
+                p.line(format!("- monitor `{}` holds {} icons {mine:?}, arranged by Scooch {arranged}", found.screen.id, mine.len()));
             }
+        }
+        for screen in &picked {
+            restore(p, &linux, screen);
         }
         let mut pictures = Vec::new();
         for (index, screen) in picked.iter().enumerate() {
