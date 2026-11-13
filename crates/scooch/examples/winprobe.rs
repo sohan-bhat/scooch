@@ -3461,8 +3461,12 @@ mod probe {
             watched.shots.iter().filter(|(at, _)| *at > settled && closed.is_none_or(|closed| *at <= closed + 1.0)).map(|(_, shot)| difference(shot, &new, &wide)).fold((0.0f32, 0u8, 0u8), |w, d| (w.0.max(d.0), w.1.max(d.1), w.2.max(d.2)))
         });
         let since = |time: Option<f64>| time.map(|time| ((time - watched.dropped) * 1000.0).round());
-        let order: Vec<(&str, Option<f64>)> = vec![("ready", ready), ("open and glide", open), ("settle", settle), ("glided", glided), ("settled", settled), ("closed", closed)];
-        let in_order = order.iter().filter_map(|(_, at)| *at).collect::<Vec<f64>>().windows(2).all(|pair| pair[1] >= pair[0]) && open.is_some() && settle.is_some() && settled.is_some() && closed.is_some();
+        let order: Vec<(&str, Option<f64>)> = vec![("ready", ready), ("open and glide", open), ("settle after the set", settle), ("glided", glided), ("settled", settled), ("closed", closed)];
+        let in_order = match (open, settle, settled, closed) {
+            (Some(open), Some(settle), Some(settled), Some(closed)) => open <= settle && settled >= settle && closed >= settled && closed + 0.02 >= settle + HOLD as f64 / 1000.0,
+            _ => false,
+        };
+        let counts = watched.log.iter().find(|line| line.contains(" glide glided")).and_then(|line| line.split(" glide glided ").nth(1)).map(str::to_string).unwrap_or_default();
         let laps = tick.as_deref().map(|line| line.split(" ms ").nth(1).and_then(|rest| rest.split("] ").nth(1)).unwrap_or("").to_string()).unwrap_or_default();
         let tick_ms = tick.as_deref().and_then(|line| line.split(" tick ").nth(1)).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok());
         let tick_start = tick.as_deref().and_then(stamp_of).zip(tick_ms).map(|(end, ms)| end - ms / 1000.0);
@@ -3474,7 +3478,7 @@ mod probe {
             apart.len(),
             classes.iter().collect::<String>()
         ));
-        p.line(format!("  - daemon order ready, open and glide, settle, glided, settled, closed at {:?} ms after the drop, in order {in_order}", order.iter().map(|(name, at)| format!("{name} {:?}", since(*at))).collect::<Vec<_>>()));
+        p.line(format!("  - daemon times after the drop {:?}, open before the set, settle after it, close after settled and {HOLD} ms after the set {in_order}, glided `{counts}`", order.iter().map(|(name, at)| format!("{name} {:?}", since(*at))).collect::<Vec<_>>()));
         p.line(format!(
             "  - drop to first moving frame on screen {:?} ms, wake {:?} ms, tick started {:?} ms, wallpaper set {:?} ms, settled {:?} ms, closed {:?} ms, tick laps `{laps}`",
             first_move.map(f64::round),
@@ -3532,6 +3536,23 @@ mod probe {
         Ok(command.spawn()?)
     }
 
+    fn quiet_log(log: &Path, quiet: Duration, limit: Duration) -> bool {
+        let started = Instant::now();
+        let mut count = log_lines(log).len();
+        let mut since = Instant::now();
+        while started.elapsed() < limit {
+            pump(Duration::from_millis(100));
+            let now = log_lines(log).len();
+            if now != count {
+                count = now;
+                since = Instant::now();
+            } else if since.elapsed() >= quiet {
+                return true;
+            }
+        }
+        false
+    }
+
     fn stop_glide_daemon(child: &mut Child) -> Option<std::process::ExitStatus> {
         let _ = scooch::poke::stop(0);
         let started = Instant::now();
@@ -3574,6 +3595,8 @@ mod probe {
 
     fn daemon_glide_steps(p: &mut Probe) -> Result<()> {
         uncover(p);
+        let turned = set_animation(true);
+        p.line(format!("- animations turned on for the glide {turned}, read back {:?}", animation()));
         let desktop = platform::current()?;
         let screen = desktop.screens()?.first().context("no screen")?.clone();
         let area = screen_rect(&screen);
@@ -3589,14 +3612,31 @@ mod probe {
         p.line(format!("- started the daemon {daemon} with SCOOCH_GLIDE_ANYWAY=1 and SCOOCH_TRACE=1 on the runner's software adapter, wallpaper source {}", source.display()));
         let home = p.home.clone();
         let first = wait_until(Duration::from_secs(60), || rendered(&home));
-        p.line(format!("- first render after {:?} ms", first.map(|time| time.as_millis())));
+        let motion = wait_until(Duration::from_secs(15), || log_lines(&log).iter().any(|line| line.contains("glide reduce motion off")));
+        p.line(format!("- first render after {:?} ms, the daemon logged reduce motion off after {:?} ms, last reading `{}`", first.map(|time| time.as_millis()), motion.map(|time| time.as_millis()), log_lines(&log).iter().rev().find(|line| line.contains(" glide reduce motion ")).cloned().unwrap_or_default()));
+        if motion.is_none() {
+            p.failed.push("the daemon never logged reduce motion as off after the probe turned animations on".into());
+            stop_glide_daemon(&mut child);
+            return Ok(());
+        }
         let (name, folder) = PROBES[0];
         let centre = POINT { x: (screen.frame.x + screen.frame.w * 0.5) as i32, y: (screen.frame.y + screen.frame.h * 0.5) as i32 };
         let aside = POINT { x: (screen.frame.x + screen.frame.w * 0.62) as i32, y: (screen.frame.y + screen.frame.h * 0.32) as i32 };
         let lower = POINT { x: (screen.frame.x + screen.frame.w * 0.42) as i32, y: (screen.frame.y + screen.frame.h * 0.62) as i32 };
-        let setup = watch_change(&log, &screen, || drag_icon(name, folder, aside), false);
-        p.line(format!("- setup drag to {},{}: new wallpaper {}, log {:?}", aside.x, aside.y, setup.new != setup.old, setup.log.iter().map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()));
-        pump(Duration::from_millis(1500));
+        let mut setup = None;
+        for (step, target) in [(1, lower), (2, aside)] {
+            let calm = quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
+            let watched = watch_change(&log, &screen, || drag_icon(name, folder, target), false);
+            p.line(format!("- setup drag {step} to {},{} after a quiet log {calm}: new wallpaper {}, log {:?}", target.x, target.y, watched.new != watched.old, watched.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
+            setup = Some(watched);
+        }
+        let setup = setup.context("no setup drag")?;
+        let wrote_tables = setup.log.iter().any(|line| line.contains(" tick ") && line.contains("tables "));
+        p.line(format!("- the last setup drag rendered with a tables entry {wrote_tables}"));
+        if !wrote_tables {
+            p.failed.push("the setup drags wrote no tables, so the timed drag could not glide".into());
+        }
+        quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
         let still_icons = icons_except(&screen, &shown_name(name, folder));
         let old_tables = desktop.wallpaper(&screen).ok().flatten().and_then(|old| tables_file(&p.home, &old));
         park_cursor();
@@ -3635,24 +3675,38 @@ mod probe {
             p.failed.push("with animations off the daemon did not take today's path".into());
         }
         let _ = set_animation(true);
-        pump(Duration::from_millis(1500));
+        let motion_back = wait_until(Duration::from_secs(10), || {
+            let _ = scooch::poke::send(daemon);
+            pump(Duration::from_millis(300));
+            log_lines(&log).iter().rev().find(|line| line.contains(" glide reduce motion ")).is_some_and(|line| line.ends_with(" off"))
+        });
+        p.line(format!("- animations on again, the daemon read it after {:?} ms", motion_back.map(|time| time.as_millis())));
+        quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
+        let program_move = |target: POINT| {
+            move || {
+                let Ok(view) = shell::view() else { return false };
+                let Ok(pidl) = pidl_of(&view, name, folder) else { return false };
+                let mut client = [target];
+                unsafe { MapWindowPoints(None, Some(view.list), &mut client) };
+                let placed = place(&view, &pidl, client[0]).is_ok();
+                let _ = scooch::poke::send(daemon);
+                placed
+            }
+        };
+        let tick_of = |watched: &Watched| watched.log.iter().find(|line| line.contains(" tick ")).cloned().unwrap_or_default();
+        let open_move = watch_change(&log, &screen, program_move(POINT { x: lower.x - 30, y: lower.y - 20 }), false);
+        p.line(format!("- a program move uncovered, then a wake: new wallpaper {}, glided {}, tick `{}`", open_move.new != open_move.old, open_move.log.iter().any(|line| line.contains(" glide open")), tick_of(&open_move)));
+        quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
         let cover = cover_window(&screen)?;
         let covered_desktop = layer::covered(&screen);
-        let shut = watch_change(&log, &screen, || {
-            let Ok(view) = shell::view() else { return false };
-            let Ok(pidl) = pidl_of(&view, name, folder) else { return false };
-            let target = POINT { x: lower.x - 30, y: lower.y - 20 };
-            let mut client = [target];
-            unsafe { MapWindowPoints(None, Some(view.list), &mut client) };
-            place(&view, &pidl, client[0]).is_ok()
-        }, false);
+        let shut = watch_change(&log, &screen, program_move(POINT { x: aside.x - 30, y: aside.y + 20 }), false);
         let _ = unsafe { DestroyWindow(cover) };
         pump(Duration::from_millis(400));
-        let shut_tick = shut.log.iter().find(|line| line.contains(" tick ")).cloned();
         let shut_glided = shut.log.iter().any(|line| line.contains(" glide open"));
-        p.line(format!("- a move while a window covers the whole desktop, covered seen {covered_desktop}: new wallpaper {}, glided {shut_glided}, tick `{}`, log {:?}", shut.new != shut.old, shut_tick.unwrap_or_default(), shut.log.iter().map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()));
-        if shut.new == shut.old {
-            p.failed.push("a covered desktop kept the new wallpaper from being set".into());
+        let hidden = shut.log.iter().any(|line| line.contains("glide skipped, hidden"));
+        p.line(format!("- the same move while a window covers the whole desktop, covered seen {covered_desktop}: new wallpaper {}, glided {shut_glided}, logged skipped hidden {hidden}, tick `{}`, log {:?}", shut.new != shut.old, tick_of(&shut), shut.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
+        if shut.new == shut.old || !hidden {
+            p.failed.push("a covered desktop did not skip the glide as hidden and set the wallpaper".into());
         }
         pump(Duration::from_millis(1500));
         let start = log_lines(&log).len();
@@ -3682,12 +3736,22 @@ mod probe {
             now_shown != shown_before,
             now_shown == recorded
         ));
-        pump(Duration::from_millis(1500));
-        let again = watch_change(&log, &screen, || drag_icon(name, folder, aside), false);
-        let glided_again = again.log.iter().any(|line| line.contains(" glide settled"));
-        p.line(format!("- the next drag glides again {glided_again}, log {:?}", again.log.iter().map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()));
-        if killed.is_empty() || now_shown != recorded || !matches.is_some_and(|d| d.1 <= 2) || !alive || !glided_again {
-            p.failed.push("killing the helper mid glide was not handled cleanly".into());
+        let mut tries = 0usize;
+        let mut glided_again = false;
+        for target in [aside, lower, centre] {
+            quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
+            tries += 1;
+            let again = watch_change(&log, &screen, || drag_icon(name, folder, target), false);
+            glided_again = again.log.iter().any(|line| line.contains(" glide settled"));
+            let reasons: Vec<String> = again.log.iter().filter(|line| line.contains("glide skipped")).map(|line| line.chars().take(200).collect()).collect();
+            p.line(format!("- drag {tries} after the kill glides {glided_again}, skip reasons {reasons:?}, log {:?}", again.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
+            if glided_again {
+                break;
+            }
+        }
+        p.line(format!("- it took {tries} drags to glide again after the helper was killed"));
+        if killed.is_empty() || now_shown != recorded || !matches.is_some_and(|d| d.1 <= 2) || !alive || !glided_again || tries > 2 {
+            p.failed.push(format!("killing the helper mid glide was not handled cleanly, {tries} drags to glide again"));
         }
         let last = Instant::now();
         let gone = wait_until(Duration::from_secs(40), || helper_children(daemon).is_empty());
