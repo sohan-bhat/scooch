@@ -126,7 +126,11 @@ pub fn picture((canvas, cw, ch): (&[u8], u32, u32), (xmap, ymap): (&[f64], &[f64
     RgbImage::from_raw(width, height, raw).unwrap_or_else(|| RgbImage::new(width, height))
 }
 
-fn plain(image: &RgbImage, placement: &Placement, width: u32, height: u32) -> RgbImage {
+pub fn finish_plain(base: RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
+    pads::apply(base, pads::wanted(scene, options).then_some(found), placement, scene, options)
+}
+
+pub fn plain(image: &RgbImage, placement: &Placement, width: u32, height: u32) -> RgbImage {
     let (sw, sh) = image.dimensions();
     let placement: Cow<Placement> = if table::usable(&placement.fx) && table::usable(&placement.fy) { Cow::Borrowed(placement) } else { Cow::Owned(table::fill(sw, sh, width, height)) };
     let ratio = worst_ratio(&placement.fx, sw, width).max(worst_ratio(&placement.fy, sh, height));
@@ -173,8 +177,8 @@ pub fn layers(image: &RgbImage, given: Option<&Analysis>, placement: &Placement,
             &own
         }
     };
-    let (state, canvas) = bundle::still(image, found, placement, scene, options, materials);
-    bundle::draw(&state, &state, 0.0, canvas.as_raw())
+    let state = bundle::still(image, found, placement, scene, options, materials);
+    bundle::draw(&state, &state, 0.0, &state.canvas)
 }
 
 pub fn still(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Bundle, RgbImage) {
@@ -183,10 +187,9 @@ pub fn still(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &
     if !scenery::active(scene, options) || sw == 0 || sh == 0 {
         return rayon::join(|| bundle::make(image, found, placement, scene, options, &materials), || render(image, Some(found), placement, scene, options));
     }
-    let (mut state, canvas) = bundle::still(image, found, placement, scene, options, &materials);
-    let (mut picture, layer) = bundle::draw(&state, &state, 0.0, canvas.as_raw());
+    let state = bundle::still(image, found, placement, scene, options, &materials);
+    let (mut picture, layer) = bundle::draw(&state, &state, 0.0, &state.canvas);
     paint::composite(&mut picture, &layer);
-    state.canvas = canvas.into_owned().into_raw();
     (state, picture)
 }
 
