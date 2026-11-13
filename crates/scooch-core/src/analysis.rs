@@ -346,14 +346,6 @@ fn palette(lab: &[Vec<f32>; 3]) -> Vec<[f32; 4]> {
     out
 }
 
-pub fn palette_of(image: &RgbImage) -> Vec<[f32; 4]> {
-    let (width, height) = grid_size(image.width(), image.height());
-    if width == 0 {
-        return Vec::new();
-    }
-    palette(&lab_planes(image, width, height))
-}
-
 pub fn analyze(image: &RgbImage) -> Analysis {
     let (sw, sh) = image.dimensions();
     let (width, height) = grid_size(sw, sh);

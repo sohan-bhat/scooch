@@ -1,6 +1,8 @@
 mod analysis;
 mod blur;
+mod bundle;
 mod color;
+mod look;
 mod pads;
 mod paint;
 mod render;
@@ -11,6 +13,7 @@ mod solver;
 mod table;
 mod warp;
 
+pub use bundle::{Bundle, Constants};
 pub use image::{GrayImage, RgbImage, RgbaImage};
 pub use paint::Materials;
 pub use shape::FIELD_STEP as SCENERY_FIELD_STEP;
@@ -104,16 +107,39 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
     solver::solve(analysis, scene, options, previous)
 }
 
+pub fn solve_near(analysis: &Analysis, scene: &Scene, options: &Options, previous: &Placement, budget: std::time::Duration) -> Placement {
+    solver::solve_near(analysis, scene, options, previous, budget)
+}
+
 pub fn render(image: &RgbImage, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
-    render::render(image, None, placement, scene, options, None)
+    render::render(image, None, placement, scene, options)
 }
 
 pub fn render_with(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
-    render::render(image, Some(analysis), placement, scene, options, None)
+    render::render(image, Some(analysis), placement, scene, options)
 }
 
 pub fn render_painted(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> RgbImage {
-    render::render(image, Some(analysis), placement, scene, options, Some(materials))
+    let (mut picture, layer) = render::layers(image, Some(analysis), placement, scene, options, Some(materials));
+    paint::composite(&mut picture, &layer);
+    picture
+}
+
+pub fn bundle(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> Bundle {
+    bundle::make(image, analysis, placement, scene, options, &paint::materials(analysis))
+}
+
+pub fn frame(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
+    bundle::frame(a, b, s)
+}
+
+pub fn frame_layers(a: &Bundle, b: &Bundle, s: f32) -> Layers {
+    let (picture, scenery) = bundle::layers(a, b, s);
+    Layers { picture, scenery }
+}
+
+pub fn compatible(a: &Bundle, b: &Bundle) -> bool {
+    bundle::compatible(a, b)
 }
 
 pub struct Layers {
@@ -148,10 +174,6 @@ pub fn fill(image_width: u32, image_height: u32, scene: &Scene) -> Placement {
 
 pub fn hidden_share(analysis: &Analysis, scene: &Scene, placement: &Placement) -> f32 {
     solver::hidden_share(analysis, scene, placement)
-}
-
-pub fn scenery_footprints(scene: &Scene) -> Vec<Rect> {
-    scenery::footprints(scene)
 }
 
 pub fn saliency_image(analysis: &Analysis) -> GrayImage {
