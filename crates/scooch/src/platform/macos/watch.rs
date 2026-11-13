@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 type Shared = Arc<dyn Fn() + Send + Sync>;
 
+pub static DROPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 const STREAM_LATENCY: f64 = 0.05;
 const FINDER: &str = "com.apple.finder";
 const LAYOUT: &str = ".DS_Store";
@@ -127,6 +129,7 @@ fn mouse(wake: Shared) {
             eprintln!("{} mouse up, Finder in front {front}", crate::daemon::stamp());
         }
         if front {
+            DROPPED.store(true, std::sync::atomic::Ordering::SeqCst);
             wake();
         }
     });
