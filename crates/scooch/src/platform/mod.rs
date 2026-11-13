@@ -79,6 +79,15 @@ pub trait Desktop: Send + Sync {
         Ok(None)
     }
     fn watching(&self, _wake: Wake) {}
+    fn live(&self) -> bool {
+        cfg!(windows)
+    }
+    fn reduce_motion(&self) -> bool {
+        false
+    }
+    fn hold(&self) -> Duration {
+        Duration::from_millis(250)
+    }
 }
 
 pub const AGREE: Duration = Duration::from_millis(500);

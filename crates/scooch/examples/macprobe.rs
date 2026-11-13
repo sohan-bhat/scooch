@@ -15,7 +15,7 @@ mod probe {
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
     use scooch::platform::macos::layer;
     use scooch::platform::macos::{finder, launchd, picture, spaces, store};
-    use scooch_live::{Gpu, Pattern, Renderer, Target};
+    use scooch_live::{Gpu, Look as Layered, Pattern, Renderer, Target};
     use scooch::platform::{self, Screen};
     use scooch_core::{Rect, RgbImage};
     use std::ffi::c_void;
@@ -116,6 +116,19 @@ mod probe {
         fn CGImageGetBitsPerPixel(image: *const c_void) -> usize;
         fn CGImageGetDataProvider(image: *const c_void) -> *const c_void;
         fn CGDataProviderCopyData(provider: *const c_void) -> *const c_void;
+        static kCGDisplayShowDuplicateLowResolutionModes: *const c_void;
+        fn CGDisplayCopyAllDisplayModes(display: u32, options: *const c_void) -> *const c_void;
+        fn CGDisplayCopyDisplayMode(display: u32) -> *const c_void;
+        fn CGDisplayModeGetWidth(mode: *const c_void) -> usize;
+        fn CGDisplayModeGetHeight(mode: *const c_void) -> usize;
+        fn CGDisplayModeGetPixelWidth(mode: *const c_void) -> usize;
+        fn CGDisplayModeGetPixelHeight(mode: *const c_void) -> usize;
+        fn CGDisplayModeIsUsableForDesktopGUI(mode: *const c_void) -> bool;
+        fn CGDisplayModeRetain(mode: *const c_void) -> *const c_void;
+        fn CGDisplayModeRelease(mode: *const c_void);
+        fn CGBeginDisplayConfiguration(config: *mut *mut c_void) -> i32;
+        fn CGConfigureDisplayWithDisplayMode(config: *mut c_void, display: u32, mode: *const c_void, options: *const c_void) -> i32;
+        fn CGCompleteDisplayConfiguration(config: *mut c_void, option: u32) -> i32;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -123,6 +136,12 @@ mod probe {
         fn CFRelease(object: *const c_void);
         fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
         fn CFDataGetLength(data: *const c_void) -> isize;
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
+        static kCFBooleanTrue: *const c_void;
+        fn CFDictionaryCreate(allocator: *const c_void, keys: *const *const c_void, values: *const *const c_void, count: isize, key_callbacks: *const c_void, value_callbacks: *const c_void) -> *const c_void;
+        static kCFTypeDictionaryKeyCallBacks: c_void;
+        static kCFTypeDictionaryValueCallBacks: c_void;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -287,6 +306,9 @@ mod probe {
         if std::env::args().nth(1).as_deref() == Some("helper") {
             return helper();
         }
+        if std::env::args().nth(1).as_deref() == Some("gpu-bench") {
+            return gpu_bench(PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "macbench".into())));
+        }
         let out = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "macprobe".into()));
         let home = std::env::temp_dir().join(format!("scooch-probe-{}", std::process::id()));
         if fs::create_dir_all(&out).is_err() || fs::create_dir_all(&home).is_err() {
@@ -332,9 +354,11 @@ mod probe {
         probe.section("2 Permission", permission);
         probe.section("3 Icons", icons);
         probe.section("3b Live layer", live);
+        probe.section("3c Helper colour and scale", colour_scale);
         probe.section("4 First run", first_run);
         probe.section("5 Move to new wallpaper", moves);
         probe.section("5b Scenery", scenery_check);
+        probe.section("5c Glide", glide_check);
         probe.section("6 Idle", idle);
         probe.section("7 Off", off);
         probe.section("8 Second cycle", second_cycle);
@@ -1916,6 +1940,617 @@ mod probe {
             spin(0.5);
             lines.push(format!("- after the device was dropped {}", memory(pid)));
             lines.push(format!("- windows of ours left {}", ours().len()));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            lines.push(format!("- **stopped** {error:#}"));
+        }
+        for line in &lines {
+            println!("{line}");
+        }
+        let _ = fs::write(out.join("report.md"), lines.join("\n") + "\n");
+        ExitCode::SUCCESS
+    }
+
+    fn test_still(width: u32, height: u32) -> RgbImage {
+        let third = (height / 3).max(1);
+        let bars: [[u8; 3]; 10] = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255], [255, 255, 255], [30, 30, 30], [128, 128, 128], [200, 120, 60]];
+        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = if y < third {
+                    [(x * 255 / width.max(1)) as u8, (y * 255 / third) as u8, 160]
+                } else if y < 2 * third {
+                    bars[(x as usize * bars.len() / width.max(1) as usize).min(bars.len() - 1)]
+                } else if (x + y) % 2 == 0 {
+                    [250, 250, 250]
+                } else {
+                    [10, 10, 10]
+                };
+                rgb.extend_from_slice(&pixel);
+            }
+        }
+        RgbImage::from_raw(width, height, rgb).unwrap_or_default()
+    }
+
+    fn still_file(path: &Path, image: &RgbImage) -> Result<()> {
+        let mut out = Vec::new();
+        let mut encoder = jpeg_encoder::Encoder::new(&mut out, 100);
+        encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_1_1);
+        if let Some(profile) = picture::profile() {
+            encoder.add_icc_profile(&profile)?;
+        }
+        encoder.encode(image.as_raw(), image.width() as u16, image.height() as u16, jpeg_encoder::ColorType::Rgb)?;
+        fs::write(path, out)?;
+        Ok(())
+    }
+
+    struct Difference {
+        mean: f64,
+        p99: u8,
+        max: u8,
+        over: usize,
+        counted: usize,
+    }
+
+    fn difference(a: &Shot, b: &Shot, keep: &dyn Fn(usize, usize) -> bool) -> Difference {
+        let mut counts = [0usize; 256];
+        for y in 0..a.height.min(b.height) {
+            for x in 0..a.width.min(b.width) {
+                if keep(x, y) {
+                    let (one, two) = (a.at(x, y), b.at(x, y));
+                    let worst = (0..3).map(|channel| one[channel].abs_diff(two[channel])).max().unwrap_or(0);
+                    counts[worst as usize] += 1;
+                }
+            }
+        }
+        let counted: usize = counts.iter().sum();
+        let total: usize = counts.iter().enumerate().map(|(value, count)| value * count).sum();
+        let mut seen = 0;
+        let mut p99 = 0u8;
+        for (value, count) in counts.iter().enumerate() {
+            seen += count;
+            if seen * 100 >= counted * 99 {
+                p99 = value as u8;
+                break;
+            }
+        }
+        let max = counts.iter().rposition(|count| *count > 0).unwrap_or(0) as u8;
+        Difference { mean: total as f64 / counted.max(1) as f64, p99, max, over: counts[3..].iter().sum(), counted }
+    }
+
+    fn calm_shot(display: u32) -> Option<Shot> {
+        let mut last = grab(display)?;
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(4) {
+            std::thread::sleep(Duration::from_millis(300));
+            let next = grab(display)?;
+            let same = difference(&last, &next, &|_, _| true).max == 0;
+            last = next;
+            if same {
+                break;
+            }
+        }
+        Some(last)
+    }
+
+    fn away_from_icons(screen: &Screen) -> impl Fn(usize, usize) -> bool {
+        let icons: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().map(|(_, rect)| rect).collect();
+        let (scale, frame) = (screen.scale, screen.frame);
+        move |x, y| {
+            let (px, py) = (x as f32 / scale + frame.x, y as f32 / scale + frame.y);
+            py - frame.y >= 30.0 && !icons.iter().any(|icon| px >= icon.x - 12.0 && px < icon.x + icon.w + 12.0 && py >= icon.y - 12.0 && py < icon.y + icon.h + 12.0)
+        }
+    }
+
+    fn still_through_helper(p: &mut Probe, screen: &Screen, label: &str) -> Result<()> {
+        let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
+        let desktop = platform::current()?;
+        let (_, display) = picture::screen_for(marker, &screen.id)?;
+        let (width, height) = pixels(screen);
+        let file = p.home.join(format!("probe-still-{width}x{height}.jpg"));
+        still_file(&file, &test_still(width, height))?;
+        desktop.set_wallpaper(screen, &file)?;
+        std::thread::sleep(Duration::from_millis(800));
+        let plain = calm_shot(display).context("the plain desktop could not be captured")?;
+        let mut helper = scooch::live::Helper::spawn(&p.bin, Duration::from_secs(5))?;
+        let ready = helper.warm(scooch::live::Hints::default(), None, None, Duration::from_secs(30))?;
+        let shown = helper.open(1, screen, &file, Duration::from_secs(5))?;
+        std::thread::sleep(Duration::from_millis(400));
+        let layered = grab(display).context("the layer could not be captured")?;
+        let keep = away_from_icons(screen);
+        let found = difference(&plain, &layered, &keep);
+        let pid = helper.pid as i64;
+        let closed = helper.close(1, Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(300));
+        let left = layer::every_window().into_iter().filter(|window| window.pid == pid).count();
+        drop(helper);
+        let _ = scooch_core::encode_png(&layered.image()).map(|bytes| fs::write(p.out.join(format!("still-{width}x{height}.png")), bytes));
+        p.line(format!(
+            "- {label}: still {width}x{height} on a {}x{} point screen at scale {}, adapter {} ready after {} ms, open to shown {shown} ms, closed {:?}, windows of the helper left {left}",
+            screen.frame.w, screen.frame.h, screen.scale, ready.adapter, ready.ms, closed.map_err(|error| error.to_string())
+        ));
+        p.line(format!("  - plain desktop against the layer showing the same still, {} pixels outside the icons and menu bar: mean {:.3}, p99 {}, max {} of 255, pixels off by more than 2 {}", found.counted, found.mean, found.p99, found.max, found.over));
+        if found.max > 2 {
+            p.fail(format!("the layer did not show the still exactly as the system does at {label}"));
+        }
+        Ok(())
+    }
+
+    fn modes(display: u32) -> Vec<(usize, usize, usize, usize, bool, *const c_void)> {
+        unsafe {
+            let keys = [kCGDisplayShowDuplicateLowResolutionModes];
+            let values = [kCFBooleanTrue];
+            let options = CFDictionaryCreate(std::ptr::null(), keys.as_ptr(), values.as_ptr(), 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+            let list = CGDisplayCopyAllDisplayModes(display, options);
+            let mut found = Vec::new();
+            if !list.is_null() {
+                for index in 0..CFArrayGetCount(list) {
+                    let mode = CFArrayGetValueAtIndex(list, index);
+                    found.push((CGDisplayModeGetWidth(mode), CGDisplayModeGetHeight(mode), CGDisplayModeGetPixelWidth(mode), CGDisplayModeGetPixelHeight(mode), CGDisplayModeIsUsableForDesktopGUI(mode), CGDisplayModeRetain(mode)));
+                }
+                CFRelease(list);
+            }
+            if !options.is_null() {
+                CFRelease(options);
+            }
+            found
+        }
+    }
+
+    fn switch_mode(display: u32, mode: *const c_void) -> bool {
+        unsafe {
+            let mut config: *mut c_void = std::ptr::null_mut();
+            if CGBeginDisplayConfiguration(&mut config) != 0 {
+                return false;
+            }
+            CGConfigureDisplayWithDisplayMode(config, display, mode, std::ptr::null());
+            CGCompleteDisplayConfiguration(config, 1) == 0
+        }
+    }
+
+    fn colour_scale(p: &mut Probe) -> Result<()> {
+        let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
+        accessory(marker);
+        let desktop = platform::current()?;
+        let screen = desktop.screens()?.into_iter().next().context("no screen")?;
+        let recorded = desktop.wallpaper(&screen).ok().flatten();
+        still_through_helper(p, &screen, "native mode")?;
+        let (_, display) = picture::screen_for(marker, &screen.id)?;
+        let current = unsafe { CGDisplayCopyDisplayMode(display) };
+        let listed = modes(display);
+        p.line(format!("- display modes, points and pixels {:?}", listed.iter().map(|(w, h, pw, ph, usable, _)| format!("{w}x{h} as {pw}x{ph}{}", if *usable { "" } else { " unusable" })).collect::<Vec<_>>()));
+        let doubled = listed.iter().filter(|(w, _, pw, _, usable, _)| *usable && *pw == 2 * *w && *w >= 640).max_by_key(|(w, _, _, _, _, _)| *w).map(|mode| mode.5);
+        match doubled {
+            Some(mode) if switch_mode(display, mode) => {
+                std::thread::sleep(Duration::from_secs(3));
+                let scaled = platform::current()?.screens()?.into_iter().next().context("no screen after the switch")?;
+                p.line(format!("- switched to a doubled mode, the screen now reads {} by {} points at scale {}", scaled.frame.w, scaled.frame.h, scaled.scale));
+                let result = still_through_helper(p, &scaled, "HiDPI mode");
+                let back = !current.is_null() && switch_mode(display, current);
+                std::thread::sleep(Duration::from_secs(3));
+                p.line(format!("- switched back to the first mode {back}"));
+                result?;
+            }
+            Some(_) => p.limit("the runner listed a doubled display mode but would not switch to it, so scale 2 is unproven here"),
+            None => p.limit("the runner's virtual display offers no doubled mode, so scale 2 is unproven here"),
+        }
+        for (_, _, _, _, _, mode) in listed {
+            unsafe { CGDisplayModeRelease(mode) };
+        }
+        if !current.is_null() {
+            unsafe { CGDisplayModeRelease(current) };
+        }
+        if let Some(recorded) = recorded.filter(|path| path.is_file()) {
+            let _ = desktop.set_wallpaper(&screen, &recorded);
+        }
+        Ok(())
+    }
+
+    struct Seen {
+        at: f64,
+        disc: Option<(f32, f32)>,
+        inked: f32,
+        step: u8,
+        thumb: RgbImage,
+    }
+
+    struct Dragged {
+        dropped: f64,
+        seen: Vec<Seen>,
+        log: Vec<String>,
+    }
+
+    fn disc(shot: &Shot) -> Option<(f32, f32)> {
+        let (mut sx, mut sy, mut count) = (0f64, 0f64, 0usize);
+        for y in (0..shot.height).step_by(2) {
+            for x in (0..shot.width).step_by(2) {
+                if near(shot.at(x, y), [245, 196, 92]) {
+                    sx += x as f64;
+                    sy += y as f64;
+                    count += 1;
+                }
+            }
+        }
+        (count > 30).then(|| ((sx / count as f64) as f32, (sy / count as f64) as f32))
+    }
+
+    fn thumb(shot: &Shot) -> RgbImage {
+        let (width, height) = (shot.width / 4, shot.height / 4);
+        let mut rgb = Vec::with_capacity(width * height * 3);
+        for y in 0..height {
+            for x in 0..width {
+                rgb.extend_from_slice(&shot.at(x * 4, y * 4));
+            }
+        }
+        RgbImage::from_raw(width as u32, height as u32, rgb).unwrap_or_default()
+    }
+
+    fn stamp_of(line: &str) -> Option<f64> {
+        line.split_whitespace().next()?.parse().ok()
+    }
+
+    fn helper_pids(p: &mut Probe) -> Vec<i32> {
+        p.tool("/usr/bin/pgrep", &["-f", "live-helper"]).out.lines().filter_map(|line| line.trim().parse().ok()).collect()
+    }
+
+    fn strong_ink(baseline: &Shot, field: &Shot, rect: &Rect, screen: &Screen) -> Vec<(usize, usize)> {
+        let scale = screen.scale;
+        let mut ink = Vec::new();
+        for y in (((rect.y - screen.frame.y) * scale).max(0.0) as usize..((rect.y - screen.frame.y + rect.h) * scale) as usize).step_by(2) {
+            for x in (((rect.x - screen.frame.x) * scale).max(0.0) as usize..((rect.x - screen.frame.x + rect.w) * scale) as usize).step_by(2) {
+                let (one, two) = (baseline.at(x, y), field.at(x, y));
+                if (0..3).map(|channel| one[channel].abs_diff(two[channel]) as u32).sum::<u32>() > 150 {
+                    ink.push((x, y));
+                }
+            }
+        }
+        ink
+    }
+
+    fn watch_drag(p: &mut Probe, display: u32, screen: &Screen, from: (f32, f32), to: (f32, f32), masks: &[Vec<(usize, usize)>]) -> Option<Dragged> {
+        let baseline = grab(display)?;
+        let menu = (30.0 * screen.scale) as usize;
+        let lines = daemon_log(p).lines().count();
+        drag(from, to);
+        let dropped = epoch();
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        let mut previous: Option<Shot> = None;
+        let mut done: Option<f64> = None;
+        let mut checks = 0;
+        while started.elapsed() < Duration::from_secs(8) {
+            let at = epoch();
+            let Some(shot) = grab(display) else { continue };
+            let inked = masks.iter().map(|ink| ink.iter().filter(|(x, y)| !near(shot.at(*x, *y), baseline.at(*x, *y))).count() as f32 / ink.len().max(1) as f32).fold(0.0, f32::max);
+            let step = previous.as_ref().map_or(0, |previous| difference(previous, &shot, &|_, y| y >= menu).max);
+            seen.push(Seen { at, disc: disc(&shot), inked, step, thumb: thumb(&shot) });
+            previous = Some(shot);
+            checks += 1;
+            if done.is_none() && checks % 3 == 0 && new_lines(&daemon_log(p), lines).iter().any(|line| line.contains(" tick ")) {
+                done = Some(epoch());
+            }
+            if done.is_some_and(|done| epoch() > done + 1.0) {
+                break;
+            }
+        }
+        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ") || line.contains("without the glide") || line.contains("turned the glide")).collect();
+        Some(Dragged { dropped, seen, log })
+    }
+
+    fn logged(dragged: &Dragged, word: &str) -> Option<f64> {
+        dragged.log.iter().find(|line| line.contains(word)).and_then(|line| stamp_of(line))
+    }
+
+    fn judge_glide(p: &mut Probe, dragged: &Dragged, label: &str, strip: Option<&Path>) -> bool {
+        let first = dragged.seen.first().and_then(|seen| seen.disc);
+        let last = dragged.seen.last().and_then(|seen| seen.disc);
+        let (Some(a), Some(b)) = (first, last) else {
+            p.line(format!("- {label}: the subject could not be found in the captures"));
+            return false;
+        };
+        let distance = |one: (f32, f32), two: (f32, f32)| ((one.0 - two.0).powi(2) + (one.1 - two.1).powi(2)).sqrt();
+        let span = distance(a, b).max(1.0);
+        let along = |point: (f32, f32)| ((point.0 - a.0) * (b.0 - a.0) + (point.1 - a.1) * (b.1 - a.1)) / (span * span);
+        let positions: Vec<(f64, f32)> = dragged.seen.iter().filter_map(|seen| seen.disc.map(|disc| (seen.at - dragged.dropped, along(disc)))).collect();
+        let moving: Vec<&(f64, f32)> = positions.iter().filter(|(_, t)| *t > 2.0 / span && *t < 1.0 - 2.0 / span).collect();
+        let steady = positions.windows(2).all(|pair| pair[1].1 >= pair[0].1 - 0.03);
+        let reached = positions.iter().position(|(_, t)| *t >= 1.0 - 2.0 / span);
+        let back = reached.is_some_and(|reached| positions[reached..].iter().any(|(_, t)| *t <= 2.0 / span));
+        let first_move = positions.iter().find(|(_, t)| *t > 2.0 / span).map(|(at, _)| at * 1000.0);
+        let inked = dragged.seen.iter().map(|seen| seen.inked).fold(0.0, f32::max);
+        let settled = logged(dragged, " glide settled");
+        let closed = logged(dragged, " glide closed");
+        let set = logged(dragged, " glide settle ");
+        let hand_over = settled.map(|settled| dragged.seen.iter().filter(|seen| seen.at > settled && closed.is_none_or(|closed| seen.at <= closed + 1.0)).map(|seen| seen.step).max().unwrap_or(0));
+        p.line(format!("- {label}: subject moved {span:.0} pixels, {} captures in {:.0} ms, {} between the old and new place, steady {steady}, old picture after the new {back}", dragged.seen.len(), dragged.seen.last().map_or(0.0, |seen| (seen.at - dragged.dropped) * 1000.0), moving.len()));
+        p.line(format!(
+            "  - drop to first moving frame on screen {:?} ms, drop to wallpaper set {:?} ms, drop to settled {:?} ms, drop to closed {:?} ms",
+            first_move.map(f64::round),
+            set.map(|at| ((at - dragged.dropped) * 1000.0).round()),
+            settled.map(|at| ((at - dragged.dropped) * 1000.0).round()),
+            closed.map(|at| ((at - dragged.dropped) * 1000.0).round())
+        ));
+        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255"));
+        p.line(format!("  - daemon log {:?}", dragged.log.iter().map(|line| line.chars().take(180).collect::<String>()).collect::<Vec<_>>()));
+        if let Some(path) = strip {
+            let until = settled.or(closed).unwrap_or(dragged.dropped + 2.0);
+            let picked: Vec<&Seen> = dragged.seen.iter().filter(|seen| seen.at <= until + 0.1).collect();
+            if picked.len() >= 9 {
+                let chosen: Vec<&RgbImage> = (0..9).map(|index| &picked[index * (picked.len() - 1) / 8].thumb).collect();
+                let (width, height) = (chosen[0].width(), chosen[0].height());
+                let mut rgb = vec![0u8; (width * 9 * height * 3) as usize];
+                for (index, image) in chosen.iter().enumerate() {
+                    for y in 0..height.min(image.height()) {
+                        for x in 0..width.min(image.width()) {
+                            let at = ((y * width * 9 + index as u32 * width + x) * 3) as usize;
+                            rgb[at..at + 3].copy_from_slice(&image.get_pixel(x, y).0);
+                        }
+                    }
+                }
+                if let Some(strip) = RgbImage::from_raw(width * 9, height, rgb) {
+                    let _ = scooch_core::encode_png(&strip).map(|bytes| fs::write(path, bytes));
+                    p.line(format!("  - nine frame strip saved as {}", path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+                }
+            }
+        }
+        moving.len() >= 2 && steady && !back && inked <= 0.1 && hand_over.is_some_and(|value| value <= 2) && settled.is_some()
+    }
+
+    fn wallpaper_after(p: &mut Probe, screen: &Screen, act: impl FnOnce(&mut Probe)) -> (Option<u128>, Vec<String>) {
+        let desktop = platform::current().ok();
+        let before = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
+        let lines = daemon_log(p).lines().count();
+        act(p);
+        let acted = Instant::now();
+        let changed = wait_until(Duration::from_secs(12), || desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten()) != before).map(|_| acted.elapsed().as_millis());
+        let home = p.home.clone();
+        let _ = wait_until(Duration::from_secs(5), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" tick ")));
+        std::thread::sleep(Duration::from_millis(600));
+        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ") || line.contains("without the glide")).map(|line| line.chars().take(180).collect()).collect();
+        (changed, log)
+    }
+
+    fn cover(marker: MainThreadMarker, screen: &Screen) -> Result<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+        use objc2::MainThreadOnly as _;
+        let (display, _) = picture::screen_for(marker, &screen.id)?;
+        let frame = display.frame();
+        let window = unsafe {
+            objc2_app_kit::NSWindow::initWithContentRect_styleMask_backing_defer_screen(objc2_app_kit::NSWindow::alloc(marker), objc2_foundation::NSRect::new(objc2_foundation::NSPoint::new(0.0, 0.0), frame.size), objc2_app_kit::NSWindowStyleMask::Borderless, objc2_app_kit::NSBackingStoreType::Buffered, false, Some(&display))
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        window.setFrame_display(frame, true);
+        window.setOpaque(true);
+        window.setBackgroundColor(Some(&objc2_app_kit::NSColor::blackColor()));
+        window.orderFrontRegardless();
+        spin(0.6);
+        Ok(window)
+    }
+
+    fn glide_check(p: &mut Probe) -> Result<()> {
+        let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
+        accessory(marker);
+        let desktop = platform::current()?;
+        let screen = main_screen(p)?;
+        let (_, display) = picture::screen_for(marker, &screen.id)?;
+        let name = PROBES[0].0;
+        if dismiss_prompt(p).is_none() {
+            p.finder = false;
+            p.line("- the glide check needs Apple Events to Finder, which the open consent window blocks, so it was skipped".to_string());
+            return Ok(());
+        }
+        let Some(daemon) = scooch_pid(p) else {
+            p.fail("no daemon runs for the glide check");
+            return Ok(());
+        };
+        p.line(format!("- glide setting `{}`, scenery `{}`, daemon {daemon}", state(p)["glide"], state(p)["options"]["scenery"].as_str().unwrap_or("missing")));
+        let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
+        let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
+        let (setup, _) = wallpaper_after(p, &screen, |p| {
+            let _ = place(p, name, subject);
+            poke(p);
+        });
+        std::thread::sleep(Duration::from_millis(1500));
+        p.line(format!("- set up with {name} on the subject, new wallpaper after {setup:?} ms"));
+        let paper = picture_window(&screen).and_then(|window| grab_window(window.number));
+        let baseline = grab(display).context("the desktop could not be captured")?;
+        let still: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().filter(|(found, _)| found.starts_with("scooch") && found != name).map(|(_, rect)| rect).collect();
+        let masks: Vec<Vec<(usize, usize)>> = paper.as_ref().map(|field| still.iter().map(|rect| strong_ink(&baseline, field, rect, &screen)).collect()).unwrap_or_default();
+        p.line(format!("- solid icon ink pixels of the still icons {:?}", masks.iter().map(Vec::len).collect::<Vec<_>>()));
+        let start = position(p, name).unwrap_or(subject);
+        let dragged = watch_drag(p, display, &screen, start, aside, &masks).context("the glide drag could not be watched")?;
+        let good = judge_glide(p, &dragged, "glide on, CGEvent drag", Some(&p.out.join("glide-strip.png")));
+        std::thread::sleep(Duration::from_millis(1000));
+        let pids = helper_pids(p);
+        let left = layer::every_window().into_iter().filter(|window| pids.contains(&(window.pid as i32))).count();
+        p.line(format!("- helper processes {pids:?} with windows left {left}"));
+        if !good || left > 0 {
+            p.fail("the glide did not move steadily under the icons and hand over cleanly");
+        }
+        let ran = p.scooch(&["glide"], LIMIT);
+        p.line(format!("- scooch glide said {:?}", ran.text()));
+        let back = position(p, name).unwrap_or(aside);
+        let (off, off_log) = wallpaper_after(p, &screen, |_| drag(back, subject));
+        p.line(format!("- glide off, the same drag back: new wallpaper after {off:?} ms, log {off_log:?}"));
+        let ran = p.scooch(&["glide"], LIMIT);
+        p.line(format!("- scooch glide said {:?}", ran.text()));
+        let reduce_before = p.tool("/usr/bin/defaults", &["read", "com.apple.universalaccess", "reduceMotion"]).out.trim().to_string();
+        let wrote = p.tool("/usr/bin/defaults", &["write", "com.apple.universalaccess", "reduceMotion", "-bool", "true"]);
+        std::thread::sleep(Duration::from_millis(800));
+        let reducing = NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
+        p.line(format!("- reduce motion written {}, read back by AppKit as {reducing}, value before `{reduce_before}`", if wrote.ok() { "ok".to_string() } else { wrote.text() }));
+        if reducing {
+            let back = position(p, name).unwrap_or(subject);
+            let (time, log) = wallpaper_after(p, &screen, |_| drag(back, aside));
+            let glided = log.iter().any(|line| line.contains(" glide open"));
+            p.line(format!("- reduce motion on, drag: new wallpaper after {time:?} ms, glided {glided}, log {log:?}"));
+            if glided {
+                p.fail("the daemon glided with reduce motion on");
+            }
+        } else {
+            p.limit("the runner would not take the reduce motion setting, so that path is proven only by the unit tests");
+        }
+        if reduce_before.is_empty() {
+            let _ = p.tool("/usr/bin/defaults", &["delete", "com.apple.universalaccess", "reduceMotion"]);
+        } else {
+            let _ = p.tool("/usr/bin/defaults", &["write", "com.apple.universalaccess", "reduceMotion", "-bool", if reduce_before == "1" { "true" } else { "false" }]);
+        }
+        std::thread::sleep(Duration::from_millis(800));
+        let window = cover(marker, &screen)?;
+        let target = if position(p, name).is_some_and(|at| (at.0 - subject.0).abs() < 5.0) { aside } else { subject };
+        let (covered, covered_log) = wallpaper_after(p, &screen, |p| {
+            let _ = place(p, name, target);
+            poke(p);
+        });
+        window.orderOut(None);
+        window.close();
+        drop(window);
+        spin(0.4);
+        let tick = |log: &[String]| log.iter().find_map(|line| line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<u64>().ok()));
+        p.line(format!("- a move while a window covers the whole desktop: new wallpaper after {covered:?} ms, tick {:?} ms against {:?} ms with glide off, log {covered_log:?}", tick(&covered_log), tick(&off_log)));
+        if covered.is_none() || tick(&covered_log).zip(tick(&off_log)).is_some_and(|(with, without)| with > without + 400 + 300) {
+            p.fail("a covered desktop delayed the plain swap");
+        }
+        std::thread::sleep(Duration::from_millis(1500));
+        let from = position(p, name).unwrap_or(subject);
+        let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
+        let lines = daemon_log(p).lines().count();
+        let shown_before = desktop.wallpaper(&screen).ok().flatten();
+        drag(from, to);
+        let home = p.home.clone();
+        let opened = wait_until(Duration::from_secs(5), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" glide open")));
+        let killed = helper_pids(p);
+        for pid in &killed {
+            let _ = p.tool("/bin/kill", &["-9", &pid.to_string()]);
+        }
+        let _ = wait_until(Duration::from_secs(6), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" tick ")));
+        std::thread::sleep(Duration::from_millis(1200));
+        let now_shown = desktop.wallpaper(&screen).ok().flatten();
+        let recorded = state(p)["screens"].as_object().and_then(|screens| screens.values().next().and_then(|entry| entry["output"].as_str().map(PathBuf::from)));
+        let shot = grab(display);
+        let icons: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().map(|(_, rect)| rect).collect();
+        let matches = shot.as_ref().zip(now_shown.as_ref()).and_then(|(shot, file)| matches_file(shot, file, &icons, &screen));
+        let alive = scooch_pid(p).is_some();
+        let kill_log: Vec<String> = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains("without the glide")).map(|line| line.chars().take(180).collect()).collect();
+        p.line(format!("- helper killed mid glide after the layer opened {:?} ms: killed {killed:?}, wallpaper changed {}, it is the recorded output {}, screen matches the file {matches:?}, daemon alive {alive}, log {kill_log:?}", opened.map(|time| time.as_millis()), now_shown != shown_before, now_shown == recorded));
+        std::thread::sleep(Duration::from_millis(1500));
+        let from = position(p, name).unwrap_or(subject);
+        let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
+        let again = watch_drag(p, display, &screen, from, to, &masks).context("the drag after the kill could not be watched")?;
+        let glided_again = logged(&again, " glide settled").is_some();
+        p.line(format!("- the next drag glides again {glided_again}, log {:?}", again.log.iter().map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()));
+        if killed.is_empty() || now_shown != recorded || !matches.is_some_and(|share| share >= 0.9) || !alive || !glided_again {
+            p.fail("killing the helper mid glide was not handled cleanly");
+        }
+        let last = Instant::now();
+        let gone = wait_until(Duration::from_secs(40), || helper_pids(p).is_empty());
+        p.line(format!("- no helper process {:?} s after the last drag", gone.map(|_| last.elapsed().as_secs())));
+        std::thread::sleep(Duration::from_secs(35).saturating_sub(last.elapsed()));
+        let pids = helper_pids(p);
+        p.line(format!("- 35 s after the last drag helper processes {pids:?}"));
+        if !pids.is_empty() {
+            p.fail("a helper was still running 35 s after the last drag");
+        }
+        quiet_minute(p, daemon, "the daemon with glide on, 35 s after its last glide")?;
+        Ok(())
+    }
+
+    const BALLOON: &[u8] = include_bytes!("../../../assets/photos/balloon-sky.jpg");
+
+    fn smoother(t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+    }
+
+    fn bench_scene(width: u32, height: u32, moved: bool) -> scooch_core::Scene {
+        let (w, h) = (152.0f32, 168.0f32);
+        let mut icons: Vec<Rect> = (0..6).map(|index| Rect { x: width as f32 - 230.0, y: 60.0 + 200.0 * index as f32, w, h }).collect();
+        icons.push(if moved { Rect { x: width as f32 * 0.25, y: height as f32 * 0.70, w, h } } else { Rect { x: width as f32 * 0.48, y: height as f32 * 0.42, w, h } });
+        scooch_core::Scene { width, height, icons }
+    }
+
+    fn timed(values: &[f64]) -> String {
+        format!("{}, over 16.7 ms {}", stats(values), values.iter().filter(|value| **value > 16.7).count())
+    }
+
+    fn gpu_bench(out: PathBuf) -> ExitCode {
+        let _ = fs::create_dir_all(&out);
+        let mut lines = vec!["# Scooch GPU glide bench".to_string(), String::new()];
+        let result = (|| -> Result<()> {
+            let marker = MainThreadMarker::new().context("not on the main thread")?;
+            accessory(marker);
+            let load = Command::new("/usr/bin/uptime").output().map(|ran| String::from_utf8_lossy(&ran.stdout).trim().to_string()).unwrap_or_default();
+            lines.push(format!("- uptime before `{load}`"));
+            let pid = std::process::id() as i32;
+            let file = out.join("balloon-sky.jpg");
+            fs::write(&file, BALLOON)?;
+            let image = objc2::rc::autoreleasepool(|_| picture::decode(&file))?;
+            let _ = fs::remove_file(&file);
+            let (width, height) = (2880u32, 1800u32);
+            let options = scooch_core::Options { scenery: scooch_core::Scenery::Auto, ..Default::default() };
+            let made = Instant::now();
+            let analysis = scooch_core::analyze(&image);
+            let (one, two) = (bench_scene(width, height, false), bench_scene(width, height, true));
+            let first = scooch_core::solve(&analysis, &one, &options, None);
+            let second = scooch_core::solve(&analysis, &two, &options, Some(&first));
+            let a = scooch_core::bundle(&image, &analysis, &first, &one, &options);
+            let b = scooch_core::bundle(&image, &analysis, &second, &two, &options);
+            let canvas = scooch_core::canvas(&image, width, height);
+            lines.push(format!("- balloon picture {}x{}, two {width}x{height} bundles with scenery and the canvas made on the CPU in {} ms, compatible {}", image.width(), image.height(), made.elapsed().as_millis(), scooch_core::compatible(&a, &b)));
+            lines.push(format!("- before any device {}", memory(pid)));
+            let started = Instant::now();
+            let gpu = Gpu::new(false).map_err(anyhow::Error::msg)?;
+            gpu.ready().map_err(anyhow::Error::msg)?;
+            lines.push(format!("- device {} with shaders ready after {} ms, {}", gpu.name, started.elapsed().as_millis(), memory(pid)));
+            let started = Instant::now();
+            let picture = gpu.picture(&canvas);
+            let glide = gpu.glide(&picture, &a, &b).map_err(anyhow::Error::msg)?;
+            lines.push(format!("- canvas {}x{} with {} mip levels and both tables uploaded in {} ms, {}", picture.width, picture.height, picture.levels, started.elapsed().as_millis(), memory(pid)));
+            let frame = |index: usize| smoother((index % 27) as f32 / 26.0);
+            let metal = objc2_quartz_core::CAMetalLayer::new();
+            metal.setOpaque(true);
+            let mut screen = gpu.screen(Target::Layer(objc2::rc::Retained::as_ptr(&metal) as *mut c_void), width, height).map_err(anyhow::Error::msg)?;
+            for index in 0..10 {
+                layer::present(|| screen.show(&[(Layered::Glide(&glide, frame(index)), 1.0)])).map_err(anyhow::Error::msg)?;
+            }
+            let mut paced = Vec::new();
+            let mut last = Instant::now();
+            for index in 0..300 {
+                layer::present(|| screen.show(&[(Layered::Glide(&glide, frame(index)), 1.0)])).map_err(anyhow::Error::msg)?;
+                let now = Instant::now();
+                paced.push((now - last).as_secs_f64() * 1000.0);
+                last = now;
+            }
+            let drained = Instant::now();
+            drop(screen);
+            lines.push(format!("- 300 glide frames presented to an offscreen Metal layer with three drawables, time between frames {}, the last frames finished {} ms after the loop", timed(&paced), drained.elapsed().as_millis()));
+            let mut whole = Vec::new();
+            for index in 0..60 {
+                let started = Instant::now();
+                gpu.snapshot(width, height, &[(Layered::Glide(&glide, frame(index)), 1.0)]).map_err(anyhow::Error::msg)?;
+                whole.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            let mut empty = Vec::new();
+            for _ in 0..30 {
+                let started = Instant::now();
+                gpu.snapshot(width, height, &[]).map_err(anyhow::Error::msg)?;
+                empty.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            let mut base = empty.clone();
+            base.sort_by(f64::total_cmp);
+            let floor = base[base.len() / 2];
+            let drawn: Vec<f64> = whole.iter().map(|value| (value - floor).max(0.0)).collect();
+            lines.push(format!("- 60 glide frames each drawn alone to an offscreen target and read back, submit to finished and read {}", stats(&whole)));
+            lines.push(format!("- 30 empty frames read back the same way {}, so the readback costs about {floor:.2} ms", stats(&empty)));
+            lines.push(format!("- the glide frames with that readback taken off {}", timed(&drawn)));
+            lines.push(format!("- with the device and pictures {}", memory(pid)));
+            drop(glide);
+            drop(picture);
+            drop(gpu);
+            spin(0.5);
+            lines.push(format!("- after the device was dropped {}", memory(pid)));
+            let load = Command::new("/usr/bin/uptime").output().map(|ran| String::from_utf8_lossy(&ran.stdout).trim().to_string()).unwrap_or_default();
+            lines.push(format!("- uptime after `{load}`"));
             Ok(())
         })();
         if let Err(error) = result {

@@ -1,6 +1,7 @@
 mod cache;
 mod commands;
 mod daemon;
+mod glide;
 #[doc(hidden)]
 pub mod live;
 #[doc(hidden)]
@@ -48,6 +49,8 @@ enum Command {
     Flip,
     #[command(about = "Turn the clouds and islands around your icons on or off")]
     Scenery,
+    #[command(about = "Turn the sliding of your picture on or off")]
+    Glide,
     #[command(about = "Run in the foreground, which is what the login item does")]
     Watch,
     #[command(about = "Check permissions and the desktop")]
@@ -75,6 +78,7 @@ fn dispatch() -> Result<()> {
         Some(Command::Render { image, icons, out, json, saliency, fill }) => commands::render(image, icons, out, json, saliency, fill),
         Some(Command::Flip) => commands::flip(),
         Some(Command::Scenery) => commands::scenery(),
+        Some(Command::Glide) => commands::glide(),
         Some(Command::Watch) => commands::watch(),
         Some(Command::Doctor) => commands::doctor(),
     }

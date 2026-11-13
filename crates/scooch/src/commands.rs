@@ -24,6 +24,9 @@ pub const FLIP_OFF: &str = "Scooch now keeps your picture the way round it is.";
 pub const SCENERY_ON: &str = "Scooch now paints scenery like clouds and islands around your icons.";
 pub const SCENERY_OFF: &str = "Scooch now keeps your picture free of scenery.";
 pub const SCENERY_LINE: &str = "Scenery  on";
+pub const GLIDE_ON: &str = "Scooch now slides your picture into place when icons move.";
+pub const GLIDE_OFF: &str = "Scooch now swaps your picture without sliding it.";
+pub const GLIDE_NONE: &str = "Scooch swaps the picture here, since sliding it works only on macOS and Windows.";
 pub const GUIDE: &str = "Your wallpaper is not a picture file, so pick a picture for Scooch to move.";
 pub const MADE: &str = "This desktop still shows a picture Scooch made, so pick a picture for Scooch to move.";
 pub const NO_SCREEN: &str = "No screen was found, so connect one and try again.";
@@ -479,6 +482,31 @@ pub fn scenery() -> Result<()> {
     Ok(())
 }
 
+pub fn glide() -> Result<()> {
+    if !desktop().is_ok_and(|desktop| desktop.live()) {
+        println!("{GLIDE_NONE}");
+        return Ok(());
+    }
+    let store = Store::open();
+    let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
+    let mut state = store.load();
+    state.glide = !state.glide;
+    store.save(&state)?;
+    if let Some(process) = store.watcher() {
+        poke::send(process);
+    }
+    println!("{}", glide_line(state.glide));
+    Ok(())
+}
+
+pub fn glide_line(on: bool) -> &'static str {
+    if on {
+        GLIDE_ON
+    } else {
+        GLIDE_OFF
+    }
+}
+
 pub fn scenery_line(on: bool) -> &'static str {
     if on {
         SCENERY_ON
@@ -778,7 +806,7 @@ mod tests {
 
     #[test]
     fn shared_sentences_name_no_system() {
-        for line in [NO_SCREEN, NO_PICTURE, NO_TERMINAL, crate::daemon::NOT_A_FILE, SCENERY_ON, SCENERY_OFF, SCENERY_LINE] {
+        for line in [NO_SCREEN, NO_PICTURE, NO_TERMINAL, crate::daemon::NOT_A_FILE, SCENERY_ON, SCENERY_OFF, SCENERY_LINE, GLIDE_ON, GLIDE_OFF] {
             for word in ["macOS", "Finder", "System Settings", "Windows", "GNOME", "login item"] {
                 assert!(!line.contains(word), "{line}");
             }
@@ -856,6 +884,15 @@ mod tests {
         assert_eq!(flip_line(true), "Scooch may now flip your picture when that clears your icons.");
         assert_eq!(flip_line(false), "Scooch now keeps your picture the way round it is.");
         for line in [FLIP_ON, FLIP_OFF, FLIP_HINT] {
+            assert!(!line.contains(['—', '–', ';', '(', ')']) && !line.contains(": "), "{line}");
+        }
+    }
+
+    #[test]
+    fn glide_switches_and_says_so_in_one_line() {
+        assert_eq!(glide_line(true), "Scooch now slides your picture into place when icons move.");
+        assert_eq!(glide_line(false), "Scooch now swaps your picture without sliding it.");
+        for line in [GLIDE_ON, GLIDE_OFF, GLIDE_NONE] {
             assert!(!line.contains(['—', '–', ';', '(', ')']) && !line.contains(": "), "{line}");
         }
     }
