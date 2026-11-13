@@ -7,22 +7,26 @@ import { asset } from '@/lib/base';
 import { runtime } from '@/story/state';
 import { gpuClass } from './quality';
 import { layoutFor } from './shots';
+import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
 
-export const DESK_TOP = 0.787;
-export const LAPTOP = { position: [0.13, DESK_TOP, 0.05] as const, rotation: -0.21, scale: 0.5, lid: -0.16 };
-export const LAMP = { position: [0.04, DESK_TOP, -0.44] as const, rotation: Math.PI + 0.38 };
-export const BULB = new Vector3(-0.005, 0.69, -0.177);
+export { BULB, DESK_TOP, LAMP, LAPTOP, TELEVISION } from './layout';
 
-const names = ['desk', 'laptop', 'lamp', 'notepads', 'stationery'] as const;
-type Name = (typeof names)[number];
+const heroes = ['desk', 'laptop', 'lamp', 'television'] as const;
+const extras = ['notepads', 'stationery', 'clock', 'cassette', 'plant', 'stapler', 'glasses', 'watch', 'gamepad'] as const;
+type Hero = (typeof heroes)[number];
+type Extra = (typeof extras)[number];
 
-function pick(folder: string) {
-  return Object.fromEntries(names.map((name) => [name, asset(`${folder}/${name}.glb`)])) as Record<Name, string>;
+function pick<T extends string>(names: readonly T[], folder: string) {
+  return Object.fromEntries(names.map((name) => [name, asset(`${folder}/${name}.glb`)])) as Record<T, string>;
 }
 
-const full = pick('models');
-const lite = !new URLSearchParams(window.location.search).has('still');
-const urls = lite ? pick('models/lite') : full;
+const full = pick(heroes, 'models');
+const query = new URLSearchParams(window.location.search);
+const still = query.has('still');
+const hero = query.has('hero');
+const lite = !still;
+const urls = lite ? pick(heroes, 'models/lite') : full;
+const extraUrls = pick(extras, 'models');
 
 const support = gpuClass();
 const ktx2 = new KTX2Loader().setTranscoderPath(asset('basis/'));
@@ -37,7 +41,8 @@ function extend(loader: { setKTX2Loader: (value: never) => unknown }) {
   loader.setKTX2Loader(ktx2 as never);
 }
 
-for (const name of names) useGLTF.preload(urls[name], false, true, extend as never);
+for (const name of heroes) useGLTF.preload(urls[name], false, true, extend as never);
+if (still) for (const name of extras) useGLTF.preload(extraUrls[name], false, true, extend as never);
 
 const slots = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap'] as const;
 
@@ -88,7 +93,7 @@ async function swapTextures(gl: WebGLRenderer, scene: Object3D, source: Object3D
   return true;
 }
 
-function Sharpen({ name, onDone }: { name: Name; onDone: () => void }) {
+function Sharpen({ name, onDone }: { name: Hero; onDone: () => void }) {
   const gl = useThree((state) => state.gl);
   const scene = useThree((state) => state.scene);
   const gltf = useGLTF(full[name], false, true, extend);
@@ -104,37 +109,33 @@ function Sharpen({ name, onDone }: { name: Name; onDone: () => void }) {
   return null;
 }
 
+function whenReady(start: () => void, test: () => boolean) {
+  let timer = 0;
+  const check = () => {
+    if (test()) start();
+    else timer = window.setTimeout(check, 200);
+  };
+  timer = window.setTimeout(check, 0);
+  return () => window.clearTimeout(timer);
+}
+
 function Sharpener() {
   const [index, setIndex] = useState(-1);
   const next = useCallback(() => setIndex((value) => value + 1), []);
   useEffect(() => {
     if (!lite) return;
-    let timer = 0;
-    const begin = () => {
-      if (runtime.ready && layoutFor(window.innerWidth, window.innerHeight) !== 'phone') setIndex(0);
-      else timer = window.setTimeout(begin, 400);
-    };
-    timer = window.setTimeout(begin, 400);
-    return () => window.clearTimeout(timer);
+    return whenReady(
+      () => setIndex(0),
+      () => runtime.props && layoutFor(window.innerWidth, window.innerHeight) !== 'phone',
+    );
   }, []);
-  if (index < 0 || index >= names.length) return null;
+  if (index < 0 || index >= heroes.length) return null;
   return (
     <Suspense fallback={null}>
-      <Sharpen key={names[index]} name={names[index]} onDone={next} />
+      <Sharpen key={heroes[index]} name={heroes[index]} onDone={next} />
     </Suspense>
   );
 }
-
-type Placement = { name: string; x: number; z: number; rotation: number; lift?: number };
-
-const props: Placement[] = [
-  { name: 'office_notepads_yellow_pad', x: -0.2, z: 0.13, rotation: 0.26 },
-  { name: 'stationery_supplies_pencil_used', x: -0.19, z: 0.15, rotation: -0.62, lift: 0.0102 },
-  { name: 'office_notepads_sticky_stack', x: -0.4, z: 0.02, rotation: -0.35 },
-  { name: 'stationery_supplies_pencil_new_a', x: -0.05, z: 0.3, rotation: 0.95 },
-  { name: 'stationery_supplies_eraser', x: -0.38, z: 0.22, rotation: 0.3 },
-  { name: 'stationery_supplies_pen_fancy', x: 0.5, z: 0.1, rotation: -1.3 },
-];
 
 function prepare(root: Object3D) {
   root.traverse((child) => {
@@ -144,6 +145,10 @@ function prepare(root: Object3D) {
     mesh.receiveShadow = true;
     const material = mesh.material as MeshStandardMaterial;
     if (!material.isMeshStandardMaterial) return;
+    if (material.transparent) {
+      mesh.castShadow = false;
+      material.depthWrite = false;
+    }
     material.envMapIntensity = material.name === 'metal_office_desk' ? 0.18 : 1;
     if (material.name === 'metal_office_desk' && !material.userData.toned) {
       material.color.multiplyScalar(0.5);
@@ -159,37 +164,89 @@ function prepare(root: Object3D) {
   });
 }
 
-function placeOnDesk(object: Object3D, placement: Placement) {
-  object.updateWorldMatrix(true, false);
-  const box = new Box3().setFromObject(object);
+function placeOnDesk(object: Object3D, placement: Placement, top: number) {
+  object.updateWorldMatrix(true, true);
+  const copy = object.clone(true);
+  object.matrixWorld.decompose(copy.position, copy.quaternion, copy.scale);
+  copy.updateWorldMatrix(false, true);
+  const box = new Box3().setFromObject(copy);
   const center = box.getCenter(new Vector3());
-  object.removeFromParent();
-  object.position.x -= center.x;
-  object.position.y -= box.min.y;
-  object.position.z -= center.z;
+  copy.position.x -= center.x;
+  copy.position.y -= box.min.y;
+  copy.position.z -= center.z;
   const holder = new Group();
-  holder.name = `${placement.name}_holder`;
-  holder.position.set(placement.x, DESK_TOP + (placement.lift ?? 0), placement.z);
-  holder.rotation.y = placement.rotation;
-  holder.add(object);
+  holder.name = `${placement.model}_${placement.node ?? 'whole'}`;
+  holder.position.set(placement.x, top + (placement.lift ?? 0), placement.z);
+  holder.rotation.set(placement.tilt ?? 0, placement.rotation, placement.roll ?? 0);
+  holder.scale.setScalar(placement.scale ?? 1);
+  holder.add(copy);
   return holder;
 }
 
-export function Desk({ onScreen, showProps }: { onScreen: (mesh: Mesh, frame: Group) => void; showProps: boolean }) {
+function Extras({ phone, onExtras }: { phone: boolean; onExtras: () => void }) {
+  const scenes = extras.map((name) => useGLTF(extraUrls[name], false, true, extend).scene);
+  const group = useMemo(() => {
+    const loaded = Object.fromEntries(extras.map((name, index) => [name, { scene: scenes[index] }])) as Record<Extra, { scene: Group }>;
+    const placed = new Group();
+    placed.name = 'extras';
+    for (const model of Object.values(loaded)) prepare(model.scene);
+    for (const placement of placements) {
+      const source = loaded[placement.model as Extra];
+      if (!source) continue;
+      const object = placement.node ? source.scene.getObjectByName(placement.node) : source.scene;
+      if (!object) continue;
+      const holder = placeOnDesk(object, placement, LAPTOP.position[1]);
+      holder.userData.phone = placement.phone !== false;
+      placed.add(holder);
+    }
+    return placed;
+  }, scenes);
+
+  useLayoutEffect(() => {
+    for (const child of group.children) child.visible = !phone || child.userData.phone;
+  }, [group, phone]);
+
+  useEffect(() => {
+    runtime.props = true;
+    onExtras();
+  }, [group, onExtras]);
+
+  return <primitive object={group} />;
+}
+
+function LateExtras({ phone, onExtras }: { phone: boolean; onExtras: () => void }) {
+  const [go, setGo] = useState(still);
+  useEffect(() => {
+    if (go) return;
+    return whenReady(
+      () => {
+        for (const name of extras) useGLTF.preload(extraUrls[name], false, true, extend as never);
+        setGo(true);
+      },
+      () => runtime.ready,
+    );
+  }, [go]);
+  if (!go) return null;
+  return (
+    <Suspense fallback={null}>
+      <Extras phone={phone} onExtras={onExtras} />
+    </Suspense>
+  );
+}
+
+export type Screens = {
+  laptop: { mesh: Mesh; frame: Group };
+  television: { mesh: Mesh; frame: Group };
+};
+
+export function Desk({ onScreens, onExtras, phone }: { onScreens: (screens: Screens) => void; onExtras: () => void; phone: boolean }) {
   const desk = useGLTF(urls.desk, false, true, extend);
   const laptop = useGLTF(urls.laptop, false, true, extend);
   const lamp = useGLTF(urls.lamp, false, true, extend);
-  const notepads = useGLTF(urls.notepads, false, true, extend);
-  const stationery = useGLTF(urls.stationery, false, true, extend);
+  const television = useGLTF(urls.television, false, true, extend);
 
-  const groups = useMemo(() => {
-    for (const model of [desk, laptop, lamp, notepads, stationery]) prepare(model.scene);
-    const placed = new Group();
-    placed.name = 'props';
-    for (const placement of props) {
-      const source = notepads.scene.getObjectByName(placement.name) ?? stationery.scene.getObjectByName(placement.name);
-      if (source) placed.add(placeOnDesk(source, placement));
-    }
+  useMemo(() => {
+    for (const model of [desk, laptop, lamp, television]) prepare(model.scene);
     lamp.scene.traverse((child) => {
       const mesh = child as Mesh;
       if (!mesh.isMesh) return;
@@ -204,25 +261,33 @@ export function Desk({ onScreen, showProps }: { onScreen: (mesh: Mesh, frame: Gr
     });
     const pivot = laptop.scene.getObjectByName('classic_laptop_screen_pivot');
     if (pivot) pivot.rotation.x = LAPTOP.lid;
-    return { placed };
-  }, [desk, laptop, lamp, notepads, stationery]);
+  }, [desk, laptop, lamp, television]);
 
-  const frame = useMemo(() => new Group(), []);
+  const laptopFrame = useMemo(() => new Group(), []);
+  const televisionFrame = useMemo(() => new Group(), []);
 
   useLayoutEffect(() => {
-    frame.updateWorldMatrix(true, true);
-    let screen: Mesh | null = null;
-    laptop.scene.traverse((child) => {
-      const mesh = child as Mesh;
-      if (mesh.isMesh && (mesh.material as MeshStandardMaterial).name === 'classic_laptop_screen') screen = mesh;
-    });
-    if (screen) onScreen(screen, frame);
-  }, [laptop, frame, onScreen]);
+    laptopFrame.updateWorldMatrix(true, true);
+    televisionFrame.updateWorldMatrix(true, true);
+    const find = (root: Object3D, name: string) => {
+      let found: Mesh | null = null;
+      root.traverse((child) => {
+        const mesh = child as Mesh;
+        if (mesh.isMesh && (mesh.material as MeshStandardMaterial).name === name) found = mesh;
+      });
+      return found as Mesh | null;
+    };
+    const laptopGlass = find(laptop.scene, 'classic_laptop_screen');
+    const televisionGlass = find(television.scene, 'television_02_screen');
+    if (laptopGlass && televisionGlass) {
+      onScreens({ laptop: { mesh: laptopGlass, frame: laptopFrame }, television: { mesh: televisionGlass, frame: televisionFrame } });
+    }
+  }, [laptop, television, laptopFrame, televisionFrame, onScreens]);
 
   return (
     <group>
       <primitive object={desk.scene} />
-      <primitive object={frame} position={LAPTOP.position} rotation-y={LAPTOP.rotation}>
+      <primitive object={laptopFrame} position={LAPTOP.position} rotation-y={LAPTOP.rotation}>
         <group scale={LAPTOP.scale}>
           <primitive object={laptop.scene} />
         </group>
@@ -230,7 +295,10 @@ export function Desk({ onScreen, showProps }: { onScreen: (mesh: Mesh, frame: Gr
       <group position={LAMP.position} rotation-y={LAMP.rotation}>
         <primitive object={lamp.scene} />
       </group>
-      <primitive object={groups.placed} visible={showProps} />
+      <primitive object={televisionFrame} position={TELEVISION.position} rotation-y={TELEVISION.rotation}>
+        <primitive object={television.scene} />
+      </primitive>
+      {hero ? null : <LateExtras phone={phone} onExtras={onExtras} />}
       <Sharpener />
     </group>
   );
