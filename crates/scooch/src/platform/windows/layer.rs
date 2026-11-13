@@ -19,7 +19,7 @@ use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::System::Threading::GetCurrentThreadId;
 use ::windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows, EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetClientRect, GetWindow, GetWindowLongPtrW, GetWindowRect,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows, EnumWindows, FindWindowExW, FindWindowW, GetAncestor, GetClassNameW, GetClientRect, GetWindow, GetWindowLongPtrW, GetWindowRect, WindowFromPoint, GA_ROOT,
     GetWindowThreadProcessId, IsWindow, IsWindowVisible, MsgWaitForMultipleObjects, PeekMessageW, PostThreadMessageW, RegisterClassExW, SendMessageTimeoutW, SetLayeredWindowAttributes, SetParent,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, EVENT_OBJECT_CREATE, EVENT_OBJECT_REORDER, GWL_STYLE, GW_CHILD, GW_HWNDNEXT, HTTRANSPARENT, LWA_ALPHA, MA_NOACTIVATE, MSG, PM_NOREMOVE,
     PM_REMOVE, QS_ALLINPUT, SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_NCHITTEST,
@@ -335,6 +335,9 @@ impl Platform for Host {
     }
 
     fn open(&mut self, screen: &Screen, hints: &Hints) -> Result<Window> {
+        if covered(screen) {
+            bail!("windows cover the whole desktop, so Windows never reported the live layer as visible");
+        }
         let method = Method::from_hints(hints)?;
         let (layout, _) = layout()?;
         let area = frame_in_parent(screen, hwnd(layout.parent()));
@@ -415,6 +418,21 @@ impl Platform for Host {
             let _ = unsafe { PostThreadMessageW(thread, WM_NULL, WPARAM(0), LPARAM(0)) };
         })
     }
+}
+
+pub fn covered(screen: &Screen) -> bool {
+    let frame = screen.frame;
+    let points = [(0.5, 0.5), (0.15, 0.15), (0.85, 0.15), (0.15, 0.8), (0.85, 0.8)];
+    points.iter().all(|(fx, fy)| {
+        let at = POINT { x: (frame.x + frame.w * fx) as i32, y: (frame.y + frame.h * fy) as i32 };
+        let found = unsafe { WindowFromPoint(at) };
+        if found.is_invalid() {
+            return false;
+        }
+        let root = unsafe { GetAncestor(found, GA_ROOT) };
+        let class = class_of(if root.is_invalid() { found } else { root });
+        class != "Progman" && class != "WorkerW"
+    })
 }
 
 fn refresh_period() -> Duration {
