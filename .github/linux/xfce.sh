@@ -13,7 +13,8 @@ export XDG_SESSION_DESKTOP=xfce
 if [ "$scale" != "1" ]; then
     xfconf-query -c xsettings -p /Gdk/WindowScalingFactor -n -t int -s "$scale" || true
     xfsettingsd >"$out/xfsettingsd.log" 2>&1 &
-    sleep 2
+    ready "Xfce settings daemon" 60 owned org.xfce.SettingsDaemon
+    sleep 1
 fi
 
 xfwm4 >"$out/xfwm4.log" 2>&1 &

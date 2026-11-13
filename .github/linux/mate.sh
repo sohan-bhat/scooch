@@ -6,6 +6,7 @@ export XDG_CURRENT_DESKTOP=MATE
 export XDG_SESSION_DESKTOP=mate
 
 gsettings set org.mate.background show-desktop-icons true || true
+gsettings set org.mate.panel default-layout 'default' || true
 
 marco >"$out/marco.log" 2>&1 &
 sleep 2
