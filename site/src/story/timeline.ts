@@ -51,11 +51,11 @@ export function buildTimeline(elements: Elements, manifest: DemoManifest): Built
 
   to(timeline, story, { camera: 0 }, { camera: 2 }, 8, 15.5, EASE.camera);
   to(timeline, story, { camera: 2 }, { camera: 3 }, 30, 4.4, EASE.camera);
-  to(timeline, story, { camera: 3 }, { camera: 4 }, 34.2, 5.6, EASE.camera);
-  to(timeline, story, { camera: 4 }, { camera: 5 }, 50, 9, EASE.camera);
-  to(timeline, story, { camera: 5 }, { camera: 6 }, 64, 12, EASE.camera);
-  to(timeline, story, { camera: 6 }, { camera: 7 }, 90, 9.4, EASE.camera);
-  to(timeline, story, { camera: 7 }, { camera: 8 }, 105.6, 9.6, EASE.camera);
+  to(timeline, story, { camera: 3 }, { camera: 5 }, 34.2, 6.4, EASE.camera);
+  to(timeline, story, { camera: 5 }, { camera: 6 }, 50, 9, EASE.camera);
+  to(timeline, story, { camera: 6 }, { camera: 7 }, 64, 12, EASE.camera);
+  to(timeline, story, { camera: 7 }, { camera: 8 }, 90, 9.4, EASE.camera);
+  to(timeline, story, { camera: 8 }, { camera: 9 }, 105.6, 9.6, EASE.camera);
 
   to(timeline, story, { dof: 0 }, { dof: 1 }, 13, 6, EASE.camera);
   to(timeline, story, { focus: 0 }, { focus: 1 }, 18.6, 5.2, EASE.camera);

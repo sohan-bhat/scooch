@@ -26,10 +26,9 @@ export const runtime = {
   hero: false,
   idle: true,
   ready: false,
-  power: 0,
   posed: false,
   compiled: false,
   props: false,
-  introAt: -1,
+  introAt: null as number | null,
   resume: null as (() => void) | null,
 };

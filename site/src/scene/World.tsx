@@ -68,12 +68,12 @@ function stageFor(glass: Glass): Stage {
   const width = glass.screen.width * 0.94;
   const height = glass.screen.height * 0.93;
   const normal = new Vector3(0, 0, 1).applyQuaternion(glass.quaternion);
-  const tilt = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), -1.12);
+  const tilt = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), -1.0);
   return {
     width,
     height,
     glass: { position: glass.center.clone().addScaledVector(normal, 0.006), quaternion: glass.quaternion.clone(), scale: 1 },
-    space: { position: glass.center.clone().addScaledVector(normal, 0.64).addScaledVector(up, 0.16), quaternion: glass.quaternion.clone().multiply(tilt), scale: 2.6 },
+    space: { position: glass.center.clone().addScaledVector(normal, 0.12).addScaledVector(up, 0.3), quaternion: glass.quaternion.clone().multiply(tilt), scale: 2.6 },
   };
 }
 
@@ -260,14 +260,15 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const motion = idle ? 1 : 0;
     rig.apply(camera as PerspectiveCamera, story.camera, time, pointer.x * motion, pointer.y * motion, Math.min(delta, 0.1), size.width, size.height, idle);
 
-    if (runtime.introAt < 0 && runtime.ready && runtime.still < 0) {
+    if (runtime.introAt === null && runtime.ready && runtime.still < 0) {
       if (readyAt.current < 0) readyAt.current = time;
       if (story.progress > 0.05) runtime.introAt = time - 10;
       else if (runtime.props || time - readyAt.current > 1.6) runtime.introAt = time + 0.12;
+      if (runtime.introAt !== null) performance.mark('scooch:intro');
     }
     let intro = 1;
     if (runtime.still >= 0) intro = runtime.hero ? 0 : 1;
-    else if (runtime.introAt < 0) intro = 0;
+    else if (runtime.introAt === null) intro = 0;
     else intro = time - runtime.introAt;
     const still = runtime.still >= 0;
     const introLamp = still ? intro : intro >= 1.6 ? 1 : flicker(intro);
