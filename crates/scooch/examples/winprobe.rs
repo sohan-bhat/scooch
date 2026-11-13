@@ -1969,10 +1969,13 @@ mod probe {
     struct Kit {
         picture: PathBuf,
         size: [u32; 2],
+        pair: (scooch_core::Bundle, scooch_core::Bundle),
+        canvas: scooch_core::Canvas,
         stills: Vec<(PathBuf, RgbImage)>,
         tables: Vec<PathBuf>,
         frames: Vec<(f32, RgbImage)>,
         mirrored_frames: Vec<(f32, RgbImage)>,
+        scenic_frames: Vec<(f32, RgbImage)>,
         other: (PathBuf, RgbImage),
         detail: (PathBuf, RgbImage),
         icons: Vec<Rect>,
@@ -1986,18 +1989,13 @@ mod probe {
         Ok(())
     }
 
-    fn colorful(image: &RgbImage, icons: &[Rect]) -> Option<(f32, f32)> {
-        let (mut sx, mut sy, mut count) = (0.0f64, 0.0f64, 0.0f64);
-        for (x, y, pixel) in image.enumerate_pixels() {
-            let [r, g, b] = pixel.0;
-            let spread = r.max(g).max(b) - r.min(g).min(b);
-            if spread > 90 && r > 120 && !inside(icons, x as f32, y as f32, 6.0) {
-                sx += f64::from(x);
-                sy += f64::from(y);
-                count += 1.0;
-            }
-        }
-        (count > 50.0).then(|| ((sx / count) as f32, (sy / count) as f32))
+    fn subject_at(bundle: &scooch_core::Bundle, analysis: &scooch_core::Analysis) -> Option<(f32, f32)> {
+        let s = analysis.subject;
+        let (u, v) = (f64::from(s.x + s.w / 2.0), f64::from(s.y + s.h / 2.0));
+        let nearest = |map: &[f64], value: f64| map.iter().enumerate().min_by(|x, y| (x.1 - value).abs().total_cmp(&(y.1 - value).abs())).map(|(index, found)| (index, (found - value).abs()));
+        let (x, dx) = nearest(&bundle.xmap, u)?;
+        let (y, dy) = nearest(&bundle.ymap, v)?;
+        (dx < 0.01 && dy < 0.01).then_some((x as f32 + 0.5, y as f32 + 0.5))
     }
 
     fn inside(icons: &[Rect], x: f32, y: f32, margin: f32) -> bool {
@@ -2032,6 +2030,47 @@ mod probe {
         best
     }
 
+    struct Found {
+        scene: Scene,
+        placement: scooch_core::Placement,
+        at: (f32, f32),
+        moved: f32,
+        tries: usize,
+    }
+
+    fn moving_pair(analysis: &scooch_core::Analysis, first: &Scene, placed: &scooch_core::Placement, from: (f32, f32), options: &Options, image: &RgbImage) -> Option<Found> {
+        let mut order: Vec<usize> = (0..first.icons.len()).collect();
+        let centre = |rect: &Rect| (rect.x + rect.w / 2.0 - from.0).hypot(rect.y + rect.h / 2.0 - from.1);
+        order.sort_by(|x, y| centre(&first.icons[*x]).total_cmp(&centre(&first.icons[*y])));
+        let offsets = [(0.0, 0.0), (-90.0, 0.0), (90.0, 0.0), (0.0, -90.0), (0.0, 90.0), (-160.0, -60.0), (160.0, 60.0)];
+        let mut best: Option<Found> = None;
+        let mut tries = 0usize;
+        for index in order.into_iter().take(6) {
+            for (dx, dy) in offsets {
+                tries += 1;
+                let mut icons = first.icons.clone();
+                let rect = icons[index];
+                icons[index].x = (from.0 + dx - rect.w / 2.0).clamp(0.0, first.width as f32 - rect.w);
+                icons[index].y = (from.1 + dy - rect.h / 2.0).clamp(0.0, first.height as f32 - rect.h);
+                let scene = Scene { width: first.width, height: first.height, icons };
+                let placement = scooch_core::solve(analysis, &scene, options, Some(placed));
+                let bundle = scooch_core::bundle(image, analysis, &placement, &scene, options);
+                let Some(at) = subject_at(&bundle, analysis) else { continue };
+                let moved = (at.0 - from.0).hypot(at.1 - from.1);
+                if best.as_ref().is_none_or(|found| moved > found.moved) {
+                    best = Some(Found { scene, placement, at, moved, tries });
+                }
+                if moved >= 80.0 {
+                    return best.map(|found| Found { tries, ..found });
+                }
+                if tries >= 30 {
+                    return best.map(|found| Found { tries, ..found });
+                }
+            }
+        }
+        best.map(|found| Found { tries, ..found })
+    }
+
     fn kit(p: &mut Probe, screen: &Screen) -> Result<Kit> {
         let (width, height) = (screen.frame.w as u32, screen.frame.h as u32);
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/photos/balloon-sky.jpg");
@@ -2041,24 +2080,31 @@ mod probe {
         let analysis = scooch_core::analyze(&image);
         let options = Options { scenery: Scenery::Auto, ..Options::default() };
         let icons: Vec<Rect> = icon_rects()?.into_iter().map(|rect| Rect { x: rect.x - screen.frame.x, y: rect.y - screen.frame.y, ..rect }).collect();
+        let first = Scene { width, height, icons: icons.clone() };
+        let placed_a = scooch_core::solve(&analysis, &first, &options, None);
+        let a = scooch_core::bundle(&image, &analysis, &placed_a, &first, &options);
+        let from = subject_at(&a, &analysis).context("the subject is not on screen in A")?;
+        let found = moving_pair(&analysis, &first, &placed_a, from, &options, &image).context("no icon move gave a placement")?;
+        p.line(format!("- searched {} icon moves, the subject goes from {:.0},{:.0} to {:.0},{:.0}, {:.0} px", found.tries, from.0, from.1, found.at.0, found.at.1, found.moved));
+        if found.moved < 80.0 {
+            p.failed.push(format!("no icon move made the subject travel 80 px, the best was {:.0} px", found.moved));
+        }
         let centre = |rect: &Rect| (rect.x + rect.w / 2.0 - width as f32 / 2.0).hypot(rect.y + rect.h / 2.0 - height as f32 / 2.0);
         let index = icons.iter().enumerate().min_by(|(_, x), (_, y)| centre(x).total_cmp(&centre(y))).map(|(index, _)| index).context("no icons to move")?;
-        let mut moved = icons.clone();
-        let shift = if moved[index].x > width as f32 / 2.0 { -320.0 } else { 320.0 };
-        moved[index].x = (moved[index].x + shift).clamp(0.0, width as f32 - moved[index].w);
-        let first = Scene { width, height, icons: icons.clone() };
-        let second = Scene { width, height, icons: moved };
-        let placed_a = scooch_core::solve(&analysis, &first, &options, None);
-        let placed_b = scooch_core::solve(&analysis, &second, &options, Some(&placed_a));
+        let mut scenic_icons = icons.clone();
+        let shift = if scenic_icons[index].x > width as f32 / 2.0 { -320.0 } else { 320.0 };
+        scenic_icons[index].x = (scenic_icons[index].x + shift).clamp(0.0, width as f32 - scenic_icons[index].w);
+        let scenic_scene = Scene { width, height, icons: scenic_icons };
+        let placed_s = scooch_core::solve(&analysis, &scenic_scene, &options, Some(&placed_a));
         let mut placed_m = placed_a.clone();
         placed_m.fx.iter_mut().for_each(|value| *value = 1.0 - *value);
         placed_m.mirrored = !placed_a.mirrored;
-        let a = scooch_core::bundle(&image, &analysis, &placed_a, &first, &options);
-        let b = scooch_core::bundle(&image, &analysis, &placed_b, &second, &options);
+        let b = scooch_core::bundle(&image, &analysis, &found.placement, &found.scene, &options);
         let mirrored = scooch_core::bundle(&image, &analysis, &placed_m, &first, &options);
+        let scenic = scooch_core::bundle(&image, &analysis, &placed_s, &scenic_scene, &options);
         let mut stills = Vec::new();
         let mut tables = Vec::new();
-        for (name, placement, scene, bundle) in [("a", &placed_a, &first, &a), ("b", &placed_b, &second, &b), ("mirrored", &placed_m, &first, &mirrored)] {
+        for (name, placement, scene, bundle) in [("a", &placed_a, &first, &a), ("b", &found.placement, &found.scene, &b), ("mirrored", &placed_m, &first, &mirrored), ("scenic", &placed_s, &scenic_scene, &scenic)] {
             let still = scooch_core::render_with(&image, &analysis, placement, scene, &options);
             let path = p.home.join(format!("glide-{name}.png"));
             save_png(&path, &still)?;
@@ -2067,43 +2113,45 @@ mod probe {
             fs::write(&table, bundle.tables_to_bytes())?;
             tables.push(table);
         }
-        let frames: Vec<(f32, RgbImage)> = (0..=20).map(|step| step as f32 / 20.0).map(|s| (s, scooch_core::frame(&a, &b, s))).collect();
+        let frames: Vec<(f32, RgbImage)> = (0..=40).map(|step| step as f32 / 40.0).map(|s| (s, scooch_core::frame(&a, &b, s))).collect();
         let mirrored_frames: Vec<(f32, RgbImage)> = (0..=10).map(|step| step as f32 / 10.0).map(|s| (s, scooch_core::frame(&a, &mirrored, s))).collect();
+        let scenic_frames: Vec<(f32, RgbImage)> = (0..=10).map(|step| step as f32 / 10.0).map(|s| (s, scooch_core::frame(&a, &scenic, s))).collect();
         let other_image = subject_picture(width, height);
         let other_path = p.home.join("glide-other.png");
         save_png(&other_path, &other_image)?;
         let detail_image = detailed(width, height);
         let detail_path = p.home.join("glide-detail.png");
         save_png(&detail_path, &detail_image)?;
-        let subject = [colorful(&stills[0].1, &icons).unwrap_or_default(), colorful(&stills[1].1, &icons).unwrap_or_default()];
-        let (left, top, moving) = best_block(&frames[0].1, &frames[3].1, &icons, 24);
+        let (left, top, moving) = best_block(&frames[0].1, &frames[6].1, &icons, 24);
         let (spot_left, spot_top, apart) = best_block(&stills[0].1, &other_image, &icons, 16);
         let origin = (screen.frame.x as i32, screen.frame.y as i32);
         p.line(format!(
-            "- test photo {} decoded to {}x{}, icon {index} moved by {shift} px, compatible {} and mirrored compatible {}, canvas {}x{}, tables {} and {} bytes, subject at {:?} then {:?}, motion patch at {left},{top} differs by {moving:.1}, other still patch at {spot_left},{spot_top} differs by {apart:.1}",
+            "- test photo {} decoded to {}x{}, compatible {}, mirrored compatible {}, scenery pair compatible {}, canvas {}x{}, tables {} bytes each, motion patch at {left},{top} differs by {moving:.1}, other still patch at {spot_left},{spot_top} differs by {apart:.1}",
             source.display(),
             image.width(),
             image.height(),
             scooch_core::compatible(&a, &b),
             scooch_core::compatible(&a, &mirrored),
+            scooch_core::compatible(&a, &scenic),
             a.canvas_width,
             a.canvas_height,
-            fs::metadata(&tables[0]).map(|meta| meta.len()).unwrap_or(0),
-            fs::metadata(&tables[1]).map(|meta| meta.len()).unwrap_or(0),
-            subject[0],
-            subject[1]
+            fs::metadata(&tables[0]).map(|meta| meta.len()).unwrap_or(0)
         ));
+        let canvas = scooch_core::canvas(&image, width, height);
         Ok(Kit {
             picture: picture_path,
             size: [width, height],
+            subject: [from, found.at],
+            pair: (a, b),
+            canvas,
             stills,
             tables,
             frames,
             mirrored_frames,
+            scenic_frames,
             other: (other_path, other_image),
             detail: (detail_path, detail_image),
             icons,
-            subject,
             patch: RECT { left: origin.0 + left as i32, top: origin.1 + top as i32, right: origin.0 + (left + 24) as i32, bottom: origin.1 + (top + 24) as i32 },
             spot: RECT { left: origin.0 + spot_left as i32, top: origin.1 + spot_top as i32, right: origin.0 + (spot_left + 16) as i32, bottom: origin.1 + (spot_top + 16) as i32 },
         })
