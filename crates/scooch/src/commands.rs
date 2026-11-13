@@ -1413,6 +1413,22 @@ mod tests {
     }
 
     #[test]
+    fn off_with_an_entry_that_changed_nothing_is_back_at_once() {
+        let (fake, store, first) = spaces("nooutput");
+        let mut state = State { on: true, ..State::default() };
+        state.screens.insert("D@S9".into(), Entry::new(&first));
+        store.save(&state).unwrap();
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(1, 0, 0, 0, 0)));
+        assert!(!store.load().restoring && store.load().screens.is_empty());
+        state.restoring = true;
+        state.on = false;
+        store.save(&state).unwrap();
+        let report = crate::daemon::Daemon::new(fake.clone(), store.clone()).tick();
+        assert!(report.unload);
+        assert_eq!(store.load().tally.back, 1);
+    }
+
+    #[test]
     fn tilde_shortens_the_home_folder() {
         let home = dirs::home_dir().unwrap();
         assert_eq!(tilde(&home.join("Pictures/harbor.jpg")), "~/Pictures/harbor.jpg");

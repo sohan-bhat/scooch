@@ -162,6 +162,11 @@ pub fn settle_screens(state: &mut State, desktop: &dyn Desktop, store: &Store, s
     let ids: Vec<String> = state.screens.keys().cloned().collect();
     for id in ids {
         let entry = state.screens[&id].clone();
+        if untouched(store, &id, &entry) {
+            state.screens.remove(&id);
+            tally.back += 1;
+            continue;
+        }
         let Some(screen) = screens.iter().find(|screen| screen.id == id) else {
             if drop_gone && gone(&id, known, screens) {
                 state.screens.remove(&id);
@@ -201,6 +206,10 @@ pub fn settle_screens(state: &mut State, desktop: &dyn Desktop, store: &Store, s
             Settled { tally, standing: false }
         }
     }
+}
+
+pub fn untouched(store: &Store, id: &str, entry: &Entry) -> bool {
+    entry.output.is_none() && store.outputs_of(id).is_empty()
 }
 
 pub fn absorb(tally: &mut Tally, settled: &Settled) {
