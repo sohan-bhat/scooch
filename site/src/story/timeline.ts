@@ -63,9 +63,9 @@ export function buildTimeline(elements: Elements, manifest: DemoManifest): Built
   to(timeline, story, { dof: 1 }, { dof: 0 }, 30, 3.2, EASE.camera);
 
   to(timeline, story, { lamp: 1 }, { lamp: 0.8 }, 12, 6, EASE.camera);
-  to(timeline, story, { lift: 0 }, { lift: 1 }, 34, 4.6, EASE.camera);
-  to(timeline, story, { tubeOff: 0 }, { tubeOff: 1 }, 34.4, 2.6, EASE.out);
-  to(timeline, story, { inside: 0 }, { inside: 1 }, 34.2, 4.2, EASE.camera);
+  to(timeline, story, { lift: 0 }, { lift: 1 }, 35.4, 4.6, EASE.camera);
+  to(timeline, story, { tubeOff: 0 }, { tubeOff: 1 }, 35.8, 2.6, EASE.out);
+  to(timeline, story, { inside: 0 }, { inside: 1 }, 35.6, 4.2, EASE.camera);
   to(timeline, story, { sweep: 0 }, { sweep: 1 }, 39.6, 5, EASE.camera);
   to(timeline, story, { relief: 0 }, { relief: 1 }, 39.8, 4.6, EASE.camera);
 
