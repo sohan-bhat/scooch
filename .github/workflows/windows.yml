@@ -28,6 +28,15 @@ jobs:
       - name: Test
         run: cargo test --release -p scooch
 
+      - name: GPU frames
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          if ('${{ matrix.image }}' -eq 'windows-2025') { $env:SCOOCH_NEED_ADAPTER = '1' }
+          New-Item -ItemType Directory -Force winprobe | Out-Null
+          cargo test --release -p scooch-live -- --nocapture --test-threads 1 2>&1 | Tee-Object -FilePath winprobe/gpu.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Probe
         if: ${{ !cancelled() }}
         continue-on-error: false
