@@ -11,6 +11,7 @@ gsettings set org.nemo.desktop home-icon-visible true || true
 gsettings set org.nemo.desktop trash-icon-visible true || true
 
 cinnamon --replace >"$out/cinnamon.log" 2>&1 &
-wait_for_name org.Cinnamon 90 || echo "Cinnamon did not start, so nemo-desktop runs in its fallback mode" >>"$out/cinnamon.log"
+ready "Cinnamon" 90 owned org.Cinnamon || echo "nemo-desktop runs in its fallback mode" >>"$out/readiness.txt"
 nemo-desktop >"$out/nemo.log" 2>&1 &
-run_probe 15
+ready "Nemo desktop window" 60 window_listed '"Desktop":'
+run_probe 10

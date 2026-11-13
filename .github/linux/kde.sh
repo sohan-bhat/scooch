@@ -5,11 +5,17 @@ start_xvfb
 export XDG_CURRENT_DESKTOP=KDE
 export XDG_SESSION_DESKTOP=KDE
 export KDE_FULL_SESSION=true
-export KDE_SESSION_VERSION="$(plasmashell --version 2>/dev/null | sed -E 's/[^0-9]*([0-9]+).*/\1/')"
+KDE_SESSION_VERSION="$(plasmashell --version 2>/dev/null | sed -E 's/[^0-9]*([0-9]+).*/\1/')"
+export KDE_SESSION_VERSION
 
 kwin_x11 >"$out/kwin.log" 2>&1 &
-sleep 3
+ready "KWin work area" 30 workarea_set
 plasmashell >"$out/plasmashell.log" 2>&1 &
 
-wait_for_name org.kde.plasmashell 120
+plasma_answers() {
+    dbus-send --session --print-reply --dest=org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "string:print(desktops().length)" 2>/dev/null | grep -q 'string "[1-9]'
+}
+
+ready "Plasma shell" 120 owned org.kde.plasmashell
+ready "Plasma desktop containment" 60 plasma_answers
 run_probe 15

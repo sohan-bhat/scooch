@@ -12,4 +12,6 @@ sleep 2
 mate-panel >"$out/panel.log" 2>&1 &
 caja --force-desktop --no-default-window >"$out/caja.log" 2>&1 &
 
-run_probe 15
+ready "work area" 60 workarea_set
+ready "Caja desktop window" 60 window_listed '"Caja")'
+run_probe 10

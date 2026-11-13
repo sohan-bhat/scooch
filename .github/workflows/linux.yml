@@ -23,6 +23,11 @@ jobs:
           - desktop: xfce
             packages: xvfb x11-utils xfdesktop4 xfwm4 xfce4-panel xfconf
             extras: xfce4-settings xfdesktop4-data gvfs gvfs-daemons
+          - desktop: xfce-scale2
+            script: xfce
+            scale: 2
+            packages: xvfb x11-utils xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings
+            extras: xfdesktop4-data gvfs gvfs-daemons
           - desktop: cinnamon
             packages: xvfb x11-utils cinnamon nemo gvfs gvfs-daemons libglib2.0-bin
             extras: cinnamon-desktop-data
@@ -53,7 +58,13 @@ jobs:
 
       - name: Probe
         if: ${{ !cancelled() }}
-        run: dbus-run-session -- bash .github/linux/${{ matrix.desktop }}.sh ./target/release/examples/linuxprobe linuxprobe
+        env:
+          SCOOCH_SCALE: ${{ matrix.scale || 1 }}
+        run: |
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          dbus-run-session -- bash ".github/linux/${{ matrix.script || matrix.desktop }}.sh" ./target/release/examples/linuxprobe linuxprobe
 
       - name: Upload
         if: ${{ !cancelled() }}
