@@ -38,14 +38,17 @@ mod probe {
     use ::windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First, Thread32Next, PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32};
     use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use ::windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
-    use ::windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_BINARY};
+    use ::windows::Win32::System::Registry::{RegCloseKey, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_BINARY, RRF_RT_REG_DWORD};
     use ::windows::Win32::System::Threading::GetProcessTimes;
     use ::windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK, TreeScope_Children};
     use ::windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow, SystemParametersInfoForDpi, MDT_EFFECTIVE_DPI};
-    use ::windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, MOUSE_EVENT_FLAGS};
+    use ::windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK,
+        MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL,
+    };
     use ::windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use ::windows::Win32::UI::Shell::{
-        IDesktopWallpaper, IFolderView2, IShellBrowser, IShellItem, IShellItemArray, IShellWindows, SHCreateItemFromParsingName, SHCreateShellItemArrayFromShellItem, ShellWindows, FWF_NOICONS,
+        IDesktopWallpaper, IFolderView2, IShellBrowser, IShellDispatch, Shell, IShellItem, IShellItemArray, IShellWindows, SHCreateItemFromParsingName, SHCreateShellItemArrayFromShellItem, ShellWindows, FWF_NOICONS,
         SID_STopLevelBrowser, SVGIO_ALLVIEW, SWC_DESKTOP, SWFO_NEEDDISPATCH,
         SHChangeNotification_Lock, SHChangeNotification_Unlock, SHChangeNotifyDeregister, SHChangeNotifyEntry, SHChangeNotifyRegister, SHGetSpecialFolderLocation, CSIDL_DESKTOP, CSIDL_DESKTOPDIRECTORY, FOLDERVIEWMODE,
         FVM_ICON, FWF_AUTOARRANGE, FWF_SNAPTOGRID, SHCNE_ALLEVENTS, SHCNE_CREATE, SHCNE_DELETE, SHCNE_MKDIR, SHCNE_RENAMEFOLDER, SHCNE_RENAMEITEM, SHCNE_RMDIR, SHCNE_UPDATEDIR, SHCNRF_InterruptLevel,
@@ -138,6 +141,7 @@ mod probe {
         pictures: Vec<PathBuf>,
         daemon: Option<Child>,
         target: Option<POINT>,
+        shell: Option<IShellDispatch>,
     }
 
     impl Probe {
@@ -198,6 +202,7 @@ mod probe {
             pictures: Vec::new(),
             daemon: None,
             target: None,
+            shell: None,
         };
         probe.section("Setup", setup);
         probe.section("1 Session facts", facts);
@@ -223,6 +228,7 @@ mod probe {
         p.line(format!("- Desktop folder {}", p.desktop.display()));
         p.line(format!("- adapter {}", desktop.name()));
         p.line(format!("- shell notification ids, desktop root {root}, desktop folder {folder}"));
+        uncover(p);
         Ok(())
     }
 
@@ -812,16 +818,65 @@ mod probe {
     }
 
     fn drag(from: POINT, distance: i32) -> bool {
+        drag_to(from, POINT { x: from.x + distance, y: from.y })
+    }
+
+    fn drag_to(from: POINT, to: POINT) -> bool {
         let mut sent = mouse(from.x, from.y, MOUSE_EVENT_FLAGS(0));
         pump(Duration::from_millis(150));
         sent &= mouse(from.x, from.y, MOUSEEVENTF_LEFTDOWN);
         pump(Duration::from_millis(150));
         for step in 1..=15 {
-            sent &= mouse(from.x + distance * step / 15, from.y, MOUSE_EVENT_FLAGS(0));
+            sent &= mouse(from.x + (to.x - from.x) * step / 15, from.y + (to.y - from.y) * step / 15, MOUSE_EVENT_FLAGS(0));
             pump(Duration::from_millis(40));
         }
-        sent &= mouse(from.x + distance, from.y, MOUSEEVENTF_LEFTUP);
+        sent &= mouse(to.x, to.y, MOUSEEVENTF_LEFTUP);
         sent
+    }
+
+    fn key(code: VIRTUAL_KEY, up: bool) -> INPUT {
+        let flags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
+        INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: code, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } }
+    }
+
+    fn control_wheel(at: POINT, notches: i32) -> bool {
+        let mut sent = mouse(at.x, at.y, MOUSE_EVENT_FLAGS(0));
+        pump(Duration::from_millis(150));
+        let down = [key(VK_CONTROL, false)];
+        sent &= unsafe { SendInput(&down, size_of::<INPUT>() as i32) } == 1;
+        pump(Duration::from_millis(80));
+        for _ in 0..notches.abs() {
+            let wheel = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: (120 * notches.signum()) as u32, dwFlags: MOUSEEVENTF_WHEEL, time: 0, dwExtraInfo: 0 } } };
+            sent &= unsafe { SendInput(&[wheel], size_of::<INPUT>() as i32) } == 1;
+            pump(Duration::from_millis(120));
+        }
+        let up = [key(VK_CONTROL, true)];
+        sent &= unsafe { SendInput(&up, size_of::<INPUT>() as i32) } == 1;
+        sent
+    }
+
+    fn bag_icon_size() -> Option<u32> {
+        let mut value = 0u32;
+        let mut size = size_of::<u32>() as u32;
+        let read = unsafe { RegGetValueW(HKEY_CURRENT_USER, w!(r"Software\Microsoft\Windows\Shell\Bags\1\Desktop"), w!("IconSize"), RRF_RT_REG_DWORD, None, Some(&mut value as *mut u32 as *mut c_void), Some(&mut size)) };
+        (read == ERROR_SUCCESS).then_some(value)
+    }
+
+    fn empty_spot() -> POINT {
+        work_area().map_or(POINT { x: 700, y: 500 }, |area| POINT { x: area.left + (area.right - area.left) * 70 / 100, y: area.top + (area.bottom - area.top) * 70 / 100 })
+    }
+
+    fn uncover(p: &mut Probe) {
+        let shell: ::windows::core::Result<IShellDispatch> = unsafe { CoCreateInstance(&Shell, None, CLSCTX_ALL) };
+        match shell {
+            Ok(shell) => {
+                let minimized = unsafe { shell.MinimizeAll() };
+                pump(Duration::from_millis(1500));
+                p.line(format!("- minimized every window so the desktop shows {minimized:?}"));
+                p.shell = Some(shell);
+            }
+            Err(error) => p.line(format!("- could not reach Shell.Application {error}")),
+        }
     }
 
     fn rule_names() -> [&'static str; 4] {
@@ -972,14 +1027,30 @@ mod probe {
         }));
         let original = shell::mode(&view)?;
         let other = if original.1 == 32 { 48 } else { 32 };
-        actions.push(act(p, "change the icon size", |_| {
+        actions.push(act(p, "change the icon size through IFolderView2", |_| {
             unsafe { view.folder.SetViewModeAndIconSize(FVM_ICON, other) }?;
-            Ok(format!("from {} to {other}", original.1))
+            pump(Duration::from_millis(300));
+            Ok(format!("from {} to {other}, Bags IconSize {:?}", original.1, bag_icon_size()))
         }));
-        actions.push(act(p, "put the icon size back", |_| {
+        actions.push(act(p, "put the icon size back through IFolderView2", |_| {
             unsafe { view.folder.SetViewModeAndIconSize(original.0, original.1) }?;
-            Ok(format!("to {}", original.1))
+            pump(Duration::from_millis(300));
+            Ok(format!("to {}, Bags IconSize {:?}", original.1, bag_icon_size()))
         }));
+        actions.push(act(p, "make icons smaller with Ctrl and the wheel", |_| {
+            let before = (shell::mode(&view).map(|mode| mode.1).ok(), bag_icon_size());
+            let sent = control_wheel(empty_spot(), -1);
+            pump(Duration::from_millis(600));
+            Ok(format!("sent {sent}, view size and Bags IconSize {before:?} then {:?}", (shell::mode(&view).map(|mode| mode.1).ok(), bag_icon_size())))
+        }));
+        actions.push(act(p, "make icons larger with Ctrl and the wheel", |_| {
+            let before = (shell::mode(&view).map(|mode| mode.1).ok(), bag_icon_size());
+            let sent = control_wheel(empty_spot(), 1);
+            pump(Duration::from_millis(600));
+            Ok(format!("sent {sent}, view size and Bags IconSize {before:?} then {:?}", (shell::mode(&view).map(|mode| mode.1).ok(), bag_icon_size())))
+        }));
+        let _ = unsafe { view.folder.SetViewModeAndIconSize(original.0, original.1) };
+        pump(Duration::from_millis(600));
         actions.push(act(p, "hide desktop icons", |_| toggle_icons(&view, false)));
         actions.push(act(p, "show desktop icons", |_| toggle_icons(&view, true)));
         if !shell::visible(&view) {
@@ -1070,6 +1141,22 @@ mod probe {
         encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
         encoder.encode(picture.as_raw(), u16::try_from(picture.width())?, u16::try_from(picture.height())?, jpeg_encoder::ColorType::Rgb)?;
         Ok(out)
+    }
+
+    fn subject_picture(width: u32, height: u32) -> RgbImage {
+        let mut bytes = Vec::with_capacity(width as usize * height as usize * 3);
+        let radius = width.min(height) as f32 * 0.18;
+        for y in 0..height {
+            for x in 0..width {
+                let dx = x as f32 - width as f32 / 2.0;
+                let dy = y as f32 - height as f32 / 2.0;
+                let inside = (dx * dx + dy * dy).sqrt() < radius;
+                let grain = ((x * 7 + y * 13) % 11) as u8;
+                let pixel = if inside { [245 - grain, 225 - grain, 185] } else { [18 + grain, 26 + grain, 46 + grain] };
+                bytes.extend_from_slice(&pixel);
+            }
+        }
+        RgbImage::from_raw(width, height, bytes).unwrap_or_default()
     }
 
     fn psnr(a: &RgbImage, b: &RgbImage) -> Option<f64> {
@@ -1376,10 +1463,10 @@ mod probe {
         let desktop = platform::current()?;
         let screen = desktop.screens()?.first().context("no screen")?.clone();
         let twin = twin()?;
-        if let Some(picture) = p.pictures.first().cloned() {
-            desktop.set_wallpaper(&screen, &picture)?;
-            p.line(format!("- wallpaper set to {}", picture.display()));
-        }
+        let picture = p.home.join("probe-subject.jpg");
+        fs::write(&picture, jpeg(&subject_picture(screen.frame.w as u32, screen.frame.h as u32))?)?;
+        desktop.set_wallpaper(&screen, &picture)?;
+        p.line(format!("- wallpaper set to a picture with one bright subject in the middle {}", picture.display()));
         fs::write(p.home.join("state.json"), br#"{"version":1,"on":true}"#)?;
         let log = fs::File::create(p.out.join("scoochw.log"))?;
         let child = Command::new(&twin).arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn()?;
@@ -1391,19 +1478,29 @@ mod probe {
         p.line(format!("- first render after {:?} ms", first.map(|time| time.as_millis())));
         let view = shell::view()?;
         let (name, folder) = PROBES[0];
-        let pidl = pidl_of(&view, name, folder)?;
-        let spot = p.target.unwrap_or(target(&view)?);
+        let shown = shown_name(name, folder);
+        let font = shell::Font::open()?;
+        let cell = shell::cell(&view, font.line)?;
+        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
+        let subject = POINT { x: (screen.frame.x + screen.frame.w / 2.0) as i32, y: (screen.frame.y + screen.frame.h / 2.0) as i32 };
+        let calm = POINT { x: (screen.frame.x + screen.frame.w * 0.8) as i32, y: (screen.frame.y + screen.frame.h * 0.2) as i32 };
         let mut times = Vec::new();
-        for round in 0..5 {
+        for round in 0..6 {
             let before = desktop.wallpaper(&screen)?.unwrap_or_default();
-            let at = POINT { x: spot.x + if round % 2 == 0 { 0 } else { 160 }, y: spot.y + 40 * round };
-            place(&view, &pidl, at)?;
-            let moved = Instant::now();
+            let Some(rect) = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect) else {
+                p.line(format!("- drag {} found no UI Automation rect for the item", round + 1));
+                break;
+            };
+            let from = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + cell.icon / 2.0) as i32 };
+            let to = if round % 2 == 0 { subject } else { calm };
+            let sent = drag_to(from, to);
+            let dropped = Instant::now();
             let changed = wait_until(Duration::from_secs(10), || desktop.wallpaper(&screen).ok().flatten().is_some_and(|now| now != before));
-            let latency = changed.map(|_| moved.elapsed().as_millis());
-            p.line(format!("- move {} to {},{} new wallpaper after {:?} ms", round + 1, at.x, at.y, latency));
+            let latency = changed.map(|_| dropped.elapsed().as_millis());
+            p.line(format!("- drag {} from {},{} to {},{} sent {sent}, new wallpaper after {:?} ms", round + 1, from.x, from.y, to.x, to.y, latency));
             times.extend(latency);
-            pump(Duration::from_millis(500));
+            park_cursor();
+            pump(Duration::from_millis(800));
         }
         times.sort_unstable();
         p.line(format!("- median move to new wallpaper {:?} ms", times.get(times.len() / 2)));
@@ -1481,6 +1578,10 @@ mod probe {
         }
         if !p.window.is_invalid() {
             let _ = unsafe { DestroyWindow(p.window) };
+        }
+        if let Some(shell) = p.shell.take() {
+            let undone = unsafe { shell.UndoMinimizeALL() };
+            p.line(format!("- windows restored {undone:?}"));
         }
         let removed = fs::remove_dir_all(&p.home);
         p.line(format!("- temp folder removed {:?}", removed.map_err(|error| error.to_string())));
