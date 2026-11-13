@@ -39,10 +39,10 @@ pub struct Scene {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Scenery {
-    #[default]
     Auto,
     Islands,
     Clouds,
+    #[default]
     Off,
 }
 
@@ -62,7 +62,7 @@ fn one() -> f32 {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { strength: 1.0, max_zoom: 1.3, mirror: false, pads: 0.7, scenery: Scenery::Auto }
+        Self { strength: 1.0, max_zoom: 1.3, mirror: false, pads: 0.7, scenery: Scenery::Off }
     }
 }
 

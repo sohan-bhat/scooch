@@ -521,7 +521,7 @@ fn scenery_is_deterministic_and_local() {
         let icons: Vec<Rect> = [(500.0, 380.0), (580.0, 380.0), (660.0, 380.0), (1200.0, 150.0), (300.0, 680.0)].iter().map(|(x, y)| Rect { x: *x, y: *y, w: 76.0, h: 94.0 }).collect();
         let u = 94.0;
         let scene = Scene { width: w, height: h, icons: icons.clone() };
-        let options = Options::default();
+        let options = Options { scenery: Scenery::Auto, ..Options::default() };
         let placement = scooch_core::fill(picture.width(), picture.height(), &scene);
         let first = scooch_core::render_with(&picture, &analysis, &placement, &scene, &options);
         let again = scooch_core::render_with(&picture, &analysis, &placement, &scene, &options);
@@ -567,9 +567,10 @@ fn scenery_survives_odd_scenes() {
 }
 
 #[test]
-fn old_option_files_load_with_scenery_on() {
+fn old_option_files_load_with_scenery_off() {
     let old: Options = serde_json::from_str(r#"{"strength":1.0,"max_zoom":1.3,"mirror":false,"pads":0.7}"#).unwrap();
-    assert_eq!(old.scenery, Scenery::Auto);
+    assert_eq!(old.scenery, Scenery::Off);
+    assert_eq!(Options::default().scenery, Scenery::Off);
     let named: Options = serde_json::from_str(r#"{"scenery":"clouds"}"#).unwrap();
     assert_eq!(named.scenery, Scenery::Clouds);
 }
@@ -584,7 +585,7 @@ fn labels_stay_readable_on_the_scenery() {
             {
                 let icons = layouts::layout(layout, &analysis, w, h);
                 let scene = Scene { width: w, height: h, icons: icons.clone() };
-                let options = Options::default();
+                let options = Options { scenery: Scenery::Auto, ..Options::default() };
                 let placement = scooch_core::solve(&analysis, &scene, &options, None);
                 let layers = scooch_core::render_layers(&picture, &analysis, &placement, &scene, &options);
                 let mut shown = layers.picture.clone();
