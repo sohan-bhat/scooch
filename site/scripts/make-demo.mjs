@@ -148,6 +148,25 @@ async function write({ state, icons, framePath, data, hidden }) {
   };
 }
 
+async function writePhoto(results) {
+  const span = (table) => Math.abs(table[table.length - 1] - table[0]);
+  const spanX = Math.min(...results.map((result) => span(result.data.placement.fx)));
+  const spanY = Math.min(...results.map((result) => span(result.data.placement.fy)));
+  const meta = await sharp(photo).rotate().metadata();
+  const needed = Math.max(width / (spanX * meta.width), height / (spanY * meta.height));
+  const limit = 2048 / Math.max(meta.width, meta.height);
+  const scale = Math.min(1, needed * 1.25, limit);
+  const size = { width: Math.round(meta.width * scale), height: Math.round(meta.height * scale) };
+  await sharp(photo).rotate().resize(size.width, size.height).webp({ quality: 88, effort: 6 }).toFile(join(out, 'photo.webp'));
+  return { file: 'photo.webp', ...size };
+}
+
+function tables(results) {
+  return Object.fromEntries(
+    results.map(({ state, data }) => [state.id, { fx: data.placement.fx.map(round), fy: data.placement.fy.map(round) }]),
+  );
+}
+
 await mkdir(work, { recursive: true });
 const layouts = { ...config.layouts };
 const rendered = [];
@@ -168,6 +187,9 @@ const normalize = ([x, y]) => [round(x / width), round(y / height)];
 const manifest = {
   screen: config.screen,
   icons: config.icons,
+  photo: await writePhoto(rendered),
+  order: rendered.map((result) => result.state.id),
+  tables: tables(rendered),
   frames,
   drag: {
     icon: config.drag.icon,
