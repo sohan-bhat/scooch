@@ -1,6 +1,6 @@
 use crate::paint::{self, Materials, CORE, LAND, LAYERS, SHORE};
 use crate::shape::{self, smoothstep, Base, Grid, FAR};
-use crate::{blur, color, Options, Scenery};
+use crate::{blur, color, scenery, table, Analysis, Options, Placement, Scene, Scenery};
 use rayon::prelude::*;
 use std::collections::VecDeque;
 
@@ -18,6 +18,7 @@ const SKY_BUSY: f32 = 0.45;
 const SKY_JUMP: f32 = 0.03;
 const SKY_SPREAD: f32 = 0.15;
 const SKY_EDGE: (f32, f32) = (0.4, 0.6);
+const SLACK: f32 = 1e-3;
 const TINT_SPREAD: f32 = 0.5;
 const TINT_FLOOR: f32 = 0.02;
 const RIPPLE_CALM: (f32, f32) = (0.25, 0.45);
@@ -43,6 +44,32 @@ pub struct Scenic {
 
 pub fn belonging(saliency: f32, busy: f32) -> f32 {
     (1.0 - smoothstep(BELONG_SALIENCY.0, BELONG_SALIENCY.1, saliency)) * (1.0 - smoothstep(BELONG_BUSY.0, BELONG_BUSY.1, busy))
+}
+
+pub fn active(found: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> bool {
+    if !scenery::active(scene, options) {
+        return false;
+    }
+    let (w, h) = (found.width as usize, found.height as usize);
+    if w == 0 || h == 0 || found.saliency.len() != w * h || found.busy.len() != w * h {
+        return true;
+    }
+    let span = |table: &[f32], size: usize| {
+        if !table::usable(table) {
+            return (0, size - 1);
+        }
+        let (lo, hi) = (table[0].min(table[table.len() - 1]), table[0].max(table[table.len() - 1]));
+        let lo = ((lo * size as f32 - 0.5).floor() as i64 - 1).clamp(0, size as i64 - 1) as usize;
+        let hi = ((hi * size as f32 - 0.5).ceil() as i64 + 1).clamp(0, size as i64 - 1) as usize;
+        (lo, hi)
+    };
+    let ((x0, x1), (y0, y1)) = (span(&placement.fx, w), span(&placement.fy, h));
+    let clean = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+    let low = |plane: &[f32], x: usize, y: usize| {
+        let (x2, y2) = ((x + 1).min(x1), (y + 1).min(y1));
+        clean(plane[y * w + x]).min(clean(plane[y * w + x2])).min(clean(plane[y2 * w + x])).min(clean(plane[y2 * w + x2])) - SLACK
+    };
+    (y0..=y1).any(|y| (x0..=x1).any(|x| belonging(if found.flat { 0.0 } else { low(&found.saliency, x, y) }, low(&found.busy, x, y)) > 0.0))
 }
 
 fn skyish(lab: [f32; 3]) -> bool {

@@ -182,3 +182,54 @@ fn tables_travel_without_the_canvas() {
     let big = Scene { width: w, height: h, icons: layouts::layout("scattered", &photo.analysis, w, h) };
     assert!(state(photo, &big, &on()).tables_to_bytes().len() < 6 * 1024 * 1024);
 }
+
+#[test]
+fn one_pass_gives_the_still_and_its_bundle() {
+    let (w, h) = (640, 400);
+    for photo in photos().iter().step_by(2) {
+        for layout in ["mac", "scattered"] {
+            let scene = Scene { width: w, height: h, icons: layouts::layout(layout, &photo.analysis, w, h) };
+            for options in [on(), Options::default(), Options { pads: 0.0, ..Options::default() }] {
+                let placement = scooch_core::solve(&photo.analysis, &scene, &options, None);
+                let (bundle, still) = scooch_core::still(&photo.image, &photo.analysis, &placement, &scene, &options);
+                let alone = scooch_core::render_with(&photo.image, &photo.analysis, &placement, &scene, &options);
+                assert_eq!(still.as_raw(), alone.as_raw(), "{} {layout} {:?}", photo.name, options.scenery);
+                assert!(bundle == scooch_core::bundle(&photo.image, &photo.analysis, &placement, &scene, &options), "{} {layout} {:?}", photo.name, options.scenery);
+            }
+        }
+    }
+    let empty = Scene { width: 0, height: 0, icons: Vec::new() };
+    let photo = &photos()[0];
+    let (bundle, still) = scooch_core::still(&photo.image, &photo.analysis, &scooch_core::fill(1, 1, &empty), &empty, &on());
+    assert_eq!((bundle.width, still.width()), (0, 0));
+}
+
+#[test]
+fn scenery_active_never_misses_a_painted_pixel() {
+    let (w, h) = (480, 300);
+    let (mut agree, mut total) = (0, 0);
+    for photo in photos() {
+        for layout in ["mac", "scattered", "cluster"] {
+            let scene = Scene { width: w, height: h, icons: layouts::layout(layout, &photo.analysis, w, h) };
+            for scenery in [Scenery::Auto, Scenery::Islands, Scenery::Clouds, Scenery::Off] {
+                let options = Options { scenery, ..Options::default() };
+                let placement = scooch_core::solve(&photo.analysis, &scene, &options, None);
+                let painted = scooch_core::render_layers(&photo.image, &photo.analysis, &placement, &scene, &options).scenery.pixels().any(|p| p[3] > 0);
+                let said = scooch_core::scenery_active(&photo.analysis, &placement, &scene, &options);
+                assert!(said || !painted, "{} {layout} {scenery:?} painted but said off", photo.name);
+                assert!(scenery != Scenery::Off || !said, "{} {layout} said on with scenery off", photo.name);
+                agree += (said == painted) as usize;
+                total += 1;
+            }
+        }
+    }
+    eprintln!("scenery_active agrees with the render on {agree} of {total}");
+    let photo = &photos()[0];
+    let none = Scene { width: w, height: h, icons: Vec::new() };
+    assert!(!scooch_core::scenery_active(&photo.analysis, &scooch_core::fill(w, h, &none), &none, &on()));
+    let scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &photo.analysis, w, h) };
+    let busy = Analysis { saliency: vec![1.0; photo.analysis.saliency.len()], flat: false, ..photo.analysis.clone() };
+    let placement = scooch_core::solve(&busy, &scene, &on(), None);
+    assert!(!scooch_core::scenery_active(&busy, &placement, &scene, &on()));
+    assert!(scooch_core::render_layers(&photo.image, &busy, &placement, &scene, &on()).scenery.pixels().all(|p| p[3] == 0));
+}

@@ -1,6 +1,6 @@
 use crate::paint::{self, Materials};
 use crate::table::{self, Curve, STEPS};
-use crate::{analysis, bundle, color, pads, scenery, Analysis, Options, Placement, RgbImage, RgbaImage, Scene};
+use crate::{analysis, bundle, color, pads, scenery, Analysis, Bundle, Options, Placement, RgbImage, RgbaImage, Scene};
 use rayon::prelude::*;
 use std::borrow::Cow;
 
@@ -175,6 +175,19 @@ pub fn layers(image: &RgbImage, given: Option<&Analysis>, placement: &Placement,
     };
     let (state, canvas) = bundle::still(image, found, placement, scene, options, materials);
     bundle::draw(&state, &state, 0.0, canvas.as_raw())
+}
+
+pub fn still(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Bundle, RgbImage) {
+    let materials = paint::materials(found);
+    let (sw, sh) = image.dimensions();
+    if !scenery::active(scene, options) || sw == 0 || sh == 0 {
+        return rayon::join(|| bundle::make(image, found, placement, scene, options, &materials), || render(image, Some(found), placement, scene, options));
+    }
+    let (mut state, canvas) = bundle::still(image, found, placement, scene, options, &materials);
+    let (mut picture, layer) = bundle::draw(&state, &state, 0.0, canvas.as_raw());
+    paint::composite(&mut picture, &layer);
+    state.canvas = canvas.into_owned().into_raw();
+    (state, picture)
 }
 
 pub fn render(image: &RgbImage, given: Option<&Analysis>, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
