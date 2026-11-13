@@ -15,7 +15,11 @@ const FILL: usize = 3;
 
 pub fn screens(marker: MainThreadMarker) -> Result<Vec<Screen>> {
     let mut found = Vec::new();
-    for screen in NSScreen::screens(marker) {
+    let displays = NSScreen::screens(marker);
+    if displays.is_empty() {
+        bail!("macOS reports no screens, so try again once a display is connected.");
+    }
+    for screen in displays {
         let Some(display) = number(&screen) else { continue };
         let bounds = unsafe { sys::CGDisplayBounds(display) };
         let frame = Rect { x: bounds.origin.x as f32, y: bounds.origin.y as f32, w: bounds.size.width as f32, h: bounds.size.height as f32 };
@@ -26,9 +30,6 @@ pub fn screens(marker: MainThreadMarker) -> Result<Vec<Screen>> {
             super::spaces::Showing::Unknown => None,
         };
         found.push(Screen { id: super::spaces::join(&display, space.as_deref()), frame, scale: screen.backingScaleFactor() as f32 });
-    }
-    if found.is_empty() {
-        bail!("macOS reports no screens, so try again once a display is connected.");
     }
     Ok(found)
 }

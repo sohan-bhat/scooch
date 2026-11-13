@@ -70,6 +70,9 @@ impl Desktop for Mac {
 
     fn snapshot(&self) -> Result<Snapshot> {
         let screens = self.screens()?;
+        if screens.is_empty() {
+            return Ok(Snapshot { screens, icons: Vec::new() });
+        }
         let icons = autoreleasepool(|_| finder::icons(&finder::view()))?;
         Ok(Snapshot { screens, icons })
     }
@@ -95,10 +98,12 @@ impl Desktop for Mac {
 
     fn known(&self) -> Result<Option<Vec<String>>> {
         let mut found = Vec::new();
-        for screen in self.screens()? {
-            let (display, _) = spaces::split(&screen.id);
-            let Some(every) = spaces::all(display) else { return Ok(None) };
-            found.extend(every.iter().map(|space| spaces::join(display, Some(space))));
+        for display in on_main(picture::display_ids) {
+            let Some(every) = spaces::all(&display) else { return Ok(None) };
+            found.extend(every.iter().map(|space| spaces::join(&display, Some(space))));
+        }
+        if found.is_empty() {
+            return Ok(None);
         }
         Ok(Some(found))
     }

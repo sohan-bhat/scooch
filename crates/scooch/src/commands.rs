@@ -25,6 +25,7 @@ pub const GUIDE: &str = "Your wallpaper is not a picture file, so pick a picture
 pub const NO_SCREEN: &str = "No screen was found, so connect one and try again.";
 pub const NO_PICTURE: &str = "Scooch needs a picture file as your wallpaper, so pick one in your system settings or run scooch use with a picture.";
 pub const NO_TERMINAL: &str = "To switch the picture, run scooch use followed by the path of an image.";
+pub const WAITING: &str = "Scooch is on. It starts when a desktop shows.";
 
 #[derive(serde::Deserialize)]
 struct SceneFile {
@@ -63,15 +64,13 @@ pub fn start() -> Result<()> {
         return status();
     }
     let desktop = desktop()?;
-    if !wake_up(&mut state) && !state.on {
-        match first_run(record(&mut state, desktop.as_ref(), &store)?, terminal()) {
-            FirstRun::Go => state.on = true,
-            FirstRun::Fail => bail!(NO_PICTURE),
-            FirstRun::Pick => {
-                println!("{GUIDE}");
-                let Some(pick) = choose(&desktop.gallery())? else { return Ok(()) };
-                return switch(Some(pick));
-            }
+    match turn_on(&mut state, desktop.as_ref(), &store, terminal())? {
+        FirstRun::Go => {}
+        FirstRun::Fail => bail!(NO_PICTURE),
+        FirstRun::Pick => {
+            println!("{GUIDE}");
+            let Some(pick) = choose(&desktop.gallery())? else { return Ok(()) };
+            return switch(Some(pick));
         }
     }
     state.problem = None;
@@ -119,6 +118,9 @@ pub fn describe(state: &State, running: bool, connected: Option<&[String]>) -> V
         let mut lines = vec!["Scooch is off. Run scooch to turn it on.".to_string()];
         lines.extend(tally_lines(&state.tally));
         return lines;
+    }
+    if running && connected.is_some_and(<[String]>::is_empty) {
+        return vec![WAITING.to_string()];
     }
     let mut lines = vec![if running { "Scooch is on.".to_string() } else { "Scooch is on but not running. Run scooch to start it again.".to_string() }];
     let shown: Vec<&Entry> = state.screens.iter().filter(|(id, _)| connected.is_none_or(|ids| ids.contains(id))).map(|(_, entry)| entry).collect();
@@ -560,6 +562,16 @@ pub enum FirstRun {
     Go,
     Pick,
     Fail,
+}
+
+pub fn turn_on(state: &mut State, desktop: &dyn Desktop, store: &Store, terminal: bool) -> Result<FirstRun> {
+    if wake_up(state) || state.on {
+        return Ok(FirstRun::Go);
+    }
+    let showing = !desktop.screens()?.is_empty();
+    let run = first_run(record(state, desktop, store)? || !showing, terminal);
+    state.on = run == FirstRun::Go;
+    Ok(run)
 }
 
 pub fn first_run(recorded: bool, terminal: bool) -> FirstRun {
@@ -1370,6 +1382,34 @@ mod tests {
         assert_eq!(off_of(&fake, &store), Off::Done(counts));
         assert!(lost.exists());
         assert!(!closing(&counts).contains("is back"));
+    }
+
+    #[test]
+    fn every_command_works_while_no_desktop_shows() {
+        let (fake, store, first) = spaces("fullscreen");
+        fake.connect(Vec::new());
+        let mut state = State::default();
+        assert_eq!(turn_on(&mut state, fake.as_ref(), &store, false).unwrap(), FirstRun::Go);
+        assert!(state.on && state.screens.is_empty());
+        store.save(&state).unwrap();
+        assert_eq!(describe(&state, true, Some(&[])), vec![WAITING.to_string()]);
+        assert!(!WAITING.contains(['\u{2014}', '\u{2013}', ';', '(', ')']) && !WAITING.contains(": "));
+        let mut daemon = crate::daemon::Daemon::new(fake.clone(), store.clone());
+        daemon.grace = Duration::ZERO;
+        let report = daemon.tick();
+        assert!(report.problem.is_none() && report.outcomes.is_empty() && store.load().problem.is_none());
+        let mut chosen = store.load();
+        choose_picture(&mut chosen, fake.as_ref(), &store, &first).unwrap();
+        assert!(chosen.on && chosen.screens.is_empty() && chosen.picture == Some(first.clone()));
+        store.save(&chosen).unwrap();
+        fake.connect(screens(&["D@S1"]));
+        daemon.tick();
+        assert_eq!(store.load().screens["D@S1"].source, first);
+        fake.show("D@S1", &store.output("D@S1", 1, "jpg"));
+        std::fs::write(store.output("D@S1", 1, "jpg"), b"x").unwrap();
+        fake.connect(Vec::new());
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(0, 0, 0, 1, 0)));
+        assert!(store.load().restoring);
     }
 
     #[test]
