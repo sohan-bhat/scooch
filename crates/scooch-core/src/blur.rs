@@ -1,3 +1,5 @@
+use rayon::prelude::*;
+
 const EXACT_LIMIT: f32 = 3.0;
 
 pub fn gaussian(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
@@ -66,6 +68,128 @@ pub fn gaussian_boxes(values: &[f32], width: usize, height: usize, sigma: f32) -
         return values.to_vec();
     }
     boxed(values, width, height, sigma)
+}
+
+pub fn gaussian_parallel(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
+    if width == 0 || height == 0 || values.len() != width * height || sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
+        return values.to_vec();
+    }
+    if sigma <= EXACT_LIMIT {
+        exact_parallel(values, width, height, sigma)
+    } else {
+        boxed_parallel(values, width, height, sigma)
+    }
+}
+
+pub fn boxes_parallel(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
+    if width == 0 || height == 0 || values.len() != width * height || sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
+        return values.to_vec();
+    }
+    boxed_parallel(values, width, height, sigma)
+}
+
+fn exact_parallel(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
+    let weights = kernel(sigma);
+    let radius = weights.len() / 2;
+    let mut across = vec![0.0f32; values.len()];
+    across.par_chunks_mut(width).zip(values.par_chunks(width)).for_each(|(out, row)| {
+        for (x, target) in out.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            if x >= radius && x + radius < width {
+                for (w, v) in weights.iter().zip(&row[x - radius..=x + radius]) {
+                    acc += w * v;
+                }
+            } else {
+                for (i, w) in weights.iter().enumerate() {
+                    acc += w * row[(x + i).saturating_sub(radius).min(width - 1)];
+                }
+            }
+            *target = acc;
+        }
+    });
+    let mut out = vec![0.0f32; values.len()];
+    out.par_chunks_mut(width).enumerate().for_each(|(y, target)| {
+        for (i, w) in weights.iter().enumerate() {
+            let source = (y + i).saturating_sub(radius).min(height - 1);
+            for (t, v) in target.iter_mut().zip(&across[source * width..(source + 1) * width]) {
+                *t += w * v;
+            }
+        }
+    });
+    out
+}
+
+fn turn(values: &[f32], width: usize, height: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; values.len()];
+    out.par_chunks_mut(height).enumerate().for_each(|(x, column)| {
+        for (y, v) in column.iter_mut().enumerate() {
+            *v = values[y * width + x];
+        }
+    });
+    out
+}
+
+fn boxed_parallel(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
+    let mut a = values.to_vec();
+    let mut b = vec![0.0f32; a.len()];
+    for radius in radii(sigma) {
+        if radius == 0 {
+            continue;
+        }
+        b.par_chunks_mut(width).zip(a.par_chunks(width)).for_each(|(out, row)| pass_rows(row, out, width, radius));
+        let turned = turn(&b, width, height);
+        let mut back = vec![0.0f32; turned.len()];
+        back.par_chunks_mut(height).zip(turned.par_chunks(height)).for_each(|(out, column)| pass_rows(column, out, height, radius));
+        a = turn(&back, height, width);
+    }
+    a
+}
+
+pub fn boxes_parallel4(values: &[[f32; 4]], width: usize, height: usize, sigma: f32) -> Vec<[f32; 4]> {
+    if width == 0 || height == 0 || values.len() != width * height || sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
+        return values.to_vec();
+    }
+    let mut a = values.to_vec();
+    let mut b = vec![[0.0f32; 4]; a.len()];
+    for radius in radii(sigma) {
+        if radius == 0 {
+            continue;
+        }
+        b.par_chunks_mut(width).zip(a.par_chunks(width)).for_each(|(out, row)| rows4(row, out, radius));
+        let turned = turn4(&b, width, height);
+        let mut back = vec![[0.0f32; 4]; turned.len()];
+        back.par_chunks_mut(height).zip(turned.par_chunks(height)).for_each(|(out, column)| rows4(column, out, radius));
+        a = turn4(&back, height, width);
+    }
+    a
+}
+
+fn rows4(row: &[[f32; 4]], out: &mut [[f32; 4]], radius: usize) {
+    let scale = 1.0 / (2 * radius + 1) as f32;
+    let last = row.len() - 1;
+    let mut sum = row[0].map(|v| v * (radius + 1) as f32);
+    for k in 1..=radius {
+        for c in 0..4 {
+            sum[c] += row[k.min(last)][c];
+        }
+    }
+    for (x, o) in out.iter_mut().enumerate() {
+        *o = sum.map(|v| v * scale);
+        let (enter, leave) = (row[(x + radius + 1).min(last)], row[x.saturating_sub(radius)]);
+        for c in 0..4 {
+            sum[c] += enter[c] - leave[c];
+        }
+    }
+}
+
+fn turn4(values: &[[f32; 4]], width: usize, height: usize) -> Vec<[f32; 4]> {
+    let mut out = vec![[0.0f32; 4]; values.len()];
+    out.par_chunks_mut(height).enumerate().for_each(|(x, column)| {
+        for (y, v) in column.iter_mut().enumerate() {
+            *v = values[y * width + x];
+        }
+    });
+    out
 }
 
 fn kernel(sigma: f32) -> Vec<f32> {
@@ -183,6 +307,22 @@ fn boxed(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_parallel_blurs_match_the_serial_ones_bit_for_bit() {
+        let (w, h) = (97, 61);
+        let values: Vec<f32> = (0..w * h).map(|i| ((i * 7919) % 1013) as f32 / 1013.0).collect();
+        for sigma in [0.6f32, 1.5, 2.9, 3.4, 7.0, 16.5] {
+            assert_eq!(gaussian(&values, w, h, sigma), gaussian_parallel(&values, w, h, sigma), "{sigma}");
+            assert_eq!(gaussian_boxes(&values, w, h, sigma), boxes_parallel(&values, w, h, sigma), "{sigma}");
+            let stacked: Vec<[f32; 4]> = values.iter().map(|v| [*v, v * 0.5, 1.0 - v, *v]).collect();
+            let four = boxes_parallel4(&stacked, w, h, sigma);
+            for c in 0..4 {
+                let plane: Vec<f32> = stacked.iter().map(|v| v[c]).collect();
+                assert_eq!(gaussian_boxes(&plane, w, h, sigma), four.iter().map(|v| v[c]).collect::<Vec<f32>>(), "{sigma} {c}");
+            }
+        }
+    }
 
     #[test]
     fn flat_input_stays_flat() {

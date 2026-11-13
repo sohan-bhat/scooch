@@ -80,7 +80,7 @@ fn skyish(lab: [f32; 3]) -> bool {
 }
 
 fn blurred(values: &[f32], grid: &Grid, spread: f32) -> Vec<f32> {
-    blur::gaussian(values, grid.w, grid.h, spread)
+    blur::gaussian_parallel(values, grid.w, grid.h, spread)
 }
 
 fn sky_region(lab: &[[f32; 3]], busy: &[f32], grid: &Grid) -> Vec<f32> {
@@ -171,13 +171,11 @@ pub fn build(base: &Base, input: &Sampled, options: &Options, materials: &Materi
         })
         .collect();
     let light = blurred(&light, &grid, spread(LIGHT_SPREAD));
-    let look: Vec<u8> = (0..cells)
-        .into_par_iter()
-        .flat_map_iter(|i| {
-            let open = smoothstep(0.0, OPEN_RAMP * u, shade[i]);
-            [byte(sky[i]), byte(belong[i]), byte(open), byte(0.5 + 0.5 * light[i])]
-        })
-        .collect();
+    let mut look = vec![0u8; cells * 4];
+    look.par_chunks_mut(4).enumerate().for_each(|(i, px)| {
+        let open = smoothstep(0.0, OPEN_RAMP * u, shade[i]);
+        px.copy_from_slice(&[byte(sky[i]), byte(belong[i]), byte(open), byte(0.5 + 0.5 * light[i])]);
+    });
     let paint_grid = Grid::of(width, height, P);
     let step = P / grid.cell;
     let pool = |values: &dyn Fn(usize) -> f32| -> Vec<f32> {
@@ -197,12 +195,12 @@ pub fn build(base: &Base, input: &Sampled, options: &Options, materials: &Materi
     };
     let wide = spread(TINT_SPREAD) / step as f32;
     let weight = |i: usize| raw[i] + TINT_FLOOR;
-    let share = blur::gaussian(&pool(&weight), paint_grid.w, paint_grid.h, wide);
+    let share = blur::gaussian_parallel(&pool(&weight), paint_grid.w, paint_grid.h, wide);
     let channels: Vec<Vec<f32>> = (0..3)
         .into_par_iter()
-        .map(|k| blur::gaussian(&pool(&|i| lab[i][k] * weight(i)), paint_grid.w, paint_grid.h, wide).iter().zip(&share).map(|(v, w)| v / w.max(1e-6)).collect())
+        .map(|k| blur::gaussian_parallel(&pool(&|i| lab[i][k] * weight(i)), paint_grid.w, paint_grid.h, wide).iter().zip(&share).map(|(v, w)| v / w.max(1e-6)).collect())
         .collect();
-    let rough = blur::gaussian(&pool(&|i| input.busy[i]), paint_grid.w, paint_grid.h, wide);
+    let rough = blur::gaussian_parallel(&pool(&|i| input.busy[i]), paint_grid.w, paint_grid.h, wide);
     let tones: Vec<(paint::Tones, f32)> = (0..paint_grid.w * paint_grid.h)
         .into_par_iter()
         .map(|i| (paint::tones(materials, [channels[0][i], channels[1][i], channels[2][i]]), 1.0 - smoothstep(RIPPLE_CALM.0, RIPPLE_CALM.1, rough[i])))

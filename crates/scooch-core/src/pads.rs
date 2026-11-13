@@ -418,7 +418,6 @@ pub fn maps(small: &[[f32; 3]], grid: &Grid, found: &Analysis, lookup: &Lookup, 
         .filter(|b| b[2] > b[0] && b[3] > b[1])
         .collect();
     let open = lookup.plane(&free, grid);
-    let rough = lookup.plane(&ground, grid);
     let mut mask = vec![0.0f32; grid.w * grid.h];
     mask.par_chunks_mut(grid.w).enumerate().for_each(|(qy, line)| {
         let py = (qy * Q) as f64 + Q as f64 / 2.0;
@@ -434,13 +433,15 @@ pub fn maps(small: &[[f32; 3]], grid: &Grid, found: &Analysis, lookup: &Lookup, 
             }
         }
     });
-    let mask = blur::gaussian_boxes(&mask, grid.w, grid.h, (feather / Q as f64) as f32);
+    let mask = blur::boxes_parallel(&mask, grid.w, grid.h, (feather / Q as f64) as f32);
     let mut weight = vec![0.0f32; grid.w * grid.h];
     for b in &padded {
         for qy in b[1]..b[3].min(grid.h) {
             for qx in b[0]..b[2].min(grid.w) {
                 let c = qy * grid.w + qx;
-                weight[c] = mask[c] * rough[c] * open[c] * amount * belong.map_or(1.0, |b| 1.0 - b[c]);
+                if weight[c] == 0.0 && mask[c] > 0.0 {
+                    weight[c] = mask[c] * lookup.sample(&ground, qx, qy) * open[c] * amount * belong.map_or(1.0, |b| 1.0 - b[c]);
+                }
             }
         }
     }
@@ -448,23 +449,16 @@ pub fn maps(small: &[[f32; 3]], grid: &Grid, found: &Analysis, lookup: &Lookup, 
         return None;
     }
     let sigma = (CALM * width as f64 / Q as f64) as f32;
-    let planes: Vec<Vec<f32>> = (0..4)
-        .into_par_iter()
-        .map(|k| {
-            let plane: Vec<f32> = if k == 3 { open.clone() } else { small.iter().zip(&open).map(|(c, o)| c[k] * o).collect() };
-            blur::gaussian_boxes(&plane, grid.w, grid.h, sigma)
-        })
-        .collect();
+    let stacked: Vec<[f32; 4]> = small.iter().zip(&open).map(|(c, o)| [c[0] * o, c[1] * o, c[2] * o, *o]).collect();
+    let planes = blur::boxes_parallel4(&stacked, grid.w, grid.h, sigma);
     let encode = color::encode_table();
-    Some(
-        (0..grid.w * grid.h)
-            .flat_map(|c| {
-                let share = planes[3][c];
-                let calm = |k: usize| if share > 1e-4 { planes[k][c] / share } else { small[c][k] };
-                [color::encode(encode, calm(0)), color::encode(encode, calm(1)), color::encode(encode, calm(2)), (weight[c].clamp(0.0, 1.0) * 255.0).round() as u8]
-            })
-            .collect(),
-    )
+    let mut out = vec![0u8; grid.w * grid.h * 4];
+    out.par_chunks_mut(4).enumerate().for_each(|(c, px)| {
+        let share = planes[c][3];
+        let calm = |k: usize| if share > 1e-4 { planes[c][k] / share } else { small[c][k] };
+        px.copy_from_slice(&[color::encode(encode, calm(0)), color::encode(encode, calm(1)), color::encode(encode, calm(2)), (weight[c].clamp(0.0, 1.0) * 255.0).round() as u8]);
+    });
+    Some(out)
 }
 
 #[cfg(test)]
