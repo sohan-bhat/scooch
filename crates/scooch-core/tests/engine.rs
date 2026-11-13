@@ -1,7 +1,7 @@
 #[path = "support/layouts.rs"]
 mod layouts;
 
-use scooch_core::{Analysis, Options, Placement, Rect, RgbImage, Scene, TABLE};
+use scooch_core::{Analysis, Options, Placement, Rect, RgbImage, Scene, Scenery, TABLE};
 use std::sync::OnceLock;
 
 struct Photo {
@@ -216,7 +216,7 @@ fn odd_inputs_do_not_panic() {
     ];
     weird.extend(layouts::scattered(1600, 1000, 500, 99));
     let screens = [(16u32, 9000u32), (1, 1), (1600, 1000), (0, 0), (5, 0)];
-    let odd_options = [options, Options { strength: f32::NAN, max_zoom: f32::INFINITY, mirror: true, pads: f32::NAN }, Options { strength: 99.0, max_zoom: -3.0, mirror: true, pads: 7.0 }];
+    let odd_options = [options, Options { strength: f32::NAN, max_zoom: f32::INFINITY, mirror: true, pads: f32::NAN, scenery: Scenery::Clouds }, Options { strength: 99.0, max_zoom: -3.0, mirror: true, pads: 7.0, scenery: Scenery::Islands }];
     for image in [&tiny, &thin] {
         let analysis = scooch_core::analyze(image);
         assert_eq!(analysis.saliency.len(), (analysis.width * analysis.height) as usize);
@@ -261,7 +261,7 @@ fn a_plain_gradient_is_flat_and_gets_no_pads() {
     assert!(analysis.flat);
     let (w, h) = (960, 600);
     let scene = Scene { width: w, height: h, icons: layouts::scattered(w, h, 25, 3) };
-    let options = Options::default();
+    let options = Options { scenery: Scenery::Off, ..Options::default() };
     let placement = scooch_core::solve(&analysis, &scene, &options, None);
     check_placement(&placement, "gradient");
     let padded = scooch_core::render(&image, &placement, &scene, &options);
@@ -275,7 +275,7 @@ fn busy_ground_under_icons_gets_pads() {
     let analysis = scooch_core::analyze(&image);
     let (w, h) = (960, 600);
     let scene = Scene { width: w, height: h, icons: layouts::mac(w, h, 8) };
-    let options = Options::default();
+    let options = Options { scenery: Scenery::Off, ..Options::default() };
     let placement = scooch_core::solve(&analysis, &scene, &options, None);
     let padded = scooch_core::render(&image, &placement, &scene, &options);
     let plain = scooch_core::render(&image, &placement, &scene, &Options { pads: 0.0, ..options });
@@ -344,7 +344,7 @@ fn render_with_matches_render_byte_for_byte() {
 
 #[test]
 fn pads_active_never_misses_a_pad() {
-    let options = Options::default();
+    let options = Options { scenery: Scenery::Off, ..Options::default() };
     let bare = Options { pads: 0.0, ..options };
     let (w, h) = (960, 600);
     for photo in photos() {
@@ -414,12 +414,12 @@ fn shifted_set(edge: bool, options: Options) -> Vec<Shifted> {
 
 fn touching() -> &'static [Shifted] {
     static CELL: OnceLock<Vec<Shifted>> = OnceLock::new();
-    CELL.get_or_init(|| shifted_set(false, Options { mirror: true, ..Options::default() }))
+    CELL.get_or_init(|| shifted_set(false, Options { mirror: true, scenery: Scenery::Off, ..Options::default() }))
 }
 
 fn behind_strip() -> &'static [Shifted] {
     static CELL: OnceLock<Vec<Shifted>> = OnceLock::new();
-    CELL.get_or_init(|| shifted_set(true, Options::default()))
+    CELL.get_or_init(|| shifted_set(true, Options { scenery: Scenery::Off, ..Options::default() }))
 }
 
 fn assert_most_clear(cases: &[Shifted]) {
@@ -452,4 +452,146 @@ fn subjects_with_a_calm_strip_behind_slide_clear() {
     let missed: Vec<&str> = counted.iter().filter(|c| c.after >= 0.5 * c.before).map(|c| c.label.as_str()).collect();
     assert!(counted.len() >= 4, "only {} cases collide with a calm strip", counted.len());
     assert!(3 * cleared >= 2 * counted.len(), "{cleared} of {} cleared, missed {missed:?}", counted.len());
+}
+
+fn on_screen_distance(px: f32, py: f32, r: &Rect) -> f32 {
+    let dx = (r.x - px).max(px - (r.x + r.w)).max(0.0);
+    let dy = (r.y - py).max(py - (r.y + r.h)).max(0.0);
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn mean_lightness(picture: &RgbImage, layer: &scooch_core::RgbaImage, r: &Rect) -> Option<f32> {
+    let (mut sum, mut count) = (0.0f32, 0.0f32);
+    let (x0, x1) = (r.x.max(0.0) as u32, ((r.x + r.w) as u32).min(picture.width()));
+    let (y0, y1) = ((r.y + r.h * 2.0 / 3.0).max(0.0) as u32, ((r.y + r.h) as u32).min(picture.height()));
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if layer.get_pixel(x, y).0[3] < 128 {
+                continue;
+            }
+            let p = picture.get_pixel(x, y).0;
+            let lin = p.map(|v| {
+                let c = v as f32 / 255.0;
+                if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+            });
+            sum += (0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]).cbrt();
+            count += 1.0;
+        }
+    }
+    (count > 0.0).then(|| sum / count)
+}
+
+#[test]
+fn scenery_off_adds_nothing_and_layers_rebuild_the_render() {
+    let (w, h) = (960, 600);
+    for photo in photos().iter().step_by(4) {
+        let picture = small(&photo.image, 1200);
+        let analysis = scooch_core::analyze(&picture);
+        for layout in ["mac", "scattered"] {
+            let scene = Scene { width: w, height: h, icons: layouts::layout(layout, &analysis, w, h) };
+            for scenery in [Scenery::Off, Scenery::Auto, Scenery::Islands, Scenery::Clouds] {
+                let options = Options { scenery, ..Options::default() };
+                let placement = scooch_core::solve(&analysis, &scene, &options, None);
+                let whole = scooch_core::render_with(&picture, &analysis, &placement, &scene, &options);
+                let layers = scooch_core::render_layers(&picture, &analysis, &placement, &scene, &options);
+                let mut rebuilt = layers.picture.clone();
+                scooch_core::composite(&mut rebuilt, &layers.scenery);
+                assert_eq!(rebuilt.as_raw(), whole.as_raw(), "{} {layout} {scenery:?}", photo.name);
+                if scenery == Scenery::Off {
+                    assert!(layers.scenery.pixels().all(|p| p.0[3] == 0));
+                } else {
+                    assert!(layers.scenery.pixels().any(|p| p.0[3] > 0), "{} {layout} {scenery:?} drew nothing", photo.name);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn scenery_is_deterministic_and_local() {
+    let photo = &photos()[0];
+    let picture = small(&photo.image, 1200);
+    let analysis = scooch_core::analyze(&picture);
+    let (w, h) = (1440, 900);
+    let icons: Vec<Rect> = [(100.0, 100.0), (180.0, 100.0), (900.0, 500.0), (1200.0, 150.0), (300.0, 650.0)].iter().map(|(x, y)| Rect { x: *x, y: *y, w: 76.0, h: 94.0 }).collect();
+    let u = 94.0;
+    let scene = Scene { width: w, height: h, icons: icons.clone() };
+    let options = Options::default();
+    let placement = scooch_core::fill(picture.width(), picture.height(), &scene);
+    let first = scooch_core::render_with(&picture, &analysis, &placement, &scene, &options);
+    let again = scooch_core::render_with(&picture, &analysis, &placement, &scene, &options);
+    assert_eq!(first.as_raw(), again.as_raw());
+    let mut moved = icons.clone();
+    moved[2].x += 2.0 * u;
+    let next = scooch_core::render_with(&picture, &analysis, &placement, &Scene { icons: moved.clone(), ..scene.clone() }, &options);
+    let mut changed_near = false;
+    for y in 0..h {
+        for x in 0..w {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let far = on_screen_distance(px, py, &icons[2]) > 3.0 * u && on_screen_distance(px, py, &moved[2]) > 3.0 * u;
+            let same = first.get_pixel(x, y) == next.get_pixel(x, y);
+            if far {
+                assert!(same, "pixel {x},{y} changed far from the moved icon");
+            } else if !same {
+                changed_near = true;
+            }
+        }
+    }
+    assert!(changed_near);
+}
+
+#[test]
+fn scenery_survives_odd_scenes() {
+    let picture = RgbImage::from_fn(300, 200, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 120]));
+    let analysis = scooch_core::analyze(&picture);
+    let mut weird = vec![
+        Rect { x: 10.0, y: 10.0, w: 0.0, h: 40.0 },
+        Rect { x: f32::NAN, y: 10.0, w: 30.0, h: 40.0 },
+        Rect { x: -5000.0, y: -5000.0, w: 30.0, h: 40.0 },
+        Rect { x: 1e9, y: 1e9, w: 30.0, h: 40.0 },
+        Rect { x: 10.0, y: 10.0, w: -30.0, h: 40.0 },
+    ];
+    weird.extend(layouts::scattered(1600, 1000, 500, 4));
+    for (w, h) in [(16u32, 9000u32), (1600, 1000), (1, 1)] {
+        for scenery in [Scenery::Auto, Scenery::Islands, Scenery::Clouds] {
+            let scene = Scene { width: w, height: h, icons: weird.clone() };
+            let options = Options { scenery, ..Options::default() };
+            let placement = scooch_core::solve(&analysis, &scene, &options, None);
+            assert_eq!(scooch_core::render_with(&picture, &analysis, &placement, &scene, &options).dimensions(), (w, h));
+            assert_eq!(scooch_core::scenery_field(&scene, w, h).dimensions(), (w, h));
+        }
+    }
+}
+
+#[test]
+fn old_option_files_load_with_scenery_on() {
+    let old: Options = serde_json::from_str(r#"{"strength":1.0,"max_zoom":1.3,"mirror":false,"pads":0.7}"#).unwrap();
+    assert_eq!(old.scenery, Scenery::Auto);
+    let named: Options = serde_json::from_str(r#"{"scenery":"clouds"}"#).unwrap();
+    assert_eq!(named.scenery, Scenery::Clouds);
+}
+
+#[test]
+fn labels_stay_readable_on_the_scenery() {
+    let (w, h) = (960, 600);
+    for photo in photos() {
+        let picture = small(&photo.image, 1200);
+        let analysis = scooch_core::analyze(&picture);
+        for layout in ["mac", "windows", "scattered", "cluster"] {
+            {
+                let icons = layouts::layout(layout, &analysis, w, h);
+                let scene = Scene { width: w, height: h, icons: icons.clone() };
+                let options = Options::default();
+                let placement = scooch_core::solve(&analysis, &scene, &options, None);
+                let layers = scooch_core::render_layers(&picture, &analysis, &placement, &scene, &options);
+                let mut shown = layers.picture.clone();
+                scooch_core::composite(&mut shown, &layers.scenery);
+                for r in &icons {
+                    if let Some(l) = mean_lightness(&shown, &layers.scenery, r) {
+                        assert!(l <= 0.66, "{} {layout} label ground lightness {l:.3}", photo.name);
+                    }
+                }
+            }
+        }
+    }
 }
