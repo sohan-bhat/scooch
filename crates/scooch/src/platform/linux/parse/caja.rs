@@ -11,7 +11,8 @@ pub const STANDARD_ICON: f64 = 48.0;
 pub const MAX_TEXT_WIDTH: f64 = 135.0;
 pub const LABEL_OFFSET: f64 = 1.0;
 pub const TEXT_PADDING_Y: f64 = 1.0;
-pub const LINE: f64 = 21.0;
+pub const LINE_SPACING: f64 = 1.36;
+pub const DEFAULT_POINTS: f64 = 10.0;
 pub const TEXT_PADDING_X: f64 = 4.0;
 pub const LINKS: [(&str, &str); 4] = [("computer", "computer-icon-visible"), ("home", "home-icon-visible"), ("trash", "trash-icon-visible"), ("network", "network-icon-visible")];
 pub const INSETS: Insets = Insets { left: 0.0, top: -2.0, right: 0.0, bottom: 0.0 };
@@ -50,6 +51,11 @@ pub fn position(value: &str) -> Option<(f64, f64)> {
     Some((x as f64, y as f64))
 }
 
+pub fn line_height(font: Option<&str>) -> f64 {
+    let points = font.and_then(|font| font.trim().trim_matches('\'').split_whitespace().last()?.parse::<f64>().ok()).filter(|points| *points > 0.0 && points.is_finite()).unwrap_or(DEFAULT_POINTS);
+    (points * 96.0 / 72.0 * LINE_SPACING).ceil()
+}
+
 pub fn scale(value: Option<&str>) -> f64 {
     value.and_then(|text| text.trim().parse::<f64>().ok()).filter(|scale| *scale > 0.0 && scale.is_finite()).unwrap_or(1.0)
 }
@@ -85,6 +91,7 @@ pub struct Layout {
     pub left: f64,
     pub top: f64,
     pub lines: f64,
+    pub line: f64,
 }
 
 impl Layout {
@@ -98,7 +105,7 @@ impl Layout {
         let left = self.left + at.0 * units;
         let top = self.top + at.1 * units;
         let wide = icon.max(MAX_TEXT_WIDTH * units + 2.0 * TEXT_PADDING_X);
-        let tall = icon + LABEL_OFFSET + self.lines * LINE + 2.0 * TEXT_PADDING_Y;
+        let tall = icon + LABEL_OFFSET + self.lines * self.line + 2.0 * TEXT_PADDING_Y;
         let center = left + icon / 2.0;
         Rect { x: (center - wide / 2.0) as f32, y: top as f32, w: wide as f32, h: tall as f32 }
     }
@@ -111,19 +118,19 @@ mod tests {
 
     #[test]
     fn a_standard_icon_has_a_label_box_under_it() {
-        let layout = Layout { zoom: 3, left: 0.0, top: 32.0, lines: 3.0 };
+        let layout = Layout { zoom: 3, left: 0.0, top: 32.0, lines: 3.0, line: line_height(Some("'Ubuntu 11'")) };
         let rect = layout.rect((10.0, 10.0), 1.0);
-        assert_eq!(rect, Rect { x: 10.0 + 24.0 - 71.5, y: 42.0, w: 143.0, h: 48.0 + 1.0 + 63.0 + 2.0 });
+        assert_eq!(rect, Rect { x: 10.0 + 24.0 - 71.5, y: 42.0, w: 143.0, h: 48.0 + 1.0 + 60.0 + 2.0 });
     }
 
     #[test]
     fn zoom_scales_positions_and_sizes() {
-        let layout = Layout { zoom: 4, left: 0.0, top: 0.0, lines: 2.0 };
+        let layout = Layout { zoom: 4, left: 0.0, top: 0.0, lines: 2.0, line: 20.0 };
         assert_eq!(layout.units(), 1.5);
         let rect = layout.rect((100.0, 40.0), 1.0);
         assert_eq!((rect.y, rect.w), (60.0, 210.5));
         assert_eq!(rect.x, 150.0 + 36.0 - 105.25);
-        let big = Layout { zoom: 3, left: 0.0, top: 0.0, lines: 1.0 }.rect((0.0, 0.0), 4.0);
+        let big = Layout { zoom: 3, left: 0.0, top: 0.0, lines: 1.0, line: 20.0 }.rect((0.0, 0.0), 4.0);
         assert_eq!(big.w, 192.0);
     }
 
@@ -154,5 +161,13 @@ mod tests {
         assert_eq!(zoom_index("'large'"), 4);
         assert_eq!(zoom_index("standard"), 3);
         assert_eq!(icon_size(4), 72.0);
+    }
+
+    #[test]
+    fn the_label_line_follows_the_font_size() {
+        assert_eq!(line_height(Some("'Ubuntu 11'")), 20.0);
+        assert_eq!(line_height(Some("Sans Bold 14")), 26.0);
+        assert_eq!(line_height(Some("''")), 19.0);
+        assert_eq!(line_height(None), 19.0);
     }
 }

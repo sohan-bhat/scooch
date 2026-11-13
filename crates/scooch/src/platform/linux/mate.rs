@@ -36,11 +36,12 @@ impl Mate {
     pub fn layout(&self, groups: &[keyfile::Group], screens: &[Screen]) -> Layout {
         let default = gsetting("org.mate.caja.icon-view", "default-zoom-level").map_or(3, |text| caja::zoom_index(&text));
         let lines = gsetting(DESKTOP, "text-ellipsis-limit").and_then(|text| text.trim().parse::<f64>().ok()).filter(|lines| *lines > 0.0).unwrap_or(3.0);
+        let font = gsetting(DESKTOP, "font").filter(|font| !font.trim().trim_matches('\'').is_empty()).or_else(|| gsetting("org.mate.interface", "font-name"));
         let size = screens.iter().fold((0.0f64, 0.0f64), |(w, h), screen| (w.max((screen.frame.x + screen.frame.w) as f64), h.max((screen.frame.y + screen.frame.h) as f64)));
         let factor = self.x11_scale().max(1.0) as u32;
         let work: Vec<u32> = if self.session == Session::X11 { screens::cardinals("_NET_WORKAREA").unwrap_or_default().into_iter().map(|value| value / factor).collect() } else { Vec::new() };
         let [top, _, left, _] = caja::margins(&work, size);
-        Layout { zoom: caja::zoom(groups, default), left, top, lines }
+        Layout { zoom: caja::zoom(groups, default), left, top, lines, line: caja::line_height(font.as_deref()) }
     }
 
     pub fn items(&self, groups: &[keyfile::Group]) -> Result<Vec<((f64, f64), f64)>> {
