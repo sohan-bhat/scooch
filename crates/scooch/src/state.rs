@@ -27,6 +27,8 @@ pub struct State {
     pub tally: Tally,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub kept: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stuck: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -44,18 +46,11 @@ impl Tally {
     pub fn is_empty(&self) -> bool {
         *self == Tally::default()
     }
-
-    pub fn add(&mut self, other: &Tally) {
-        self.back += other.back;
-        self.plain += other.plain;
-        self.stuck += other.stuck;
-        self.strays = self.strays.max(other.strays);
-    }
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { version: VERSION, on: false, options: Options::default(), screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new() }
+        Self { version: VERSION, on: false, options: Options::default(), screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new() }
     }
 }
 
@@ -98,17 +93,9 @@ impl Entry {
 pub const PROGRAM: &str = env!("CARGO_PKG_VERSION");
 
 impl Store {
-    pub fn forget_pictures(&self, keep: &[PathBuf]) {
-        if let Ok(entries) = fs::read_dir(self.out()) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !keep.iter().any(|kept| same(kept, &path)) {
-                    let _ = fs::remove_file(path);
-                }
-            }
-        }
-        let _ = fs::remove_dir(self.out());
-        let _ = fs::remove_dir_all(self.cache());
+    pub fn pictures(&self) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(self.out()) else { return Vec::new() };
+        entries.flatten().map(|entry| entry.path()).filter(|path| path.is_file()).collect()
     }
 
     pub fn mark(&self, running: Option<&str>) -> Result<()> {
@@ -211,10 +198,16 @@ impl Store {
     }
 
     pub fn save(&self, state: &State) -> Result<()> {
+        self.write(state).map(drop)
+    }
+
+    pub fn write(&self, state: &State) -> Result<Vec<u8>> {
         fs::create_dir_all(&self.root).with_context(|| format!("Scooch could not make its folder at {}.", self.root.display()))?;
         let mut state = state.clone();
         state.version = VERSION;
-        write_atomic(&self.state_file(), &serde_json::to_vec_pretty(&state)?)
+        let bytes = serde_json::to_vec_pretty(&state)?;
+        write_atomic(&self.state_file(), &bytes)?;
+        Ok(bytes)
     }
 
     pub fn owns(&self, path: &Path) -> bool {
@@ -234,18 +227,6 @@ impl Store {
         let prefix = format!("{}-", file_safe(screen));
         let Ok(entries) = fs::read_dir(self.out()) else { return Vec::new() };
         entries.flatten().filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix)).map(|entry| entry.path()).collect()
-    }
-
-    pub fn sweep(&self, screen: &str, keep: Option<&Path>, kept: &[PathBuf]) {
-        let prefix = format!("{}-", file_safe(screen));
-        let Ok(entries) = fs::read_dir(self.out()) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let spared = keep.is_some_and(|keep| same(keep, &path)) || kept.iter().any(|kept| same(kept, &path));
-            if !spared && entry.file_name().to_string_lossy().starts_with(&prefix) {
-                let _ = fs::remove_file(path);
-            }
-        }
     }
 
     pub fn lock(&self) -> Result<Option<Lock>> {
@@ -369,19 +350,6 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_pictures_keeps_the_settings() {
-        let store = Store::at(scratch("forget"));
-        store.save(&State { on: true, ..State::default() }).unwrap();
-        fs::create_dir_all(store.out()).unwrap();
-        fs::create_dir_all(store.cache()).unwrap();
-        fs::write(store.output("main", 1, "jpg"), b"x").unwrap();
-        fs::write(store.cache().join("1.rgb"), b"x").unwrap();
-        store.forget_pictures(&[]);
-        assert!(!store.out().exists() && !store.cache().exists());
-        assert!(store.load().on);
-    }
-
-    #[test]
     fn a_broken_file_is_moved_aside_and_never_overwritten() {
         let store = Store::at(scratch("broken"));
         fs::write(store.state_file(), b"{ not json").unwrap();
@@ -455,22 +423,6 @@ mod tests {
         assert!(store.owns(&store.output("main", 1, "jpg")));
         assert!(!store.owns(Path::new("/Library/Desktop Pictures/lake.jpg")));
         assert!(!store.owns(&store.state_file()));
-    }
-
-    #[test]
-    fn sweep_keeps_the_newest_output_and_other_screens() {
-        let store = Store::at(scratch("sweep"));
-        fs::create_dir_all(store.out()).unwrap();
-        let old = store.output("main", 1, "jpg");
-        let new = store.output("main", 2, "jpg");
-        let other = store.output("main2", 1, "jpg");
-        for path in [&old, &new, &other] {
-            fs::write(path, b"x").unwrap();
-        }
-        store.sweep("main", Some(&new), &[]);
-        assert!(!old.exists() && new.exists() && other.exists());
-        store.sweep("main", None, &[]);
-        assert!(!new.exists() && other.exists());
     }
 
     #[test]

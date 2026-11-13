@@ -1,5 +1,5 @@
 use crate::platform::{Desktop, Format, Screen, Snapshot};
-use crate::state::{display_of, parse, same, write_atomic, Entry, State, Store, Tally};
+use crate::state::{display_of, file_safe, parse, same, write_atomic, Entry, State, Store, Tally};
 use crate::{cache, poke, scene};
 use anyhow::{Context, Result};
 use scooch_core::{Analysis, Options, Placement, Rect, RgbImage, Scene};
@@ -128,7 +128,7 @@ pub fn relink(state: &mut State, id: &str, shown: &Path) -> bool {
     true
 }
 
-pub fn claim_orphans(state: &mut State, desktop: &dyn Desktop, store: &Store, screens: &[Screen]) -> usize {
+pub fn claim_orphans(state: &mut State, desktop: &dyn Desktop, store: &Store, screens: &[Screen], _known: Option<&[String]>) -> usize {
     let mut orphans = 0;
     for screen in screens {
         if state.screens.contains_key(&screen.id) {
@@ -144,15 +144,23 @@ pub fn claim_orphans(state: &mut State, desktop: &dyn Desktop, store: &Store, sc
     orphans
 }
 
-pub fn settle_screens(state: &mut State, desktop: &dyn Desktop, store: &Store, screens: &[Screen], known: Option<&[String]>, drop_gone: bool) -> Tally {
-    let mut tally = Tally { strays: claim_orphans(state, desktop, store, screens), ..Tally::default() };
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Settled {
+    pub tally: Tally,
+    pub standing: bool,
+}
+
+pub fn settle_screens(state: &mut State, desktop: &dyn Desktop, store: &Store, screens: &[Screen], known: Option<&[String]>, drop_gone: bool) -> Settled {
+    let orphans = claim_orphans(state, desktop, store, screens, known);
+    let mut tally = Tally::default();
+    let mut stuck = 0;
     let ids: Vec<String> = state.screens.keys().cloned().collect();
     for id in ids {
         let entry = state.screens[&id].clone();
         let Some(screen) = screens.iter().find(|screen| screen.id == id) else {
             if drop_gone && gone(&id, known, screens) {
                 state.screens.remove(&id);
-                store.sweep(&id, None, &state.kept);
+                sweep(desktop, store, state, &id, entry.output.as_slice());
             } else {
                 tally.pending += 1;
             }
@@ -168,30 +176,113 @@ pub fn settle_screens(state: &mut State, desktop: &dyn Desktop, store: &Store, s
         state.screens.remove(&id);
         match outcome {
             Restored::Stuck(showing) => {
-                tally.stuck += 1;
-                store.sweep(&id, showing.as_deref(), &state.kept);
+                stuck += 1;
                 if let Some(showing) = showing {
-                    keep(state, showing);
+                    remember(&mut state.stuck, showing);
                 }
             }
-            Restored::Plain => {
-                tally.plain += 1;
-                store.sweep(&id, None, &state.kept);
-            }
-            Restored::Back => {
-                tally.back += 1;
-                store.sweep(&id, None, &state.kept);
-            }
+            Restored::Plain => tally.plain += 1,
+            Restored::Back => tally.back += 1,
+        }
+        sweep(desktop, store, state, &id, entry.output.as_slice());
+    }
+    match desktop.in_use(&store.out()) {
+        Ok(Some(used)) => {
+            (tally.stuck, tally.strays) = standing(state, store, &used);
+            Settled { tally, standing: true }
+        }
+        _ => {
+            (tally.stuck, tally.strays) = (stuck, orphans);
+            Settled { tally, standing: false }
         }
     }
-    tally
+}
+
+pub fn absorb(tally: &mut Tally, settled: &Settled) {
+    tally.back += settled.tally.back;
+    tally.plain += settled.tally.plain;
+    if settled.standing {
+        (tally.stuck, tally.strays) = (settled.tally.stuck, settled.tally.strays);
+    } else {
+        tally.stuck += settled.tally.stuck;
+        tally.strays = tally.strays.max(settled.tally.strays);
+    }
+}
+
+pub fn standing(state: &State, store: &Store, used: &[PathBuf]) -> (usize, usize) {
+    let mut seen: Vec<&PathBuf> = Vec::new();
+    let (mut stuck, mut strays) = (0, 0);
+    for path in used {
+        if !store.owns(path) || seen.iter().any(|earlier| same(earlier, path)) {
+            continue;
+        }
+        seen.push(path);
+        if state.screens.iter().any(|(id, entry)| named_for(id, path) || entry.output.as_deref().is_some_and(|output| same(output, path))) {
+            continue;
+        }
+        if state.stuck.iter().any(|left| same(left, path)) {
+            stuck += 1;
+        } else {
+            strays += 1;
+        }
+    }
+    (stuck, strays)
+}
+
+pub fn named_for(id: &str, path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(&format!("{}-", file_safe(id))))
+}
+
+pub fn discard(desktop: &dyn Desktop, store: &Store, doomed: &[PathBuf], owned: &[PathBuf]) {
+    let doomed: Vec<&PathBuf> = doomed.iter().filter(|path| store.owns(path) && path.is_file()).collect();
+    if doomed.is_empty() {
+        return;
+    }
+    let used = desktop.in_use(&store.out()).ok().flatten();
+    for path in doomed {
+        let spared = match &used {
+            Some(used) => used.iter().any(|shown| same(shown, path)),
+            None => !owned.iter().any(|mine| same(mine, path)),
+        };
+        if !spared {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+pub fn protected(state: &State, path: &Path) -> bool {
+    state.kept.iter().chain(&state.stuck).any(|kept| same(kept, path)) || state.screens.values().any(|entry| entry.output.as_deref().is_some_and(|output| same(output, path)))
+}
+
+pub fn sweep(desktop: &dyn Desktop, store: &Store, state: &State, id: &str, extra: &[PathBuf]) {
+    let mut doomed = store.outputs_of(id);
+    for path in extra {
+        if !doomed.iter().any(|listed| same(listed, path)) {
+            doomed.push(path.clone());
+        }
+    }
+    doomed.retain(|path| !protected(state, path));
+    discard(desktop, store, &doomed, &doomed);
+}
+
+pub fn forget(desktop: &dyn Desktop, store: &Store, state: &mut State) {
+    let doomed: Vec<PathBuf> = store.pictures().into_iter().filter(|path| !state.screens.values().any(|entry| entry.output.as_deref().is_some_and(|output| same(output, path)))).collect();
+    discard(desktop, store, &doomed, &[]);
+    let _ = std::fs::remove_dir(store.out());
+    let _ = std::fs::remove_dir_all(store.cache());
+    state.kept.retain(|path| path.exists());
+    state.stuck.retain(|path| path.exists());
+}
+
+fn remember(list: &mut Vec<PathBuf>, path: PathBuf) {
+    list.retain(|listed| listed.exists());
+    if !list.iter().any(|listed| same(listed, &path)) {
+        list.push(path);
+    }
 }
 
 pub fn keep(state: &mut State, path: PathBuf) {
-    state.kept.retain(|kept| kept.exists());
-    if !state.kept.iter().any(|kept| same(kept, &path)) {
-        state.kept.push(path);
-    }
+    remember(&mut state.kept, path);
 }
 
 pub const ABSENT_FOR: u64 = 24 * 60 * 60;
@@ -207,7 +298,7 @@ pub fn absence(entry: &mut Entry, present: bool, now: u64) -> bool {
     now.saturating_sub(since) > ABSENT_FOR && entry.absent_ticks >= ABSENT_TICKS
 }
 
-pub fn prune(state: &mut State, store: &Store, known: Option<&[String]>, screens: &[Screen], now: u64) -> usize {
+pub fn prune(state: &mut State, desktop: &dyn Desktop, store: &Store, known: Option<&[String]>, screens: &[Screen], now: u64) -> usize {
     let Some(listed) = known else { return 0 };
     let ids: Vec<String> = state.screens.keys().cloned().collect();
     let mut pruned = 0;
@@ -218,8 +309,9 @@ pub fn prune(state: &mut State, store: &Store, known: Option<&[String]>, screens
         }
         let entry = state.screens.get_mut(&id).expect("the id was just listed");
         if absence(entry, present, now) {
+            let output = entry.output.clone();
             state.screens.remove(&id);
-            store.sweep(&id, None, &state.kept);
+            sweep(desktop, store, state, &id, output.as_slice());
             pruned += 1;
         }
     }
@@ -235,7 +327,13 @@ pub struct Daemon {
     pub store: Store,
     pub grace: Duration,
     recent: Mutex<HashMap<String, Instant>>,
-    kept: Mutex<Vec<PathBuf>>,
+    ledger: Mutex<Ledger>,
+}
+
+#[derive(Default)]
+struct Ledger {
+    expected: Option<Vec<u8>>,
+    external: bool,
 }
 
 pub fn adoptable(entry: &Entry, current: &Path, ours: bool) -> bool {
@@ -272,7 +370,7 @@ pub fn stamp() -> String {
 impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), kept: Mutex::new(Vec::new()) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()) }
     }
 
     fn settling(&self, screen: &str) -> bool {
@@ -281,6 +379,7 @@ impl Daemon {
 
     pub fn tick(&self) -> Report {
         let before = self.store.read();
+        *self.ledger.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Ledger { expected: before.clone(), external: false };
         let mut state = parse(before.as_deref());
         let mut report = Report::default();
         if !state.on && !state.restoring {
@@ -300,14 +399,18 @@ impl Daemon {
         }
         state.problem = report.problem.clone();
         let now = self.store.read();
-        if now != before {
+        let changed = {
+            let ledger = self.ledger.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            ledger.external || now != ledger.expected
+        };
+        if changed {
             state = merge(&state, &parse(before.as_deref()), &parse(now.as_deref()));
             report.retry = true;
         }
         if state.restoring && !state.on && state.screens.is_empty() {
             state.restoring = false;
             state.picture = None;
-            self.store.forget_pictures(&state.kept);
+            forget(self.desktop.as_ref(), &self.store, &mut state);
             report.unload = true;
         }
         if state == parse(now.as_deref()) {
@@ -329,26 +432,27 @@ impl Daemon {
             }
         };
         let settled = settle_screens(state, self.desktop.as_ref(), &self.store, &screens, None, false);
-        state.tally.add(&settled);
-        if settled.strays > 0 {
+        absorb(&mut state.tally, &settled);
+        if settled.tally.strays > 0 {
             report.problem = Some(ORPHAN.to_string());
         }
     }
 
     fn pass(&self, state: &mut State, snapshot: &Snapshot, report: &mut Report) {
         let options = state.options;
-        if let Ok(mut kept) = self.kept.lock() {
-            kept.clone_from(&state.kept);
-        }
         let known = self.desktop.known().ok().flatten();
-        prune(state, &self.store, known.as_deref(), &snapshot.screens, unix_now());
+        prune(state, self.desktop.as_ref(), &self.store, known.as_deref(), &snapshot.screens, unix_now());
         for screen in &snapshot.screens {
             if unplaced(state, &screen.id) {
                 report.outcomes.push((screen.id.clone(), Outcome::Skipped));
                 report.problem.get_or_insert(SPACE_UNKNOWN.to_string());
                 continue;
             }
+            let previous = state.screens.get(&screen.id).and_then(|entry| entry.output.clone());
             let outcome = self.screen(state, screen, &snapshot.icons, &options);
+            if state.screens.get(&screen.id).and_then(|entry| entry.output.clone()) != previous {
+                sweep(self.desktop.as_ref(), &self.store, state, &screen.id, previous.as_slice());
+            }
             match outcome {
                 Ok(outcome) => {
                     report.retry |= outcome == Outcome::Interrupted;
@@ -374,7 +478,6 @@ impl Daemon {
             if let (true, Some(shown)) = (ours, current.as_deref()) {
                 if !relink(state, &screen.id, shown) {
                     keep(state, shown.to_path_buf());
-                    self.spare(shown);
                     anyhow::bail!(ORPHAN);
                 }
             }
@@ -450,7 +553,6 @@ impl Daemon {
             entry.placement = Some(placement);
             if current.is_some_and(|path| same(path, &source)) {
                 entry.output = None;
-                self.store.sweep(&screen.id, None, &self.spared());
             } else if !copied && !self.plain(entry, screen, current, seen)? {
                 return Ok(Outcome::Interrupted);
             }
@@ -496,36 +598,45 @@ impl Daemon {
     }
 
     fn publish(&self, entry: &mut Entry, screen: &Screen, current: Option<&Path>, seen: Option<&Path>, extension: &str, write: impl FnOnce(&Path) -> Result<()>) -> Result<bool> {
-        let previous = entry.output.clone();
         let (counter, path) = self.fresh_name(&screen.id, entry.counter, extension, current);
         std::fs::create_dir_all(self.store.out()).with_context(|| format!("Scooch could not make {}, so check the disk.", self.store.out().display()))?;
         write(&path)?;
-        if self.picked_meanwhile(screen, seen)? {
-            let _ = std::fs::remove_file(&path);
+        let made = [path.clone()];
+        if self.picked_meanwhile(screen, seen)? || !self.note(&screen.id, &Entry { output: Some(path.clone()), counter, ..entry.clone() })? {
+            discard(self.desktop.as_ref(), &self.store, &made, &made);
             return Ok(false);
         }
         if let Err(error) = self.show(screen, &path) {
-            let _ = std::fs::remove_file(&path);
+            let _ = self.note(&screen.id, entry);
+            discard(self.desktop.as_ref(), &self.store, &made, &made);
             return Err(error);
-        }
-        let kept = self.spared();
-        self.store.sweep(&screen.id, Some(&path), &kept);
-        if let Some(previous) = previous.filter(|old| *old != path && self.store.owns(old) && !kept.iter().any(|kept| same(kept, old))) {
-            let _ = std::fs::remove_file(previous);
         }
         entry.counter = counter;
         entry.output = Some(path);
         Ok(true)
     }
 
-    fn spare(&self, path: &Path) {
-        if let Ok(mut kept) = self.kept.lock() {
-            kept.push(path.to_path_buf());
+    fn note(&self, id: &str, entry: &Entry) -> Result<bool> {
+        let mut ledger = self.ledger.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fresh = self.store.read();
+        if fresh != ledger.expected {
+            ledger.external = true;
         }
-    }
-
-    fn spared(&self) -> Vec<PathBuf> {
-        self.kept.lock().map(|kept| kept.clone()).unwrap_or_default()
+        let mut state = parse(fresh.as_deref());
+        if !state.on {
+            return Ok(false);
+        }
+        match state.screens.get_mut(id) {
+            Some(theirs) => {
+                theirs.output.clone_from(&entry.output);
+                theirs.counter = theirs.counter.max(entry.counter);
+            }
+            None => {
+                state.screens.insert(id.to_string(), entry.clone());
+            }
+        }
+        ledger.expected = Some(self.store.write(&state)?);
+        Ok(true)
     }
 
     fn picked_meanwhile(&self, screen: &Screen, seen: Option<&Path>) -> Result<bool> {
@@ -585,6 +696,11 @@ pub fn merge(mine: &State, before: &State, fresh: &State) -> State {
     for kept in &mine.kept {
         if !merged.kept.contains(kept) {
             merged.kept.push(kept.clone());
+        }
+    }
+    for left in &mine.stuck {
+        if !merged.stuck.contains(left) {
+            merged.stuck.push(left.clone());
         }
     }
     for (id, ours) in &mine.screens {
@@ -830,12 +946,14 @@ pub mod tests {
         pub broken: Mutex<Option<String>>,
         pub mid_render: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         pub refuse: Mutex<Vec<String>>,
+        pub unknowable: Mutex<bool>,
+        pub crash_after_set: Mutex<bool>,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), refuse: Mutex::new(Vec::new()) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -911,7 +1029,17 @@ pub mod tests {
             }
             self.sets.fetch_add(1, Ordering::SeqCst);
             self.show(&screen.id, path);
+            if std::mem::take(&mut *self.crash_after_set.lock().unwrap()) {
+                panic!("the process was killed right after the set");
+            }
             Ok(())
+        }
+
+        fn in_use(&self, folder: &Path) -> Result<Option<Vec<PathBuf>>> {
+            if *self.unknowable.lock().unwrap() {
+                return Ok(None);
+            }
+            Ok(Some(self.shown.lock().unwrap().values().filter(|path| path.starts_with(folder)).cloned().collect()))
         }
 
         fn run(&self, _wake: Wake) -> Result<()> {
@@ -1461,9 +1589,12 @@ pub mod tests {
         for path in [&one, &two, &bare] {
             std::fs::write(path, b"x").unwrap();
         }
-        store.sweep("D@S1", None, &[]);
+        let fake = Fake::new(vec![screen("D@S1", 0.0, 1.0)], &one);
+        fake.show("D@S1", Path::new("/p/elsewhere.jpg"));
+        let state = State::default();
+        sweep(fake.as_ref(), &store, &state, "D@S1", &[]);
         assert!(!one.exists() && two.exists() && bare.exists());
-        store.sweep("D", None, &[]);
+        sweep(fake.as_ref(), &store, &state, "D", &[]);
         assert!(two.exists() && !bare.exists());
     }
 
@@ -1614,10 +1745,11 @@ pub mod tests {
     #[test]
     fn a_showing_space_is_never_marked_absent() {
         let store = Store::at(scratch("showingpresent"));
+        let fake = Fake::new(vec![screen("D@S1", 0.0, 1.0)], Path::new("/p/a.jpg"));
         let mut state = State::default();
         state.screens.insert("D@S1".into(), Entry::new(Path::new("/p/a.jpg")));
         for tick in 0..10 {
-            assert_eq!(prune(&mut state, &store, Some(&[]), &[screen("D@S1", 0.0, 1.0)], tick * ABSENT_FOR), 0);
+            assert_eq!(prune(&mut state, fake.as_ref(), &store, Some(&[]), &[screen("D@S1", 0.0, 1.0)], tick * ABSENT_FOR), 0);
         }
         assert_eq!((state.screens["D@S1"].absent_since, state.screens["D@S1"].absent_ticks), (None, 0));
     }
@@ -1649,6 +1781,55 @@ pub mod tests {
         *fake.known.lock().unwrap() = Some(vec!["D@S1".into()]);
         daemon.tick();
         assert!(!daemon.store.load().screens.contains_key("D@S2") && !output.exists());
+    }
+
+    #[test]
+    fn without_an_answer_only_the_cleaned_entrys_own_files_go() {
+        let store = Store::at(scratch("unknowable"));
+        std::fs::create_dir_all(store.out()).unwrap();
+        let (mine, older, theirs) = (store.output("A", 1, "jpg"), store.output("A", 2, "jpg"), store.output("B", 1, "jpg"));
+        for path in [&mine, &older, &theirs] {
+            std::fs::write(path, b"x").unwrap();
+        }
+        let fake = Fake::new(vec![screen("A", 0.0, 1.0)], Path::new("/p/a.jpg"));
+        *fake.unknowable.lock().unwrap() = true;
+        discard(fake.as_ref(), &store, &[mine.clone(), theirs.clone()], std::slice::from_ref(&mine));
+        assert!(!mine.exists() && theirs.exists());
+        *fake.unknowable.lock().unwrap() = false;
+        fake.show("B", &theirs);
+        discard(fake.as_ref(), &store, &[older.clone(), theirs.clone()], &[]);
+        assert!(!older.exists() && theirs.exists());
+    }
+
+    #[test]
+    fn a_failed_set_takes_the_new_path_back_out_of_the_record() {
+        let (daemon, fake, original) = rig("failedset", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        fake.refuse.lock().unwrap().push("main".into());
+        assert!(daemon.tick().problem.is_some());
+        assert_eq!(daemon.store.load().screens["main"].output, None);
+        assert!(daemon.store.pictures().is_empty());
+        assert_eq!(fake.showing("main"), original);
+    }
+
+    #[test]
+    fn the_record_is_saved_before_the_set_and_a_tick_still_merges_commands() {
+        let (daemon, fake, original) = rig("savefirst", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        let (store, flipped) = (daemon.store.clone(), Arc::new(Mutex::new(None)));
+        let seen = flipped.clone();
+        *fake.mid_render.lock().unwrap() = Some(Box::new(move || {
+            let mut state = store.load();
+            state.options.mirror = true;
+            store.save(&state).unwrap();
+            *seen.lock().unwrap() = Some(());
+        }));
+        let report = daemon.tick();
+        assert!(report.retry && flipped.lock().unwrap().is_some());
+        let state = daemon.store.load();
+        assert!(state.options.mirror);
+        assert_eq!(state.screens["main"].output.as_deref(), Some(fake.showing("main").as_path()));
+        assert_eq!(state.screens["main"].original, original);
     }
 
     #[test]

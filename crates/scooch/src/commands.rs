@@ -290,7 +290,7 @@ pub fn wind_down(desktop: &dyn Desktop, store: &Store) -> Result<Off> {
         return Ok(Off::Unreadable);
     }
     let was_restoring = state.restoring;
-    let mut tally = daemon::settle_screens(&mut state, desktop, store, &screens, known.as_deref(), true);
+    let mut tally = daemon::settle_screens(&mut state, desktop, store, &screens, known.as_deref(), true).tally;
     let left = state.screens.len();
     state.on = false;
     state.problem = None;
@@ -312,10 +312,10 @@ pub fn wind_down(desktop: &dyn Desktop, store: &Store) -> Result<Off> {
         state.restoring = false;
         state.picture = None;
         state.tally = tally;
-        store.forget_pictures(&state.kept);
+        daemon::forget(desktop, store, &mut state);
         Off::Done(tally)
     };
-    if store.root.exists() {
+    if store.state_file().exists() {
         store.save(&state)?;
     }
     Ok(off)
@@ -913,7 +913,7 @@ mod tests {
         assert!(output.exists());
         assert_eq!(fake.showing("main"), output);
         let state = store.load();
-        assert!(!state.restoring && state.screens.is_empty() && state.kept == vec![output]);
+        assert!(!state.restoring && state.screens.is_empty() && state.stuck == vec![output]);
     }
 
     fn pair(name: &str) -> (std::sync::Arc<crate::daemon::tests::Fake>, Store, PathBuf, PathBuf) {
@@ -1337,6 +1337,39 @@ mod tests {
         let state = store.load();
         assert!(!state.restoring && state.screens.is_empty() && !store.out().exists());
         assert_eq!(state.tally.back, 3);
+    }
+
+    #[test]
+    fn a_kill_right_after_the_set_still_leaves_a_record_that_off_keeps() {
+        let (fake, store, first) = spaces("killset");
+        store.save(&State { on: true, ..State::default() }).unwrap();
+        fake.place(vec![Rect { x: 60.0, y: 30.0, w: 40.0, h: 40.0 }]);
+        *fake.crash_after_set.lock().unwrap() = true;
+        let mut daemon = crate::daemon::Daemon::new(fake.clone(), store.clone());
+        daemon.grace = Duration::ZERO;
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| daemon.tick())).is_err());
+        let shown = fake.showing("D@S1");
+        assert!(store.owns(&shown));
+        assert_eq!(store.load().screens["D@S1"].output.as_deref(), Some(shown.as_path()));
+        fake.connect(screens(&["D@S2"]));
+        fake.show("D@S2", &first);
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(0, 0, 0, 1, 0)));
+        assert!(shown.exists());
+    }
+
+    #[test]
+    fn off_counts_a_desktop_pointing_at_a_picture_no_record_knows() {
+        let (fake, store, first) = spaces("norecord");
+        store.save(&State { on: true, ..State::default() }).unwrap();
+        let lost = store.output("D@S1", 4, "jpg");
+        std::fs::write(&lost, b"x").unwrap();
+        fake.show("D@S1", &lost);
+        fake.connect(screens(&["D@S2"]));
+        fake.show("D@S2", &first);
+        let counts = Tally { strays: 1, ..Tally::default() };
+        assert_eq!(off_of(&fake, &store), Off::Done(counts));
+        assert!(lost.exists());
+        assert!(!closing(&counts).contains("is back"));
     }
 
     #[test]
