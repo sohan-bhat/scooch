@@ -111,14 +111,12 @@ impl Shell for Xfce {
         let work = workarea(self.session, true).map(|work| shrink(work, factor as f32));
         let mut found = Vec::new();
         if let Some(configs) = self.configs() {
-            for screen in screens {
-                let Some(config) = xfce::config_for(&configs, &screen.id, &screen.frame) else { continue };
-                let area = work.and_then(|work| intersect(&work, &screen.frame)).unwrap_or(screen.frame);
-                let Some(grid) = xfce::grid(&area, icon, &STYLE) else { continue };
-                for (id, (row, col)) in &config.icons {
-                    if self.shown(id) {
-                        found.extend(grid.rect(*row, *col).map(|rect| xfce::INSETS_4_20.apply(rect)));
-                    }
+            let named: Vec<(String, Rect)> = screens.iter().map(|screen| (screen.id.clone(), screen.frame)).collect();
+            let assigned = xfce::assign(&configs, &named);
+            let grids: Vec<Option<xfce::Grid>> = screens.iter().map(|screen| xfce::grid(&work.and_then(|work| intersect(&work, &screen.frame)).unwrap_or(screen.frame), icon, &STYLE)).collect();
+            for (id, (screen, (row, col))) in xfce::placements(&configs, &assigned) {
+                if self.shown(&id) {
+                    found.extend(grids[screen].and_then(|grid| grid.rect(row, col)).map(|rect| xfce::INSETS_4_20.apply(rect)));
                 }
             }
             return Ok(found);

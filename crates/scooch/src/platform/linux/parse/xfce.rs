@@ -77,11 +77,42 @@ pub fn rc_positions(groups: &[Group]) -> BTreeMap<String, (i64, i64)> {
         .collect()
 }
 
-pub fn config_for<'a>(configs: &'a [Config], name: &str, frame: &Rect) -> Option<&'a Config> {
-    let by_name = configs.iter().find(|config| config.monitors.iter().any(|monitor| !name.is_empty() && monitor.name == name));
-    let by_place = || configs.iter().find(|config| config.monitors.iter().any(|monitor| monitor.geometry == *frame));
-    let by_size = || configs.iter().find(|config| config.monitors.iter().any(|monitor| monitor.geometry.w == frame.w && monitor.geometry.h == frame.h));
-    by_name.or_else(by_place).or_else(by_size)
+pub fn assign(configs: &[Config], screens: &[(String, Rect)]) -> Vec<Option<usize>> {
+    let mut used = vec![false; configs.len()];
+    let mut out = vec![None; screens.len()];
+    for (index, (name, frame)) in screens.iter().enumerate() {
+        let free = |at: &usize| !used[*at];
+        let named = (0..configs.len()).filter(free).find(|at| !name.is_empty() && configs[*at].monitors.iter().any(|monitor| monitor.name == *name));
+        let pick = named.or_else(|| {
+            let sized: Vec<usize> = (0..configs.len()).filter(free).filter(|at| configs[*at].monitors.iter().any(|monitor| monitor.geometry.w == frame.w && monitor.geometry.h == frame.h)).collect();
+            match sized.as_slice() {
+                [] => None,
+                [only] => Some(*only),
+                _ => {
+                    let placed: Vec<usize> = sized.into_iter().filter(|at| configs[*at].monitors.iter().any(|monitor| monitor.geometry == *frame)).collect();
+                    (placed.len() == 1).then(|| placed[0])
+                }
+            }
+        });
+        if let Some(at) = pick {
+            used[at] = true;
+            out[index] = Some(at);
+        }
+    }
+    out
+}
+
+pub fn placements(configs: &[Config], assigned: &[Option<usize>]) -> BTreeMap<String, (usize, (i64, i64))> {
+    let mut best: BTreeMap<String, (i64, usize, (i64, i64))> = BTreeMap::new();
+    for (screen, config) in assigned.iter().enumerate() {
+        let Some(config) = config.and_then(|at| configs.get(at)) else { continue };
+        for (id, place) in &config.icons {
+            if best.get(id).is_none_or(|(level, _, _)| config.level > *level) {
+                best.insert(id.clone(), (config.level, screen, *place));
+            }
+        }
+    }
+    best.into_iter().map(|(id, (_, screen, place))| (id, (screen, place))).collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -200,9 +231,15 @@ mod tests {
         let found = configs(&doc);
         assert_eq!(found[0].icons["/home/ada/Desktop/a.txt"], (3, 1));
         let frame = Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 };
-        assert!(config_for(&found, "screen", &frame).is_some());
-        assert!(config_for(&found, "HDMI-1", &frame).is_some());
-        assert!(config_for(&found, "HDMI-1", &Rect { w: 1280.0, h: 720.0, ..frame }).is_none());
+        let right = Rect { x: 1920.0, ..frame };
+        assert_eq!(assign(&found, &[("screen".into(), frame)]), vec![Some(0)]);
+        assert_eq!(assign(&found, &[("HDMI-1".into(), frame)]), vec![Some(0)]);
+        assert_eq!(assign(&found, &[("HDMI-1".into(), Rect { w: 1280.0, h: 720.0, ..frame })]), vec![None]);
+        let both = assign(&found, &[("left".into(), frame), ("right".into(), right)]);
+        assert_eq!(both, vec![Some(0), None]);
+        let placed = placements(&found, &both);
+        assert_eq!(placed.len(), 1);
+        assert_eq!(placed["/home/ada/Desktop/a.txt"], (0, (3, 1)));
     }
 
     #[test]
