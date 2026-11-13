@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-const PATIENCE: Duration = Duration::from_secs(60);
+const PATIENCE: Duration = Duration::from_secs(15);
 const HINT_AFTER: Duration = Duration::from_secs(4);
 const START_PATIENCE: Duration = Duration::from_secs(8);
 const POLL: Duration = Duration::from_millis(100);
@@ -657,12 +657,11 @@ fn begin(desktop: &dyn Desktop, store: &Store) -> Result<()> {
 
 fn wait(desktop: &dyn Desktop, store: &Store) {
     let hint = desktop.consent_hint();
-    let connected: Vec<String> = desktop.screens().map(|screens| screens.into_iter().map(|screen| screen.id).collect()).unwrap_or_default();
     let started = Instant::now();
     let mut hinted = false;
     while started.elapsed() < PATIENCE {
         let running = store.watcher().is_some();
-        if settled(&store.load(), &connected) && running {
+        if running && ready(desktop, store) {
             return;
         }
         if !running && started.elapsed() > START_PATIENCE {
@@ -674,6 +673,11 @@ fn wait(desktop: &dyn Desktop, store: &Store) {
         }
         std::thread::sleep(POLL);
     }
+}
+
+pub fn ready(desktop: &dyn Desktop, store: &Store) -> bool {
+    let connected: Vec<String> = desktop.screens().map(|screens| screens.into_iter().map(|screen| screen.id).collect()).unwrap_or_default();
+    settled(&store.load(), &connected)
 }
 
 pub fn settled(state: &State, connected: &[String]) -> bool {
@@ -1596,6 +1600,18 @@ mod tests {
         let mut state = State::default();
         assert_eq!(turn_on(&mut state, fake.as_ref(), &store, true).unwrap(), FirstRun::Pick);
         assert_eq!(guide(fake.as_ref(), &store), MADE);
+    }
+
+    #[test]
+    fn waiting_follows_a_space_switch_and_stops_soon() {
+        let (fake, store, first) = spaces("spaceswitch");
+        let mut state = State { on: true, ..State::default() };
+        state.screens.insert("D@S2".into(), Entry { fingerprint: Some("f".into()), ..Entry::new(&first) });
+        store.save(&state).unwrap();
+        assert!(!ready(fake.as_ref(), &store));
+        fake.connect(screens(&["D@S2"]));
+        assert!(ready(fake.as_ref(), &store));
+        assert_eq!(PATIENCE, Duration::from_secs(15));
     }
 
     #[test]
