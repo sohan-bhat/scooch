@@ -1,5 +1,6 @@
 use crate::{solver, GrayImage, Scene};
 use rayon::prelude::*;
+#[cfg(test)]
 use std::collections::VecDeque;
 
 pub const Q: usize = 4;
@@ -22,7 +23,7 @@ const PUFF_JITTER: f32 = 0.35;
 const PUFF_INSET: f32 = 0.10;
 const PUFF_JOIN: f32 = 0.03;
 const PUFF_REACH: f32 = 1.1;
-const PUFF_SPAN: (f32, f32) = (0.8, 1.6);
+const PUFF_SPAN: (f32, f32) = (0.8, 1.2);
 const OPEN: f32 = 1.0;
 const GAPS: f32 = 0.25;
 const FOLDS: (f32, f32, u32) = (0.12, 0.6, 61);
@@ -184,11 +185,13 @@ fn field(g: &Ground, grid: &Grid) -> (Vec<f32>, Vec<f32>) {
     (d, meanders)
 }
 
+#[cfg(test)]
 fn neighbours(i: usize, grid: &Grid) -> [Option<usize>; 4] {
     let (x, y) = (i % grid.w, i / grid.w);
     [(x > 0).then(|| i - 1), (x + 1 < grid.w).then(|| i + 1), (y > 0).then(|| i - grid.w), (y + 1 < grid.h).then(|| i + grid.w)]
 }
 
+#[cfg(test)]
 fn label(d: &[f32], grid: &Grid) -> (Vec<i32>, Vec<Vec<usize>>) {
     let mut labels = vec![-1i32; d.len()];
     let mut groups = Vec::new();
@@ -215,36 +218,38 @@ fn label(d: &[f32], grid: &Grid) -> (Vec<i32>, Vec<Vec<usize>>) {
     (labels, groups)
 }
 
-fn owners(labels: &[i32], grid: &Grid, reach: usize) -> Vec<i32> {
-    let mut owner = labels.to_vec();
-    let mut distance = vec![usize::MAX; labels.len()];
-    let mut queue = VecDeque::new();
-    for (i, l) in labels.iter().enumerate() {
-        if *l >= 0 {
-            distance[i] = 0;
-            queue.push_back(i);
+fn reached(d: &[f32], grid: &Grid, reach: usize) -> Vec<bool> {
+    let cap = reach as u32 + 1;
+    let mut across = vec![cap; d.len()];
+    across.par_chunks_mut(grid.w).zip(d.par_chunks(grid.w)).for_each(|(out, row)| {
+        let mut last = cap;
+        for (o, v) in out.iter_mut().zip(row) {
+            last = if *v < 0.0 { 0 } else { (last + 1).min(cap) };
+            *o = last;
         }
-    }
-    while let Some(i) = queue.pop_front() {
-        if distance[i] >= reach {
-            continue;
+        for i in (0..grid.w.saturating_sub(1)).rev() {
+            out[i] = out[i].min(out[i + 1] + 1);
         }
-        for n in neighbours(i, grid).into_iter().flatten() {
-            if distance[n] == usize::MAX {
-                distance[n] = distance[i] + 1;
-                owner[n] = owner[i];
-                queue.push_back(n);
-            }
+    });
+    let mut down = vec![cap; d.len()];
+    down.par_chunks_mut(grid.h).enumerate().for_each(|(x, column)| {
+        let mut last = cap;
+        for (y, o) in column.iter_mut().enumerate() {
+            last = across[y * grid.w + x].min(last + 1);
+            *o = last;
         }
-    }
-    owner
+        for y in (0..grid.h.saturating_sub(1)).rev() {
+            column[y] = column[y].min(column[y + 1] + 1);
+        }
+    });
+    (0..d.len()).into_par_iter().map(|i| down[(i % grid.w) * grid.h + i / grid.w] as usize <= reach).collect()
 }
 
 pub struct Base {
     pub grid: Grid,
     pub u: f32,
     pub d: Vec<f32>,
-    pub owner: Vec<i32>,
+    pub owned: Vec<bool>,
     pub icons: Vec<[f32; 4]>,
     meanders: Vec<f32>,
 }
@@ -256,9 +261,8 @@ pub fn base(scene: &Scene, width: usize, height: usize) -> Option<Base> {
     }
     let grid = Grid::of(width, height, Q);
     let (d, meanders) = field(&g, &grid);
-    let (labels, _) = label(&d, &grid);
-    let owner = owners(&labels, &grid, (MARGIN * g.u / Q as f32).ceil() as usize);
-    Some(Base { grid, u: g.u, d, owner, icons: g.icons, meanders })
+    let owned = reached(&d, &grid, (MARGIN * g.u / Q as f32).ceil() as usize);
+    Some(Base { grid, u: g.u, d, owned, icons: g.icons, meanders })
 }
 
 struct Lattice {
@@ -308,7 +312,7 @@ pub fn clouds(base: &Base, wanted: impl Fn(usize) -> bool + Sync) -> Vec<f32> {
     (0..d.len())
         .into_par_iter()
         .map(|i| {
-            if base.owner[i] < 0 || !wanted(i) {
+            if !base.owned[i] || !wanted(i) {
                 return d[i];
             }
             let (px, py) = grid.center(i);
@@ -402,6 +406,27 @@ mod tests {
 
     fn icon(x: f32, y: f32) -> Rect {
         Rect { x, y, w: 76.0, h: 94.0 }
+    }
+
+    #[test]
+    fn reach_matches_a_breadth_first_walk() {
+        let grid = Grid::of(160, 120, 4);
+        let d: Vec<f32> = (0..grid.w * grid.h).map(|i| if [37usize, 520, 999, 1100].contains(&i) { -1.0 } else { 1.0 }).collect();
+        let near = reached(&d, &grid, 6);
+        let mut distance = vec![usize::MAX; d.len()];
+        let mut queue: VecDeque<usize> = (0..d.len()).filter(|i| d[*i] < 0.0).collect();
+        queue.iter().for_each(|i| distance[*i] = 0);
+        while let Some(i) = queue.pop_front() {
+            for n in neighbours(i, &grid).into_iter().flatten() {
+                if distance[n] == usize::MAX {
+                    distance[n] = distance[i] + 1;
+                    queue.push_back(n);
+                }
+            }
+        }
+        for i in 0..d.len() {
+            assert_eq!(near[i], distance[i] <= 6, "{i}");
+        }
     }
 
     #[test]
