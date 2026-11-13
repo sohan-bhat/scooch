@@ -20,7 +20,6 @@ import {
   Scene,
   SRGBColorSpace,
   Texture,
-  TextureLoader,
   UnsignedByteType,
   WebGLRenderTarget,
   type WebGLRenderer,
@@ -171,12 +170,16 @@ function blankLayers() {
 }
 
 async function canvasTexture(base: string, info: SceneryInfo) {
-  const canvas = await new TextureLoader().loadAsync(`${base}/${info.canvas.file}`);
+  const url = `${base}/${info.canvas.file}`;
+  const response = await fetchEarly(url);
+  if (!response.ok) throw new Error(`${response.status} ${url}`);
+  const canvas = new Texture(await createImageBitmap(await response.blob()));
   canvas.colorSpace = SRGBColorSpace;
   canvas.flipY = false;
   canvas.generateMipmaps = true;
   canvas.minFilter = LinearMipmapLinearFilter;
   canvas.anisotropy = 4;
+  canvas.needsUpdate = true;
   return canvas;
 }
 

@@ -26,11 +26,12 @@ try {
   const early = [
     ['/scooch/demo/manifest.json', 'high'],
     [`/scooch/demo/${manifest.scenery.folder}/${manifest.scenery.fill.file}`, 'high'],
+    [`/scooch/demo/${manifest.scenery.folder}/${manifest.scenery.canvas.file}`, 'low'],
     ...['laptop', 'desk', 'lamp', 'television'].map((model) => [`/scooch/models/lite/${model}.glb`, 'high']),
     ...['basis_transcoder.js', 'basis_transcoder.wasm'].map((file) => [`/scooch/basis/${file}`, 'high']),
     ['/scooch/hdri/studio.hdr', 'low'],
   ];
-  const images = [manifest.photo.saliency, `${manifest.scenery.folder}/${manifest.scenery.canvas.file}`, 'atlas.png'];
+  const images = [manifest.photo.saliency, 'atlas.png'];
   const scene = [
     `<link rel="preload" as="image" href="/scooch/stills/hero-desktop.webp" media="${wide}" fetchpriority="high" />`,
     `<link rel="preload" as="image" href="/scooch/stills/hero-square.webp" media="${square}" fetchpriority="high" />`,
