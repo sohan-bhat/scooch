@@ -2,7 +2,7 @@ use crate::platform::{Desktop, Format, Screen, Snapshot};
 use crate::state::{display_of, file_safe, parse, same, write_atomic, Entry, State, Store, Tally};
 use crate::{cache, poke, scene};
 use anyhow::{Context, Result};
-use scooch_core::{Analysis, Options, Placement, Rect, RgbImage, Scene};
+use scooch_core::{Analysis, Options, Placement, RgbImage, Scene};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -117,25 +117,30 @@ pub fn gone(id: &str, known: Option<&[String]>, screens: &[Screen]) -> bool {
     id.contains('@') && !known.iter().any(|seen| seen == id) && screens.iter().any(|screen| display_of(&screen.id) == display_of(id))
 }
 
-pub fn relink(state: &mut State, id: &str, shown: &Path) -> bool {
+pub fn relink(state: &mut State, id: &str, shown: &Path, known: Option<&[String]>, screens: &[Screen]) -> bool {
     if state.screens.contains_key(id) {
         return true;
     }
     let owner = state.screens.iter().find(|(_, entry)| entry.output.as_deref().is_some_and(|output| same(output, shown))).map(|(owner, _)| owner.clone());
     let Some(owner) = owner else { return false };
-    let entry = state.screens.remove(&owner).expect("the owner was just found");
+    let mut entry = state.screens[&owner].clone();
+    if !owner.contains('@') || gone(&owner, known, screens) {
+        state.screens.remove(&owner);
+    } else {
+        (entry.absent_since, entry.absent_ticks) = (None, 0);
+    }
     state.screens.insert(id.to_string(), entry);
     true
 }
 
-pub fn claim_orphans(state: &mut State, desktop: &dyn Desktop, store: &Store, screens: &[Screen], _known: Option<&[String]>) -> usize {
+pub fn claim_orphans(state: &mut State, desktop: &dyn Desktop, store: &Store, screens: &[Screen], known: Option<&[String]>) -> usize {
     let mut orphans = 0;
     for screen in screens {
         if state.screens.contains_key(&screen.id) {
             continue;
         }
         let Ok(Some(shown)) = desktop.wallpaper(screen) else { continue };
-        if !store.owns(&shown) || relink(state, &screen.id, &shown) {
+        if !store.owns(&shown) || relink(state, &screen.id, &shown, known, screens) {
             continue;
         }
         orphans += 1;
@@ -449,7 +454,7 @@ impl Daemon {
                 continue;
             }
             let previous = state.screens.get(&screen.id).and_then(|entry| entry.output.clone());
-            let outcome = self.screen(state, screen, &snapshot.icons, &options);
+            let outcome = self.screen(state, screen, snapshot, &options, known.as_deref());
             if state.screens.get(&screen.id).and_then(|entry| entry.output.clone()) != previous {
                 sweep(self.desktop.as_ref(), &self.store, state, &screen.id, previous.as_slice());
             }
@@ -466,7 +471,7 @@ impl Daemon {
         }
     }
 
-    fn screen(&self, state: &mut State, screen: &Screen, icons: &[Rect], options: &Options) -> Result<Outcome> {
+    fn screen(&self, state: &mut State, screen: &Screen, snapshot: &Snapshot, options: &Options, known: Option<&[String]>) -> Result<Outcome> {
         let current = self.desktop.wallpaper(screen)?;
         let ours = current.as_deref().is_some_and(|path| self.store.owns(path));
         let usable = current.clone().filter(|path| path.is_file());
@@ -476,7 +481,7 @@ impl Daemon {
                 return Ok(Outcome::Skipped);
             }
             if let (true, Some(shown)) = (ours, current.as_deref()) {
-                if !relink(state, &screen.id, shown) {
+                if !relink(state, &screen.id, shown, known, &snapshot.screens) {
                     keep(state, shown.to_path_buf());
                     anyhow::bail!(ORPHAN);
                 }
@@ -507,7 +512,7 @@ impl Daemon {
         if usable.is_none() && !ours && !settling && !chosen {
             anyhow::bail!(NOT_A_FILE);
         }
-        let scene = scene::scene(screen, icons);
+        let scene = scene::scene(screen, &snapshot.icons);
         entry.icons = scene.icons.len();
         let fingerprint = scene::fingerprint(&entry.source, &scene, options);
         let showing = current.as_deref().is_some_and(|path| same(path, entry.shown()));
@@ -926,6 +931,7 @@ pub mod tests {
     use super::*;
     use crate::platform::Wake;
     use crate::state::scratch;
+    use scooch_core::Rect;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1830,6 +1836,51 @@ pub mod tests {
         assert!(state.options.mirror);
         assert_eq!(state.screens["main"].output.as_deref(), Some(fake.showing("main").as_path()));
         assert_eq!(state.screens["main"].original, original);
+    }
+
+    #[test]
+    fn two_spaces_sharing_one_file_keep_it_while_either_shows_it() {
+        let (daemon, fake, _) = rig("sharing", vec![screen("D@S1", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let shared = fake.showing("D@S1");
+        assert!(daemon.store.owns(&shared));
+        *fake.known.lock().unwrap() = Some(vec!["D@S1".into(), "D@S2".into()]);
+        fake.connect(vec![screen("D@S2", 0.0, 1.0)]);
+        fake.show("D@S2", &shared);
+        let report = daemon.tick();
+        assert!(report.problem.is_none(), "{:?}", report.problem);
+        let state = daemon.store.load();
+        assert_eq!(state.screens.keys().cloned().collect::<Vec<_>>(), vec!["D@S1".to_string(), "D@S2".to_string()]);
+        fake.place(vec![corner()]);
+        daemon.tick();
+        assert_ne!(fake.showing("D@S2"), shared);
+        assert!(shared.exists());
+        assert_eq!(daemon.store.load().screens["D@S1"].output.as_deref(), Some(shared.as_path()));
+        fake.connect(vec![screen("D@S1", 0.0, 1.0)]);
+        daemon.tick();
+        assert_ne!(fake.showing("D@S1"), shared);
+        assert!(!shared.exists());
+    }
+
+    #[test]
+    fn an_entry_moves_only_when_its_owner_is_bare_or_gone() {
+        let shown = Path::new("/d/out/D_S1-1.jpg");
+        let state = || {
+            let mut state = State::default();
+            state.screens.insert("D@S1".into(), Entry { output: Some(shown.to_path_buf()), ..Entry::new(Path::new("/p/a.jpg")) });
+            state
+        };
+        let screens = [screen("D@S2", 0.0, 1.0)];
+        let mut live = state();
+        assert!(relink(&mut live, "D@S2", shown, Some(&["D@S1".to_string(), "D@S2".to_string()]), &screens));
+        assert!(live.screens.contains_key("D@S1") && live.screens.contains_key("D@S2"));
+        let mut unsure = state();
+        assert!(relink(&mut unsure, "D@S2", shown, None, &screens));
+        assert!(unsure.screens.contains_key("D@S1"));
+        let mut closed = state();
+        assert!(relink(&mut closed, "D@S2", shown, Some(&["D@S2".to_string()]), &screens));
+        assert!(!closed.screens.contains_key("D@S1") && closed.screens.contains_key("D@S2"));
     }
 
     #[test]
