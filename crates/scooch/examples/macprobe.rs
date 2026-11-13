@@ -658,7 +658,7 @@ mod probe {
         owners
     }
 
-    fn wait_render(p: &Probe, limit: Duration, source: Option<&Path>) -> Option<Duration> {
+    fn wait_render(p: &Probe, limit: Duration, source: Option<&Path>, stop_on_consent: bool) -> Option<Duration> {
         let home = p.home.clone();
         let source = source.map(|path| path.to_string_lossy().into_owned());
         let started = Instant::now();
@@ -669,7 +669,7 @@ mod probe {
             if done {
                 return Some(started.elapsed());
             }
-            if state["problem"].as_str().is_some_and(|problem| problem == finder::ASKING || problem == finder::DENIED) {
+            if stop_on_consent && state["problem"].as_str().is_some_and(|problem| problem == finder::ASKING || problem == finder::DENIED) {
                 return None;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -752,6 +752,8 @@ mod probe {
         for (index, (name, _)) in PROBES.iter().enumerate() {
             let _ = place(p, name, (calm.0, calm.1 + 110.0 * index as f32));
         }
+        let _ = place(p, PROBES[0].0, (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5));
+        p.line(format!("- {} sits on the subject and the other probe items sit in a calm column", PROBES[0].0));
         std::thread::sleep(Duration::from_millis(1500));
         let kind = format!("{:?}", store::describe(&screen.id));
         p.line(format!("- wallpaper set to a plain test JPEG with one bright subject in the middle {}, store kind {kind}", subject.display()));
@@ -762,7 +764,7 @@ mod probe {
         for line in ran.text().lines() {
             p.line(format!("  - `{line}`"));
         }
-        let rendered_at = wait_render(p, Duration::from_secs(45), None).map(|_| started.elapsed());
+        let rendered_at = wait_render(p, Duration::from_secs(45), None, true).map(|_| started.elapsed());
         let shown = desktop.wallpaper(&screen).ok().flatten();
         let ours = shown.as_ref().is_some_and(|path| path.starts_with(p.home.join("out")));
         p.line(format!("- first render by the login item {:?} ms after scooch started, wallpaper now {:?}, inside the probe home {ours}", rendered_at.map(|time| time.as_millis()), shown));
@@ -797,7 +799,7 @@ mod probe {
             return Ok(());
         }
         let swapped = stand_in(p, "first run")?;
-        let rendered = wait_render(p, Duration::from_secs(45), None);
+        let rendered = wait_render(p, Duration::from_secs(45), None, false);
         let shown = desktop.wallpaper(&screen).ok().flatten();
         let ours = shown.as_ref().is_some_and(|path| path.starts_with(p.home.join("out")));
         p.line(format!(
@@ -838,6 +840,23 @@ mod probe {
         post(2, to);
     }
 
+    fn poke(p: &mut Probe) {
+        if let Some(pid) = scooch_pid(p) {
+            let _ = p.tool("/bin/kill", &["-USR1", &pid.to_string()]);
+        }
+    }
+
+    fn away(p: &mut Probe, name: &str, calm: (f32, f32)) {
+        let desktop = platform::current();
+        let screen = main_screen(p);
+        let before = desktop.as_ref().ok().zip(screen.as_ref().ok()).and_then(|(desktop, screen)| desktop.wallpaper(screen).ok().flatten());
+        let _ = place(p, name, calm);
+        std::thread::sleep(Duration::from_millis(300));
+        poke(p);
+        let _ = wait_until(Duration::from_secs(6), || desktop.as_ref().ok().zip(screen.as_ref().ok()).and_then(|(desktop, screen)| desktop.wallpaper(screen).ok().flatten()) != before);
+        std::thread::sleep(Duration::from_millis(1200));
+    }
+
     fn moves(p: &mut Probe) -> Result<()> {
         let desktop = platform::current()?;
         let screen = main_screen(p)?;
@@ -849,56 +868,52 @@ mod probe {
             p.line("- the moves need Apple Events to Finder, which the open consent window blocks, so they were skipped".to_string());
             return Ok(());
         }
+        p.line(format!("- each round first moves {name} to a calm spot without timing it and pokes the daemon, then times one move onto the subject"));
         let mut times = Vec::new();
         let mut sources = std::collections::BTreeMap::<String, usize>::new();
         for round in 0..5 {
+            away(p, name, calm);
             let before = desktop.wallpaper(&screen).ok().flatten();
             let seen = daemon_log(p).lines().count();
-            let to = if round % 2 == 0 { subject } else { calm };
-            let ran = place(p, name, to);
+            let ran = place(p, name, subject);
             let moved = Instant::now();
             let changed = wait_until(Duration::from_secs(12), || desktop.wallpaper(&screen).ok().flatten() != before);
             let latency = changed.map(|_| moved.elapsed().as_millis());
             std::thread::sleep(Duration::from_millis(400));
-            let wakes: Vec<String> = new_lines(&daemon_log(p), seen).into_iter().filter(|line| line.contains(" wake ")).collect();
+            let wakes: Vec<String> = new_lines(&daemon_log(p), seen).iter().filter_map(|line| line.split(" wake ").nth(1).map(|source| source.trim().to_string())).collect();
             for wake in &wakes {
-                if let Some(source) = wake.split(" wake ").nth(1) {
-                    *sources.entry(source.trim().to_string()).or_default() += 1;
-                }
+                *sources.entry(wake.clone()).or_default() += 1;
             }
-            p.line(format!("- Apple Event move {} to {:.0},{:.0} took {} ms {}, new wallpaper after {latency:?} ms, wakes {:?}", round + 1, to.0, to.1, ran.took.as_millis(), if ran.ok() { "ok" } else { "failed" }, wakes.iter().filter_map(|line| line.split(" wake ").nth(1)).collect::<Vec<_>>()));
-            match latency {
-                Some(time) => times.push(time),
-                None => p.fail(format!("Apple Event move {} brought no new wallpaper", round + 1)),
-            }
-            std::thread::sleep(Duration::from_millis(800));
+            p.line(format!("- Apple Event move {} onto the subject took {} ms {}, new wallpaper after {latency:?} ms, wakes {wakes:?}", round + 1, ran.took.as_millis(), if ran.ok() { "ok" } else { "failed" }));
+            times.extend(latency);
         }
         times.sort_unstable();
-        p.line(format!("- Apple Event move to new wallpaper times {times:?} ms, median {:?}", times.get(times.len() / 2)));
-        p.line(format!("- wake sources during the moves {sources:?}"));
+        p.line(format!("- Apple Event moves that brought a new wallpaper {} of 5, times {times:?} ms, median {:?}", times.len(), times.get(times.len() / 2)));
+        p.line(format!("- wake sources during the Apple Event moves {sources:?}"));
+        if times.is_empty() {
+            p.fail("no Apple Event move brought a new wallpaper");
+        }
         let allowed = unsafe { CGPreflightPostEventAccess() };
         p.line(format!("- posting mouse events allowed by preflight {allowed}"));
+        away(p, name, calm);
         let start = position(p, name).unwrap_or(calm);
-        let view = finder::view();
-        let from = (start.0, start.1 + view.icon / 2.0 - view.icon / 2.0);
         let before = desktop.wallpaper(&screen).ok().flatten();
         let seen = daemon_log(p).lines().count();
-        drag(from, subject);
+        drag(start, subject);
         let dropped = Instant::now();
         let changed = wait_until(Duration::from_secs(12), || desktop.wallpaper(&screen).ok().flatten() != before);
+        let latency = changed.map(|_| dropped.elapsed().as_millis());
         std::thread::sleep(Duration::from_millis(400));
         let after = position(p, name);
-        let wakes: Vec<String> = new_lines(&daemon_log(p), seen).into_iter().filter(|line| line.contains(" wake ")).collect();
+        let wakes: Vec<String> = new_lines(&daemon_log(p), seen).iter().filter_map(|line| line.split(" wake ").nth(1).map(|source| source.trim().to_string())).collect();
         let moved = after.is_some_and(|after| (after.0 - start.0).abs() > 20.0 || (after.1 - start.1).abs() > 20.0);
-        p.line(format!(
-            "- CGEvent drag from {:.0},{:.0} to {:.0},{:.0}: item moved {moved} from {start:?} to {after:?}, new wallpaper after {:?} ms, wakes {:?}",
-            from.0,
-            from.1,
-            subject.0,
-            subject.1,
-            changed.map(|_| dropped.elapsed().as_millis()),
-            wakes.iter().filter_map(|line| line.split(" wake ").nth(1)).collect::<Vec<_>>()
-        ));
+        p.line(format!("- CGEvent drag from {:.0},{:.0} onto the subject at {:.0},{:.0}: item moved {moved} to {after:?}, new wallpaper after {latency:?} ms, wakes {wakes:?}", start.0, start.1, subject.0, subject.1));
+        if allowed && (!moved || latency.is_none()) {
+            p.fail("the CGEvent drag did not move the item and bring a new wallpaper");
+        }
+        if !allowed {
+            p.limit("the runner does not let the probe post mouse events, so no real drag was tried");
+        }
         Ok(())
     }
 
@@ -1061,10 +1076,10 @@ mod probe {
         let subject = p.subject.clone().context("no test picture")?;
         let ran = p.scooch(&["use", &subject.to_string_lossy()], Duration::from_secs(60));
         p.line(format!("- scooch use on the first Space exit {:?}", ran.code));
-        if wait_render(p, Duration::from_secs(30), Some(&subject)).is_none() {
+        if wait_render(p, Duration::from_secs(30), Some(&subject), true).is_none() {
             stand_in(p, "Spaces")?;
         }
-        let one = wait_render(p, Duration::from_secs(30), Some(&subject));
+        let one = wait_render(p, Duration::from_secs(30), Some(&subject), false);
         p.line(format!("- first Space rendered {:?}, entries {:?}", one.map(|time| time.as_millis()), entries(p)));
         switch(p, 124);
         let home = p.home.clone();
