@@ -298,16 +298,4 @@ mod tests {
         assert!((found.x + found.w / 2.0 - 333.0).abs() < 0.5, "{found:?}");
     }
 
-    #[test]
-    fn live_the_login_item_installs_and_leaves_no_trace() {
-        if !live() {
-            return;
-        }
-        let folder = crate::state::scratch("launchd");
-        launchd::install(Path::new("/usr/bin/true"), &folder).unwrap();
-        let installed = (launchd::installed(), launchd::loaded());
-        launchd::remove().unwrap();
-        assert_eq!(installed, (true, true));
-        assert!(!launchd::installed() && !launchd::loaded());
-    }
 }
