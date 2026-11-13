@@ -2,12 +2,6 @@
 . "$(dirname "$0")/common.sh"
 
 start_xvfb
-{
-    xrandr --newmode "1920x1080_60.00" 173.00 1920 2048 2248 2576 1080 1083 1088 1120 -hsync +vsync
-    xrandr --addmode screen "1920x1080_60.00"
-    xrandr --output screen --mode "1920x1080_60.00"
-    xrandr
-} >"$out/xrandr.log" 2>&1 || echo "a mode with a refresh rate could not be set on Xvfb" >>"$out/readiness.txt"
 mkdir -p "$HOME/.config/nemo"
 printf '[desktop-monitor-0]\nnemo-icon-view-auto-layout=false\n' >"$HOME/.config/nemo/desktop-metadata"
 export XDG_CURRENT_DESKTOP=X-Cinnamon
@@ -20,6 +14,11 @@ gsettings set org.nemo.desktop trash-icon-visible true || true
 
 cinnamon --replace >"$out/cinnamon.log" 2>&1 &
 ready "Cinnamon" 90 owned org.Cinnamon || echo "nemo-desktop runs in its fallback mode" >>"$out/readiness.txt"
+python3 "$(dirname "$0")/session_manager.py" >"$out/session-manager.log" 2>&1 &
+ready "session manager stand in" 30 owned org.gnome.SessionManager
+background="$(command -v csd-background || echo /usr/libexec/csd-background)"
+"$background" >"$out/csd-background.log" 2>&1 &
+ready "Cinnamon background drawn on the root window" 60 root_pixmap_set
 nemo-desktop >"$out/nemo.log" 2>&1 &
 ready "Nemo desktop window" 60 window_listed '"Desktop":'
 run_probe 10

@@ -29,7 +29,7 @@ jobs:
             packages: xvfb x11-utils xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings
             extras: xfdesktop4-data gvfs gvfs-daemons
           - desktop: cinnamon
-            packages: xvfb x11-utils cinnamon nemo gvfs gvfs-daemons libglib2.0-bin
+            packages: xvfb x11-utils cinnamon cinnamon-settings-daemon nemo gvfs gvfs-daemons libglib2.0-bin python3-gi
             extras: cinnamon-desktop-data
           - desktop: mate
             packages: xvfb x11-utils caja marco mate-panel gvfs gvfs-daemons libglib2.0-bin

@@ -25,6 +25,10 @@ window_listed() {
     xwininfo -root -tree 2>/dev/null | grep -q -- "$1"
 }
 
+root_pixmap_set() {
+    xprop -root _XROOTPMAP_ID 2>/dev/null | grep -q "0x"
+}
+
 workarea_set() {
     xprop -root _NET_WORKAREA 2>/dev/null | grep -q "="
 }
