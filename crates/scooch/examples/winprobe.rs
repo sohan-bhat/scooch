@@ -1761,6 +1761,7 @@ mod probe {
         bar: Option<f32>,
         marker: bool,
         icons_changed: usize,
+        others_changed: usize,
     }
 
     struct Sight {
@@ -1768,22 +1769,43 @@ mod probe {
         row: usize,
         baseline: RgbImage,
         icons: Vec<usize>,
+        others: Vec<usize>,
     }
 
     impl Sight {
-        fn new(baseline: RgbImage, field: &RgbImage, origin: (i32, i32)) -> Self {
+        fn new(baseline: RgbImage, field: &RgbImage, origin: (i32, i32), rects: &[Rect]) -> Self {
             let (width, height) = (baseline.width() as usize, baseline.height() as usize);
             let work_bottom = work_area().map_or(height, |area| (area.bottom - origin.1).clamp(0, height as i32) as usize);
-            let mut icons = Vec::new();
+            let inside = |x: usize, y: usize| {
+                let (x, y) = (x as f32 + origin.0 as f32, y as f32 + origin.1 as f32);
+                rects.iter().any(|rect| x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h)
+            };
+            let (mut icons, mut others) = (Vec::new(), Vec::new());
             if field.dimensions() == baseline.dimensions() {
                 for (index, (a, b)) in baseline.as_raw().as_chunks::<3>().0.iter().zip(field.as_raw().as_chunks::<3>().0.iter()).enumerate() {
                     let (x, y) = (index % width, index / width);
                     if y < work_bottom && x + 40 < width && a.iter().zip(b.iter()).any(|(p, q)| p.abs_diff(*q) > 60) {
-                        icons.push(index);
+                        if inside(x, y) {
+                            icons.push(index);
+                        } else {
+                            others.push(index);
+                        }
                     }
                 }
             }
-            Sight { width, row: height * 6 / 10, baseline, icons }
+            Sight { width, row: height * 6 / 10, baseline, icons, others }
+        }
+
+        fn changed(&self, pixels: &[usize], raw: &[u8], band: Option<f32>) -> usize {
+            let base = self.baseline.as_raw();
+            pixels.iter().filter(|index| {
+                let x = (**index % self.width) as f32;
+                if band.is_some_and(|center| (x - center).abs() < 28.0) {
+                    return false;
+                }
+                let at = **index * 3;
+                (0..3).any(|channel| raw.get(at + channel).zip(base.get(at + channel)).is_some_and(|(a, b)| a.abs_diff(*b) > 40))
+            }).count()
         }
 
         fn look(&self, shot: &RgbImage, at: u128) -> Look {
@@ -1798,17 +1820,10 @@ mod probe {
             let bar = (!columns.is_empty()).then(|| columns.iter().sum::<usize>() as f32 / columns.len() as f32 / self.width as f32);
             let spot = (16 * self.width + self.width.saturating_sub(16)) * 3;
             let marker = raw.get(spot..spot + 3).is_some_and(|pixel| pixel[0] < 60 && pixel[1] > 200 && pixel[2] < 60);
-            let base = self.baseline.as_raw();
             let band = bar.map(|bar| bar * self.width as f32);
-            let icons_changed = self.icons.iter().filter(|index| {
-                let x = (*index % self.width) as f32;
-                if band.is_some_and(|center| (x - center).abs() < 28.0) {
-                    return false;
-                }
-                let at = *index * 3;
-                (0..3).any(|channel| raw.get(at + channel).zip(base.get(at + channel)).is_some_and(|(a, b)| a.abs_diff(*b) > 40))
-            }).count();
-            Look { at, bar, marker, icons_changed }
+            let icons_changed = self.changed(&self.icons, raw, band);
+            let others_changed = self.changed(&self.others, raw, band);
+            Look { at, bar, marker, icons_changed, others_changed }
         }
     }
 
@@ -1839,6 +1854,7 @@ mod probe {
         markers: usize,
         gaps: usize,
         icons_changed: usize,
+        others_changed: usize,
     }
 
     fn judge(looks: &[Look], length: Duration) -> Verdict {
@@ -1867,6 +1883,7 @@ mod probe {
             markers: looks.iter().filter(|look| look.marker).count(),
             gaps,
             icons_changed: looks.iter().map(|look| look.icons_changed).max().unwrap_or(0),
+            others_changed: looks.iter().map(|look| look.others_changed).max().unwrap_or(0),
         }
     }
 
@@ -1930,35 +1947,31 @@ mod probe {
         (layer::ours_left(), gdi, user, handles, counters.PrivateUsage)
     }
 
-    fn rung(p: &mut Probe, screen: &Screen, method: Method, field: &RgbImage, sight: &Sight, save: bool) -> Result<Verdict> {
+    fn rung(p: &mut Probe, screen: &Screen, method: Method, field: &RgbImage, sight: &Sight, save: Option<&str>) -> Result<Verdict> {
         let area = screen_rect(screen);
         let opened = Instant::now();
         let layer = layer::open(screen, method, pattern_of(field), Duration::from_millis(500))?;
         let open_ms = opened.elapsed().as_millis();
         let length = Duration::from_millis(1500);
-        let mut kept = None;
         let looks = watch_screen(area, sight, length, |_| {});
-        if save {
-            if let Ok(shot) = capture(area) {
-                kept = Some(shot);
-            }
-        }
+        let kept = save.and_then(|_| capture(area).ok());
         let verdict = judge(&looks, length);
+        let seen = looks.iter().find(|look| look.marker).map(|look| look.at);
         let (presents, rate, first, adapter, error) = present_rate(&layer);
         let in_place = layer.in_place();
         drop(layer);
         pump(Duration::from_millis(400));
         let left = layer::ours_left();
         let after = capture(area).ok().map(|shot| mean_gap(&shot, field));
-        if let Some(shot) = kept {
-            let _ = fs::write(p.out.join(format!("layer-{method:?}.png")), scooch_core::encode_png(&shot)?);
+        if let (Some(name), Some(shot)) = (save, kept) {
+            let _ = fs::write(p.out.join(format!("{name}.png")), scooch_core::encode_png(&shot)?);
         }
         p.line(format!(
-            "  - opened in {open_ms} ms, first frame after {first:?} ms on {adapter}, {presents} presents at {rate:.1} per second, present error {error:?}"
+            "  - opened in {open_ms} ms, first frame after {first:?} ms on {adapter}, first seen on screen {seen:?} ms after the open returned, {presents} presents at {rate:.1} per second, present error {error:?}"
         ));
         p.line(format!(
-            "  - {} captures at {:.1} per second, bar seen in {}, steps forward {} backward {}, marker in {}, marker gaps {}, most changed icon pixels away from the bar {}, ordered under the icons {in_place}",
-            verdict.captures, verdict.rate, verdict.bars, verdict.forward, verdict.backward, verdict.markers, verdict.gaps, verdict.icons_changed
+            "  - {} captures at {:.1} per second, bar seen in {}, steps forward {} backward {}, marker in {}, marker gaps {}, most changed icon pixels away from the bar {}, other changed pixels {}, ordered under the icons {in_place}",
+            verdict.captures, verdict.rate, verdict.bars, verdict.forward, verdict.backward, verdict.markers, verdict.gaps, verdict.icons_changed, verdict.others_changed
         ));
         p.line(format!("  - after closing, windows of ours left {left}, screen gap to the wallpaper {after:?}"));
         if left > 0 {
@@ -1968,7 +1981,82 @@ mod probe {
     }
 
     fn works(verdict: &Verdict, watched: usize) -> bool {
-        verdict.bars >= 3 && verdict.forward > verdict.backward && verdict.markers > 0 && verdict.icons_changed * 50 < watched.max(1)
+        watched > 0 && verdict.bars >= 3 && verdict.forward > verdict.backward && verdict.markers > 0 && verdict.icons_changed * 50 < watched
+    }
+
+    fn icon_rects() -> Result<Vec<Rect>> {
+        let view = shell::view()?;
+        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
+        Ok(automation_rects(&automation, view.list)?.into_iter().map(|(_, rect)| rect).collect())
+    }
+
+    fn settle(area: RECT, limit: Duration) -> Result<RgbImage> {
+        let started = Instant::now();
+        let bottom = work_area().map_or(area.bottom, |work| work.bottom.min(area.bottom)) - area.top;
+        let mut last = capture(area)?;
+        while started.elapsed() < limit {
+            pump(Duration::from_millis(300));
+            let shot = capture(area)?;
+            let rows = (bottom.max(0) as usize * shot.width() as usize * 3).min(shot.as_raw().len());
+            let still = shot.dimensions() == last.dimensions() && shot.as_raw()[..rows] == last.as_raw()[..rows];
+            last = shot;
+            if still {
+                break;
+            }
+        }
+        Ok(last)
+    }
+
+    fn sight_of(p: &mut Probe, area: RECT, field: &RgbImage, name: &str) -> Result<Sight> {
+        park_cursor();
+        let baseline = settle(area, Duration::from_secs(6))?;
+        let _ = fs::write(p.out.join(format!("{name}.png")), scooch_core::encode_png(&baseline)?);
+        let rects = icon_rects().unwrap_or_default();
+        let sight = Sight::new(baseline, field, (area.left, area.top), &rects);
+        p.line(format!(
+            "- {} icon pixels watched inside {} icon rectangles, {} other pixels differ from the wallpaper, bar row {}, screen gap to the wallpaper {}",
+            sight.icons.len(),
+            rects.len(),
+            sight.others.len(),
+            sight.row,
+            mean_gap(&sight.baseline, field)
+        ));
+        if sight.icons.is_empty() {
+            p.failed.push(format!("no icon pixels to watch for {name}"));
+        }
+        Ok(sight)
+    }
+
+    fn cycles(p: &mut Probe, screen: &Screen, method: Method, field: &RgbImage, gpu: Option<layer::Gpu>, label: &str) {
+        let start = own_counts();
+        let mut firsts = Vec::new();
+        let mut megabytes = Vec::new();
+        for _ in 0..20 {
+            let opened = Instant::now();
+            match layer::open_on(screen, method, pattern_of(field), Duration::from_millis(500), gpu.clone()) {
+                Ok(layer) => {
+                    firsts.push(layer.stats.lock().ok().and_then(|stats| stats.first).map_or(opened.elapsed().as_millis(), |first| first.as_millis()));
+                    pump(Duration::from_millis(50));
+                    drop(layer);
+                }
+                Err(error) => p.line(format!("- an open in the loop failed {error:#}")),
+            }
+            megabytes.push(own_counts().4 / 1_000_000);
+        }
+        pump(Duration::from_millis(500));
+        let end = own_counts();
+        pump(Duration::from_secs(2));
+        let later = own_counts();
+        firsts.sort_unstable();
+        p.line(format!(
+            "- twenty opens and closes {label}, windows {} to {}, GDI objects {} to {}, user objects {} to {}, handles {} to {}, private bytes {} to {} and {} two seconds later",
+            start.0, end.0, start.1, end.1, start.2, end.2, start.3, end.3, start.4, end.4, later.4
+        ));
+        p.line(format!("  - private megabytes after each close {megabytes:?}"));
+        p.line(format!("  - first frame median {:?} ms, slowest {:?} ms", firsts.get(firsts.len() / 2), firsts.last()));
+        if end.0 > 0 || end.1 > start.1 + 4 || end.2 > start.2 + 4 || end.3 > start.3 + 16 {
+            p.failed.push(format!("twenty opens and closes {label} leaked windows, GDI or user objects or handles"));
+        }
     }
 
     fn live(p: &mut Probe) -> Result<()> {
@@ -2003,16 +2091,11 @@ mod probe {
         fade(p, "with no layer, the adapter", area, &field, &other, || desktop.set_wallpaper(&screen, &other_path));
         fade(p, "with no layer, SystemParametersInfo", area, &other, &field, || spi_wallpaper(&field_path.to_string_lossy()));
         pump(Duration::from_millis(800));
-        park_cursor();
-        pump(Duration::from_millis(400));
-        let baseline = capture(area)?;
-        let _ = fs::write(p.out.join("layer-baseline.png"), scooch_core::encode_png(&baseline)?);
-        let sight = Sight::new(baseline, &field, (area.left, area.top));
-        p.line(format!("- {} icon pixels watched, bar row {}", sight.icons.len(), sight.row));
+        let sight = sight_of(p, area, &field, "layer-baseline")?;
         let mut kept = None;
         for method in Method::ALL {
             p.line(format!("- **{}**", method.name()));
-            match rung(p, &screen, method, &field, &sight, true) {
+            match rung(p, &screen, method, &field, &sight, Some(&format!("layer-{method:?}"))) {
                 Ok(verdict) => {
                     let good = works(&verdict, sight.icons.len());
                     p.line(format!("  - {}", if good { "shows the pattern under the icons" } else { "does not show the pattern under the icons" }));
@@ -2030,24 +2113,42 @@ mod probe {
         p.line(format!("- kept {}", method.name()));
         for (label, set) in [("the adapter", 0), ("SystemParametersInfo", 1)] {
             let layer = layer::open(&screen, method, pattern_of(&field), Duration::from_millis(500))?;
+            let showing = wait_until(Duration::from_secs(1), || capture(area).is_ok_and(|shot| sight.look(&shot, 0).marker));
             let before_repairs = layer::repairs();
             let target = if set == 0 { other_path.clone() } else { field_path.clone() };
-            let mut done = false;
-            let looks = watch_screen(area, &sight, Duration::from_millis(2500), |at| {
+            let started = Instant::now();
+            let (mut looks, mut through, mut done) = (Vec::new(), None, false);
+            while started.elapsed() < Duration::from_millis(2500) {
+                let at = started.elapsed().as_millis();
                 if !done && at > 300 {
                     done = true;
                     let _ = if set == 0 { desktop.set_wallpaper(&screen, &target) } else { spi_wallpaper(&target.to_string_lossy()) };
                 }
-            });
+                if let Ok(shot) = capture(area) {
+                    let look = sight.look(&shot, at);
+                    if through.is_none() && !look.marker && look.bar.is_none() {
+                        through = Some(shot);
+                    }
+                    looks.push(look);
+                }
+                drain();
+            }
             let verdict = judge(&looks, Duration::from_millis(2500));
-            let missing: Vec<u128> = looks.iter().filter(|look| !look.marker).map(|look| look.at).collect();
+            let missing: Vec<u128> = looks.iter().filter(|look| !look.marker && look.bar.is_none()).map(|look| look.at).collect();
+            let partial: Vec<u128> = looks.iter().filter(|look| look.marker != look.bar.is_some()).map(|look| look.at).collect();
             let in_place = layer.in_place();
             drop(layer);
+            if let Some(shot) = through {
+                let _ = fs::write(p.out.join(format!("through-{set}.png")), scooch_core::encode_png(&shot)?);
+            }
             p.line(format!(
-                "- wallpaper set through {label} while open, {} captures, system layer showed through in {} at {:?} ms, order repairs {}, still under the icons {in_place}, bar steps forward {} backward {}",
+                "- wallpaper set through {label} at 300 ms while open, layer on screen after {:?} ms, {} captures, system layer showed through in {} at {:?} ms, bar or marker alone in {} at {:?} ms, order repairs {}, still under the icons {in_place}, bar steps forward {} backward {}",
+                showing.map(|took| took.as_millis()),
                 verdict.captures,
                 missing.len(),
                 missing.iter().take(12).collect::<Vec<_>>(),
+                partial.len(),
+                partial.iter().take(12).collect::<Vec<_>>(),
                 layer::repairs() - before_repairs,
                 verdict.forward,
                 verdict.backward
@@ -2057,37 +2158,17 @@ mod probe {
         if desktop.set_wallpaper(&screen, &field_path).is_ok() {
             pump(Duration::from_millis(1500));
         }
-        let start_counts = own_counts();
-        let mut warm = Vec::new();
-        for _ in 0..20 {
-            let opened = Instant::now();
-            match layer::open(&screen, method, pattern_of(&field), Duration::from_millis(500)) {
-                Ok(layer) => {
-                    warm.push(layer.stats.lock().ok().and_then(|stats| stats.first).map_or(opened.elapsed().as_millis(), |first| first.as_millis()));
-                    pump(Duration::from_millis(50));
-                    drop(layer);
-                }
-                Err(error) => p.line(format!("- an open in the loop failed {error:#}")),
-            }
-        }
-        pump(Duration::from_millis(500));
-        let end_counts = own_counts();
-        warm.sort_unstable();
-        p.line(format!("- twenty opens and closes, windows {} to {}, GDI objects {} to {}, user objects {} to {}, handles {} to {}, private bytes {} to {}", start_counts.0, end_counts.0, start_counts.1, end_counts.1, start_counts.2, end_counts.2, start_counts.3, end_counts.3, start_counts.4, end_counts.4));
-        p.line(format!("- warm first frame median {:?} ms, slowest {:?} ms", warm.get(warm.len() / 2), warm.last()));
-        if end_counts.0 > 0 || end_counts.1 > start_counts.1 + 4 || end_counts.2 > start_counts.2 + 4 {
-            p.failed.push("the layer leaked windows or GDI or user objects".into());
+        cycles(p, &screen, method, &field, None, "each on a new device");
+        match layer::Gpu::new(method != Method::Hwnd) {
+            Ok(gpu) => cycles(p, &screen, method, &field, Some(gpu), "on one shared device"),
+            Err(error) => p.line(format!("- no shared device {error}")),
         }
         input_check(p, &screen, method, &field)?;
         restart_explorer(p)?;
-        pump(Duration::from_secs(1));
-        park_cursor();
-        pump(Duration::from_millis(400));
-        let baseline = capture(area)?;
-        let sight = Sight::new(baseline, &field, (area.left, area.top));
         p.line("- **after an Explorer restart**".to_string());
         p.line(format!("- layout now {}", layer::layout().map(|(layout, notes)| format!("{}, {}", layout.describe(), notes.join(", "))).unwrap_or_else(|error| error.to_string())));
-        match rung(p, &screen, method, &field, &sight, false) {
+        let sight = sight_of(p, area, &field, "restart-baseline")?;
+        match rung(p, &screen, method, &field, &sight, Some("restart-layer")) {
             Ok(verdict) if works(&verdict, sight.icons.len()) => p.line("  - shows the pattern under the icons after the restart".to_string()),
             Ok(_) => p.failed.push("the layer did not show under the icons after an Explorer restart".into()),
             Err(error) => p.failed.push(format!("the layer did not open after an Explorer restart {error:#}")),
@@ -2098,20 +2179,48 @@ mod probe {
         Ok(())
     }
 
+    fn press(view: &shell::View, pidl: &com::Pidl, at: POINT) -> (bool, Option<u128>) {
+        let selected = || unsafe { view.folder.GetSelectionState(pidl.0) }.is_ok_and(|state| state & SVSI_SELECT.0 as u32 != 0);
+        let mut sent = mouse(at.x, at.y, MOUSE_EVENT_FLAGS(0));
+        pump(Duration::from_millis(100));
+        let pressed = Instant::now();
+        sent &= mouse(at.x, at.y, MOUSEEVENTF_LEFTDOWN);
+        let (mut took, mut up) = (None, false);
+        while pressed.elapsed() < Duration::from_secs(1) {
+            if selected() {
+                took = Some(pressed.elapsed().as_millis());
+                break;
+            }
+            if !up && pressed.elapsed() >= Duration::from_millis(80) {
+                sent &= mouse(at.x, at.y, MOUSEEVENTF_LEFTUP);
+                up = true;
+            }
+            pump(Duration::from_millis(4));
+        }
+        if !up {
+            sent &= mouse(at.x, at.y, MOUSEEVENTF_LEFTUP);
+        }
+        (sent, took)
+    }
+
     fn input_check(p: &mut Probe, screen: &Screen, method: Method, field: &RgbImage) -> Result<()> {
         let view = shell::view()?;
         let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
-        let layer = layer::open(screen, method, pattern_of(field), Duration::from_millis(500))?;
         let (name, folder) = PROBES[5];
         let shown = shown_name(name, folder);
         let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect).context("no rect for the click target")?;
         let pidl = pidl_of(&view, name, folder)?;
         let target = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 };
-        let clicked = Instant::now();
-        let sent = click(target, false);
-        let selected = wait_until(Duration::from_millis(1000), || unsafe { view.folder.GetSelectionState(pidl.0) }.is_ok_and(|state| state & SVSI_SELECT.0 as u32 != 0));
-        let took = selected.map(|_| clicked.elapsed().as_millis());
-        p.line(format!("- with the layer open, a click on `{shown}` sent {sent} selected it after {took:?} ms"));
+        click(empty_spot(), false);
+        pump(Duration::from_millis(400));
+        let (sent, bare) = press(&view, &pidl, target);
+        p.line(format!("- with no layer, a click on `{shown}` sent {sent} selected it {bare:?} ms after the button went down"));
+        click(empty_spot(), false);
+        pump(Duration::from_millis(400));
+        let layer = layer::open(screen, method, pattern_of(field), Duration::from_millis(500))?;
+        pump(Duration::from_millis(300));
+        let (sent, took) = press(&view, &pidl, target);
+        p.line(format!("- with the layer open, a click on `{shown}` sent {sent} selected it {took:?} ms after the button went down"));
         if took.is_none_or(|took| took > 200) {
             p.failed.push(format!("a click on an icon with the layer open selected it after {took:?} ms"));
         }
