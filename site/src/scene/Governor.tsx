@@ -34,25 +34,28 @@ class Ring {
     this.count = 0;
   }
 
-  result = { mean: 0, max: 0, n: 0, over: 0 };
+  result = { mean: 0, max: 0, n: 0, steady: 0 };
 
-  stats(now: number, window: number, limit = Infinity) {
+  stats(now: number, window: number) {
     let sum = 0;
     let max = 0;
+    let next = 0;
     let n = 0;
-    let over = 0;
     for (let i = 1; i <= this.count; i++) {
       const at = (this.head - i + SIZE) % SIZE;
       if (now - this.times[at] > window) break;
-      sum += this.values[at];
-      max = Math.max(max, this.values[at]);
-      if (this.values[at] > limit) over += 1;
+      const value = this.values[at];
+      sum += value;
+      if (value > max) {
+        next = max;
+        max = value;
+      } else if (value > next) next = value;
       n += 1;
     }
     this.result.mean = n ? sum / n : 0;
     this.result.max = max;
     this.result.n = n;
-    this.result.over = over;
+    this.result.steady = n > 2 ? (sum - max - next) / (n - 2) : this.result.mean;
     return this.result;
   }
 }
@@ -127,10 +130,10 @@ export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | n
       return;
     }
     if (now - state.start < WARMUP || now - state.changed < SETTLE) return;
-    const frames = state.frames.stats(now, DOWN_WINDOW, DOWN_LIMIT);
-    const slowFrames = frames.n >= 8 && frames.over * 2 >= frames.n;
-    const gpuShort = state.gpu.stats(now, DOWN_WINDOW, DOWN_LIMIT);
-    const slow = slowFrames || (gpuShort.n >= 8 && gpuShort.over * 2 >= gpuShort.n);
+    const frames = state.frames.stats(now, DOWN_WINDOW);
+    const slowFrames = frames.n >= 8 && frames.steady > DOWN_LIMIT;
+    const gpuShort = state.gpu.stats(now, DOWN_WINDOW);
+    const slow = slowFrames || (gpuShort.n >= 8 && gpuShort.steady > DOWN_LIMIT);
     if (slow && quality.canDown()) {
       state.failedAt[quality.level] = now;
       state.failures[quality.level] += 1;
