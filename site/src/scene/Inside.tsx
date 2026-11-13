@@ -30,7 +30,6 @@ uniform vec2 uSize;
 varying vec2 vUv;
 varying float vHeight;
 varying vec3 vNormal;
-varying vec3 vWorld;
 ${pictureBody}
 
 float sweepFront(vec2 uv) {
@@ -63,9 +62,7 @@ void main() {
   vUv = uv;
   vHeight = h;
   vNormal = n;
-  vec4 world = modelMatrix * vec4(displaced, 1.0);
-  vWorld = world.xyz;
-  gl_Position = projectionMatrix * viewMatrix * world;
+  gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(displaced, 1.0);
 }
 `;
 
@@ -86,7 +83,6 @@ uniform vec2 uShadowDir;
 varying vec2 vUv;
 varying float vHeight;
 varying vec3 vNormal;
-varying vec3 vWorld;
 ${pictureBody}
 
 float box(vec2 p, vec4 rect, float blur) {
