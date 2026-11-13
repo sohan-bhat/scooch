@@ -1439,7 +1439,7 @@ mod probe {
         let before = (ours().len(), ports(), threads(pid).len(), rusage(pid));
         let mut opens = Vec::new();
         let mut shown = Vec::new();
-        let mut stages = [0usize; 3];
+        let mut stages = [0usize; 2];
         let mut first: Vec<String> = Vec::new();
         for index in 0..20 {
             let started = Instant::now();
@@ -1465,9 +1465,7 @@ mod probe {
             let windows_dropped = ours().len();
             layer::spin(0.05);
             let spun = traces.held();
-            layer::settle(marker);
-            let settled = traces.held();
-            for (slot, held) in [dropped, spun, settled].iter().enumerate() {
+            for (slot, held) in [dropped, spun].iter().enumerate() {
                 if held[0].is_some() {
                     stages[slot] += 1;
                 }
@@ -1477,8 +1475,7 @@ mod probe {
                     format!("open {open_held:?}"),
                     format!("renderer dropped {rendered_held:?}"),
                     format!("layer dropped {dropped:?} with our windows {windows_dropped}"),
-                    format!("run loop spun {spun:?}"),
-                    format!("events pumped {settled:?} with our windows {}", ours().len()),
+                    format!("run loop spun {spun:?} with our windows {}", ours().len()),
                 ];
             }
         }
@@ -1499,7 +1496,7 @@ mod probe {
         ));
         p.line(format!("- open to visible {}, open to first frame {}", stats(&shown), stats(&opens)));
         p.line(format!("- references still held on the window, view and Metal layer in the first cycle, beyond the probe's own {first:?}"));
-        p.line(format!("- of twenty windows, still alive after the layer dropped {}, after the run loop spun {}, after AppKit events were pumped {}", stages[0], stages[1], stages[2]));
+        p.line(format!("- of twenty windows, still alive after the layer dropped {}, after the run loop spun {}", stages[0], stages[1]));
         Ok(())
     }
 
@@ -1521,8 +1518,8 @@ mod probe {
         let timed = Instant::now();
         let _ = grab(display);
         let grab_ms = timed.elapsed().as_secs_f64() * 1000.0;
-        let cross = (grab_ms * 8.0 / 1000.0).clamp(0.5, 4.0);
-        p.line(format!("- one screen capture takes {grab_ms:.0} ms here, so the bar crosses in {cross:.2} s to be caught about eight times"));
+        let cross = (grab_ms * 12.0 / 1000.0).clamp(0.5, 4.0);
+        p.line(format!("- one screen capture takes {grab_ms:.0} ms here, so the bar crosses in {cross:.2} s to be caught several times on the way"));
         let _ = scooch_core::encode_png(&baseline.image()).map(|bytes| fs::write(p.out.join("live-before.png"), bytes));
         let paper = picture_window(&screen).context("no wallpaper window was found for this screen")?;
         let field = grab_window(paper.number).context("the wallpaper window could not be captured")?;
@@ -1557,6 +1554,7 @@ mod probe {
         p.line(format!("- layer number {} at level {}, {}x{} pixels, adapter {}, device ready after {} ms", layer.number(), layer.level, width, height, gpu.name, device_ready.as_millis()));
         let row = (height as f32 * 0.55) as usize;
         let samples: Vec<(usize, usize)> = [(0.1, 0.7), (0.5, 0.7), (0.7, 0.7), (0.9, 0.7), (0.55, 0.45), (0.85, 0.45)].iter().map(|(x, y)| ((width as f32 * x) as usize, (height as f32 * y) as usize)).collect();
+        let set_after = opened.elapsed().as_secs_f64() * 1000.0 + cross * 1000.0 + 400.0;
         let worker = animate(renderer, layer.display, cross, 4.0, Some(0.3));
         let mut looks: Vec<Look> = Vec::new();
         let mut set_at: Option<Instant> = None;
@@ -1575,7 +1573,7 @@ mod probe {
                 saved += 1;
             }
             looks.push(Look { at, bar, changed, covered, through });
-            if set_at.is_none() && at > 900.0 {
+            if set_at.is_none() && at > set_after {
                 desktop.set_wallpaper(&screen, &cyan)?;
                 set_at = Some(Instant::now());
             }
@@ -1589,7 +1587,7 @@ mod probe {
         let (renderer, run) = worker.join().map_err(|_| anyhow::anyhow!("the render thread panicked"))?;
         drop(renderer);
         let traces = layer.traces();
-        layer.close(marker);
+        layer.close();
         let closed = Instant::now();
         layer::spin(0.4);
         let after = grab(display);
@@ -1686,8 +1684,6 @@ mod probe {
             drop(layer);
             layer::spin(0.3);
             say("closed", format!(", window, view and Metal layer still alive {:?}, windows of ours {}", traces.held(), ours().len()));
-            layer::settle(marker);
-            say("settled", format!(", after AppKit events were pumped {:?}, windows of ours {}", traces.held(), ours().len()));
             drop(gpu);
             spin(0.5);
             say("dropped", String::new());
@@ -1745,7 +1741,7 @@ mod probe {
         switch(p, 123);
         let back = showing();
         drop(renderer);
-        layer.close(marker);
+        layer.close();
         p.line(format!("- the layer on the first Space is listed on screen there {one}, on the second Space {two}, back on the first {back}"));
         if !one || two || !back {
             p.fail("the layer did not stay on its own Space");
@@ -1761,35 +1757,39 @@ mod probe {
             accessory(marker);
             let desktop = platform::current()?;
             let screen = desktop.screens()?.into_iter().next().context("no screen shows a desktop")?;
-            let source = desktop.wallpaper(&screen).ok().flatten().filter(|path| path.is_file()).unwrap_or_else(|| PathBuf::from(store::DEFAULT_DESKTOP));
+            let source = picture::reported(marker, &screen.id).ok().flatten().filter(|path| path.is_file()).unwrap_or_else(|| PathBuf::from(store::DEFAULT_DESKTOP));
             let picture = desktop.decode(&source)?;
             lines.push(format!("- screen `{}` {} scale {}, field from {}", screen.id, show(&screen.frame), screen.scale, source.display()));
             let pid = std::process::id() as i32;
             lines.push(format!("- before any device {}", memory(pid)));
-            let mut gpu: Option<Gpu> = None;
+            let made = Instant::now();
+            let gpu = Gpu::new(false).map_err(anyhow::Error::msg)?;
+            lines.push(format!("- device {} ready after {} ms, {}", gpu.name, made.elapsed().as_millis(), memory(pid)));
             let mut field: Option<Vec<u8>> = None;
             for index in 0..5 {
                 let started = Instant::now();
                 let layer = layer::open(marker, &screen)?;
+                let shown = started.elapsed().as_millis();
                 let (width, height) = layer.pixels;
                 let rgba = field.get_or_insert_with(|| rgba(&picture, width, height)).clone();
-                let shared = gpu.get_or_insert(Gpu::new(false).map_err(anyhow::Error::msg)?).clone();
-                let renderer = Renderer::on(&shared, Target::Layer(layer.surface()), &Pattern { width, height, rgba }).map_err(anyhow::Error::msg)?;
+                let renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &Pattern { width, height, rgba }).map_err(anyhow::Error::msg)?;
                 layer.commit();
-                let (renderer, run) = animate(renderer, layer.display, 0.5, 0.8, None).join().map_err(|_| anyhow::anyhow!("the render thread panicked"))?;
+                let (renderer, run) = animate(renderer, layer.display, 0.5, 0.6, None).join().map_err(|_| anyhow::anyhow!("the render thread panicked"))?;
                 drop(renderer);
-                layer.close(marker);
+                let traces = layer.traces();
+                layer.close();
+                let lifetime = started.elapsed().as_millis();
                 layer::spin(0.1);
                 let first = run.frames.first().map(|frame| (*frame - started).as_millis());
                 let period = if run.rate > 0.0 { 1000.0 / run.rate } else { 16.67 };
                 let presents = intervals(&run.frames);
-                lines.push(format!("- open {} level {}, {}x{}, open to first frame {first:?} ms", index + 1, layer::levels().0, width, height));
+                lines.push(format!("- open {} level {}, {}x{}, open to visible {shown} ms, open to first frame {first:?} ms, window open for {lifetime} ms, window, view and Metal layer alive after close {:?}, windows of ours {}", index + 1, layer::levels().0, width, height, traces.held(), ours().len()));
                 lines.push(format!("  - display link {:.2} Hz, {} callbacks, arrival intervals {}, longer than 1.5 periods {}", run.rate, run.callbacks, stats(&run.arrivals), over(&run.arrivals, period)));
                 lines.push(format!("  - display link output times {}, longer than 1.5 periods {}", stats(&run.outputs), over(&run.outputs, period)));
                 lines.push(format!("  - frames {}, skipped while occluded {}, intervals {}, longer than 1.5 periods {}", run.frames.len(), run.hidden, stats(&presents), over(&presents, period)));
                 std::thread::sleep(Duration::from_millis(300));
             }
-            lines.push(format!("- adapter {}, with the device after five opens {}", gpu.as_ref().map(|gpu| gpu.name.clone()).unwrap_or_default(), memory(pid)));
+            lines.push(format!("- with the device after five opens {}", memory(pid)));
             drop(gpu);
             spin(0.5);
             lines.push(format!("- after the device was dropped {}", memory(pid)));

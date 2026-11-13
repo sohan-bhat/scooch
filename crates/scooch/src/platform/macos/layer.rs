@@ -5,11 +5,12 @@ use anyhow::{Context, Result};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly, Message};
-use objc2_app_kit::{NSApplication, NSBackingStoreType, NSColor, NSEventMask, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowStyleMask};
-use objc2_foundation::{ns_string, NSDate, NSPoint, NSRect};
+use objc2_app_kit::{NSBackingStoreType, NSColor, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowStyleMask};
+use objc2_foundation::{NSPoint, NSRect};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 use scooch_core::Rect;
 use std::ffi::c_void;
+use std::mem::ManuallyDrop;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -185,21 +186,10 @@ impl Traces {
     }
 }
 
-pub fn settle(marker: MainThreadMarker) {
-    let application = NSApplication::sharedApplication(marker);
-    objc2::rc::autoreleasepool(|_| {
-        let past = NSDate::distantPast();
-        while let Some(event) = application.nextEventMatchingMask_untilDate_inMode_dequeue(NSEventMask::Any, Some(&past), ns_string!("kCFRunLoopDefaultMode"), true) {
-            application.sendEvent(&event);
-        }
-    });
-    spin(0.0);
-}
-
 pub struct Layer {
-    window: Retained<NSWindow>,
-    _view: Retained<NSView>,
-    metal: Retained<CAMetalLayer>,
+    window: ManuallyDrop<Retained<NSWindow>>,
+    view: ManuallyDrop<Retained<NSView>>,
+    metal: ManuallyDrop<Retained<CAMetalLayer>>,
     pub level: i64,
     pub pixels: (u32, u32),
     pub display: u32,
@@ -215,12 +205,11 @@ impl Layer {
     }
 
     pub fn traces(&self) -> Traces {
-        Traces { window: Weak::from_retained(&self.window), view: Weak::from_retained(&self._view), metal: Weak::from_retained(&self.metal) }
+        Traces { window: Weak::from_retained(&self.window), view: Weak::from_retained(&self.view), metal: Weak::from_retained(&self.metal) }
     }
 
-    pub fn close(self, marker: MainThreadMarker) {
+    pub fn close(self) {
         drop(self);
-        settle(marker);
     }
 
     pub fn commit(&self) {
@@ -248,6 +237,11 @@ impl Drop for Layer {
         objc2::rc::autoreleasepool(|_| {
             self.window.orderOut(None);
             self.window.close();
+            unsafe {
+                ManuallyDrop::drop(&mut self.metal);
+                ManuallyDrop::drop(&mut self.view);
+                ManuallyDrop::drop(&mut self.window);
+            }
             CATransaction::flush();
         });
     }
@@ -289,7 +283,7 @@ fn build(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
     window.orderFrontRegardless();
     CATransaction::flush();
     let pixels = ((frame.size.width * scale).round() as u32, (frame.size.height * scale).round() as u32);
-    let layer = Layer { window, _view: view, metal, level, pixels, display: number };
+    let layer = Layer { window: ManuallyDrop::new(window), view: ManuallyDrop::new(view), metal: ManuallyDrop::new(metal), level, pixels, display: number };
     layer.shown_after().context(HIDDEN)?;
     Ok(layer)
 }
