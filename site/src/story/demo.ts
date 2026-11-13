@@ -1,5 +1,6 @@
 import type { SceneryInfo } from '@/scene/screen/scenery';
 import { asset } from '@/lib/base';
+import { fetchEarly } from './early';
 
 export type Rect = [number, number, number, number];
 
@@ -38,7 +39,7 @@ export type DemoPicture = {
 let pending: Promise<DemoManifest> | null = null;
 
 export function loadManifest() {
-  pending ??= fetch(asset('demo/manifest.json')).then((response) => {
+  pending ??= fetchEarly(asset('demo/manifest.json')).then((response) => {
     if (!response.ok) throw new Error(`manifest ${response.status}`);
     return response.json() as Promise<DemoManifest>;
   });

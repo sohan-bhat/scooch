@@ -27,6 +27,7 @@ import {
 } from 'three';
 import frame from '../../../../crates/scooch-core/shaders/frame.glsl?raw';
 import { asset } from '@/lib/base';
+import { fetchEarly } from '@/story/early';
 
 type Table = { file: string; width: number; height: number; layers?: number };
 
@@ -78,7 +79,7 @@ void main() {
 `;
 
 async function bytes(url: string) {
-  const response = await fetch(url);
+  const response = await fetchEarly(url);
   if (!response.ok) throw new Error(`${response.status} ${url}`);
   return response.arrayBuffer();
 }

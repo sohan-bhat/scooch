@@ -1,3 +1,4 @@
+import './early';
 import { Canvas, useThree } from '@react-three/fiber';
 import { Suspense, useEffect, useRef } from 'react';
 import { setConsoleFunction } from 'three';
