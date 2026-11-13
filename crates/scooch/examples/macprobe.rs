@@ -2561,6 +2561,45 @@ mod probe {
             laps.push(format!("move {} new wallpaper {time:?} ms, tick {render:?}", index + 1));
         }
         p.line(format!("- scenery moves on calm ground, the first leaves the subject and the rest hold the placement {laps:?}"));
+        let (mut looked, mut moved, mut right, mut half) = (0, 0, 0, 0);
+        let mut seen = Vec::new();
+        for index in 0..12 {
+            quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
+            let lines = daemon_log(p).lines().count();
+            let from = position(p, name).unwrap_or(subject);
+            let target = if index % 2 == 0 { aside } else { subject };
+            drag(from, target);
+            let home = p.home.clone();
+            let ticked = |count: usize| {
+                let home = home.clone();
+                move || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().filter(|line| line.contains(" tick ")).count() >= count
+            };
+            let _ = wait_until(Duration::from_secs(6), ticked(1));
+            std::thread::sleep(Duration::from_millis(1500));
+            poke(p);
+            let _ = wait_until(Duration::from_secs(4), ticked(2));
+            let log = new_lines(&daemon_log(p), lines);
+            let prints: Vec<(String, bool)> = log.iter().enumerate().filter_map(|(at, line)| line.split("snapshot icons ").nth(1).map(|print| (print.trim().to_string(), log[at..].iter().find(|later| later.contains(" tick ")).is_some_and(|tick| tick.contains("Rendered"))))).collect();
+            let last = prints.last().map(|(print, _)| print.clone()).unwrap_or_default();
+            let quick = log.iter().find_map(|line| line.split("quick look after ").nth(1).map(str::to_string));
+            if let Some(quick) = &quick {
+                looked += 1;
+                let went = quick.ends_with("moved true");
+                let print = quick.split("icons ").nth(1).and_then(|rest| rest.split_whitespace().next()).unwrap_or_default().to_string();
+                if went {
+                    moved += 1;
+                    if print == last {
+                        right += 1;
+                    }
+                }
+            }
+            half += prints.iter().filter(|(print, rendered)| *rendered && *print != last).count();
+            seen.push(format!("{}: {}", index + 1, quick.unwrap_or_else(|| "no quick look".into())));
+        }
+        p.line(format!("- twelve drags: quick looks {looked}, saw the icons moved {moved}, of those had the final layout {right}, renders from a layout that was not the final one {half}, per drag {seen:?}"));
+        if half > 0 {
+            p.fail("a quick look rendered a half finished move");
+        }
         let ran = p.scooch(&["glide"], LIMIT);
         p.line(format!("- scooch glide said {:?}", ran.text()));
         let back = position(p, name).unwrap_or(aside);
