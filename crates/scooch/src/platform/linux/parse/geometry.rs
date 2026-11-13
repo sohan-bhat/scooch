@@ -45,6 +45,28 @@ pub fn intersect(a: &Rect, b: &Rect) -> Option<Rect> {
     (right > left && bottom > top).then_some(Rect { x: left, y: top, w: right - left, h: bottom - top })
 }
 
+pub fn scaled(screen: &crate::platform::Screen, factor: f32) -> crate::platform::Screen {
+    if factor <= 1.0 {
+        return screen.clone();
+    }
+    let frame = Rect { x: screen.frame.x / factor, y: screen.frame.y / factor, w: screen.frame.w / factor, h: screen.frame.h / factor };
+    crate::platform::Screen { id: screen.id.clone(), frame, scale: screen.scale * factor }
+}
+
+pub fn xft_dpi(resources: &str) -> Option<f64> {
+    resources.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "Xft.dpi").then(|| value.trim().parse::<f64>().ok()).flatten()
+    })
+}
+
+pub fn x11_scale(setting: Option<i64>, dpi: Option<f64>) -> f32 {
+    match setting {
+        Some(value) if value > 0 => value as f32,
+        _ => dpi.map_or(1.0, |dpi| (dpi / 96.0).floor().max(1.0) as f32),
+    }
+}
+
 pub fn transformed(width: i32, height: i32, transform: u32) -> (i32, i32) {
     if transform % 2 == 1 {
         (height, width)
@@ -92,6 +114,24 @@ mod tests {
         let a = Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
         assert_eq!(intersect(&a, &Rect { x: 50.0, y: 50.0, w: 100.0, h: 100.0 }), Some(Rect { x: 50.0, y: 50.0, w: 50.0, h: 50.0 }));
         assert_eq!(intersect(&a, &Rect { x: 100.0, y: 0.0, w: 10.0, h: 10.0 }), None);
+    }
+
+    #[test]
+    fn x11_frames_shrink_by_the_desktop_scale() {
+        let screen = crate::platform::Screen { id: "DP-1".into(), frame: Rect { x: 3840.0, y: 0.0, w: 3840.0, h: 2160.0 }, scale: 1.0 };
+        let half = scaled(&screen, 2.0);
+        assert_eq!((half.frame, half.scale), (Rect { x: 1920.0, y: 0.0, w: 1920.0, h: 1080.0 }, 2.0));
+        assert_eq!(scaled(&screen, 1.0), screen);
+    }
+
+    #[test]
+    fn the_scale_comes_from_the_setting_or_else_from_xft_dpi() {
+        assert_eq!(xft_dpi("Xft.antialias:\t1\nXft.dpi:\t192\n"), Some(192.0));
+        assert_eq!(xft_dpi("Xcursor.size: 24"), None);
+        assert_eq!(x11_scale(Some(2), Some(96.0)), 2.0);
+        assert_eq!(x11_scale(Some(0), Some(192.0)), 2.0);
+        assert_eq!(x11_scale(Some(0), Some(144.0)), 1.0);
+        assert_eq!(x11_scale(None, None), 1.0);
     }
 
     #[test]

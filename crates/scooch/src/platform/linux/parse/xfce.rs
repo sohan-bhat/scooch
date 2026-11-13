@@ -131,6 +131,25 @@ impl Grid {
     }
 }
 
+pub fn version(text: &str) -> Option<(u32, u32)> {
+    text.split(|letter: char| letter.is_whitespace() || letter == ',').find_map(|word| {
+        let mut parts = word.split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        Some((major, minor))
+    })
+}
+
+pub fn single_workspace_default(version: Option<(u32, u32)>) -> bool {
+    version.is_none_or(|version| version < (4, 19))
+}
+
+pub fn inset_area(work: &Rect, scale: i64) -> Rect {
+    let scale = scale.max(1);
+    let (x, y, w, h) = (work.x as i64 / scale, work.y as i64 / scale, work.w as i64 / scale, work.h as i64 / scale);
+    Rect { x: (x + MIN_MARGIN) as f32, y: (y + MIN_MARGIN) as f32, w: (w - 2 * MIN_MARGIN) as f32, h: (h - 2 * MIN_MARGIN) as f32 }
+}
+
 pub fn backdrop_prefix(monitor: &str, workspace: i64) -> String {
     let name: String = monitor.chars().filter(|letter| !letter.is_whitespace()).collect();
     format!("/backdrop/screen0/monitor{name}/workspace{workspace}")
@@ -199,6 +218,26 @@ mod tests {
         assert_eq!(backdrop_prefix("LG Ultra", 2), "/backdrop/screen0/monitorLGUltra/workspace2");
         assert_eq!(workspace_of("/backdrop/screen0/monitorVirtual-1/workspace3/last-image", "Virtual-1"), Some(3));
         assert_eq!(workspace_of("/backdrop/screen0/monitorVirtual-1/workspace3/image-style", "Virtual-1"), None);
+    }
+
+    #[test]
+    fn the_version_line_gives_major_and_minor() {
+        assert_eq!(version("This is xfdesktop version 4.18.1, running on Xfce 4.18.\nBuilt with GTK+ 3.24.41"), Some((4, 18)));
+        assert_eq!(version("This is xfdesktop version 4.20.1, running on Xfce 4.20."), Some((4, 20)));
+        assert_eq!(version("nothing here"), None);
+        assert!(single_workspace_default(Some((4, 18))));
+        assert!(!single_workspace_default(Some((4, 20))));
+        assert!(single_workspace_default(None));
+    }
+
+    #[test]
+    fn xfdesktop_4_18_insets_the_work_area_by_eight_pixels() {
+        let work = Rect { x: 0.0, y: 0.0, w: 1060.0, h: 800.0 };
+        let inset = inset_area(&work, 1);
+        assert_eq!(inset, Rect { x: 8.0, y: 8.0, w: 1044.0, h: 784.0 });
+        assert_eq!(grid(&work, 48.0, &STYLE).unwrap().cols, 10);
+        assert_eq!(grid(&inset, 48.0, &STYLE).unwrap().cols, 9);
+        assert_eq!(inset_area(&Rect { x: 0.0, y: 60.0, w: 3840.0, h: 2100.0 }, 2), Rect { x: 8.0, y: 38.0, w: 1904.0, h: 1034.0 });
     }
 
     #[test]

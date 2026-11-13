@@ -1,4 +1,8 @@
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+pub const RETRIES: [u64; 3] = [1, 5, 30];
 
 pub const GNOME_KEYS: [&str; 3] = ["/org/gnome/desktop/background/", "/org/gnome/desktop/interface/color-scheme", "/org/gnome/shell/extensions/ding/"];
 pub const CINNAMON_KEYS: [&str; 2] = ["/org/cinnamon/desktop/background/", "/org/nemo/desktop/"];
@@ -51,6 +55,31 @@ pub fn desktop_metadata(name: &str) -> bool {
 
 pub fn xfce_file(name: &str) -> bool {
     name == super::xfce::YAML_FILE || (name.starts_with("icons.screen") && name.ends_with(".rc"))
+}
+
+pub fn retry_delay(failures: usize) -> Option<Duration> {
+    RETRIES.get(failures).map(|seconds| Duration::from_secs(*seconds))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Spot {
+    pub folder: PathBuf,
+    pub waiting: Option<OsString>,
+}
+
+pub fn nearest(target: &Path, exists: impl Fn(&Path) -> bool) -> Option<Spot> {
+    if exists(target) {
+        return Some(Spot { folder: target.to_path_buf(), waiting: None });
+    }
+    let mut child = target;
+    let mut parent = target.parent()?;
+    loop {
+        if exists(parent) {
+            return Some(Spot { folder: parent.to_path_buf(), waiting: child.file_name().map(OsString::from) });
+        }
+        child = parent;
+        parent = parent.parent()?;
+    }
 }
 
 pub fn desktop_in_home(desktop: &Path, home: &Path) -> Option<String> {
@@ -112,6 +141,22 @@ mod tests {
         assert!(!xfce_file("icons.screen0.yaml.new"));
         assert!(desktop_metadata("desktop-metadata"));
         assert!(!desktop_metadata("desktop-metadata.LT1Q2"));
+    }
+
+    #[test]
+    fn retries_wait_one_five_and_thirty_seconds_then_stop() {
+        let waits: Vec<Option<Duration>> = (0..5).map(retry_delay).collect();
+        assert_eq!(waits, vec![Some(Duration::from_secs(1)), Some(Duration::from_secs(5)), Some(Duration::from_secs(30)), None, None]);
+    }
+
+    #[test]
+    fn a_missing_folder_is_watched_through_its_nearest_parent() {
+        let present = [PathBuf::from("/home/ada"), PathBuf::from("/home"), PathBuf::from("/")];
+        let exists = |path: &Path| present.iter().any(|known| known == path);
+        assert_eq!(nearest(Path::new("/home/ada"), exists), Some(Spot { folder: PathBuf::from("/home/ada"), waiting: None }));
+        assert_eq!(nearest(Path::new("/home/ada/.config/nemo"), exists), Some(Spot { folder: PathBuf::from("/home/ada"), waiting: Some(".config".into()) }));
+        assert_eq!(nearest(Path::new("/home/ada/Desktop"), exists), Some(Spot { folder: PathBuf::from("/home/ada"), waiting: Some("Desktop".into()) }));
+        assert_eq!(nearest(Path::new("relative"), |_| false), None);
     }
 
     #[test]
