@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/windows.yml"
   workflow_dispatch:
 
