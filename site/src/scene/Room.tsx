@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Color, ShaderMaterial, UniformsLib, UniformsUtils, Vector2 } from 'three';
+import { Color, Matrix4, ShaderMaterial, UniformsLib, UniformsUtils, Vector2, type Texture } from 'three';
 import { tokenColor } from '@/lib/tokens';
 
 const vertex = `
@@ -21,6 +21,11 @@ uniform vec3 uGlow;
 uniform vec2 uCenter;
 uniform float uLevel;
 uniform float uFloor;
+uniform sampler2D uBlinds;
+uniform mat4 uBlindsMatrix;
+uniform vec3 uBlindsColor;
+uniform float uBlindsLevel;
+uniform float uFade;
 varying vec3 vWorld;
 #include <fog_pars_fragment>
 
@@ -43,12 +48,18 @@ void main() {
   float pool = exp(-dot(offset, offset) * 2.4);
   float plaster = 0.9 + 0.07 * noise(p * 13.0) + 0.05 * noise(p * 47.0) + 0.02 * noise(p * 160.0);
   vec3 color = uColor * plaster * (0.22 + uGlow * pool * uLevel * 4.5);
-  gl_FragColor = vec4(color, 1.0);
+  vec4 projected = uBlindsMatrix * vec4(vWorld, 1.0);
+  vec2 window = projected.xy / max(projected.w, 1e-4);
+  float front = step(0.0, projected.w) * step(0.0, window.x) * step(window.x, 1.0) * step(0.0, window.y) * step(window.y, 1.0);
+  float cone = 1.0 - smoothstep(0.34, 0.5, length(window - 0.5));
+  float slats = texture2D(uBlinds, window).r;
+  color += uBlindsColor * uColor * plaster * slats * cone * front * uBlindsLevel * 3.2;
+  gl_FragColor = vec4(color * uFade, 1.0);
   #include <fog_fragment>
 }
 `;
 
-export function useRoomMaterial(kind: 'wall' | 'floor', center: Vector2) {
+export function useRoomMaterial(kind: 'wall' | 'floor', center: Vector2, blinds: Texture) {
   return useMemo(() => {
     const uniforms = UniformsUtils.merge([
       UniformsLib.fog,
@@ -58,11 +69,18 @@ export function useRoomMaterial(kind: 'wall' | 'floor', center: Vector2) {
         uCenter: { value: new Vector2() },
         uLevel: { value: 1 },
         uFloor: { value: kind === 'floor' ? 1 : 0 },
+        uBlinds: { value: null as Texture | null },
+        uBlindsMatrix: { value: new Matrix4() },
+        uBlindsColor: { value: new Color() },
+        uBlindsLevel: { value: 0 },
+        uFade: { value: 1 },
       },
     ]);
     uniforms.uColor.value = tokenColor(kind === 'wall' ? 'room-3' : 'room-2');
     uniforms.uGlow.value = tokenColor('bulb');
     uniforms.uCenter.value = center.clone();
+    uniforms.uBlinds.value = blinds;
+    uniforms.uBlindsColor.value = tokenColor('rim');
     return new ShaderMaterial({ name: `scooch-${kind}`, vertexShader: vertex, fragmentShader: fragment, uniforms, fog: true });
-  }, [kind, center]);
+  }, [kind, center, blinds]);
 }
