@@ -334,6 +334,7 @@ mod probe {
         probe.section("3b Live layer", live);
         probe.section("4 First run", first_run);
         probe.section("5 Move to new wallpaper", moves);
+        probe.section("5b Scenery", scenery_check);
         probe.section("6 Idle", idle);
         probe.section("7 Off", off);
         probe.section("8 Second cycle", second_cycle);
@@ -934,7 +935,7 @@ mod probe {
             p.line("- the moves need Apple Events to Finder, which the open consent window blocks, so they were skipped".to_string());
             return Ok(());
         }
-        p.line(format!("- each round first moves {name} to a calm spot without timing it and pokes the daemon, then times one move onto the subject"));
+        p.line(format!("- each round first moves {name} to a calm spot without timing it and pokes the daemon, then times one move onto the subject, with the scenery setting `{}`", state(p)["options"]["scenery"].as_str().unwrap_or("missing")));
         let mut times = Vec::new();
         let mut sources = std::collections::BTreeMap::<String, usize>::new();
         for round in 0..5 {
@@ -979,6 +980,121 @@ mod probe {
         }
         if !allowed {
             p.limit("the runner does not let the probe post mouse events, so no real drag was tried");
+        }
+        Ok(())
+    }
+
+    fn tick_lines(p: &Probe, from: usize) -> Vec<String> {
+        new_lines(&daemon_log(p), from).into_iter().filter(|line| line.contains(" tick ")).map(|line| line.chars().take(200).collect()).collect()
+    }
+
+    fn icon_rect(name: &str) -> Option<Rect> {
+        finder::named(&finder::view()).ok()?.into_iter().find(|(found, _)| found == name).map(|(_, rect)| rect)
+    }
+
+    fn ring(a: &Shot, b: &Shot, icon: &Rect, screen: &Screen) -> usize {
+        let scale = screen.scale;
+        let (x0, y0) = (((icon.x - screen.frame.x - 40.0) * scale).max(0.0) as usize, ((icon.y - screen.frame.y - 40.0) * scale).max(0.0) as usize);
+        let (x1, y1) = ((((icon.x - screen.frame.x + icon.w + 40.0) * scale) as usize).min(a.width), (((icon.y - screen.frame.y + icon.h + 40.0) * scale) as usize).min(a.height));
+        let inside = |x: usize, y: usize| {
+            let (px, py) = (x as f32 / scale + screen.frame.x, y as f32 / scale + screen.frame.y);
+            px >= icon.x && px < icon.x + icon.w && py >= icon.y && py < icon.y + icon.h
+        };
+        (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|(x, y)| !inside(*x, *y) && !near(a.at(*x, *y), b.at(*x, *y))).count()
+    }
+
+    fn matches_file(shot: &Shot, file: &Path, icons: &[Rect], screen: &Screen) -> Option<f32> {
+        let picture = scooch_core::open(file).ok()?;
+        let (width, height) = (picture.width() as usize, picture.height() as usize);
+        let clear = |x: usize, y: usize| {
+            let (px, py) = (x as f32 / screen.scale + screen.frame.x, y as f32 / screen.scale + screen.frame.y);
+            !icons.iter().any(|icon| px >= icon.x - 20.0 && px < icon.x + icon.w + 20.0 && py >= icon.y - 20.0 && py < icon.y + icon.h + 20.0)
+        };
+        let points: Vec<(usize, usize)> = (0..height).step_by(16).flat_map(|y| (0..width).step_by(16).map(move |x| (x, y))).filter(|(x, y)| clear(*x, *y) && *y > 40).collect();
+        let same = points.iter().filter(|(x, y)| near(shot.at(*x, *y), picture.get_pixel(*x as u32, *y as u32).0)).count();
+        Some(same as f32 / points.len().max(1) as f32)
+    }
+
+    fn scenery_check(p: &mut Probe) -> Result<()> {
+        let desktop = platform::current()?;
+        let screen = main_screen(p)?;
+        let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
+        let (_, display) = picture::screen_for(marker, &screen.id)?;
+        let name = PROBES[0].0;
+        if dismiss_prompt(p).is_none() {
+            p.finder = false;
+            p.line("- the scenery check needs Apple Events to Finder, which the open consent window blocks, so it was skipped".to_string());
+            return Ok(());
+        }
+        let setting = |p: &Probe| state(p)["options"]["scenery"].as_str().unwrap_or("missing").to_string();
+        p.line(format!("- scenery setting in the state file at the start `{}`, the default for a new state", setting(p)));
+        if setting(p) == "off" {
+            let ran = p.scooch(&["scenery"], LIMIT);
+            p.line(format!("- scooch scenery said {:?}", ran.text()));
+        }
+        let from = (screen.frame.x + screen.frame.w * 0.85, screen.frame.y + screen.frame.h * 0.25);
+        let to = (screen.frame.x + screen.frame.w * 0.15, screen.frame.y + screen.frame.h * 0.75);
+        away(p, name, from);
+        let start = position(p, name).unwrap_or(from);
+        let shown = || desktop.wallpaper(&screen).ok().flatten();
+        let before = shown();
+        let seen = daemon_log(p).lines().count();
+        drag(start, to);
+        let dropped = Instant::now();
+        let on_time = wait_until(Duration::from_secs(12), || shown() != before).map(|_| dropped.elapsed().as_millis());
+        std::thread::sleep(Duration::from_millis(1200));
+        let icon = icon_rect(name);
+        p.line(format!("- scenery on, CGEvent drag from {:.0},{:.0} to calm ground at {:.0},{:.0}: new wallpaper after {on_time:?} ms, the item now at {icon:?}", start.0, start.1, to.0, to.1));
+        p.line(format!("  - daemon ticks {:?}", tick_lines(p, seen)));
+        let on_shot = grab(display).context("the screen could not be captured with scenery on")?;
+        let _ = scooch_core::encode_png(&on_shot.image()).map(|bytes| fs::write(p.out.join("scenery-on.png"), bytes));
+        let before = shown();
+        let seen = daemon_log(p).lines().count();
+        let ran = p.scooch(&["scenery"], LIMIT);
+        let switched = Instant::now();
+        let off_switch = wait_until(Duration::from_secs(12), || shown() != before).map(|_| switched.elapsed().as_millis());
+        std::thread::sleep(Duration::from_millis(1200));
+        p.line(format!("- scooch scenery said {:?} and the setting is now `{}`, new wallpaper after {off_switch:?} ms", ran.text(), setting(p)));
+        p.line(format!("  - daemon ticks {:?}", tick_lines(p, seen)));
+        let off_shot = grab(display).context("the screen could not be captured with scenery off")?;
+        let _ = scooch_core::encode_png(&off_shot.image()).map(|bytes| fs::write(p.out.join("scenery-off.png"), bytes));
+        let painted = icon.as_ref().map(|icon| ring(&on_shot, &off_shot, icon, &screen));
+        p.line(format!("- pixels within 40 points around the dragged item that differ between the scenery on and off captures {painted:?}"));
+        let icons: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().map(|(_, rect)| rect).collect();
+        let current = shown();
+        let matched = current.as_deref().and_then(|file| matches_file(&off_shot, file, &icons, &screen));
+        p.line(format!("- share of sample points away from the icons where the scenery off capture matches the wallpaper file {current:?} {matched:?}"));
+        let back = position(p, name).unwrap_or(to);
+        let before = shown();
+        let seen = daemon_log(p).lines().count();
+        drag(back, from);
+        let dropped = Instant::now();
+        let off_time = wait_until(Duration::from_secs(12), || shown() != before).map(|_| dropped.elapsed().as_millis());
+        std::thread::sleep(Duration::from_millis(600));
+        p.line(format!("- scenery off, CGEvent drag back to {:.0},{:.0}: new wallpaper after {off_time:?} ms", from.0, from.1));
+        p.line(format!("  - daemon ticks {:?}", tick_lines(p, seen)));
+        let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            away(p, name, from);
+            let before = shown();
+            let moved = Instant::now();
+            let _ = place(p, name, subject);
+            times.extend(wait_until(Duration::from_secs(12), || shown() != before).map(|_| moved.elapsed().as_millis()));
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        times.sort_unstable();
+        p.line(format!("- scenery off, Apple Event moves onto the subject that brought a new wallpaper {} of 5, times {times:?} ms, median {:?}, to set beside the scenery on moves in section 5", times.len(), times.get(times.len() / 2)));
+        let ran = p.scooch(&["scenery"], LIMIT);
+        p.line(format!("- scooch scenery said {:?} and the setting is back to `{}`", ran.text(), setting(p)));
+        if on_time.is_none() || off_switch.is_none() || off_time.is_none() {
+            p.fail("a scenery step brought no new wallpaper");
+        }
+        if painted.is_none_or(|count| count < 200) {
+            p.fail("no painted scenery showed around the dragged item");
+        }
+        if matched.is_none_or(|share| share < 0.9) {
+            p.fail("the scenery off capture does not match the scenery off render");
         }
         Ok(())
     }
