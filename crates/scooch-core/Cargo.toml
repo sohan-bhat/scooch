@@ -1,6 +1,6 @@
 [package]
 name = "scooch-core"
-description = "The Scooch engine. Moves a wallpaper so desktop icons never cover its subject."
+description = "Saliency, placement solver and renderer for Scooch."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
