@@ -77,6 +77,41 @@ pub fn twin(exe: &Path) -> PathBuf {
     exe.with_file_name(TWIN)
 }
 
+fn folded(path: &Path) -> String {
+    plain(path).to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+pub fn inside(path: &Path, folder: &Path) -> bool {
+    let (path, folder) = (folded(path), folded(folder));
+    !folder.is_empty() && path.len() > folder.len() + 1 && path.starts_with(&folder) && path.as_bytes()[folder.len()] == b'\\'
+}
+
+pub fn picture_extension(path: &Path, bytes: &[u8]) -> String {
+    if let Some(extension) = path.extension().and_then(|extension| extension.to_str()).filter(|extension| !extension.is_empty() && extension.chars().all(|letter| letter.is_ascii_alphanumeric())) {
+        return extension.to_ascii_lowercase();
+    }
+    let kind = match bytes {
+        [0x89, b'P', b'N', b'G', ..] => "png",
+        [b'B', b'M', ..] => "bmp",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "webp",
+        [_, _, _, _, b'f', b't', b'y', b'p', ..] => "heic",
+        _ => "jpg",
+    };
+    kind.into()
+}
+
+pub fn picked_name(path: &Path, bytes: &[u8], digest: u64) -> String {
+    format!("{digest:016x}.{}", picture_extension(path, bytes))
+}
+
+pub fn startup_disabled(flag: &[u8]) -> bool {
+    flag.first().is_some_and(|first| first & 1 == 1)
+}
+
+pub fn refuse(own: bool, shell: Option<bool>) -> bool {
+    own && shell != Some(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +170,53 @@ mod tests {
     fn the_login_command_quotes_the_program() {
         assert_eq!(command_line(Path::new(r"\\?\C:\Program Files\Scooch\scoochw.exe")), r#""C:\Program Files\Scooch\scoochw.exe" watch"#);
         assert_eq!(command_line(Path::new(r"C:\tools\scooch.exe")), r#""C:\tools\scooch.exe" watch"#);
+    }
+
+    #[test]
+    fn the_themes_folder_is_found_in_any_letter_case() {
+        let themes = Path::new(r"C:\Users\a\AppData\Roaming\Microsoft\Windows\Themes");
+        assert!(inside(Path::new(r"C:\Users\a\AppData\Roaming\Microsoft\Windows\Themes\TranscodedWallpaper"), themes));
+        assert!(inside(Path::new(r"c:\users\A\appdata\roaming\microsoft\windows\themes\CachedFiles\CachedImage_1920_1080_POS4.jpg"), themes));
+        assert!(inside(Path::new(r"\\?\C:\Users\a\AppData\Roaming\Microsoft\Windows\Themes\TranscodedWallpaper"), themes));
+        assert!(inside(Path::new(r"C:\Users\a\AppData\Roaming\Microsoft\Windows\Themes\x.jpg"), Path::new(r"C:\Users\a\AppData\Roaming\Microsoft\Windows\Themes\")));
+        assert!(inside(Path::new("C:/Users/a/AppData/Roaming/Microsoft/Windows/Themes/x.jpg"), themes));
+    }
+
+    #[test]
+    fn other_folders_are_not_the_themes_folder() {
+        let themes = Path::new(r"C:\Users\a\AppData\Roaming\Microsoft\Windows\Themes");
+        assert!(!inside(Path::new(r"C:\Users\a\AppData\Roaming\Microsoft\Windows\ThemesOld\x.jpg"), themes));
+        assert!(!inside(Path::new(r"C:\Users\a\AppData\Roaming\Microsoft\Windows\Themes"), themes));
+        assert!(!inside(Path::new(r"C:\Users\a\AppData\Roaming\Microsoft\Windows\Themes\"), themes));
+        assert!(!inside(Path::new(r"C:\Users\a\Pictures\lake.jpg"), themes));
+        assert!(!inside(Path::new(r"C:\Users\a\Pictures\lake.jpg"), Path::new("")));
+    }
+
+    #[test]
+    fn picked_copies_are_named_by_their_bytes() {
+        assert_eq!(picked_name(Path::new(r"C:\Themes\TranscodedWallpaper"), &[0xFF, 0xD8, 0xFF, 0xE0], 0xAB), "00000000000000ab.jpg");
+        assert_eq!(picked_name(Path::new(r"C:\Themes\TranscodedWallpaper"), &[0x89, b'P', b'N', b'G', 13, 10], 1), "0000000000000001.png");
+        assert_eq!(picked_name(Path::new(r"C:\Themes\CachedImage.JPG"), &[0x89, b'P', b'N', b'G'], 2), "0000000000000002.jpg");
+        assert_eq!(picture_extension(Path::new("a"), &[0, 0, 0, 24, b'f', b't', b'y', b'p', b'h']), "heic");
+        assert_eq!(picture_extension(Path::new("a"), b"BM"), "bmp");
+    }
+
+    #[test]
+    fn an_odd_first_byte_means_turned_off_in_startup_apps() {
+        assert!(startup_disabled(&[3, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]));
+        assert!(startup_disabled(&[7]));
+        assert!(!startup_disabled(&[2, 0, 0, 0]));
+        assert!(!startup_disabled(&[6]));
+        assert!(!startup_disabled(&[]));
+    }
+
+    #[test]
+    fn administrator_runs_are_refused_unless_explorer_matches() {
+        assert!(refuse(true, Some(false)));
+        assert!(refuse(true, None));
+        assert!(!refuse(true, Some(true)));
+        assert!(!refuse(false, Some(false)));
+        assert!(!refuse(false, None));
     }
 
     #[test]

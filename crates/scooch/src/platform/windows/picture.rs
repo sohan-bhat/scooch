@@ -70,7 +70,35 @@ pub fn wallpaper(screen: &Screen) -> Result<Option<PathBuf>> {
     let id = monitor(screen);
     let path = unsafe { wallpaper.GetWallpaper(pointer(&id)) }.context("Scooch could not read the wallpaper, so check that the screen is still connected.")?;
     let path = take(path);
-    Ok((!path.is_empty()).then(|| PathBuf::from(path)))
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let path = PathBuf::from(path);
+    if themes().is_some_and(|themes| layout::inside(&path, &themes)) {
+        return keep(&path).map(Some);
+    }
+    Ok(Some(path))
+}
+
+pub fn themes() -> Option<PathBuf> {
+    dirs::config_dir().map(|roaming| roaming.join("Microsoft").join("Windows").join("Themes"))
+}
+
+pub fn keep(path: &Path) -> Result<PathBuf> {
+    let bytes = std::fs::read(path).with_context(|| format!("Scooch could not read {}, so pick the wallpaper again in Settings.", path.display()))?;
+    let folder = crate::state::Store::open().root.join("picked");
+    let target = folder.join(layout::picked_name(path, &bytes, crate::cache::digest(&bytes)));
+    if target.is_file() {
+        return Ok(target);
+    }
+    std::fs::create_dir_all(&folder).with_context(|| format!("Scooch could not make {}, so check the disk.", folder.display()))?;
+    let partial = target.with_extension("part");
+    let written = std::fs::write(&partial, &bytes).and_then(|()| std::fs::rename(&partial, &target));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written.with_context(|| format!("Scooch could not copy {}, so check that the disk has room.", path.display()))?;
+    Ok(target)
 }
 
 pub fn set_wallpaper(screen: &Screen, path: &Path) -> Result<()> {
