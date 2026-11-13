@@ -38,7 +38,8 @@
   "photo": {
     "file": "photo.webp",
     "width": 2048,
-    "height": 1152
+    "height": 1152,
+    "saliency": "photo.saliency.png"
   },
   "order": [
     "before",
