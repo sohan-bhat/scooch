@@ -165,6 +165,10 @@ pub fn still(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene
     render::still(image, analysis, placement, scene, options)
 }
 
+pub fn scenery_active(analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> bool {
+    look::active(analysis, placement, scene, options)
+}
+
 pub fn canvas(image: &RgbImage, width: u32, height: u32) -> Canvas {
     let made = bundle::canvas(image, width, height);
     Canvas { width: made.width(), height: made.height(), pixels: made.into_owned().into_raw() }
