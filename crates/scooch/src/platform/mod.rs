@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 #[doc(hidden)]
 pub mod linux;
 #[cfg(target_os = "macos")]
-mod macos;
+#[doc(hidden)]
+pub mod macos;
 #[cfg(any(target_os = "windows", test))]
 #[doc(hidden)]
 pub mod windows;

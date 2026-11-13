@@ -1,8 +1,8 @@
-mod finder;
-mod launchd;
-mod picture;
-mod spaces;
-mod store;
+pub mod finder;
+pub mod launchd;
+pub mod picture;
+pub mod spaces;
+pub mod store;
 mod sys;
 mod watch;
 

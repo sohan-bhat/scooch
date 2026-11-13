@@ -141,10 +141,30 @@ pub fn icons(view: &View) -> Result<Vec<Rect>> {
     bail!("The desktop kept changing while Scooch read it, so it will try again at the next change.")
 }
 
-fn rects(centers: &[(f32, f32)], names: &[String], view: &View) -> Vec<Rect> {
+pub fn named(view: &View) -> Result<Vec<(String, Rect)>> {
+    let centers = centers()?;
+    let names = names()?;
+    if centers.len() != names.len() {
+        bail!("The desktop kept changing while Scooch read it, so it will try again at the next change.");
+    }
+    let view = view.clone();
+    Ok(on_main(move |_| {
+        let attributes = attributes(&view);
+        centers.iter().zip(names).map(|(center, name)| {
+            let rect = item_rect(*center, &view, measure(&name, &attributes, view.wrap()));
+            (name, rect)
+        }).collect()
+    }))
+}
+
+fn attributes(view: &View) -> Retained<NSDictionary<NSString, AnyObject>> {
     let font = NSFont::systemFontOfSize_weight(view.text as f64, unsafe { NSFontWeightSemibold });
     let font: &AnyObject = &font;
-    let attributes = NSDictionary::from_slices(&[unsafe { NSFontAttributeName }], &[font]);
+    NSDictionary::from_slices(&[unsafe { NSFontAttributeName }], &[font])
+}
+
+fn rects(centers: &[(f32, f32)], names: &[String], view: &View) -> Vec<Rect> {
+    let attributes = attributes(view);
     let mut seen = Vec::<(i32, i32)>::new();
     let mut out = Vec::new();
     for (center, name) in centers.iter().zip(names) {
