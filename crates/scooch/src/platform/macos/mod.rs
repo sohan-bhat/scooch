@@ -191,8 +191,13 @@ impl Desktop for Mac {
         true
     }
 
+    fn hold(&self) -> Duration {
+        Duration::from_millis(300)
+    }
+
     fn reduce_motion(&self) -> bool {
-        on_main(|_| objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion())
+        let saved = finder::preference("com.apple.universalaccess", "reduceMotion").and_then(|value| value.downcast_ref::<objc2_foundation::NSNumber>().map(|number| number.boolValue()));
+        saved.unwrap_or_else(|| on_main(|_| objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()))
     }
 }
 

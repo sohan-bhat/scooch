@@ -24,7 +24,7 @@ pub enum Heard {
 
 pub trait Link: Send {
     fn warm(&mut self, picture: &Path, size: [u32; 2]) -> Result<()>;
-    fn ready(&mut self, timeout: Duration) -> Result<String>;
+    fn ready(&mut self, timeout: Duration) -> Result<Adapter>;
     fn open(&mut self, id: u32, screen: &Screen, still: &Path) -> Result<()>;
     fn shown(&mut self, id: u32, timeout: Duration) -> Result<()>;
     fn glide(&mut self, id: u32, a: &Path, b: &Path, ms: u32) -> Result<()>;
@@ -32,6 +32,12 @@ pub trait Link: Send {
     fn hear(&mut self, timeout: Duration) -> Result<Heard>;
     fn close(&mut self, id: u32);
     fn alive(&mut self) -> bool;
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Adapter {
+    pub name: String,
+    pub kind: String,
 }
 
 pub trait Spawn: Send + Sync {
@@ -62,9 +68,9 @@ impl Link for Real {
         self.0.send(&live::Command::Warm { hints: Hints::default(), picture: Some(picture.to_path_buf()), size: Some(size) })
     }
 
-    fn ready(&mut self, timeout: Duration) -> Result<String> {
+    fn ready(&mut self, timeout: Duration) -> Result<Adapter> {
         self.0.expect(timeout, |reply| match reply {
-            Reply::Ready { adapter, .. } => Some(Ok(adapter.clone())),
+            Reply::Ready { adapter, kind, .. } => Some(Ok(Adapter { name: adapter.clone(), kind: kind.clone() })),
             Reply::Failed { id: None, why } => Some(Err(anyhow!("{why}"))),
             _ => None,
         })
@@ -120,11 +126,45 @@ struct Flight {
     id: u32,
     screen: String,
     settled: bool,
+    set: Option<Instant>,
 }
 
-pub fn software(adapter: &str) -> bool {
-    let adapter = adapter.to_lowercase();
-    SOFTWARE.iter().any(|name| adapter.contains(name))
+pub fn software(adapter: &Adapter) -> bool {
+    if !adapter.kind.is_empty() {
+        return adapter.kind == "cpu";
+    }
+    let name = adapter.name.to_lowercase();
+    SOFTWARE.iter().any(|known| name.contains(known))
+}
+
+pub fn skipped(reason: &str, detail: &str) {
+    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if crate::daemon::trace() || *last != reason {
+        if detail.is_empty() {
+            eprintln!("{} glide skipped, {reason}", crate::daemon::stamp());
+        } else {
+            eprintln!("{} glide skipped, {reason}, {detail}", crate::daemon::stamp());
+        }
+        reason.clone_into(&mut last);
+    }
+}
+
+fn reason_of(error: &anyhow::Error) -> &'static str {
+    let text = format!("{error:#}");
+    if text.contains("software renderer") {
+        "software adapter"
+    } else if text.contains("never reported the live layer as visible") {
+        "hidden"
+    } else if text.contains("no wallpaper window below") {
+        "no room"
+    } else if text.contains("did not answer within") {
+        "helper budget"
+    } else if text.contains("did not settle") {
+        "settle budget"
+    } else {
+        "helper failed"
+    }
 }
 
 pub struct Glider {
@@ -176,7 +216,7 @@ impl Glider {
             if self.strikes >= STRIKES && !self.stalled {
                 self.stalled = true;
                 let line = format!("Scooch turned the glide off until it starts again because {STRIKES} glides in a row stuttered.");
-                eprintln!("{line}");
+                eprintln!("{} glide {line}", crate::daemon::stamp());
                 keep(&mut self.said, line);
             }
         } else {
@@ -243,6 +283,7 @@ impl Glider {
 
     pub fn begin(&mut self, plan: &Plan) -> Option<u32> {
         if !self.usable() {
+            skipped(if self.software { "software adapter" } else { "strikes" }, "");
             return None;
         }
         let started = Instant::now();
@@ -257,8 +298,9 @@ impl Glider {
                 let adapter = link.ready(Self::left(deadline))?;
                 if !self.forced && software(&adapter) {
                     self.software = true;
-                    return Err(anyhow!("the only GPU here is the software renderer {adapter}"));
+                    return Err(anyhow!("the only GPU here is the software renderer {} of kind {}", adapter.name, adapter.kind));
                 }
+                note(&mut self.said, format!("ready on {} of kind {}", adapter.name, adapter.kind));
                 self.ready = true;
             }
             link.open(id, plan.screen, plan.still)?;
@@ -270,7 +312,7 @@ impl Glider {
         match result {
             Ok(()) => {
                 note(&mut self.said, format!("open {id} shown and gliding after {} ms", started.elapsed().as_millis()));
-                self.flights.push(Flight { id, screen: plan.screen.id.clone(), settled: false });
+                self.flights.push(Flight { id, screen: plan.screen.id.clone(), settled: false, set: None });
                 Some(id)
             }
             Err(error) => {
@@ -280,7 +322,10 @@ impl Glider {
         }
     }
 
-    pub fn settle(&mut self, id: u32, still: &Path) {
+    pub fn settle(&mut self, id: u32, still: &Path, set: Instant) {
+        if let Some(flight) = self.flights.iter_mut().find(|flight| flight.id == id) {
+            flight.set = Some(set);
+        }
         let result = match self.link.as_mut() {
             Some(link) => link.settle(id, still),
             None => Err(anyhow!("the helper is gone")),
@@ -318,9 +363,10 @@ impl Glider {
         }
         self.flights.clear();
         self.drop_link();
-        let line = format!("Scooch swapped the picture without the glide because {error:#}.");
-        eprintln!("{line}");
-        keep(&mut self.said, line);
+        let reason = reason_of(error);
+        let detail = format!("{error:#}");
+        skipped(reason, &detail);
+        keep(&mut self.said, format!("skipped, {reason}, {detail}"));
     }
 
     pub fn land(&mut self, hold: Duration, interrupted: &dyn Fn() -> bool) {
@@ -335,6 +381,7 @@ impl Glider {
                 for id in ids {
                     self.abort(id);
                 }
+                note(&mut self.said, "interrupted, closed early".into());
                 return;
             }
             if Instant::now() >= deadline {
@@ -360,9 +407,8 @@ impl Glider {
                 Ok(Heard::Failed(Some(id), why)) if self.flights.iter().any(|flight| flight.id == id) => {
                     link.close(id);
                     self.flights.retain(|flight| flight.id != id);
-                    let line = format!("Scooch swapped the picture without the glide because {why}.");
-                    eprintln!("{line}");
-                    keep(&mut self.said, line);
+                    skipped("helper failed", &why);
+                    keep(&mut self.said, format!("skipped, helper failed, {why}"));
                 }
                 Ok(Heard::Failed(None, why)) => {
                     self.give_up(None, &anyhow!(why));
@@ -376,17 +422,17 @@ impl Glider {
             }
         }
         note(&mut self.said, format!("settled after {} ms", started.elapsed().as_millis()));
-        let until = Instant::now() + hold;
-        while Instant::now() < until && !interrupted() {
-            std::thread::sleep(CHECK.min(Self::left(until)));
-        }
-        let ids: Vec<u32> = self.flights.drain(..).map(|flight| flight.id).collect();
-        if let Some(link) = self.link.as_mut() {
-            for id in &ids {
-                link.close(*id);
+        let mut due: Vec<(Instant, u32)> = self.flights.drain(..).map(|flight| (flight.set.map_or_else(Instant::now, |set| set + hold), flight.id)).collect();
+        due.sort();
+        for (when, id) in due {
+            while Instant::now() < when && !interrupted() {
+                std::thread::sleep(CHECK.min(Self::left(when)));
             }
+            if let Some(link) = self.link.as_mut() {
+                link.close(id);
+            }
+            note(&mut self.said, format!("closed {id} {} ms after its wallpaper was set", hold.as_millis()));
         }
-        note(&mut self.said, format!("closed {ids:?} after holding {} ms", hold.as_millis()));
     }
 }
 
@@ -398,6 +444,8 @@ pub mod tests {
     #[derive(Clone, Default)]
     pub struct Script {
         pub adapter: String,
+        pub kind: String,
+        pub held: Option<Arc<std::sync::atomic::AtomicBool>>,
         pub glided: Option<(u32, u32)>,
         pub spawn_fails: bool,
         pub ready_fails: bool,
@@ -407,8 +455,12 @@ pub mod tests {
         pub settle_after: Duration,
     }
 
+    pub type Waits = Arc<Mutex<Vec<(&'static str, Duration)>>>;
+    pub type Events = Arc<Mutex<Vec<(String, Instant)>>>;
+
     pub struct FakeHelper {
-        log: Arc<Mutex<Vec<String>>>,
+        log: Events,
+        waits: Waits,
         script: Arc<Mutex<Script>>,
         settles: Vec<(u32, Instant)>,
         glides: Vec<u32>,
@@ -416,31 +468,33 @@ pub mod tests {
     }
 
     pub struct FakeSpawner {
-        pub log: Arc<Mutex<Vec<String>>>,
+        pub log: Events,
         pub script: Arc<Mutex<Script>>,
         pub spawned: Arc<Mutex<usize>>,
+        pub waits: Waits,
     }
 
     impl FakeSpawner {
-        pub fn new(log: Arc<Mutex<Vec<String>>>) -> Self {
-            Self { log, script: Arc::new(Mutex::new(Script::default())), spawned: Arc::new(Mutex::new(0)) }
+        pub fn new(log: Events) -> Self {
+            Self { log, script: Arc::new(Mutex::new(Script::default())), spawned: Arc::new(Mutex::new(0)), waits: Arc::new(Mutex::new(Vec::new())) }
         }
     }
 
     impl Spawn for FakeSpawner {
-        fn spawn(&self, _timeout: Duration) -> Result<Box<dyn Link>> {
+        fn spawn(&self, timeout: Duration) -> Result<Box<dyn Link>> {
+            self.waits.lock().unwrap().push(("spawn", timeout));
             if self.script.lock().unwrap().spawn_fails {
                 return Err(anyhow!("the test helper could not start"));
             }
             *self.spawned.lock().unwrap() += 1;
-            self.log.lock().unwrap().push("spawn".into());
-            Ok(Box::new(FakeHelper { log: self.log.clone(), script: self.script.clone(), settles: Vec::new(), glides: Vec::new(), dead: false }))
+            self.log.lock().unwrap().push(("spawn".into(), Instant::now()));
+            Ok(Box::new(FakeHelper { log: self.log.clone(), waits: self.waits.clone(), script: self.script.clone(), settles: Vec::new(), glides: Vec::new(), dead: false }))
         }
     }
 
     impl FakeHelper {
         fn say(&self, what: String) {
-            self.log.lock().unwrap().push(what);
+            self.log.lock().unwrap().push((what, Instant::now()));
         }
 
         fn script(&self) -> Script {
@@ -462,13 +516,14 @@ pub mod tests {
             Ok(())
         }
 
-        fn ready(&mut self, _timeout: Duration) -> Result<String> {
+        fn ready(&mut self, timeout: Duration) -> Result<Adapter> {
             self.living()?;
+            self.waits.lock().unwrap().push(("ready", timeout));
             if self.script().ready_fails {
                 return Err(anyhow!("no device"));
             }
-            let adapter = self.script().adapter;
-            Ok(if adapter.is_empty() { "Fake GPU".into() } else { adapter })
+            let script = self.script();
+            Ok(Adapter { name: if script.adapter.is_empty() { "Fake GPU".into() } else { script.adapter }, kind: script.kind })
         }
 
         fn open(&mut self, id: u32, _screen: &Screen, still: &Path) -> Result<()> {
@@ -479,9 +534,10 @@ pub mod tests {
 
         fn shown(&mut self, id: u32, timeout: Duration) -> Result<()> {
             self.living()?;
+            self.waits.lock().unwrap().push(("shown", timeout));
             if self.script().shown_fails {
-                std::thread::sleep(timeout);
-                return Err(anyhow!("macOS never reported the live layer as visible"));
+                self.say(format!("hidden {id}"));
+                return Err(anyhow!("macOS never reported the live layer as visible, so Scooch keeps the plain swap."));
             }
             self.say(format!("shown {id}"));
             Ok(())
@@ -506,8 +562,9 @@ pub mod tests {
 
         fn hear(&mut self, timeout: Duration) -> Result<Heard> {
             self.living()?;
-            if self.script().settle_never {
-                std::thread::sleep(timeout);
+            let script = self.script();
+            if script.settle_never || script.held.as_ref().is_some_and(|held| held.load(std::sync::atomic::Ordering::SeqCst)) {
+                std::thread::sleep(timeout.min(Duration::from_millis(5)));
                 return Ok(Heard::Nothing);
             }
             if let (Some((frames, slow)), Some(id)) = (self.script().glided, self.glides.pop()) {
