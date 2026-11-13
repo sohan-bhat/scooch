@@ -189,40 +189,51 @@ fn wayland() -> Result<Vec<Found>> {
     Ok(state.found())
 }
 
-pub fn watch(session: Session, wake: Shared) {
-    let _ = std::thread::Builder::new().name("scooch-screens".into()).spawn(move || {
-        let _ = match session {
-            Session::Wayland => watch_wayland(&wake),
-            Session::X11 => watch_x11(&wake),
-        };
-    });
+pub fn watch_once(session: Session, wake: &Shared) -> bool {
+    match session {
+        Session::Wayland => watch_wayland(wake),
+        Session::X11 => watch_x11(wake),
+    }
 }
 
-fn watch_wayland(wake: &Shared) -> Result<()> {
-    let (mut queue, mut state) = open()?;
+fn watch_wayland(wake: &Shared) -> bool {
+    let Ok((mut queue, mut state)) = open() else { return false };
     state.changed = false;
-    loop {
-        queue.blocking_dispatch(&mut state)?;
+    while queue.blocking_dispatch(&mut state).is_ok() {
         if std::mem::take(&mut state.changed) {
             wake();
         }
     }
+    true
 }
 
-fn watch_x11(wake: &Shared) -> Result<()> {
-    let (conn, number) = x11rb::connect(None)?;
-    let root = conn.setup().roots.get(number).context("The X display has no screen.")?.root;
-    conn.randr_query_version(1, 5)?.reply()?;
-    conn.randr_select_input(root, NotifyMask::SCREEN_CHANGE | NotifyMask::OUTPUT_CHANGE | NotifyMask::CRTC_CHANGE)?;
-    conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE))?;
-    let workarea = conn.intern_atom(false, b"_NET_WORKAREA")?.reply()?.atom;
-    let desktop = conn.intern_atom(false, b"_NET_CURRENT_DESKTOP")?.reply()?.atom;
-    conn.flush()?;
-    loop {
-        match conn.wait_for_event()? {
+fn watch_x11(wake: &Shared) -> bool {
+    let Ok((conn, number)) = x11rb::connect(None) else { return false };
+    let Some(root) = conn.setup().roots.get(number).map(|screen| screen.root) else { return false };
+    let armed = (|| -> Result<(u32, u32, u32)> {
+        conn.randr_query_version(1, 5)?.reply()?;
+        conn.randr_select_input(root, NotifyMask::SCREEN_CHANGE | NotifyMask::OUTPUT_CHANGE | NotifyMask::CRTC_CHANGE)?;
+        conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE))?;
+        let workarea = conn.intern_atom(false, b"_NET_WORKAREA")?.reply()?.atom;
+        let desktop = conn.intern_atom(false, b"_NET_CURRENT_DESKTOP")?.reply()?.atom;
+        let resources = conn.intern_atom(false, b"RESOURCE_MANAGER")?.reply()?.atom;
+        conn.flush()?;
+        Ok((workarea, desktop, resources))
+    })();
+    let Ok((workarea, desktop, resources)) = armed else { return false };
+    while let Ok(event) = conn.wait_for_event() {
+        match event {
             Event::RandrScreenChangeNotify(_) | Event::RandrNotify(_) => wake(),
-            Event::PropertyNotify(event) if event.atom == workarea || event.atom == desktop => wake(),
+            Event::PropertyNotify(event) if event.atom == workarea || event.atom == desktop || event.atom == resources => wake(),
             _ => {}
         }
     }
+    true
+}
+
+pub fn resources() -> Option<String> {
+    let (conn, number) = x11rb::connect(None).ok()?;
+    let root = conn.setup().roots.get(number)?.root;
+    let reply = conn.get_property(false, root, AtomEnum::RESOURCE_MANAGER, AtomEnum::STRING, 0, 1 << 20).ok()?.reply().ok()?;
+    Some(String::from_utf8_lossy(&reply.value).into_owned())
 }
