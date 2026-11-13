@@ -183,9 +183,5 @@
       }
     ]
   },
-  "placeholders": {
-    "install.tabs.macos.command": "Install script URL is not live yet.",
-    "install.tabs.windows.command": "Install script URL is not live yet.",
-    "install.tabs.linux.command": "Install script URL is not live yet."
-  }
+  "placeholders": {}
 }
