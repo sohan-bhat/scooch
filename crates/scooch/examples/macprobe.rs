@@ -1021,11 +1021,20 @@ mod probe {
         p.line(format!("- mirror saved {}, source now {:?}", state(p)["options"]["mirror"], state(p)["screens"].as_object().and_then(|screens| screens.values().next().map(|entry| entry["source"].clone()))));
         if let Some(pid) = job {
             if let Some(before) = rusage(pid) {
+                let seen = daemon_log(p).lines().count();
                 std::thread::sleep(Duration::from_secs(60));
                 if let Some(after) = rusage(pid) {
                     let cpu = nanos((after.user + after.system).saturating_sub(before.user + before.system)) / 1_000_000;
                     p.line(format!("- the launchd daemon over a quiet 60 s, waiting for consent: CPU {cpu} ms, idle wakeups {}, interrupt wakeups {}, footprint {:.1} MB", after.idle_wakeups.saturating_sub(before.idle_wakeups), after.interrupt_wakeups.saturating_sub(before.interrupt_wakeups), after.footprint as f64 / 1_048_576.0));
                 }
+                let quiet = new_lines(&daemon_log(p), seen);
+                let mut sources = std::collections::BTreeMap::<String, usize>::new();
+                for line in &quiet {
+                    if let Some(source) = line.split(" wake ").nth(1) {
+                        *sources.entry(source.trim().to_string()).or_default() += 1;
+                    }
+                }
+                p.line(format!("- during that minute the daemon logged {} ticks and wakes {sources:?}", quiet.iter().filter(|line| line.contains(" tick ")).count()));
             }
         }
         let ran = p.scooch(&["off"], Duration::from_secs(60));
@@ -1074,6 +1083,8 @@ mod probe {
         }
         switch(p, 123);
         let subject = p.subject.clone().context("no test picture")?;
+        let _ = place(p, PROBES[0].0, (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5));
+        let second_id = spaces::join(&display, second.as_deref());
         let ran = p.scooch(&["use", &subject.to_string_lossy()], Duration::from_secs(60));
         p.line(format!("- scooch use on the first Space exit {:?}", ran.code));
         if wait_render(p, Duration::from_secs(30), Some(&subject), true).is_none() {
@@ -1085,7 +1096,7 @@ mod probe {
         let home = p.home.clone();
         let two = wait_until(Duration::from_secs(25), || {
             let state: serde_json::Value = fs::read(home.join("state.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
-            state["screens"].as_object().is_some_and(|screens| screens.len() >= 2 && screens.values().all(|entry| !entry["output"].is_null()))
+            state["screens"].as_object().is_some_and(|screens| screens.len() >= 2 && screens.get(&second_id).is_some_and(|entry| !entry["output"].is_null()))
         });
         p.line(format!("- second Space entry with its own output after {:?} ms: {:?}", two.map(|time| time.as_millis()), entries(p)));
         switch(p, 123);
