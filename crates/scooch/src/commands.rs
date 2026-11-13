@@ -3,7 +3,7 @@ use crate::platform::{self, Desktop, Screen};
 use crate::state::{self, same, Entry, State, Store, Tally};
 use crate::{poke, scene};
 use anyhow::{anyhow, bail, Context, Result};
-use scooch_core::{Options, Rect, RgbImage, Scene};
+use scooch_core::{Options, Rect, RgbImage, Scene, Scenery};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,6 +21,9 @@ const PICTURE_KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp",
 pub const FLIP_HINT: &str = "Icons still cover part of the picture. Run scooch flip to let Scooch flip it.";
 pub const FLIP_ON: &str = "Scooch may now flip your picture when that clears your icons.";
 pub const FLIP_OFF: &str = "Scooch now keeps your picture the way round it is.";
+pub const SCENERY_ON: &str = "Scooch now paints scenery like clouds and islands around your icons.";
+pub const SCENERY_OFF: &str = "Scooch now keeps your picture free of scenery.";
+pub const SCENERY_LINE: &str = "Scenery  on";
 pub const GUIDE: &str = "Your wallpaper is not a picture file, so pick a picture for Scooch to move.";
 pub const MADE: &str = "This desktop still shows a picture Scooch made, so pick a picture for Scooch to move.";
 pub const NO_SCREEN: &str = "No screen was found, so connect one and try again.";
@@ -143,6 +146,9 @@ pub fn describe(state: &State, running: bool, connected: Option<&[String]>) -> V
     }
     let icons: usize = shown.iter().map(|entry| entry.icons).sum();
     lines.push(format!("Icons    {icons} on {}", plural(shown.len(), "screen")));
+    if state::scenery_on(&state.options) {
+        lines.push(SCENERY_LINE.into());
+    }
     if !state.options.mirror && shown.iter().any(|entry| entry.flip_helps) {
         lines.push(FLIP_HINT.into());
     }
@@ -460,6 +466,27 @@ pub fn flip() -> Result<()> {
     Ok(())
 }
 
+pub fn scenery() -> Result<()> {
+    let store = Store::open();
+    let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
+    let mut state = store.load();
+    state.options.scenery = if state::scenery_on(&state.options) { Scenery::Off } else { Scenery::Auto };
+    store.save(&state)?;
+    if let Some(process) = store.watcher() {
+        poke::send(process);
+    }
+    println!("{}", scenery_line(state::scenery_on(&state.options)));
+    Ok(())
+}
+
+pub fn scenery_line(on: bool) -> &'static str {
+    if on {
+        SCENERY_ON
+    } else {
+        SCENERY_OFF
+    }
+}
+
 pub fn flip_line(mirror: bool) -> &'static str {
     if mirror {
         FLIP_ON
@@ -751,7 +778,7 @@ mod tests {
 
     #[test]
     fn shared_sentences_name_no_system() {
-        for line in [NO_SCREEN, NO_PICTURE, NO_TERMINAL, crate::daemon::NOT_A_FILE] {
+        for line in [NO_SCREEN, NO_PICTURE, NO_TERMINAL, crate::daemon::NOT_A_FILE, SCENERY_ON, SCENERY_OFF, SCENERY_LINE] {
             for word in ["macOS", "Finder", "System Settings", "Windows", "GNOME", "login item"] {
                 assert!(!line.contains(word), "{line}");
             }
@@ -831,6 +858,19 @@ mod tests {
         for line in [FLIP_ON, FLIP_OFF, FLIP_HINT] {
             assert!(!line.contains(['—', '–', ';', '(', ')']) && !line.contains(": "), "{line}");
         }
+    }
+
+    #[test]
+    fn scenery_switches_and_says_so_in_one_line() {
+        assert_eq!(scenery_line(true), "Scooch now paints scenery like clouds and islands around your icons.");
+        assert_eq!(scenery_line(false), "Scooch now keeps your picture free of scenery.");
+        for line in [SCENERY_ON, SCENERY_OFF, SCENERY_LINE] {
+            assert!(!line.contains(['—', '–', ';', '(', ')']) && !line.contains(": "), "{line}");
+        }
+        let mut state = on();
+        assert!(!describe(&state, true, None).contains(&SCENERY_LINE.to_string()));
+        state.options.scenery = Scenery::Auto;
+        assert_eq!(describe(&state, true, None), vec!["Scooch is on.", "Picture  ~/Pictures/harbor.jpg", "Icons    9 on 1 screen", SCENERY_LINE]);
     }
 
     fn desk(name: &str) -> (std::sync::Arc<crate::daemon::tests::Fake>, Store, PathBuf, PathBuf) {

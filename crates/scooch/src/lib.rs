@@ -46,6 +46,8 @@ enum Command {
     },
     #[command(about = "Let Scooch flip the picture when that clears your icons")]
     Flip,
+    #[command(about = "Turn the clouds and islands around your icons on or off")]
+    Scenery,
     #[command(about = "Run in the foreground, which is what the login item does")]
     Watch,
     #[command(about = "Check permissions and the desktop")]
@@ -75,6 +77,7 @@ fn dispatch() -> Result<()> {
         Some(Command::Status) => commands::status(),
         Some(Command::Render { image, icons, out, json, saliency, fill }) => commands::render(image, icons, out, json, saliency, fill),
         Some(Command::Flip) => commands::flip(),
+        Some(Command::Scenery) => commands::scenery(),
         Some(Command::Watch) => commands::watch(),
         Some(Command::Doctor) => commands::doctor(),
     }
