@@ -41,11 +41,13 @@ pub fn worst_ratio(values: &[f32], source: u32, out: u32) -> f64 {
 }
 
 pub fn shrink(image: &RgbImage, factor: u32) -> RgbImage {
-    let (sw, sh) = image.dimensions();
+    shrink_raw(image.as_raw(), image.width(), image.height(), factor)
+}
+
+pub fn shrink_raw(raw: &[u8], sw: u32, sh: u32, factor: u32) -> RgbImage {
     let (w, h) = (sw.div_ceil(factor), sh.div_ceil(factor));
     let decode = color::decode_table();
     let encode = color::encode_table();
-    let raw = image.as_raw();
     let mut out = vec![0u8; (w * h * 3) as usize];
     out.par_chunks_mut((w * 3) as usize).enumerate().for_each(|(y, row)| {
         let (y0, y1) = (y as u32 * factor, ((y as u32 + 1) * factor).min(sh));
@@ -70,11 +72,10 @@ pub fn shrink(image: &RgbImage, factor: u32) -> RgbImage {
     RgbImage::from_raw(w, h, out).unwrap_or_else(|| RgbImage::new(w, h))
 }
 
-fn resample(source: &RgbImage, columns: &[Tap], rows: &[Tap], width: usize) -> Vec<u8> {
+fn resample(raw: &[u8], source_width: u32, columns: &[Tap], rows: &[Tap], width: usize) -> Vec<u8> {
     let decode = color::decode_table();
     let encode = color::encode_table();
-    let raw = source.as_raw();
-    let stride = source.width() as usize * 3;
+    let stride = source_width as usize * 3;
     let left = columns.iter().flat_map(|t| t.at).min().unwrap_or(0) as usize;
     let right = columns.iter().flat_map(|t| t.at).max().unwrap_or(0) as usize;
     let places: Vec<[usize; 4]> = columns.iter().map(|t| t.at.map(|a| (a as usize - left) * 3)).collect();
@@ -109,17 +110,19 @@ fn resample(source: &RgbImage, columns: &[Tap], rows: &[Tap], width: usize) -> V
     out
 }
 
-pub fn picture(canvas: &RgbImage, xmap: &[f64], ymap: &[f64], ratio: f64, width: u32, height: u32) -> RgbImage {
-    let (cw, ch) = canvas.dimensions();
+pub fn picture((canvas, cw, ch): (&[u8], u32, u32), (xmap, ymap): (&[f64], &[f64]), ratio: f64, (width, height): (u32, u32)) -> RgbImage {
     if width == 0 || height == 0 || cw == 0 || ch == 0 {
         return RgbImage::new(width, height);
     }
     let factor = if ratio > SHRINK_FROM { ratio.floor().clamp(1.0, cw.min(ch) as f64) as u32 } else { 1 };
-    let shrunk = (factor > 1).then(|| shrink(canvas, factor));
-    let source = shrunk.as_ref().unwrap_or(canvas);
-    let columns = map_taps(xmap.iter().copied(), cw as f64 / factor as f64, source.width() as usize);
-    let rows = map_taps(ymap.iter().copied(), ch as f64 / factor as f64, source.height() as usize);
-    let raw = resample(source, &columns, &rows, width as usize);
+    let shrunk = (factor > 1).then(|| shrink_raw(canvas, cw, ch, factor));
+    let (source, sw, sh) = match &shrunk {
+        Some(small) => (small.as_raw().as_slice(), small.width(), small.height()),
+        None => (canvas, cw, ch),
+    };
+    let columns = map_taps(xmap.iter().copied(), cw as f64 / factor as f64, sw as usize);
+    let rows = map_taps(ymap.iter().copied(), ch as f64 / factor as f64, sh as usize);
+    let raw = resample(source, sw, &columns, &rows, width as usize);
     RgbImage::from_raw(width, height, raw).unwrap_or_else(|| RgbImage::new(width, height))
 }
 
@@ -132,7 +135,7 @@ fn plain(image: &RgbImage, placement: &Placement, width: u32, height: u32) -> Rg
     let source = shrunk.as_ref().unwrap_or(image);
     let columns = taps(&placement.fx, width as usize, sw as f64 / factor as f64, source.width() as usize);
     let rows = taps(&placement.fy, height as usize, sh as f64 / factor as f64, source.height() as usize);
-    let raw = resample(source, &columns, &rows, width as usize);
+    let raw = resample(source.as_raw(), source.width(), &columns, &rows, width as usize);
     RgbImage::from_raw(width, height, raw).unwrap_or_else(|| RgbImage::new(width, height))
 }
 
@@ -170,8 +173,8 @@ pub fn layers(image: &RgbImage, given: Option<&Analysis>, placement: &Placement,
             &own
         }
     };
-    let state = bundle::make(image, found, placement, scene, options, materials);
-    bundle::layers(&state, &state, 0.0)
+    let (state, canvas) = bundle::still(image, found, placement, scene, options, materials);
+    bundle::draw(&state, &state, 0.0, canvas.as_raw())
 }
 
 pub fn render(image: &RgbImage, given: Option<&Analysis>, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {

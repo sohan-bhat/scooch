@@ -1,6 +1,6 @@
 use crate::look::{self, Sampled, P};
 use crate::pads::{self, Lookup};
-use crate::paint::{self, Materials, BELLY, CORE, FOAM, LAND, LIT, RIM, SHORE, TOP};
+use crate::paint::{self, Materials, BELLY, CORE, FOAM, LAND, LAYERS, LIT, RIM, SHORE, TOP};
 use crate::render;
 use crate::shape::{self, smoothstep, Grid, Q};
 use crate::table::{self, Curve};
@@ -32,7 +32,7 @@ const CORE_LIFT: f32 = 0.08;
 const CORE_DROP: f32 = 0.15;
 const VOLUME_LIT: f32 = 0.6;
 const VOLUME_DARK: f32 = 0.5;
-const REACH: f32 = 0.45;
+const REACH: f32 = 0.38;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Constants {
@@ -166,28 +166,22 @@ fn sample(canvas: &RgbImage, decode: &[f32; 256], x: f64, y: f64) -> [f32; 3] {
 fn small_picture(canvas: &RgbImage, xmap: &[f64], ymap: &[f64], grid: &Grid) -> Vec<[f32; 3]> {
     let decode = color::decode_table();
     let (cw, ch) = (canvas.width() as f64, canvas.height() as f64);
-    let at = |map: &[f64], cell: usize, k: usize, size: f64| map[(cell * Q + 1 + 2 * k).min(map.len() - 1)] * size - 0.5;
-    let columns: Vec<[f64; 2]> = (0..grid.w).map(|i| [at(xmap, i, 0, cw), at(xmap, i, 1, cw)]).collect();
-    let rows: Vec<[f64; 2]> = (0..grid.h).map(|j| [at(ymap, j, 0, ch), at(ymap, j, 1, ch)]).collect();
-    (0..grid.w * grid.h)
-        .into_par_iter()
-        .map(|c| {
-            let (col, row) = (&columns[c % grid.w], &rows[c / grid.w]);
-            let mut sum = [0.0f32; 3];
-            for y in row {
-                for x in col {
-                    let v = sample(canvas, decode, *x, *y);
-                    for k in 0..3 {
-                        sum[k] += v[k] * 0.25;
-                    }
-                }
-            }
-            sum
-        })
-        .collect()
+    let at = |map: &[f64], cell: usize, size: f64| {
+        let (a, b) = ((cell * Q + Q / 2 - 1).min(map.len() - 1), (cell * Q + Q / 2).min(map.len() - 1));
+        (map[a] + map[b]) * 0.5 * size - 0.5
+    };
+    let columns: Vec<f64> = (0..grid.w).map(|i| at(xmap, i, cw)).collect();
+    let rows: Vec<f64> = (0..grid.h).map(|j| at(ymap, j, ch)).collect();
+    (0..grid.w * grid.h).into_par_iter().map(|c| sample(canvas, decode, columns[c % grid.w], rows[c / grid.w])).collect()
 }
 
 pub fn make(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> Bundle {
+    let (mut out, canvas) = still(image, found, placement, scene, options, materials);
+    out.canvas = canvas.into_owned().into_raw();
+    out
+}
+
+pub fn still<'a>(image: &'a RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> (Bundle, Cow<'a, RgbImage>) {
     let (width, height) = (scene.width, scene.height);
     let (sw, sh) = image.dimensions();
     let placement: Cow<Placement> = if table::usable(&placement.fx) && table::usable(&placement.fy) { Cow::Borrowed(placement) } else { Cow::Owned(table::fill(sw.max(1), sh.max(1), width.max(1), height.max(1))) };
@@ -234,8 +228,7 @@ pub fn make(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &S
         },
     };
     if width == 0 || height == 0 || cw == 0 || ch == 0 {
-        out.canvas = canvas.as_raw().clone();
-        return out;
+        return (out, canvas);
     }
     let small = small_picture(&canvas, &out.xmap, &out.ymap, &grid);
     let (aw, ah) = (found.width as usize, found.height as usize);
@@ -262,7 +255,6 @@ pub fn make(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &S
     let unit = base.as_ref().map_or(1.0, |b| b.u);
     let padded = usable && (base.is_some() || pads::active(found, &placement, scene, options));
     let pad = if padded { pads::maps(&small, &grid, found, &lookup, scene, options, base.is_some().then_some(&scenic.belong[..])) } else { None };
-    out.canvas = canvas.as_raw().clone();
     out.field = scenic.field.iter().map(|v| half(*v)).collect();
     out.look = scenic.look;
     out.pad = pad.unwrap_or_else(|| vec![0; grid.w * grid.h * 4]);
@@ -271,7 +263,7 @@ pub fn make(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &S
     out.paints = scenic.paints;
     out.ramps = ramps(unit);
     out.constants.unit = unit;
-    out
+    (out, canvas)
 }
 
 pub fn compatible(a: &Bundle, b: &Bundle) -> bool {
@@ -304,42 +296,49 @@ fn probes(count: usize, cell: usize, cells: usize) -> Vec<Probe> {
         .collect()
 }
 
+#[inline(always)]
 fn bilinear(values: &[f32], w: usize, column: &Probe, row: &Probe) -> f32 {
-    let top = values[row.a * w + column.a] + (values[row.a * w + column.b] - values[row.a * w + column.a]) * column.t;
-    let bottom = values[row.b * w + column.a] + (values[row.b * w + column.b] - values[row.b * w + column.a]) * column.t;
-    top + (bottom - top) * row.t
+    let (top, bottom) = (&values[row.a * w..], &values[row.b * w..]);
+    let upper = top[column.a] + (top[column.b] - top[column.a]) * column.t;
+    let lower = bottom[column.a] + (bottom[column.b] - bottom[column.a]) * column.t;
+    upper + (lower - upper) * row.t
 }
 
-fn bytes4(values: &[u8], w: usize, column: &Probe, row: &Probe) -> [f32; 4] {
-    let at = |r: usize, c: usize, k: usize| values[(r * w + c) * 4 + k] as f32;
+#[inline(always)]
+fn bilinear4(values: &[[f32; 4]], w: usize, column: &Probe, row: &Probe) -> [f32; 4] {
+    let (p, q, r, s) = (&values[row.a * w + column.a], &values[row.a * w + column.b], &values[row.b * w + column.a], &values[row.b * w + column.b]);
     std::array::from_fn(|k| {
-        let top = at(row.a, column.a, k) + (at(row.a, column.b, k) - at(row.a, column.a, k)) * column.t;
-        let bottom = at(row.b, column.a, k) + (at(row.b, column.b, k) - at(row.b, column.a, k)) * column.t;
-        (top + (bottom - top) * row.t) / 255.0
+        let upper = p[k] + (q[k] - p[k]) * column.t;
+        let lower = r[k] + (s[k] - r[k]) * column.t;
+        upper + (lower - upper) * row.t
     })
 }
 
-fn color4(values: &[u8], w: usize, column: &Probe, row: &Probe, decode: &[f32; 256]) -> [f32; 4] {
-    let at = |r: usize, c: usize| {
-        let i = (r * w + c) * 4;
-        [decode[values[i] as usize], decode[values[i + 1] as usize], decode[values[i + 2] as usize], values[i + 3] as f32 / 255.0]
-    };
-    let (p, q, r, s) = (at(row.a, column.a), at(row.a, column.b), at(row.b, column.a), at(row.b, column.b));
-    std::array::from_fn(|k| {
-        let top = p[k] + (q[k] - p[k]) * column.t;
-        let bottom = r[k] + (s[k] - r[k]) * column.t;
-        top + (bottom - top) * row.t
-    })
+struct Plane {
+    look: Vec<[f32; 4]>,
+    pad: Vec<[f32; 4]>,
+    paints: Vec<Vec<[f32; 4]>>,
+    ramps: Vec<[f32; 8]>,
 }
 
-fn ramp(table: &[u8], row: usize, value: f32, c: &Constants) -> [f32; 4] {
+fn plane(x: &Bundle, decode: &[f32; 256]) -> Plane {
+    let unit = |p: &[u8; 4]| p.map(|v| v as f32 / 255.0);
+    let linear = |p: &[u8; 4]| [decode[p[0] as usize], decode[p[1] as usize], decode[p[2] as usize], p[3] as f32 / 255.0];
+    let size = x.paint_grid().w * x.paint_grid().h * 4;
+    Plane {
+        look: x.look.as_chunks::<4>().0.par_iter().map(unit).collect(),
+        pad: x.pad.as_chunks::<4>().0.par_iter().map(linear).collect(),
+        paints: (0..LAYERS).map(|k| x.paints[k * size..(k + 1) * size].as_chunks::<4>().0.iter().map(linear).collect()).collect(),
+        ramps: (0..RAMP).map(|k| std::array::from_fn(|c| x.ramps[((c / 4) * RAMP + k) * 4 + c % 4] as f32 / 255.0)).collect(),
+    }
+}
+
+#[inline(always)]
+fn ramp(table: &[[f32; 8]], value: f32, c: &Constants) -> [f32; 8] {
     let f = ((value - c.ramp_low) / (c.ramp_high - c.ramp_low) * (RAMP - 1) as f32).clamp(0.0, (RAMP - 1) as f32);
     let (a, t) = (f as usize, f - f.floor());
-    let b = (a + 1).min(RAMP - 1);
-    std::array::from_fn(|k| {
-        let (p, q) = (table[(row * RAMP + a) * 4 + k] as f32, table[(row * RAMP + b) * 4 + k] as f32);
-        (p + (q - p) * t) / 255.0
-    })
+    let (p, q) = (&table[a], &table[(a + 1).min(RAMP - 1)]);
+    std::array::from_fn(|k| p[k] + (q[k] - p[k]) * t)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -349,6 +348,7 @@ struct Paint {
 }
 
 impl Paint {
+    #[inline(always)]
     fn over(&mut self, color: [f32; 3], alpha: f32) {
         if alpha <= 0.0 {
             return;
@@ -373,11 +373,27 @@ fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t)
 }
 
-struct Reads {
+fn rgb(c: [f32; 4]) -> [f32; 3] {
+    [c[0], c[1], c[2]]
+}
+
+struct Reads<F: Fn([f32; 2]) -> f32> {
     d: f32,
-    shadow: f32,
-    rim: f32,
-    belly: f32,
+    at: F,
+    shadow: Option<f32>,
+    rim: Option<f32>,
+    belly: Option<f32>,
+}
+
+impl<F: Fn([f32; 2]) -> f32> Reads<F> {
+    fn get(&mut self, which: usize, offset: [f32; 2]) -> f32 {
+        let slot = match which {
+            0 => &mut self.shadow,
+            1 => &mut self.rim,
+            _ => &mut self.belly,
+        };
+        *slot.get_or_insert_with(|| (self.at)(offset))
+    }
 }
 
 struct At<'a> {
@@ -385,64 +401,82 @@ struct At<'a> {
     row: &'a Probe,
     tint_column: &'a Probe,
     tint_row: &'a Probe,
+    grid: usize,
+    tints: usize,
 }
 
-fn paint(x: &Bundle, reads: &Reads, at: &At, grain: f32, decode: &[f32; 256]) -> Paint {
-    let (column, row, tint_column, tint_row) = (at.column, at.row, at.tint_column, at.tint_row);
-    let c = &x.constants;
-    let grid = x.grid();
-    let [sky, belong, open, light] = bytes4(&x.look, grid.w, column, row);
+#[inline(always)]
+fn paint<F: Fn([f32; 2]) -> f32, G: Fn() -> f32>(c: &Constants, plane: &Plane, reads: &mut Reads<F>, at: &At, grain: &mut Grain<G>) -> Paint {
+    let [sky, belong, open, light] = bilinear4(&plane.look, at.grid, at.column, at.row);
     if belong <= 0.0 {
         return Paint::default();
     }
     let light = light * 2.0 - 1.0;
-    let first = ramp(&x.ramps, 0, reads.d, c);
-    let second = ramp(&x.ramps, 1, reads.d, c);
-    let shade = ramp(&x.ramps, 1, reads.shadow, c);
-    let plane = x.paint_grid().w * x.paint_grid().h * 4;
-    let layer = |k: usize| color4(&x.paints[k * plane..(k + 1) * plane], x.paint_grid().w, tint_column, tint_row, decode);
-    let grained = |rgb: [f32; 4]| [(rgb[0] * grain).min(1.0), (rgb[1] * grain).min(1.0), (rgb[2] * grain).min(1.0)];
+    let d = reads.d;
+    let here = ramp(&plane.ramps, d, c);
+    let layer = |k: usize| bilinear4(&plane.paints[k], at.tints, at.tint_column, at.tint_row);
+    let outside = d > EDGE / c.unit;
+    let shade = if d > -EDGE / c.unit { ramp(&plane.ramps, reads.get(0, c.shadow), c) } else { [0.0; 8] };
     let mut land = Paint::default();
-    if sky < 1.0 {
-        let shore = layer(SHORE);
-        land.over([1.0; 3], first[0] * shore[3]);
-        land.over([0.0; 3], shade[2]);
-        if first[1] > 0.0 {
-            land.over(grained(shore), first[1]);
-            if first[2] > 0.0 {
-                land.over(grained(layer(FOAM)), first[2]);
-            }
-            let fill = layer(LAND);
-            if first[3] > 0.0 {
-                land.over(grained(fill), first[3]);
-            }
-            if second[0] > 0.0 {
-                land.over(grained(layer(TOP)), second[0]);
-            }
-            land = land.scaled(fill[3]);
+    if sky < 1.0 && !(outside && here[0] <= 0.0 && shade[6] <= 0.0) {
+        let fill = layer(LAND);
+        if outside {
+            land.over([1.0; 3], here[0] * layer(SHORE)[3]);
+            land.over([0.0; 3], shade[6]);
+        } else if here[4] >= 1.0 {
+            land.over(grain.apply(layer(TOP)), 1.0);
         } else {
-            land = land.scaled(layer(LAND)[3]);
+            let shore = layer(SHORE);
+            land.over([1.0; 3], here[0] * shore[3]);
+            land.over([0.0; 3], shade[6]);
+            land.over(grain.apply(shore), here[1]);
+            if here[2] > 0.0 {
+                land.over(grain.apply(layer(FOAM)), here[2]);
+            }
+            if here[3] > 0.0 {
+                land.over(grain.apply(fill), here[3]);
+            }
+            if here[4] > 0.0 {
+                land.over(grain.apply(layer(TOP)), here[4]);
+            }
         }
+        land = land.scaled(fill[3]);
     }
     let mut cloud = Paint::default();
-    if sky > 0.0 {
+    if sky > 0.0 && !(here[5] <= 0.0 && shade[7] <= 0.0) {
         let core = layer(CORE);
-        cloud.over([0.0; 3], shade[3]);
-        if second[1] > 0.0 {
-            let (rim, belly) = (layer(RIM), layer(BELLY));
-            let mut tone = mix3([core[0], core[1], core[2]], { let l = layer(LIT); [l[0], l[1], l[2]] }, open);
+        cloud.over([0.0; 3], shade[7]);
+        if here[5] > 0.0 {
+            let (rim, belly) = (rgb(layer(RIM)), rgb(layer(BELLY)));
+            let mut tone = mix3(rgb(core), rgb(layer(LIT)), open);
             if light > 0.0 {
-                tone = mix3(tone, [rim[0], rim[1], rim[2]], light * (c.core_lift + (c.volume_lit - c.core_lift) * open));
+                tone = mix3(tone, rim, light * (c.core_lift + (c.volume_lit - c.core_lift) * open));
             } else {
-                tone = mix3(tone, [belly[0], belly[1], belly[2]], -light * (c.core_drop + (c.volume_dark - c.core_drop) * open));
+                tone = mix3(tone, belly, -light * (c.core_drop + (c.volume_dark - c.core_drop) * open));
             }
-            tone = mix3(tone, [rim[0], rim[1], rim[2]], 1.0 - ramp(&x.ramps, 0, reads.rim, c)[1]);
-            tone = mix3(tone, [belly[0], belly[1], belly[2]], 1.0 - ramp(&x.ramps, 0, reads.belly, c)[1]);
-            cloud.over(grained([tone[0], tone[1], tone[2], 1.0]), second[1]);
+            if d > -(c.rim[0].abs() + c.rim[1].abs()) - EDGE / c.unit {
+                tone = mix3(tone, rim, 1.0 - ramp(&plane.ramps, reads.get(1, c.rim), c)[1]);
+            }
+            if d > -c.belly[1].abs() - EDGE / c.unit {
+                tone = mix3(tone, belly, 1.0 - ramp(&plane.ramps, reads.get(2, c.belly), c)[1]);
+            }
+            cloud.over(grain.apply([tone[0], tone[1], tone[2], 1.0]), here[5]);
         }
         cloud = cloud.scaled(core[3]);
     }
     land.scaled(1.0 - sky).plus(cloud.scaled(sky)).scaled(belong)
+}
+
+struct Grain<G: Fn() -> f32> {
+    factor: Option<f32>,
+    make: G,
+}
+
+impl<G: Fn() -> f32> Grain<G> {
+    fn apply(&mut self, color: [f32; 4]) -> [f32; 3] {
+        let k = *self.factor.get_or_insert_with(|| (self.make)());
+        [(color[0] * k).min(1.0), (color[1] * k).min(1.0), (color[2] * k).min(1.0)]
+    }
 }
 
 fn crossfade(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
@@ -471,6 +505,20 @@ pub fn frame(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
 }
 
 pub fn layers(a: &Bundle, b: &Bundle, s: f32) -> (RgbImage, RgbaImage) {
+    draw(a, b, s, &a.canvas)
+}
+
+fn dilate(cells: &[bool], grid: &Grid) -> Vec<bool> {
+    (0..cells.len())
+        .into_par_iter()
+        .map(|cell| {
+            let (i, j) = (cell % grid.w, cell / grid.w);
+            (j.saturating_sub(1)..(j + 2).min(grid.h)).any(|r| (i.saturating_sub(1)..(i + 2).min(grid.w)).any(|q| cells[r * grid.w + q]))
+        })
+        .collect()
+}
+
+pub fn draw(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8]) -> (RgbImage, RgbaImage) {
     let s = if s.is_finite() { s.clamp(0.0, 1.0) } else { 0.0 };
     let (a, b, s) = if !compatible(a, b) {
         if s < 0.5 {
@@ -486,11 +534,10 @@ pub fn layers(a: &Bundle, b: &Bundle, s: f32) -> (RgbImage, RgbaImage) {
         (a, b, s)
     };
     let (width, height) = (a.width, a.height);
-    if width == 0 || height == 0 || a.canvas_width == 0 || a.canvas_height == 0 {
+    if width == 0 || height == 0 || a.canvas_width == 0 || a.canvas_height == 0 || canvas.len() != (a.canvas_width * a.canvas_height * 3) as usize {
         return (RgbImage::new(width, height), RgbaImage::new(width, height));
     }
     let same = std::ptr::eq(a, b) || s == 0.0;
-    let canvas = RgbImage::from_raw(a.canvas_width, a.canvas_height, a.canvas.clone()).unwrap_or_else(|| RgbImage::new(a.canvas_width, a.canvas_height));
     let (xmap, ymap): (Cow<[f64]>, Cow<[f64]>) = if same {
         (Cow::Borrowed(&a.xmap), Cow::Borrowed(&a.ymap))
     } else {
@@ -498,31 +545,43 @@ pub fn layers(a: &Bundle, b: &Bundle, s: f32) -> (RgbImage, RgbaImage) {
         (Cow::Owned(blend(&a.xmap, &b.xmap)), Cow::Owned(blend(&a.ymap, &b.ymap)))
     };
     let ratio = if same { a.ratio } else { a.ratio.max(b.ratio) };
-    let mut picture = render::picture(&canvas, &xmap, &ymap, ratio, width, height);
-    let grid = a.grid();
+    let mut picture = render::picture((canvas, a.canvas_width, a.canvas_height), (&xmap, &ymap), ratio, (width, height));
+    let mut layer = RgbaImage::new(width, height);
     let decode = color::decode_table();
     let encode = color::encode_table();
+    let pad_on = |x: &Bundle| x.pad.as_chunks::<4>().0.iter().any(|p| p[3] > 0);
+    let look_on = |x: &Bundle| x.look.as_chunks::<4>().0.iter().any(|p| p[1] > 0);
+    let wanted = |x: &Bundle| pad_on(x) || look_on(x);
+    if !(wanted(a) || (!same && wanted(b))) {
+        return (picture, layer);
+    }
+    let grid = a.grid();
     let (w, h) = (width as usize, height as usize);
     let columns = probes(w, Q, grid.w);
     let rows = probes(h, Q, grid.h);
-    let weights = |x: &Bundle| -> Vec<f32> { x.pad.as_chunks::<4>().0.iter().map(|p| p[3] as f32 / 255.0).collect() };
-    let pad_on = |x: &Bundle| x.pad.as_chunks::<4>().0.iter().any(|p| p[3] > 0);
-    if pad_on(a) || (!same && pad_on(b)) {
-        let (wa, wb) = (weights(a), if same { Vec::new() } else { weights(b) });
+    let planes: Vec<Plane> = if same { vec![plane(a, decode)] } else { vec![plane(a, decode), plane(b, decode)] };
+    let shares: Vec<(f32, &Bundle)> = if same { vec![(1.0, a)] } else { vec![(1.0 - s, a), (s, b)] };
+    let padded = dilate(&(0..grid.w * grid.h).map(|c| planes.iter().any(|p| p.pad[c][3] > 0.0)).collect::<Vec<bool>>(), &grid);
+    if padded.iter().any(|p| *p) {
         let buffer: &mut [u8] = &mut picture;
         buffer.par_chunks_mut(w * 3).enumerate().for_each(|(y, line)| {
             let row = &rows[y];
+            if !padded[row.a * grid.w..(row.a + 1) * grid.w].iter().any(|p| *p) {
+                return;
+            }
             for (x, px) in line.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                 let column = &columns[x];
-                let mut weight = bilinear(&wa, grid.w, column, row) * if same { 1.0 } else { 1.0 - s };
-                let mut calm = color4(&a.pad, grid.w, column, row, decode).map(|v| v * weight);
-                if !same {
-                    let wb_here = bilinear(&wb, grid.w, column, row) * s;
-                    let other = color4(&b.pad, grid.w, column, row, decode);
-                    for k in 0..3 {
-                        calm[k] += other[k] * wb_here;
+                if !padded[row.a * grid.w + column.a] {
+                    continue;
+                }
+                let (mut weight, mut calm) = (0.0f32, [0.0f32; 3]);
+                for (plane, (share, _)) in planes.iter().zip(&shares) {
+                    let here = bilinear4(&plane.pad, grid.w, column, row);
+                    let k = here[3] * share;
+                    weight += k;
+                    for c in 0..3 {
+                        calm[c] += here[c] * k;
                     }
-                    weight += wb_here;
                 }
                 if weight <= 0.0 {
                     continue;
@@ -534,32 +593,23 @@ pub fn layers(a: &Bundle, b: &Bundle, s: f32) -> (RgbImage, RgbaImage) {
             }
         });
     }
-    let mut layer = RgbaImage::new(width, height);
-    let belonging = |x: &Bundle| x.look.as_chunks::<4>().0.iter().any(|p| p[1] > 0);
-    if !(belonging(a) || (!same && belonging(b))) {
+    let c = a.constants;
+    let fields: Vec<&[f32]> = shares.iter().map(|(_, x)| &x.field[..]).collect();
+    let active = dilate(&(0..grid.w * grid.h).map(|cell| planes.iter().zip(&fields).any(|(p, f)| p.look[cell][1] > 0.0 && f[cell] < c.reach)).collect::<Vec<bool>>(), &grid);
+    if !active.iter().any(|a| *a) {
         return (picture, layer);
     }
-    let c = a.constants;
-    let u = c.unit;
-    let near = |x: &Bundle, cell: usize| x.look[cell * 4 + 1] > 0 && x.field[cell] < c.reach + 0.25;
-    let active: Vec<bool> = (0..grid.w * grid.h)
-        .map(|cell| {
-            let (i, j) = (cell % grid.w, cell / grid.w);
-            (j.saturating_sub(1)..(j + 2).min(grid.h)).any(|r| (i.saturating_sub(1)..(i + 2).min(grid.w)).any(|q| near(a, r * grid.w + q) || (!same && near(b, r * grid.w + q))))
-        })
-        .collect();
     let raw = picture.as_raw();
     let block: Vec<[f32; 2]> = (0..grid.w * grid.h)
         .into_par_iter()
         .map(|cell| {
             if !active[cell] {
-                return [0.0, 0.0];
+                return [0.0, 1.0];
             }
             let (i, j) = (cell % grid.w, cell / grid.w);
             let (mut sum, mut count) = (0.0f32, 0.0f32);
             for y in j * Q..((j + 1) * Q).min(h) {
-                for x in i * Q..((i + 1) * Q).min(w) {
-                    let p = &raw[(y * w + x) * 3..(y * w + x) * 3 + 3];
+                for p in raw[(y * w + i * Q) * 3..(y * w + ((i + 1) * Q).min(w)) * 3].as_chunks::<3>().0 {
                     sum += 0.2126 * decode[p[0] as usize] + 0.7152 * decode[p[1] as usize] + 0.0722 * decode[p[2] as usize];
                     count += 1.0;
                 }
@@ -572,13 +622,12 @@ pub fn layers(a: &Bundle, b: &Bundle, s: f32) -> (RgbImage, RgbaImage) {
     let paint_grid = a.paint_grid();
     let tint_columns = probes(w, P, paint_grid.w);
     let tint_rows = probes(h, P, paint_grid.h);
-    let field_at = |x: &Bundle, px: f32, py: f32| grid.linear(&x.field, grid.at(px), grid.at(py));
-    let read = |px: f32, py: f32| if same { field_at(a, px, py) } else { field_at(a, px, py) * (1.0 - s) + field_at(b, px, py) * s };
+    let u = c.unit;
     let out: &mut [u8] = &mut layer;
     out.par_chunks_mut(w * 4).enumerate().for_each(|(y, line)| {
         let row = &rows[y];
-        let j = row.a.min(grid.h - 1);
-        if !(0..grid.w).any(|i| active[j * grid.w + i]) {
+        let j = row.a;
+        if !active[j * grid.w..(j + 1) * grid.w].iter().any(|a| *a) {
             return;
         }
         let tint_row = &tint_rows[y];
@@ -588,26 +637,33 @@ pub fn layers(a: &Bundle, b: &Bundle, s: f32) -> (RgbImage, RgbaImage) {
             if !active[j * grid.w + column.a] {
                 continue;
             }
-            let d = if same { bilinear(&a.field, grid.w, column, row) } else { bilinear(&a.field, grid.w, column, row) * (1.0 - s) + bilinear(&b.field, grid.w, column, row) * s };
+            let d = if same { bilinear(fields[0], grid.w, column, row) } else { fields.iter().zip(&shares).map(|(f, (share, _))| bilinear(f, grid.w, column, row) * share).sum::<f32>() };
             if d > c.reach {
                 continue;
             }
             let fx = x as f32 + 0.5;
-            let reads = Reads {
-                d,
-                shadow: read(fx + c.shadow[0] * u, py + c.shadow[1] * u),
-                rim: read(fx + c.rim[0] * u, py + c.rim[1] * u),
-                belly: read(fx + c.belly[0] * u, py + c.belly[1] * u),
+            let offset = |o: [f32; 2]| {
+                let (gx, gy) = (grid.at(fx + o[0] * u), grid.at(py + o[1] * u));
+                if same {
+                    grid.linear(fields[0], gx, gy)
+                } else {
+                    fields.iter().zip(&shares).map(|(f, (share, _))| grid.linear(f, gx, gy) * share).sum::<f32>()
+                }
             };
-            let p = &raw[(y * w + x) * 3..(y * w + x) * 3 + 3];
-            let lum = 0.2126 * decode[p[0] as usize] + 0.7152 * decode[p[1] as usize] + 0.0722 * decode[p[2] as usize];
-            let detail = (lum - bilinear(&means, grid.w, column, row)) * block[j * grid.w + column.a][1];
-            let grain = (1.0 + (detail / c.grain_scale).clamp(-1.0, 1.0) * c.grain).powi(3);
-            let at = At { column, row, tint_column: &tint_columns[x], tint_row };
-            let mut total = paint(a, &reads, &at, grain, decode);
-            if !same {
-                total = total.scaled(1.0 - s).plus(paint(b, &reads, &at, grain, decode).scaled(s));
-            }
+            let mut reads = Reads { d, at: offset, shadow: None, rim: None, belly: None };
+            let make = || {
+                let p = &raw[(y * w + x) * 3..(y * w + x) * 3 + 3];
+                let lum = 0.2126 * decode[p[0] as usize] + 0.7152 * decode[p[1] as usize] + 0.0722 * decode[p[2] as usize];
+                let detail = (lum - bilinear(&means, grid.w, column, row)) * block[j * grid.w + column.a][1];
+                (1.0 + (detail / c.grain_scale).clamp(-1.0, 1.0) * c.grain).powi(3)
+            };
+            let mut grain = Grain { factor: None, make };
+            let at = At { column, row, tint_column: &tint_columns[x], tint_row, grid: grid.w, tints: paint_grid.w };
+            let total = if same {
+                paint(&a.constants, &planes[0], &mut reads, &at, &mut grain)
+            } else {
+                planes.iter().zip(&shares).fold(Paint::default(), |sum, (plane, (share, x))| sum.plus(paint(&x.constants, plane, &mut reads, &at, &mut grain).scaled(*share)))
+            };
             if total.a <= 1e-4 {
                 continue;
             }
@@ -639,9 +695,10 @@ mod tests {
     fn ramps_cover_the_land_and_fade_outside() {
         let table = ramps(100.0);
         let c = Constants { unit: 100.0, ramp_low: RAMP_RANGE.0, ramp_high: RAMP_RANGE.1, reach: REACH, shadow: SHADOW_AT, rim: RIM_AT, belly: BELLY_AT, grain: 0.0, grain_scale: 1.0, grain_floor: 0.03, core_lift: 0.0, core_drop: 0.0, volume_lit: 0.0, volume_dark: 0.0 };
-        let inside = ramp(&table, 0, -0.6, &c);
-        assert!(inside[1] > 0.99 && inside[3] > 0.99 && ramp(&table, 1, -0.6, &c)[0] > 0.99);
-        let outside = ramp(&table, 0, 0.6, &c);
+        let rows: Vec<[f32; 8]> = (0..RAMP).map(|k| std::array::from_fn(|c| table[((c / 4) * RAMP + k) * 4 + c % 4] as f32 / 255.0)).collect();
+        let inside = ramp(&rows, -0.6, &c);
+        assert!(inside[1] > 0.99 && inside[3] > 0.99 && inside[4] > 0.99);
+        let outside = ramp(&rows, 0.6, &c);
         assert!(outside.iter().all(|v| *v < 0.01));
     }
 }
