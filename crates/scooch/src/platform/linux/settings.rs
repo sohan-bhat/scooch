@@ -82,23 +82,15 @@ pub fn xfconf_list() -> Vec<String> {
 
 pub struct Plasma;
 
-pub fn plasma_key(screen: i64) -> String {
-    format!("screen {screen} Image")
-}
-
-fn plasma_screen(key: &str) -> Option<i64> {
-    key.strip_prefix("screen ")?.strip_suffix(" Image")?.parse().ok()
-}
-
 impl Settings for Plasma {
     fn get(&self, key: &str) -> Result<Option<String>> {
-        let screen = plasma_screen(key).unwrap_or(0);
-        Ok(plasma::containment(screen)?.and_then(|containment| containment.image))
+        let id = kde::record_id(key).ok_or_else(|| anyhow::anyhow!("Scooch does not know the Plasma setting {key}."))?;
+        Ok(Some(plasma::evaluate(&kde::read_image_script(id))?.trim_end_matches('\n').to_string()))
     }
 
     fn set(&self, key: &str, value: Option<&str>) -> Result<()> {
-        let screen = plasma_screen(key).unwrap_or(0);
-        plasma::evaluate(&kde::wallpaper_script(screen, value.unwrap_or("")))?;
+        let id = kde::record_id(key).ok_or_else(|| anyhow::anyhow!("Scooch does not know the Plasma setting {key}."))?;
+        plasma::evaluate(&kde::wallpaper_script(id, value.unwrap_or("")))?;
         Ok(())
     }
 }
@@ -107,10 +99,14 @@ pub fn record_file() -> PathBuf {
     record::file(&crate::state::folder())
 }
 
-pub fn write(settings: &dyn Settings, wanted: &[(String, String)], in_effect: &str, original: impl Fn(Option<&str>) -> bool) -> Result<Outcome> {
-    record::write(settings, &record_file(), wanted, in_effect, original)
+pub fn write(settings: &dyn Settings, desktop: &str, wanted: &[(String, String)], pictures: &[String], target: &Path, read: impl Fn(&str) -> Option<PathBuf>) -> Result<Outcome> {
+    let store = crate::state::Store::open();
+    let owned = |value: Option<&str>| value.and_then(&read).is_some_and(|path| store.owns(&path));
+    let original = |value: Option<&str>| value.and_then(&read).is_some_and(|old| crate::state::same(&old, target));
+    let request = record::Request { desktop, wanted, pictures, target_is_ours: store.owns(target) };
+    record::write(settings, &record_file(), &request, original, owned)
 }
 
-pub fn same_path(text: Option<&str>, path: &Path, read: impl Fn(&str) -> Option<PathBuf>) -> bool {
-    text.and_then(read).is_some_and(|old| crate::state::same(&old, path))
+pub fn scale_setting(schema: &str, key: &str) -> Option<i64> {
+    gsetting(schema, key).and_then(|text| text.trim().trim_start_matches("uint32 ").parse().ok())
 }

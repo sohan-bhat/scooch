@@ -259,31 +259,142 @@ pub fn available(frame: &Rect, screen: i64, panels: &[Panel]) -> Rect {
     super::geometry::subtract(frame, edges)
 }
 
-pub const PANELS_SCRIPT: &str = "var out = []; var all = panels(); for (var i = 0; i < all.length; i++) { var p = all[i]; out.push({screen: p.screen, location: p.location, height: p.height, hiding: p.hiding}); } print(JSON.stringify(out));";
+pub const GENERAL_KEYS: [&str; 9] = ["positions", "sortMode", "iconSize", "labelWidth", "textLines", "arrangement", "alignment", "url", "showHiddenFiles"];
 
-pub fn wallpaper_script(screen: i64, uri: &str) -> String {
-    let text = serde_json::to_string(uri).unwrap_or_else(|_| "\"\"".into());
+pub fn state_script() -> String {
+    let keys = serde_json::to_string(&GENERAL_KEYS).unwrap_or_else(|_| "[]".into());
     format!(
-        "var all = desktops(); for (var i = 0; i < all.length; i++) {{ var d = all[i]; if (d.screen != {screen}) continue; d.wallpaperPlugin = 'org.kde.image'; d.currentConfigGroup = ['Wallpaper', 'org.kde.image', 'General']; d.writeConfig('Image', {text}); }}"
+        "var out = {{activity: currentActivity(), screens: [], desktops: [], panels: []}}; \
+for (var i = 0; i < screenCount; i++) {{ var g = screenGeometry(i); out.screens.push({{id: i, x: g.x, y: g.y, width: g.width, height: g.height}}); }} \
+var keys = {keys}; var all = desktopsForActivity(currentActivity()); \
+for (var j = 0; j < all.length; j++) {{ var d = all[j]; var item = {{id: d.id, screen: d.screen, type: d.type, wallpaper: d.wallpaperPlugin, general: {{}}}}; \
+d.currentConfigGroup = ['General']; for (var k = 0; k < keys.length; k++) {{ var v = d.readConfig(keys[k], ''); item.general[keys[k]] = (v === undefined || v === null) ? '' : String(v); }} \
+d.currentConfigGroup = ['Wallpaper', 'org.kde.image', 'General']; var image = d.readConfig('Image', ''); item.image = (image === undefined || image === null) ? '' : String(image); d.currentConfigGroup = []; out.desktops.push(item); }} \
+var ps = panels(); for (var p = 0; p < ps.length; p++) {{ out.panels.push({{screen: ps[p].screen, location: ps[p].location, height: ps[p].height, hiding: ps[p].hiding}}); }} \
+print(JSON.stringify(out));"
     )
 }
 
+pub fn read_image_script(id: i64) -> String {
+    format!("var d = desktopById({id}); if (d) {{ d.currentConfigGroup = ['Wallpaper', 'org.kde.image', 'General']; var v = d.readConfig('Image', ''); print((v === undefined || v === null) ? '' : String(v)); }}")
+}
+
+pub fn wallpaper_script(id: i64, uri: &str) -> String {
+    let text = serde_json::to_string(uri).unwrap_or_else(|_| "\"\"".into());
+    format!("var d = desktopById({id}); if (d) {{ d.wallpaperPlugin = 'org.kde.image'; d.currentConfigGroup = ['Wallpaper', 'org.kde.image', 'General']; d.writeConfig('Image', {text}); }}")
+}
+
+pub fn record_key(id: i64) -> String {
+    format!("containment {id} Image")
+}
+
+pub fn record_id(key: &str) -> Option<i64> {
+    key.strip_prefix("containment ")?.strip_suffix(" Image")?.parse().ok()
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct State {
+    pub activity: Option<String>,
+    pub screens: Vec<(i64, Rect)>,
+    pub desktops: Vec<Containment>,
+    pub panels: Vec<Panel>,
+}
+
+fn text_of(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(items) => items.iter().map(text_of).collect::<Vec<_>>().join(","),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+pub fn state(json: &str) -> Option<State> {
+    let root: serde_json::Value = serde_json::from_str(json.trim()).ok()?;
+    let screens = root.get("screens")?.as_array()?.iter().filter_map(|screen| {
+        let number = |key: &str| screen.get(key).and_then(serde_json::Value::as_f64);
+        Some((screen.get("id")?.as_i64()?, Rect { x: number("x")? as f32, y: number("y")? as f32, w: number("width")? as f32, h: number("height")? as f32 }))
+    });
+    let activity = root.get("activity").and_then(serde_json::Value::as_str).filter(|id| !id.is_empty()).map(str::to_string);
+    let desktops = root.get("desktops")?.as_array()?.iter().filter_map(|desktop| {
+        let general = desktop.get("general").and_then(serde_json::Value::as_object).map(|map| map.iter().map(|(key, value)| (key.clone(), text_of(value))).collect()).unwrap_or_default();
+        Some(Containment {
+            id: desktop.get("id")?.as_i64()?.to_string(),
+            screen: desktop.get("screen").and_then(serde_json::Value::as_i64).unwrap_or(-1),
+            activity: activity.clone(),
+            plugin: desktop.get("type").map(text_of).unwrap_or_default(),
+            wallpaper_plugin: desktop.get("wallpaper").map(text_of).filter(|plugin| !plugin.is_empty()),
+            general,
+            image: desktop.get("image").map(text_of),
+        })
+    });
+    let panels = root.get("panels").map(|value| panels(&value.to_string())).unwrap_or_default();
+    Some(State { activity: activity.clone(), screens: screens.collect(), desktops: desktops.collect(), panels })
+}
+
+fn normalized(rects: &[Rect]) -> Vec<[f32; 4]> {
+    let left = rects.iter().map(|rect| rect.x).fold(f32::INFINITY, f32::min);
+    let top = rects.iter().map(|rect| rect.y).fold(f32::INFINITY, f32::min);
+    let right = rects.iter().map(|rect| rect.x + rect.w).fold(f32::NEG_INFINITY, f32::max);
+    let bottom = rects.iter().map(|rect| rect.y + rect.h).fold(f32::NEG_INFINITY, f32::max);
+    let (wide, tall) = ((right - left).max(1.0), (bottom - top).max(1.0));
+    rects.iter().map(|rect| [(rect.x - left) / wide, (rect.y - top) / tall, rect.w / wide, rect.h / tall]).collect()
+}
+
+pub fn match_screens(plasma: &[Rect], frames: &[Rect]) -> Vec<Option<usize>> {
+    let (one, two) = (normalized(plasma), normalized(frames));
+    let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
+    for (i, a) in one.iter().enumerate() {
+        for (j, b) in two.iter().enumerate() {
+            pairs.push((a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum(), i, j));
+        }
+    }
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out = vec![None; plasma.len()];
+    let mut taken = vec![false; frames.len()];
+    for (_, i, j) in pairs {
+        if out[i].is_none() && !taken[j] {
+            out[i] = Some(j);
+            taken[j] = true;
+        }
+    }
+    out
+}
+
+pub fn look_and_feel_wallpaper(defaults: &[Group]) -> Option<String> {
+    find(defaults, &["Wallpaper"])?.get("Image").map(str::trim).filter(|name| !name.is_empty()).map(str::to_string)
+}
+
+pub fn look_and_feel_package(kdeglobals: &[Group]) -> String {
+    find(kdeglobals, &["KDE"]).and_then(|group| group.get("LookAndFeelPackage")).map(str::trim).filter(|name| !name.is_empty()).unwrap_or("org.kde.breeze.desktop").to_string()
+}
+
+pub fn distance(size: (f64, f64), desired: (f64, f64)) -> f64 {
+    let desired_ratio = if desired.1 > 0.0 { desired.0 / desired.1 } else { 0.0 };
+    let candidate_ratio = if size.1 > 0.0 { size.0 / size.1 } else { f64::MAX };
+    let delta = size.0 - desired.0;
+    let delta = if delta >= 0.0 { delta } else { -delta * 2.0 };
+    (candidate_ratio - desired_ratio).abs() * 25000.0 + delta
+}
+
 pub fn best_image(files: &[PathBuf], width: f64, height: f64) -> Option<PathBuf> {
-    let want = if height > 0.0 { width / height } else { 16.0 / 9.0 };
-    let mut sized: Vec<(f64, f64, f64, &PathBuf)> = Vec::new();
-    for file in files {
+    let target = if width > 0.0 && height > 0.0 { (width, height) } else { (1920.0, 1080.0) };
+    let mut sorted: Vec<&PathBuf> = files.iter().collect();
+    sorted.sort();
+    let mut best: Option<(f64, &PathBuf)> = None;
+    for file in sorted {
         let Some(stem) = file.file_stem().and_then(|stem| stem.to_str()) else { continue };
         let Some((w, h)) = stem.split_once('x') else { continue };
         let (Ok(w), Ok(h)) = (w.parse::<f64>(), h.parse::<f64>()) else { continue };
-        if w > 0.0 && h > 0.0 {
-            sized.push(((w / h - want).abs(), w, h, file));
+        if w <= 0.0 || h <= 0.0 {
+            continue;
+        }
+        let gap = distance((w, h), target);
+        if best.is_none_or(|(least, _)| gap < least) {
+            best = Some((gap, file));
         }
     }
-    sized.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let best_ratio = sized.first()?.0;
-    let mut close: Vec<_> = sized.into_iter().filter(|entry| (entry.0 - best_ratio).abs() < 1e-6).collect();
-    close.sort_by(|a, b| a.1.total_cmp(&b.1));
-    close.iter().find(|entry| entry.1 >= width && entry.2 >= height).or(close.last()).map(|entry| entry.3.clone())
+    best.map(|(_, file)| file.clone())
 }
 
 #[cfg(test)]
@@ -376,15 +487,49 @@ mod tests {
     fn the_best_package_image_fits_the_screen() {
         let files: Vec<PathBuf> = ["1280x800.png", "1920x1080.png", "3840x2160.png", "1080x1920.png", "screenshot.png"].iter().map(PathBuf::from).collect();
         assert_eq!(best_image(&files, 1920.0, 1080.0), Some(PathBuf::from("1920x1080.png")));
-        assert_eq!(best_image(&files, 2560.0, 1440.0), Some(PathBuf::from("3840x2160.png")));
+        assert_eq!(best_image(&files, 2560.0, 1440.0), Some(PathBuf::from("1920x1080.png")));
+        assert_eq!(best_image(&files, 3840.0, 2160.0), Some(PathBuf::from("3840x2160.png")));
+        assert_eq!(distance((1920.0, 1080.0), (2560.0, 1440.0)), 1280.0);
         assert_eq!(best_image(&files, 1440.0, 900.0), Some(PathBuf::from("1280x800.png")));
         assert_eq!(best_image(&[], 1.0, 1.0), None);
     }
 
     #[test]
+    fn live_state_reads_screens_desktops_and_panels() {
+        let json = r#"{"activity":"a1","screens":[{"id":0,"x":1920,"y":0,"width":1920,"height":1080},{"id":1,"x":0,"y":0,"width":1920,"height":1080}],"desktops":[{"id":12,"screen":0,"type":"org.kde.plasma.folder","wallpaper":"org.kde.image","general":{"positions":"{\"1920x1080\":[\"1\"\\,\"17\"]}","sortMode":"-1"},"image":""}],"panels":[{"screen":0,"location":"bottom","height":44,"hiding":"none"}]}"#;
+        let found = state(json).unwrap();
+        assert_eq!(found.activity.as_deref(), Some("a1"));
+        assert_eq!(found.screens[0], (0, Rect { x: 1920.0, y: 0.0, w: 1920.0, h: 1080.0 }));
+        let desktop = &found.desktops[0];
+        assert_eq!((desktop.id.as_str(), desktop.screen, desktop.folder(), desktop.image.as_deref()), ("12", 0, true, Some("")));
+        assert_eq!(desktop.setting("sortMode"), Some(-1));
+        assert_eq!(found.panels.len(), 1);
+        assert!(state("not json").is_none());
+        assert!(state_script().contains("desktopsForActivity(currentActivity())"));
+        assert!(read_image_script(12).contains("readConfig('Image', '')"));
+        assert_eq!(record_id(&record_key(12)), Some(12));
+    }
+
+    #[test]
+    fn plasma_screens_match_outputs_by_layout_not_order() {
+        let plasma = [Rect { x: 1920.0, y: 0.0, w: 1920.0, h: 1080.0 }, Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 }];
+        let outputs = [Rect { x: 0.0, y: 0.0, w: 3840.0, h: 2160.0 }, Rect { x: 3840.0, y: 0.0, w: 3840.0, h: 2160.0 }];
+        assert_eq!(match_screens(&plasma, &outputs), vec![Some(1), Some(0)]);
+        assert_eq!(match_screens(&plasma[..1], &outputs[..1]), vec![Some(0)]);
+    }
+
+    #[test]
+    fn the_default_wallpaper_follows_the_look_and_feel() {
+        let defaults = parse("[Wallpaper]\nImage=Next\n");
+        assert_eq!(look_and_feel_wallpaper(&defaults), Some("Next".into()));
+        assert_eq!(look_and_feel_package(&parse("[KDE]\nLookAndFeelPackage=org.kde.breezedark.desktop\n")), "org.kde.breezedark.desktop");
+        assert_eq!(look_and_feel_package(&[]), "org.kde.breeze.desktop");
+    }
+
+    #[test]
     fn scripts_quote_the_picture() {
-        let script = wallpaper_script(1, "file:///p/it's \"here\".jpg");
-        assert!(script.contains("d.screen != 1"));
+        let script = wallpaper_script(7, "file:///p/it's \"here\".jpg");
+        assert!(script.contains("desktopById(7)"));
         assert!(script.contains("d.writeConfig('Image', \"file:///p/it's \\\"here\\\".jpg\")"));
         assert_eq!(resolution(&Rect { x: 0.0, y: 0.0, w: 1920.6, h: 1080.0 }), "1920x1080");
     }

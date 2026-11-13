@@ -30,7 +30,7 @@ pub fn install(exe: &Path) -> Result<()> {
 
 pub fn start(exe: &Path) -> Result<()> {
     let mut command = Command::new(exe);
-    command.arg("watch").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command.arg("watch").current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     unsafe {
         command.pre_exec(|| {
             libc::setsid();

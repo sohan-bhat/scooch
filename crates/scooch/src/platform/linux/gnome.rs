@@ -6,7 +6,8 @@ use crate::platform::Screen;
 use zbus::zvariant;
 use anyhow::{bail, Result};
 use scooch_core::Rect;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -128,12 +129,31 @@ impl Gnome {
 
     fn in_effect(&self) -> &'static str {
         let dark = gsetting("org.gnome.desktop.interface", "color-scheme").and_then(|text| gvariant::string(&text).or(Some(text))).is_some_and(|scheme| scheme.trim_matches('\'') == "prefer-dark");
-        if dark {
+        if dark && has_key("picture-uri-dark") {
             "picture-uri-dark"
         } else {
             "picture-uri"
         }
     }
+}
+
+pub fn background_keys() -> &'static BTreeSet<String> {
+    static KEYS: OnceLock<BTreeSet<String>> = OnceLock::new();
+    KEYS.get_or_init(|| {
+        super::tool::run("gsettings", &["list-keys", BACKGROUND]).ok().filter(|output| output.status.success()).map(|output| String::from_utf8_lossy(&output.stdout).lines().map(|line| line.trim().to_string()).filter(|line| !line.is_empty()).collect()).unwrap_or_default()
+    })
+}
+
+pub fn has_key(name: &str) -> bool {
+    let keys = background_keys();
+    if keys.is_empty() {
+        return name == "picture-uri" || name == "picture-options";
+    }
+    keys.contains(name)
+}
+
+fn read_value(text: &str) -> Option<PathBuf> {
+    gvariant::string(text).and_then(|uri| gio::location(&uri))
 }
 
 fn picture(uri: &str) -> Option<PathBuf> {
@@ -169,13 +189,12 @@ impl Shell for Gnome {
 
     fn set_wallpaper(&self, _screen: &Screen, path: &Path) -> Result<()> {
         let value = gvariant::quote(&gio::path_uri(path));
-        let wanted = vec![
-            (format!("{BACKGROUND} picture-uri"), value.clone()),
-            (format!("{BACKGROUND} picture-uri-dark"), value),
-            (format!("{BACKGROUND} picture-options"), "'zoom'".to_string()),
-        ];
-        let in_effect = format!("{BACKGROUND} {}", self.in_effect());
-        settings::write(&Gsettings, &wanted, &in_effect, |old| settings::same_path(old, path, |text| gvariant::string(text).and_then(|uri| gio::location(&uri))))?;
+        let pictures: Vec<String> = ["picture-uri", "picture-uri-dark"].iter().filter(|name| has_key(name)).map(|name| format!("{BACKGROUND} {name}")).collect();
+        let mut wanted: Vec<(String, String)> = pictures.iter().map(|key| (key.clone(), value.clone())).collect();
+        if has_key("picture-options") {
+            wanted.push((format!("{BACKGROUND} picture-options"), "'zoom'".to_string()));
+        }
+        settings::write(&Gsettings, "gnome", &wanted, &pictures, path, read_value)?;
         Ok(())
     }
 
@@ -186,6 +205,10 @@ impl Shell for Gnome {
 
     fn per_screen(&self) -> bool {
         false
+    }
+
+    fn x11_scale(&self) -> f32 {
+        super::tool::gtk_scale("org.gnome.desktop.interface", "scaling-factor")
     }
 
     fn tools(&self) -> &'static [&'static str] {

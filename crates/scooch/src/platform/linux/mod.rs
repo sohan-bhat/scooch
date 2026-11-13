@@ -72,6 +72,18 @@ mod system {
         fn primary(&self, _screens: &[Screen]) -> Option<usize> {
             None
         }
+        fn x11_scale(&self) -> f32 {
+            1.0
+        }
+        fn adjust(&self, session: Session, found: &mut [screens::Found]) {
+            if session != Session::X11 {
+                return;
+            }
+            let factor = self.x11_scale();
+            for each in found.iter_mut() {
+                each.screen = super::parse::geometry::scaled(&each.screen, factor);
+            }
+        }
         fn wallpaper(&self, screen: &Screen) -> Result<Option<PathBuf>>;
         fn set_wallpaper(&self, screen: &Screen, path: &Path) -> Result<()>;
         fn watches(&self) -> Watches;
@@ -100,6 +112,12 @@ mod system {
                 .map_err(|_| anyhow!("Scooch could not run {program}, so install it or check your PATH."))
         }
 
+        pub fn gtk_scale(schema: &str, key: &str) -> f32 {
+            let setting = super::super::settings::scale_setting(schema, key);
+            let dpi = super::super::screens::resources().and_then(|text| super::super::parse::geometry::xft_dpi(&text));
+            super::super::parse::geometry::x11_scale(setting, dpi)
+        }
+
         pub fn on_path(program: &str) -> Option<PathBuf> {
             let paths = std::env::var_os("PATH")?;
             std::env::split_paths(&paths).map(|folder| folder.join(OsStr::new(program))).find(|candidate| candidate.is_file())
@@ -110,13 +128,24 @@ mod system {
         use anyhow::{anyhow, Result};
         use serde::de::DeserializeOwned;
         use serde::Serialize;
-        use std::sync::OnceLock;
+        use std::sync::Mutex;
         use zbus::blocking::Connection;
         use zbus::zvariant::{DynamicType, Type};
 
+        static SESSION: Mutex<Option<Connection>> = Mutex::new(None);
+
         pub fn session() -> Result<Connection> {
-            static SESSION: OnceLock<Option<Connection>> = OnceLock::new();
-            SESSION.get_or_init(|| Connection::session().ok()).clone().ok_or_else(|| anyhow!("Scooch could not reach the session bus, so log in to a desktop session first."))
+            let mut slot = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(connection) = slot.as_ref() {
+                return Ok(connection.clone());
+            }
+            let connection = Connection::session().map_err(|_| anyhow!("Scooch could not reach the session bus, so log in to a desktop session first."))?;
+            *slot = Some(connection.clone());
+            Ok(connection)
+        }
+
+        pub fn forget() {
+            *SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         }
 
         pub fn call<B, R>(destination: &str, path: &str, interface: &str, method: &str, body: &B) -> Result<R>
@@ -124,7 +153,14 @@ mod system {
             B: Serialize + DynamicType,
             R: DeserializeOwned + Type,
         {
-            let reply = session()?.call_method(Some(destination), path, Some(interface), method, body)?;
+            let reply = match session()?.call_method(Some(destination), path, Some(interface), method, body) {
+                Ok(reply) => reply,
+                Err(zbus::Error::InputOutput(_)) => {
+                    forget();
+                    session()?.call_method(Some(destination), path, Some(interface), method, body)?
+                }
+                Err(error) => return Err(error.into()),
+            };
             Ok(reply.body().deserialize()?)
         }
 
@@ -143,7 +179,7 @@ mod system {
         let config = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
         Ok(match kind {
             Kind::Gnome => Box::new(gnome::Gnome { desktop: desktop.to_path_buf(), home, x11: session == Session::X11 }),
-            Kind::Kde => Box::new(kde::Kde { desktop: desktop.to_path_buf(), config }),
+            Kind::Kde => Box::new(kde::Kde { desktop: desktop.to_path_buf(), config, session }),
             Kind::Xfce => Box::new(xfce::Xfce { desktop: desktop.to_path_buf(), home, config, session }),
             Kind::Cinnamon => Box::new(cinnamon::Cinnamon { desktop: desktop.to_path_buf(), home, config, session }),
             Kind::Mate => Box::new(mate::Mate { desktop: desktop.to_path_buf(), home, config, session }),
@@ -172,7 +208,9 @@ mod system {
         }
 
         pub fn all_screens(&self) -> Result<Vec<screens::Found>> {
-            screens::read(self.session)
+            let mut found = screens::read(self.session)?;
+            self.shell.adjust(self.session, &mut found);
+            Ok(found)
         }
 
         fn pick(&self, found: Vec<screens::Found>) -> Vec<Screen> {

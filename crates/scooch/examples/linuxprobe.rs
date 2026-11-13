@@ -185,6 +185,12 @@ mod probe {
         p.line(format!("- desktop {:?}, version {}", p.kind, version(p.kind)));
         p.line(format!("- session {:?}, WAYLAND_DISPLAY {:?}, DISPLAY {:?}, XDG_SESSION_TYPE {:?}", p.session, std::env::var("WAYLAND_DISPLAY").ok(), std::env::var("DISPLAY").ok(), std::env::var("XDG_SESSION_TYPE").ok()));
         p.line(format!("- Desktop folder {}", p.desktop.display()));
+        let readiness = fs::read_to_string(p.out.join("readiness.txt")).unwrap_or_default();
+        for line in readiness.lines() {
+            p.line(format!("- session start {line}"));
+        }
+        p.line(format!("- Xft.dpi {:?}, X11 scale settings GNOME {:?} Cinnamon {:?} MATE {:?} Xfce {}", screens::resources().and_then(|text| scooch::platform::linux::parse::geometry::xft_dpi(&text)), settings::scale_setting("org.gnome.desktop.interface", "scaling-factor"), settings::scale_setting("org.cinnamon.desktop.interface", "scaling-factor"), settings::scale_setting("org.mate.interface", "window-scaling-factor"), xfce::scale()));
+        p.line(format!("- xfdesktop version {:?}", xfce::version()));
         p.line(format!("- SCOOCH_HOME {}", p.home.display()));
         for (name, found) in ["gio", "gsettings", "xdg-user-dir", "xfconf-query", "xfdesktop", "plasmashell", "kwriteconfig6", "kwriteconfig5", "nemo", "caja", "dconf", "gdbus"].iter().map(|name| (*name, tool::on_path(name))) {
             p.line(format!("- tool {name} {}", found.map_or("missing".into(), |path| path.display().to_string())));
@@ -291,7 +297,18 @@ mod probe {
 
     fn kde_facts(p: &mut Probe) {
         p.line(format!("- KDE_SESSION_VERSION {:?}, plasma6 by the adapter {}", std::env::var("KDE_SESSION_VERSION").ok(), kde::plasma6()));
-        p.line(format!("- current activity {:?}", kde::activity()));
+        let raw = kde::evaluate(&kde_rules::state_script());
+        p.raw(format!("live Plasma state {raw:?}"));
+        match raw.as_deref().ok().and_then(kde_rules::state) {
+            Some(state) => {
+                p.line(format!("- live activity {:?}, Plasma screens {:?}, panels {:?}", state.activity, state.screens, state.panels));
+                for desktop in &state.desktops {
+                    p.line(format!("- live desktop {} screen {} plugin {} wallpaper {:?} image {:?} general {:?}", desktop.id, desktop.screen, desktop.plugin, desktop.wallpaper_plugin, desktop.image, desktop.general));
+                }
+            }
+            None => p.line(format!("- live Plasma state unreadable {:?}", raw.err().map(|error| error.to_string()))),
+        }
+        p.line(format!("- default wallpaper package {:?}", kde::default_package()));
         let folder = kde::config_folder();
         for name in [kde_rules::APPLETS, kde_rules::SHELL, "kactivitymanagerdrc"] {
             let text = fs::read_to_string(folder.join(name)).unwrap_or_else(|error| format!("unreadable {error}"));
@@ -304,8 +321,6 @@ mod probe {
                 p.line(format!("  - {key} = `{value}`"));
             }
         }
-        p.line(format!("- panels {:?}", kde::evaluate(kde_rules::PANELS_SCRIPT)));
-        p.line(format!("- screens from the script {:?}", kde::evaluate("var out = []; for (var i = 0; i < screenCount; i++) { out.push(JSON.stringify(screenGeometry(i))); } print(out.join(' '));")));
     }
 
     fn xfce_facts(p: &mut Probe) {
@@ -322,7 +337,7 @@ mod probe {
                 p.raw(format!("{}\n{text}", entry.path().display()));
             }
         }
-        p.line(format!("- adapter work area {:?}, workspace {}", xfce::workarea(p.session).map(|rect| show(&rect)), xfce::workspace(p.session)));
+        p.line(format!("- adapter work area {:?}, workspace {}", xfce::workarea(p.session, true).map(|rect| show(&rect)), xfce::workspace(p.session)));
     }
 
     fn file_manager_facts(p: &mut Probe, program: &str, keys: &[&str]) {
@@ -848,7 +863,7 @@ mod probe {
                 let prefix = xfce_rules::backdrop_prefix(&screen.id, xfce::workspace(p.session));
                 vec![(Box::new(Xfconf) as Box<dyn record::Settings>, format!("{prefix}/last-image")), (Box::new(Xfconf), format!("{prefix}/image-style"))]
             }
-            Some(Kind::Kde) => vec![(Box::new(Plasma) as Box<dyn record::Settings>, settings::plasma_key(kde::number_of(screen)))],
+            Some(Kind::Kde) => kde::state().ok().and_then(|state| kde::containment(&state, screen).and_then(|desktop| desktop.id.parse::<i64>().ok())).map(|id| vec![(Box::new(Plasma) as Box<dyn record::Settings>, kde_rules::record_key(id))]).unwrap_or_default(),
             Some(Kind::Cinnamon) => ["org.cinnamon.desktop.background picture-uri", "org.cinnamon.desktop.background picture-options"].iter().map(|key| (Box::new(Gsettings) as Box<dyn record::Settings>, key.to_string())).collect(),
             Some(Kind::Mate) => ["org.mate.background picture-filename", "org.mate.background picture-options"].iter().map(|key| (Box::new(Gsettings) as Box<dyn record::Settings>, key.to_string())).collect(),
             _ => Vec::new(),
@@ -1006,18 +1021,14 @@ mod probe {
             }
         }
         let leftover = record::load(&record::file(&p.home));
-        if !leftover.settings.is_empty() {
-            p.line(format!("- a record was left, restoring it directly {:?}", leftover.settings));
-            let store: Option<Box<dyn record::Settings>> = match p.kind {
-                Some(Kind::Gnome) => Some(Box::new(Gsettings)),
-                Some(Kind::Xfce) => Some(Box::new(Xfconf)),
-                Some(Kind::Kde) => Some(Box::new(Plasma)),
-                Some(Kind::Cinnamon) | Some(Kind::Mate) => Some(Box::new(Gsettings)),
-                _ => None,
+        for (desktop, saved) in &leftover.desktops {
+            p.line(format!("- a record was left for {desktop}, restoring it directly {saved:?}"));
+            let store: Box<dyn record::Settings> = match desktop.as_str() {
+                "xfce" => Box::new(Xfconf),
+                "kde" => Box::new(Plasma),
+                _ => Box::new(Gsettings),
             };
-            if let Some(store) = store {
-                p.line(format!("- direct restore {:?}", record::restore(store.as_ref(), &record::file(&p.home), &leftover).map_err(|error| error.to_string())));
-            }
+            p.line(format!("- direct restore {:?}", record::restore(store.as_ref(), &record::file(&p.home), desktop).map_err(|error| error.to_string())));
         }
         let removed = fs::remove_dir_all(&p.home);
         p.line(format!("- temp folder removed {:?}", removed.map_err(|error| error.to_string())));

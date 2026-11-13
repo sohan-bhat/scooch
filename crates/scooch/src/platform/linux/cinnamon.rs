@@ -57,14 +57,22 @@ impl Cinnamon {
     }
 
     pub fn windows(&self) -> Vec<Window> {
-        let Ok(found) = screens::read(self.session) else { return Vec::new() };
+        let Ok(mut found) = screens::read(self.session) else { return Vec::new() };
+        let factor = self.x11_scale();
+        self.adjust(self.session, &mut found);
         let primary = found.iter().find(|found| found.primary).map(|found| found.screen.frame);
         if let Ok(rects) = work_rects() {
             if !rects.is_empty() {
-                return rects.into_iter().map(|(index, canvas)| Window { index, canvas, primary: primary.is_some_and(|frame| inside(&canvas, &frame)) }).collect();
+                return rects
+                    .into_iter()
+                    .map(|(index, rect)| {
+                        let canvas = Rect { x: (rect.x / factor).trunc(), y: (rect.y / factor).trunc(), w: (rect.w / factor).trunc(), h: (rect.h / factor).trunc() };
+                        Window { index, canvas, primary: primary.is_some_and(|frame| inside(&canvas, &frame)) }
+                    })
+                    .collect();
             }
         }
-        let work = if self.session == Session::X11 { screens::cardinals("_NET_WORKAREA").ok().and_then(|values| super::parse::xfce::workarea(&values, 0)) } else { None };
+        let work = if self.session == Session::X11 { screens::cardinals("_NET_WORKAREA").ok().and_then(|values| super::parse::xfce::workarea(&values, 0)).map(|work| Rect { x: work.x / factor, y: work.y / factor, w: work.w / factor, h: work.h / factor }) } else { None };
         found
             .iter()
             .enumerate()
@@ -131,8 +139,8 @@ impl Shell for Cinnamon {
 
     fn set_wallpaper(&self, _screen: &Screen, path: &Path) -> Result<()> {
         let wanted = vec![(format!("{BACKGROUND} picture-uri"), gvariant::quote(&gio::path_uri(path))), (format!("{BACKGROUND} picture-options"), "'zoom'".to_string())];
-        let in_effect = format!("{BACKGROUND} picture-uri");
-        settings::write(&Gsettings, &wanted, &in_effect, |old| settings::same_path(old, path, |text| gvariant::string(text).and_then(|uri| gio::location(&uri))))?;
+        let pictures = vec![format!("{BACKGROUND} picture-uri")];
+        settings::write(&Gsettings, "cinnamon", &wanted, &pictures, path, |text| gvariant::string(text).and_then(|uri| gio::location(&uri)))?;
         Ok(())
     }
 
@@ -145,6 +153,14 @@ impl Shell for Cinnamon {
 
     fn per_screen(&self) -> bool {
         false
+    }
+
+    fn x11_scale(&self) -> f32 {
+        if self.session == Session::X11 {
+            super::tool::gtk_scale("org.cinnamon.desktop.interface", "scaling-factor")
+        } else {
+            1.0
+        }
     }
 
     fn tools(&self) -> &'static [&'static str] {

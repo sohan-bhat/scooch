@@ -37,7 +37,8 @@ impl Mate {
         let default = gsetting("org.mate.caja.icon-view", "default-zoom-level").map_or(3, |text| caja::zoom_index(&text));
         let lines = gsetting(DESKTOP, "text-ellipsis-limit").and_then(|text| text.trim().parse::<f64>().ok()).filter(|lines| *lines > 0.0).unwrap_or(3.0);
         let size = screens.iter().fold((0.0f64, 0.0f64), |(w, h), screen| (w.max((screen.frame.x + screen.frame.w) as f64), h.max((screen.frame.y + screen.frame.h) as f64)));
-        let work = if self.session == Session::X11 { screens::cardinals("_NET_WORKAREA").unwrap_or_default() } else { Vec::new() };
+        let factor = self.x11_scale().max(1.0) as u32;
+        let work: Vec<u32> = if self.session == Session::X11 { screens::cardinals("_NET_WORKAREA").unwrap_or_default().into_iter().map(|value| value / factor).collect() } else { Vec::new() };
         let [top, _, left, _] = caja::margins(&work, size);
         Layout { zoom: caja::zoom(groups, default), left, top, lines }
     }
@@ -79,8 +80,8 @@ impl Shell for Mate {
 
     fn set_wallpaper(&self, _screen: &Screen, path: &Path) -> Result<()> {
         let wanted = vec![(format!("{BACKGROUND} picture-filename"), gvariant::quote(&path.to_string_lossy())), (format!("{BACKGROUND} picture-options"), "'zoom'".to_string())];
-        let in_effect = format!("{BACKGROUND} picture-filename");
-        settings::write(&Gsettings, &wanted, &in_effect, |old| settings::same_path(old, path, |text| gvariant::string(text).and_then(|value| gio::location(&value))))?;
+        let pictures = vec![format!("{BACKGROUND} picture-filename")];
+        settings::write(&Gsettings, "mate", &wanted, &pictures, path, |text| gvariant::string(text).and_then(|value| gio::location(&value)))?;
         Ok(())
     }
 
@@ -93,6 +94,14 @@ impl Shell for Mate {
 
     fn per_screen(&self) -> bool {
         false
+    }
+
+    fn x11_scale(&self) -> f32 {
+        if self.session == Session::X11 {
+            super::tool::gtk_scale("org.mate.interface", "window-scaling-factor")
+        } else {
+            1.0
+        }
     }
 
     fn tools(&self) -> &'static [&'static str] {

@@ -9,6 +9,7 @@ use anyhow::Result;
 use scooch_core::Rect;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 pub struct Xfce {
     pub desktop: PathBuf,
@@ -25,17 +26,35 @@ fn number(property: &str) -> Option<i64> {
     xfconf(property)?.trim().parse().ok()
 }
 
-pub fn workarea(session: Session) -> Option<Rect> {
+pub fn workarea(session: Session, current: bool) -> Option<Rect> {
     if session != Session::X11 {
         return None;
     }
     let values = screens::cardinals("_NET_WORKAREA").ok()?;
-    let desktop = screens::cardinals("_NET_CURRENT_DESKTOP").ok().and_then(|values| values.first().copied()).unwrap_or(0) as usize;
+    let desktop = if current { screens::cardinals("_NET_CURRENT_DESKTOP").ok().and_then(|values| values.first().copied()).unwrap_or(0) as usize } else { 0 };
     xfce::workarea(&values, desktop).or_else(|| xfce::workarea(&values, 0))
 }
 
+pub fn version() -> Option<(u32, u32)> {
+    static VERSION: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    *VERSION.get_or_init(|| super::tool::run("xfdesktop", &["--version"]).ok().and_then(|output| xfce::version(&String::from_utf8_lossy(&output.stdout))))
+}
+
+pub fn scale() -> i64 {
+    super::tool::run("xfconf-query", &["-c", "xsettings", "-p", "/Gdk/WindowScalingFactor"])
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8_lossy(&output.stdout).trim().parse::<i64>().ok())
+        .filter(|factor| *factor > 0)
+        .unwrap_or(1)
+}
+
+fn shrink(rect: Rect, factor: f32) -> Rect {
+    Rect { x: (rect.x / factor).trunc(), y: (rect.y / factor).trunc(), w: (rect.w / factor).trunc(), h: (rect.h / factor).trunc() }
+}
+
 pub fn workspace(session: Session) -> i64 {
-    if flag("/backdrop/single-workspace-mode", false) {
+    if flag("/backdrop/single-workspace-mode", xfce::single_workspace_default(version())) {
         return number("/backdrop/single-workspace-number").unwrap_or(0);
     }
     if session != Session::X11 {
@@ -88,7 +107,8 @@ impl Shell for Xfce {
             return Ok(Vec::new());
         }
         let icon = number("/desktop-icons/icon-size").map_or(xfce::DEFAULT_ICON_SIZE, |size| size as f64);
-        let work = workarea(self.session);
+        let factor = if self.session == Session::X11 { scale() } else { 1 };
+        let work = workarea(self.session, true).map(|work| shrink(work, factor as f32));
         let mut found = Vec::new();
         if let Some(configs) = self.configs() {
             for screen in screens {
@@ -105,9 +125,10 @@ impl Shell for Xfce {
         }
         let Some(positions) = self.rc() else { return Ok(found) };
         let primary_only = flag("/desktop-icons/primary", false);
-        let area = match (primary_only, work) {
-            (true, work) => screens.first().map(|screen| work.and_then(|work| intersect(&work, &screen.frame)).unwrap_or(screen.frame)),
-            (false, Some(work)) => Some(work),
+        let single = workarea(self.session, false).map(|work| xfce::inset_area(&work, factor));
+        let area = match (primary_only, single) {
+            (true, _) => screens.first().map(|screen| work.and_then(|work| intersect(&work, &screen.frame)).unwrap_or(screen.frame)),
+            (false, Some(single)) => Some(single),
             (false, None) => screens.first().map(|screen| screen.frame),
         };
         let Some(grid) = area.and_then(|area| xfce::grid(&area, icon, &STYLE)) else { return Ok(found) };
@@ -129,7 +150,8 @@ impl Shell for Xfce {
         let property = self.property(screen);
         let style = format!("{}/image-style", property.trim_end_matches("/last-image"));
         let wanted = vec![(property.clone(), path.to_string_lossy().into_owned()), (style, "5".to_string())];
-        settings::write(&Xfconf, &wanted, &property, |old| old.is_some_and(|old| crate::state::same(Path::new(old), path)))?;
+        let pictures = vec![property];
+        settings::write(&Xfconf, "xfce", &wanted, &pictures, path, |text| Some(PathBuf::from(text)).filter(|path| path.is_absolute()))?;
         Ok(())
     }
 
@@ -139,6 +161,10 @@ impl Shell for Xfce {
 
     fn per_screen(&self) -> bool {
         true
+    }
+
+    fn x11_scale(&self) -> f32 {
+        scale() as f32
     }
 
     fn tools(&self) -> &'static [&'static str] {
