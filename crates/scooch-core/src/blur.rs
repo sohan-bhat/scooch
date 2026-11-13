@@ -81,6 +81,7 @@ pub fn gaussian_parallel(values: &[f32], width: usize, height: usize, sigma: f32
     }
 }
 
+#[cfg(test)]
 pub fn boxes_parallel(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
     if width == 0 || height == 0 || values.len() != width * height || sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
         return values.to_vec();
@@ -304,6 +305,170 @@ fn boxed(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
     a
 }
 
+const ONE: f64 = (1u64 << 24) as f64;
+
+pub type Area = [usize; 4];
+
+pub fn reach(sigma: f32) -> usize {
+    if sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
+        0
+    } else if sigma <= EXACT_LIMIT {
+        kernel(sigma).len() / 2
+    } else {
+        radii(sigma).iter().sum()
+    }
+}
+
+pub fn box_reach(sigma: f32) -> usize {
+    if sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
+        0
+    } else {
+        radii(sigma).iter().sum()
+    }
+}
+
+pub fn boxes_fixed_into(values: &[f32], out: &mut [f32], width: usize, height: usize, sigma: f32, area: Area) {
+    let [x0, y0, x1, y1] = [area[0], area[1], area[2].min(width), area[3].min(height)];
+    if x0 >= x1 || y0 >= y1 || values.len() != width * height || out.len() != width * height {
+        return;
+    }
+    if sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
+        for y in y0..y1 {
+            out[y * width + x0..y * width + x1].copy_from_slice(&values[y * width + x0..y * width + x1]);
+        }
+    } else {
+        boxes_into(values, out, width, height, sigma, [x0, y0, x1, y1]);
+    }
+}
+
+#[cfg(test)]
+pub fn fixed(values: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
+    let mut out = vec![0.0f32; values.len()];
+    fixed_into(values, &mut out, width, height, sigma, [0, 0, width, height]);
+    out
+}
+
+pub fn fixed_into(values: &[f32], out: &mut [f32], width: usize, height: usize, sigma: f32, area: Area) {
+    let [x0, y0, x1, y1] = [area[0], area[1], area[2].min(width), area[3].min(height)];
+    if x0 >= x1 || y0 >= y1 || values.len() != width * height || out.len() != width * height {
+        return;
+    }
+    if sigma.is_nan() || sigma <= 0.0 || sigma.is_infinite() {
+        for y in y0..y1 {
+            out[y * width + x0..y * width + x1].copy_from_slice(&values[y * width + x0..y * width + x1]);
+        }
+    } else if sigma <= EXACT_LIMIT {
+        taps_into(values, out, width, height, sigma, [x0, y0, x1, y1]);
+    } else {
+        boxes_into(values, out, width, height, sigma, [x0, y0, x1, y1]);
+    }
+}
+
+fn taps_into(values: &[f32], out: &mut [f32], width: usize, height: usize, sigma: f32, [x0, y0, x1, y1]: Area) {
+    let weights = kernel(sigma);
+    let radius = weights.len() / 2;
+    let (r0, r1) = (y0.saturating_sub(radius), (y1 + radius).min(height));
+    let span = x1 - x0;
+    let mut across = vec![0.0f32; span * (r1 - r0)];
+    across.par_chunks_mut(span).enumerate().for_each(|(k, line)| {
+        let row = &values[(r0 + k) * width..(r0 + k + 1) * width];
+        for (i, target) in line.iter_mut().enumerate() {
+            let x = x0 + i;
+            let mut acc = 0.0f32;
+            for (t, w) in weights.iter().enumerate() {
+                acc += w * row[(x + t).saturating_sub(radius).min(width - 1)];
+            }
+            *target = acc;
+        }
+    });
+    out.par_chunks_mut(width).enumerate().skip(y0).take(y1 - y0).for_each(|(y, line)| {
+        for (i, target) in line[x0..x1].iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for (t, w) in weights.iter().enumerate() {
+                let source = (y + t).saturating_sub(radius).min(height - 1);
+                acc += w * across[(source - r0) * span + i];
+            }
+            *target = acc;
+        }
+    });
+}
+
+fn share(sum: i64, count: i64) -> i64 {
+    (2 * sum + count).div_euclid(2 * count)
+}
+
+fn boxes_into(values: &[f32], out: &mut [f32], width: usize, height: usize, sigma: f32, [x0, y0, x1, y1]: Area) {
+    let passes: Vec<usize> = radii(sigma).into_iter().filter(|r| *r > 0).collect();
+    let mut areas = vec![[x0, y0, x1, y1]];
+    for radius in passes.iter().rev() {
+        let [a, b, c, d] = areas[areas.len() - 1];
+        let tall = [a, b.saturating_sub(*radius), c, (d + radius).min(height)];
+        areas.push(tall);
+        areas.push([a.saturating_sub(*radius), tall[1], (c + radius).min(width), tall[3]]);
+    }
+    let outer = areas[areas.len() - 1];
+    let (ow, oh) = (outer[2] - outer[0], outer[3] - outer[1]);
+    let at = |x: usize, y: usize| (y - outer[1]) * ow + (x - outer[0]);
+    let mut a = vec![0i64; ow * oh];
+    a.par_chunks_mut(ow).enumerate().for_each(|(k, line)| {
+        let row = &values[(outer[1] + k) * width + outer[0]..(outer[1] + k) * width + outer[2]];
+        for (q, v) in line.iter_mut().zip(row) {
+            *q = (*v as f64 * ONE).round() as i64;
+        }
+    });
+    let mut b = vec![0i64; ow * oh];
+    for (step, radius) in passes.iter().enumerate() {
+        let across = areas[areas.len() - 2 - 2 * step];
+        let down = areas[areas.len() - 3 - 2 * step];
+        let (count, r) = ((2 * radius + 1) as i64, *radius);
+        let source = &a;
+        b.par_chunks_mut(ow).enumerate().skip(across[1] - outer[1]).take(across[3] - across[1]).for_each(|(k, line)| {
+            let y = outer[1] + k;
+            let pick = |x: isize| source[at((x.max(0) as usize).min(width - 1), y)];
+            let first = across[0] as isize;
+            let mut sum: i64 = (-(r as isize)..=r as isize).map(|t| pick(first + t)).sum();
+            for x in across[0]..across[2] {
+                line[x - outer[0]] = share(sum, count);
+                if x + 1 < across[2] {
+                    sum += pick(x as isize + r as isize + 1) - pick(x as isize - r as isize);
+                }
+            }
+        });
+        let source = &b;
+        let columns: Vec<usize> = (down[0]..down[2]).collect();
+        let strips: Vec<Vec<i64>> = columns
+            .par_chunks(32)
+            .map(|chunk| {
+                let pick = |x: usize, y: isize| source[at(x, (y.max(0) as usize).min(height - 1))];
+                let first = down[1] as isize;
+                let mut sums: Vec<i64> = chunk.iter().map(|&x| (-(r as isize)..=r as isize).map(|t| pick(x, first + t)).sum()).collect();
+                let mut strip = vec![0i64; chunk.len() * (down[3] - down[1])];
+                for y in down[1]..down[3] {
+                    for (c, &x) in chunk.iter().enumerate() {
+                        strip[(y - down[1]) * chunk.len() + c] = share(sums[c], count);
+                        if y + 1 < down[3] {
+                            sums[c] += pick(x, y as isize + r as isize + 1) - pick(x, y as isize - r as isize);
+                        }
+                    }
+                }
+                strip
+            })
+            .collect();
+        for (chunk, strip) in columns.chunks(32).zip(&strips) {
+            for y in down[1]..down[3] {
+                for (c, &x) in chunk.iter().enumerate() {
+                    a[at(x, y)] = strip[(y - down[1]) * chunk.len() + c];
+                }
+            }
+        }
+    }
+    out.par_chunks_mut(width).enumerate().skip(y0).take(y1 - y0).for_each(|(y, line)| {
+        for x in x0..x1 {
+            line[x] = (a[at(x, y)] as f64 / ONE) as f32;
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +485,42 @@ mod tests {
             for c in 0..4 {
                 let plane: Vec<f32> = stacked.iter().map(|v| v[c]).collect();
                 assert_eq!(gaussian_boxes(&plane, w, h, sigma), four.iter().map(|v| v[c]).collect::<Vec<f32>>(), "{sigma} {c}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_of_the_fixed_blur_matches_the_whole() {
+        let (w, h) = (83, 57);
+        let values: Vec<f32> = (0..w * h).map(|i| ((i * 7919) % 1013) as f32 / 101.3 - 3.0).collect();
+        for sigma in [0.0f32, 0.7, 2.9, 3.4, 7.0, 12.5] {
+            let whole = fixed(&values, w, h, sigma);
+            if sigma > 0.0 && sigma <= EXACT_LIMIT {
+                assert_eq!(whole, gaussian(&values, w, h, sigma), "{sigma}");
+            } else if sigma > EXACT_LIMIT {
+                let float = gaussian(&values, w, h, sigma);
+                assert!(whole.iter().zip(&float).all(|(a, b)| (a - b).abs() < 1e-4), "{sigma}");
+            }
+            for area in [[0, 0, w, h], [5, 7, 30, 21], [0, 40, 12, h], [70, 0, w, 3], [41, 28, 42, 29]] {
+                let mut out = vec![9.0f32; w * h];
+                fixed_into(&values, &mut out, w, h, sigma, area);
+                for y in 0..h {
+                    for x in 0..w {
+                        let inside = x >= area[0] && x < area[2] && y >= area[1] && y < area[3];
+                        assert_eq!(out[y * w + x], if inside { whole[y * w + x] } else { 9.0 }, "{sigma} {area:?} {x} {y}");
+                    }
+                }
+            }
+            let mut moved = values.clone();
+            moved[20 * w + 30] += 5.0;
+            let after = fixed(&moved, w, h, sigma);
+            let r = reach(sigma);
+            for y in 0..h {
+                for x in 0..w {
+                    if x.abs_diff(30) > r || y.abs_diff(20) > r {
+                        assert_eq!(after[y * w + x], whole[y * w + x], "{sigma} {x} {y}");
+                    }
+                }
             }
         }
     }
