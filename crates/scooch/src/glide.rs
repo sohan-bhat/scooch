@@ -16,7 +16,7 @@ const CLOSE_WAIT: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Heard {
-    Glided { id: u32, frames: u32, slow: u32 },
+    Glided { id: u32, frames: u32, slow: u32, scale: f32 },
     Settled(u32),
     Failed(Option<u32>, String),
     Nothing,
@@ -96,7 +96,7 @@ impl Link for Real {
         let started = Instant::now();
         match self.0.next(timeout) {
             Some(Reply::Settled { id }) => Ok(Heard::Settled(id)),
-            Some(Reply::Glided { id, frames, slow_frames, .. }) => Ok(Heard::Glided { id, frames, slow: slow_frames }),
+            Some(Reply::Glided { id, frames, slow_frames, scale, .. }) => Ok(Heard::Glided { id, frames, slow: slow_frames, scale }),
             Some(Reply::Failed { id, why }) => Ok(Heard::Failed(id, why)),
             Some(_) => Ok(Heard::Nothing),
             None if self.0.exited() || started.elapsed() < timeout / 2 => Err(anyhow!("the helper is gone")),
@@ -398,9 +398,9 @@ impl Glider {
                         flight.settled = true;
                     }
                 }
-                Ok(Heard::Glided { id, frames, slow }) => {
+                Ok(Heard::Glided { id, frames, slow, scale }) => {
                     if self.flights.iter().any(|flight| flight.id == id) {
-                        note(&mut self.said, format!("glided {id} with {frames} frames, {slow} slow"));
+                        note(&mut self.said, format!("glided {id} with {frames} frames, {slow} slow, at scale {scale}"));
                         self.judge(frames, slow);
                     }
                 }
@@ -568,7 +568,7 @@ pub mod tests {
                 return Ok(Heard::Nothing);
             }
             if let (Some((frames, slow)), Some(id)) = (self.script().glided, self.glides.pop()) {
-                return Ok(Heard::Glided { id, frames, slow });
+                return Ok(Heard::Glided { id, frames, slow, scale: 1.0 });
             }
             if let Some(index) = self.settles.iter().position(|(_, at)| *at <= Instant::now()) {
                 let (id, _) = self.settles.remove(index);
