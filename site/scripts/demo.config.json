@@ -97,5 +97,12 @@
   "limits": {
     "before": 0.1,
     "after": 0.02
-  }
+  },
+  "pictures": [
+    {
+      "id": "frost",
+      "photo": "../assets/photos/frosty-tree.jpg",
+      "layout": "start"
+    }
+  ]
 }

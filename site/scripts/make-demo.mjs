@@ -100,13 +100,13 @@ function fail(message) {
   process.exit(1);
 }
 
-async function render(state, layout) {
+async function render(state, layout, source = photo, prefix = '') {
   const icons = rects(layout);
-  const scenePath = join(work, `${state.id}.scene.json`);
-  const framePath = join(work, `${state.id}.jpg`);
-  const jsonPath = join(work, `${state.id}.json`);
+  const scenePath = join(work, `${prefix}${state.id}.scene.json`);
+  const framePath = join(work, `${prefix}${state.id}.jpg`);
+  const jsonPath = join(work, `${prefix}${state.id}.json`);
   await writeFile(scenePath, JSON.stringify({ width, height, icons }));
-  const args = ['render', photo, '--icons', scenePath, '--out', framePath, '--json', jsonPath];
+  const args = ['render', source, '--icons', scenePath, '--out', framePath, '--json', jsonPath];
   if (!state.solve) args.push(config.fill);
   try {
     await run(binary, args);
@@ -148,17 +148,17 @@ async function write({ state, icons, framePath, data, hidden }) {
   };
 }
 
-async function writePhoto(results) {
+async function writePhoto(results, source = photo, file = 'photo.webp') {
   const span = (table) => Math.abs(table[table.length - 1] - table[0]);
   const spanX = Math.min(...results.map((result) => span(result.data.placement.fx)));
   const spanY = Math.min(...results.map((result) => span(result.data.placement.fy)));
-  const meta = await sharp(photo).rotate().metadata();
+  const meta = await sharp(source).rotate().metadata();
   const needed = Math.max(width / (spanX * meta.width), height / (spanY * meta.height));
   const limit = 2048 / Math.max(meta.width, meta.height);
   const scale = Math.min(1, needed * 1.25, limit);
   const size = { width: Math.round(meta.width * scale), height: Math.round(meta.height * scale) };
-  await sharp(photo).rotate().resize(size.width, size.height).webp({ quality: 88, effort: 6 }).toFile(join(out, 'photo.webp'));
-  return { file: 'photo.webp', ...size };
+  await sharp(source).rotate().resize(size.width, size.height).webp({ quality: 88, effort: 6 }).toFile(join(out, file));
+  return { file, ...size };
 }
 
 function tables(results) {
@@ -167,7 +167,45 @@ function tables(results) {
   );
 }
 
+async function picture(entry) {
+  const source = resolve(site, entry.photo);
+  const states = [
+    { id: 'before', layout: entry.layout, solve: false },
+    { id: 'fixed', layout: entry.layout, solve: true },
+  ];
+  const results = [];
+  for (const state of states) {
+    const result = await render(state, config.layouts[entry.layout], source, `${entry.id}-`);
+    console.log(entry.id, state.id, 'hidden', result.hidden.toFixed(3), 'zoom', round(result.data.placement.zoom));
+    results.push(result);
+  }
+  for (const result of results) check(result);
+  return {
+    id: entry.id,
+    photo: await writePhoto(results, source, `${entry.id}.webp`),
+    order: states.map((state) => state.id),
+    tables: tables(results),
+    frames: Object.fromEntries(
+      await Promise.all(
+        results.map(async ({ state, framePath, hidden, data }) => [
+          state.id,
+          { average: await average(framePath), hidden: round(hidden), subject: subjectOnScreen(data.analysis, data.placement) },
+        ]),
+      ),
+    ),
+    icons: Object.fromEntries(config.icons.map((icon, index) => [icon.id, rects(config.layouts[entry.layout])[index].map((value, at) => round(value / (at % 2 === 0 ? width : height)))])),
+  };
+}
+
 await mkdir(work, { recursive: true });
+await mkdir(out, { recursive: true });
+if (process.argv.includes('--pictures')) {
+  const manifest = JSON.parse(await readFile(join(out, 'manifest.json'), 'utf8'));
+  manifest.pictures = [];
+  for (const entry of config.pictures ?? []) manifest.pictures.push(await picture(entry));
+  await writeFile(join(out, 'manifest.json'), JSON.stringify(manifest, null, 2));
+  process.exit(0);
+}
 const layouts = { ...config.layouts };
 const rendered = [];
 for (const state of config.states) {
@@ -197,5 +235,7 @@ const manifest = {
     to: normalize(layouts.dropped[config.drag.icon]),
   },
 };
+manifest.pictures = [];
+for (const entry of config.pictures ?? []) manifest.pictures.push(await picture(entry));
 await writeFile(join(out, 'manifest.json'), JSON.stringify(manifest, null, 2));
 console.log('wrote', Object.keys(frames).length, 'frames to', out);
