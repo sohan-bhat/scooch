@@ -1,6 +1,7 @@
 use crate::area::{self, Area};
 use crate::bundle::{self, Bundle, Parts, Scope};
 use crate::pack::fingerprint;
+use rayon::prelude::*;
 use std::borrow::Cow;
 use crate::paint;
 use crate::{look, pads, render, scenery, shape, solver, Analysis, Options, Placement, RgbImage, Scene};
@@ -271,27 +272,24 @@ fn lean(h: &mut Held, analysis: &Analysis, scene: &Scene, moved: &[[f64; 4]]) ->
     let width = scene.width as usize;
     let scope = Scope::new(redraw, &around, w, hh);
     let mut work = RgbImage::new(scene.width, scene.height);
-    {
-        let (from, to): (&[u8], &mut [u8]) = (h.picture.as_raw(), &mut work);
-        for y in 0..scene.height as usize {
-            for (x0, x1) in Scope::ranges(&scope.need, w, y, width) {
-                to[(y * width + x0) * 3..(y * width + x1) * 3].copy_from_slice(&from[(y * width + x0) * 3..(y * width + x1) * 3]);
-            }
+    let from = h.picture.as_raw();
+    work.par_chunks_mut(width * 3).enumerate().for_each(|(y, line)| {
+        for (x0, x1) in Scope::ranges(&scope.need, w, y, width) {
+            line[x0 * 3..x1 * 3].copy_from_slice(&from[(y * width + x0) * 3..(y * width + x1) * 3]);
         }
-    }
+    });
     let (shown, layer) = bundle::finish(&h.bundle, &h.bundle, 0.0, work, Some(&scope));
     let (shown, layer) = (shown.as_raw(), layer.as_raw());
     let still: &mut [u8] = &mut h.still;
-    for y in 0..scene.height as usize {
+    still.par_chunks_mut(width * 3).enumerate().for_each(|(y, line)| {
         for (x0, x1) in Scope::ranges(&scope.redraw, w, y, width) {
             for x in x0..x1 {
-                let i = y * width + x;
-                let p = &mut still[i * 3..i * 3 + 3];
+                let (i, p) = (y * width + x, &mut line[x * 3..x * 3 + 3]);
                 p.copy_from_slice(&shown[i * 3..i * 3 + 3]);
                 paint::blend(p, &layer[i * 4..i * 4 + 4]);
             }
         }
-    }
+    });
     h.redraw = Some(scope.redraw);
     true
 }
