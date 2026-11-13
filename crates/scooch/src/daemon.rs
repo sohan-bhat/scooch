@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const QUIET: Duration = Duration::from_millis(250);
 const REAP_EVERY: Duration = Duration::from_secs(2);
+pub const REST: Duration = Duration::from_secs(30);
 pub const LIMIT: Duration = Duration::from_secs(2);
 pub const QUALITY: u8 = 95;
 
@@ -354,6 +355,8 @@ pub struct Daemon {
     pub glider: Arc<Mutex<Glider>>,
     reaping: Arc<std::sync::atomic::AtomicBool>,
     motion: std::sync::atomic::AtomicU8,
+    sessions: Arc<Mutex<HashMap<String, (u64, scooch_core::Session)>>>,
+    used: Arc<Mutex<Instant>>,
 }
 
 #[derive(Default)]
@@ -397,7 +400,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())) }
     }
 
     fn glide_block(&self, state: &State) -> Option<&'static str> {
@@ -451,17 +454,50 @@ impl Daemon {
         self.reap_later();
     }
 
+    fn session_still(&self, screen: &str, key: u64, (image, analysis, placement, scene, options): (&RgbImage, &Analysis, &Placement, &Scene, &Options)) -> (Arc<scooch_core::Bundle>, Arc<RgbImage>) {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let slot = sessions.entry(screen.to_string()).or_insert_with(|| (key, scooch_core::Session::new()));
+        if slot.0 != key {
+            slot.1.forget();
+            slot.0 = key;
+        }
+        let made = slot.1.still_shared(image, analysis, placement, scene, options);
+        drop(sessions);
+        *self.used.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+        made
+    }
+
+    fn forget_session(&self, screen: &str) {
+        if let Some((_, mut session)) = self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(screen) {
+            session.forget();
+        }
+    }
+
+    pub fn held_bytes(&self) -> usize {
+        self.sessions.lock().map(|sessions| sessions.values().map(|(_, session)| session.bytes()).sum()).unwrap_or(0)
+    }
+
     fn reap_later(&self) {
         let running = self.glider.lock().map(|glider| glider.running()).unwrap_or(false);
-        if !running || self.reaping.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let holding = self.sessions.lock().map(|sessions| !sessions.is_empty()).unwrap_or(false);
+        if !(running || holding) || self.reaping.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        let (glider, reaping) = (self.glider.clone(), self.reaping.clone());
+        let (glider, reaping, sessions, used) = (self.glider.clone(), self.reaping.clone(), self.sessions.clone(), self.used.clone());
         let spawned = std::thread::Builder::new().name("scooch-reap".into()).spawn(move || loop {
             std::thread::sleep(REAP_EVERY);
+            let idle = used.lock().map(|used| used.elapsed() >= REST).unwrap_or(true);
+            let holding = {
+                let mut sessions = sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if idle && !sessions.is_empty() {
+                    sessions.clear();
+                    relieve();
+                }
+                !sessions.is_empty()
+            };
             let mut glider = glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             glider.reap();
-            if !glider.running() {
+            if !glider.running() && !holding {
                 reaping.store(false, std::sync::atomic::Ordering::SeqCst);
                 return;
             }
@@ -499,12 +535,24 @@ impl Daemon {
             self.restore(&mut state, &mut report);
         } else {
             let mut clock = Instant::now();
+            let glider = self.glider.clone();
+            let blocked = self.glide_block(&state);
+            let mut gliding = blocked.is_none().then(|| glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+            if let Some(glider) = gliding.as_deref_mut() {
+                self.open_early(&state, glider);
+                lap("early", &mut clock);
+            }
             let snapshot = self.desktop.snapshot();
             lap("snapshot", &mut clock);
             match snapshot {
-                Ok(snapshot) => self.pass(&mut state, &snapshot, &mut report),
+                Ok(snapshot) => self.pass(&mut state, &snapshot, &mut report, (gliding.as_deref_mut(), blocked)),
                 Err(error) => report.problem = Some(error.to_string()),
             }
+            if let Some(glider) = gliding.as_deref_mut() {
+                glider.close_early();
+            }
+            drop(gliding);
+            self.reap_later();
         }
         state.problem = report.problem.clone();
         let now = self.store.read();
@@ -549,13 +597,24 @@ impl Daemon {
         }
     }
 
-    fn pass(&self, state: &mut State, snapshot: &Snapshot, report: &mut Report) {
+    fn open_early(&self, state: &State, glider: &mut Glider) {
+        let Ok(screens) = self.desktop.screens() else { return };
+        for screen in &screens {
+            let Some(entry) = state.screens.get(&screen.id) else { continue };
+            let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { continue };
+            let Ok(key) = tables_key(&entry.source, &state.options) else { continue };
+            if !self.store.tables_for(output, key).is_file() || !self.desktop.wallpaper(screen).ok().flatten().is_some_and(|shown| same(&shown, output)) {
+                continue;
+            }
+            let scene = scene::scene(screen, &[]);
+            glider.open_early(screen, &entry.source, [scene.width, scene.height], output);
+        }
+    }
+
+    fn pass(&self, state: &mut State, snapshot: &Snapshot, report: &mut Report, (mut gliding, blocked): (Option<&mut Glider>, Option<&'static str>)) {
         let options = state.options;
         let known = self.desktop.known().ok().flatten();
         prune(state, self.desktop.as_ref(), &self.store, known.as_deref(), &snapshot.screens, unix_now());
-        let glider = self.glider.clone();
-        let blocked = self.glide_block(state);
-        let mut gliding = blocked.is_none().then(|| glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
         for screen in &snapshot.screens {
             if unplaced(state, &screen.id) {
                 report.outcomes.push((screen.id.clone(), Outcome::Skipped));
@@ -578,7 +637,8 @@ impl Daemon {
                 }
             }
         }
-        if let Some(glider) = gliding.as_deref_mut() {
+        if let Some(glider) = gliding {
+            glider.close_early();
             if glider.in_flight() {
                 let watched: Vec<(String, PathBuf)> = glider.screens().into_iter().filter_map(|id| state.screens.get(&id).map(|entry| (id, entry.source.clone()))).collect();
                 let mirror = options.mirror;
@@ -593,12 +653,7 @@ impl Daemon {
                 glider.land(self.desktop.hold(), &interrupted);
             }
         }
-        let running = gliding.as_ref().is_some_and(|glider| glider.running());
-        drop(gliding);
         self.tidy_tables(state);
-        if running {
-            self.reap_later();
-        }
     }
 
     fn screen(&self, state: &mut State, screen: &Screen, snapshot: &Snapshot, options: &Options, known: Option<&[String]>, glider: (Option<&mut Glider>, Option<&'static str>)) -> Result<Outcome> {
@@ -715,7 +770,7 @@ impl Daemon {
             let tables_key = tables_key(&source, options)?;
             let (_, next) = self.fresh_name(&screen.id, entry.counter, format.extension(), current);
             let made = self.store.tables_for(&next, tables_key);
-            let (bundle, picture) = scooch_core::still(&decoded, &analysis, &placement, scene, options);
+            let (bundle, picture) = self.session_still(&screen.id, key, (&decoded, &analysis, &placement, scene, options));
             lap("render", &mut clock);
             let written = std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| write_atomic(&made, &bundle.tables_to_bytes()));
             drop(bundle);
@@ -737,7 +792,13 @@ impl Daemon {
             picture
         } else {
             crate::glide::skipped(blocked.unwrap_or("not live"), "");
-            let picture = scooch_core::render_with(&decoded, &analysis, &placement, scene, options);
+            let held = entry.placement.as_ref() == Some(&placement);
+            let picture = if wanted || held {
+                self.session_still(&screen.id, key, (&decoded, &analysis, &placement, scene, options)).1
+            } else {
+                self.forget_session(&screen.id);
+                Arc::new(scooch_core::render_with(&decoded, &analysis, &placement, scene, options))
+            };
             lap("render", &mut clock);
             picture
         };
@@ -1140,7 +1201,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             relieve();
             stop.end();
             if tracing {
-                eprintln!("{} tick {} ms {:?} {}", stamp(), started.elapsed().as_millis(), report.outcomes, laps());
+                eprintln!("{} tick {} ms {:?} {}, sessions hold {} MB", stamp(), started.elapsed().as_millis(), report.outcomes, laps(), daemon.held_bytes() >> 20);
             }
             if report.problem != said {
                 if let Some(problem) = &report.problem {
@@ -1249,6 +1310,7 @@ pub mod tests {
 
         fn snapshot(&self) -> Result<Snapshot> {
             self.snapshots.fetch_add(1, Ordering::SeqCst);
+            self.events.lock().unwrap().push(("snapshot".into(), Instant::now()));
             if let Some(reason) = self.broken.lock().unwrap().clone() {
                 anyhow::bail!(reason);
             }
@@ -2566,6 +2628,26 @@ pub mod tests {
     }
 
     #[test]
+    fn the_layer_opens_before_the_snapshot_and_an_unused_one_closes_with_nothing_set() {
+        let (daemon, fake, _, _) = glide_rig("glide-early", true);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let events = events(&fake);
+        let open = at(&events, "open");
+        assert!(open < events.iter().rposition(|event| event == "snapshot").unwrap() && open < at(&events, "glide"), "{events:?}");
+        assert!(daemon.glider.lock().unwrap().said.iter().any(|line| line.ends_with("opened early")));
+        fake.events.lock().unwrap().clear();
+        let sets = fake.sets.load(Ordering::SeqCst);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        let events: Vec<String> = fake.events.lock().unwrap().iter().map(|(event, _)| event.clone()).collect();
+        assert!(at(&events, "open") < at(&events, "close") && !events.iter().any(|event| event.starts_with("glide ") || event.starts_with("set ")), "{events:?}");
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
+        assert!(daemon.held_bytes() > 0);
+    }
+
+    #[test]
     fn every_failure_takes_todays_path_with_the_same_picture() {
         let expected = today("glide-fail-today");
         let cases: [(&str, Breaker); 5] = [
@@ -2588,7 +2670,7 @@ pub mod tests {
                 assert_eq!(opened, closed, "{name} {events:?}");
             }
             assert!(!daemon.glider.lock().unwrap().in_flight(), "{name}");
-            assert!(!daemon.glider.lock().unwrap().running(), "{name}");
+            assert_eq!(daemon.glider.lock().unwrap().running(), name == "shown", "{name}");
         }
     }
 
@@ -2692,7 +2774,7 @@ pub mod tests {
     }
 
     fn opens(fake: &Fake) -> usize {
-        events(fake).iter().filter(|event| event.starts_with("open")).count()
+        events(fake).iter().filter(|event| event.starts_with("glide ")).count()
     }
 
     #[test]
