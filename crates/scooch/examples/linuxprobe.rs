@@ -42,6 +42,7 @@ mod probe {
     ];
     const SHOW_WAIT: Duration = Duration::from_secs(10);
     const SETTLE: Duration = Duration::from_millis(1500);
+const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
 
     static START: OnceLock<Instant> = OnceLock::new();
 
@@ -437,7 +438,7 @@ mod probe {
                 let all = kde_rules::containments(&kde::groups(kde_rules::APPLETS));
                 let found = all.iter().find(|containment| containment.screen == 0).and_then(|containment| containment.general.get("positions").cloned()).unwrap_or_default();
                 let at = found.replace("\\,", ",").find(&url).map(|at| found.replace("\\,", ",")[at..].chars().take(url.len() + 12).collect::<String>());
-                at.unwrap_or_else(|| "not in positions, sorted mode".into())
+                at.unwrap_or_else(|| "not in positions yet, placed in reading order".into())
             }
             Some(Kind::Xfce) => {
                 let id = path.display().to_string();
@@ -772,35 +773,82 @@ mod probe {
         Ok(())
     }
 
-    fn move_icon(p: &mut Probe, round: i32) -> Result<String> {
+    fn probe_icon(p: &Probe, linux: &Linux) -> Result<Rect> {
+        let name = PROBES[1].0;
+        let scale = factor(p);
+        let now_rects: Vec<Rect> = icons(linux).iter().map(|rect| physical(rect, scale)).collect();
+        let from = p.measures.iter().find(|measure| measure.name == name).and_then(|measure| measure.adapter).context("no adapter rect for the probe icon")?;
+        Ok(now_rects.iter().min_by(|a, b| (a.x - from.x).abs().max((a.y - from.y).abs()).total_cmp(&(b.x - from.x).abs().max((b.y - from.y).abs()))).copied().unwrap_or(from))
+    }
+
+    fn grab_point(rect: &Rect) -> (f32, f32) {
+        (rect.x + rect.w / 2.0, rect.y + rect.h / 3.0)
+    }
+
+    fn move_icon(p: &mut Probe, target: (f32, f32)) -> Result<String> {
         let name = PROBES[1].0;
         let path = p.desktop.join(name);
+        let scale = factor(p);
         if p.kind == Some(Kind::Gnome) {
             let monitors = gnome::geometry()?;
             let prefs = gnome::prefs();
-            let grid = monitors.iter().find_map(|monitor| ding::Grid::new(monitor, prefs.size, gnome::mode(p.session == Session::X11))).context("no DING grid")?;
-            let column = if round % 2 == 0 { 6 } else { 0 };
-            let (x, y) = grid.stored(column, 3 + i64::from(round % 3));
-            gvfs::set(&path.clone().into_os_string(), ding::POSITION_KEY, Some(&format!("{x},{y}")))?;
-            return Ok(format!("wrote {x},{y} to {name}"));
+            let (x, y) = (f64::from(target.0 / scale), f64::from(target.1 / scale));
+            let grids: Vec<ding::Grid> = monitors.iter().filter_map(|monitor| ding::Grid::new(monitor, prefs.size, gnome::mode(p.session == Session::X11))).collect();
+            let grid = grids.iter().find(|grid| grid.belongs(x, y)).or(grids.first()).context("no DING grid")?;
+            let (lx, ly) = grid.local(x, y);
+            let column = ((lx / grid.cell_w).floor() as i64).clamp(0, grid.cols - 1);
+            let row = ((ly / grid.cell_h).floor() as i64).clamp(0, grid.rows - 1);
+            let (sx, sy) = grid.stored(column, row);
+            gvfs::set(&path.clone().into_os_string(), ding::POSITION_KEY, Some(&format!("{sx},{sy}")))?;
+            return Ok(format!("wrote {sx},{sy}, column {column} row {row}, to {name}"));
         }
         if p.session != Session::X11 {
             bail!("no way to move an icon without a person on this session");
         }
         let linux = p.linux()?;
-        let scale = factor(p);
-        let now_rects: Vec<Rect> = icons(&linux).iter().map(|rect| physical(rect, scale)).collect();
-        let from = p.measures.iter().find(|measure| measure.name == name).and_then(|measure| measure.adapter).context("no adapter rect for the probe icon")?;
-        let current = now_rects.iter().min_by(|a, b| (a.x - from.x).abs().max((a.y - from.y).abs()).total_cmp(&(b.x - from.x).abs().max((b.y - from.y).abs()))).copied().unwrap_or(from);
-        let start = ((current.x + current.w / 2.0) as i16, (current.y + current.h / 3.0) as i16);
-        let width = primary_frame(p).map_or(1920.0, |frame| frame.w);
-        let target_x = if (start.0 as f32) < width / 3.0 { start.0 as f32 + 700.0 * scale } else { 60.0 * scale };
-        let end = (target_x as i16, start.1);
+        let current = probe_icon(p, &linux)?;
+        let grab = grab_point(&current);
+        let start = (grab.0 as i16, grab.1 as i16);
+        let end = (target.0 as i16, target.1 as i16);
         drag(start, end)?;
         if let Some(measure) = p.measures.iter_mut().find(|measure| measure.name == name) {
-            measure.adapter = Some(Rect { x: current.x + end.0 as f32 - start.0 as f32, y: current.y + end.1 as f32 - start.1 as f32, ..current });
+            measure.adapter = Some(Rect { x: current.x + f32::from(end.0 - start.0), y: current.y + f32::from(end.1 - start.1), ..current });
         }
         Ok(format!("dragged from {},{} to {},{}", start.0, start.1, end.0, end.1))
+    }
+
+    fn aside(p: &Probe) -> Result<(f32, f32)> {
+        let linux = p.linux()?;
+        let current = probe_icon(p, &linux)?;
+        let grab = grab_point(&current);
+        Ok((grab.0 + 700.0 * factor(p), grab.1))
+    }
+
+    fn subject_on_screen(p: &Probe, linux: &Linux) -> Option<(f32, f32)> {
+        let frame = primary_frame(p)?;
+        let shot = capture(p.session, &frame).ok()?;
+        let scale = factor(p);
+        let skip: Vec<Rect> = icons(linux).iter().map(|rect| grown(&physical(rect, scale), 8.0)).collect();
+        let band = 64.0 * scale;
+        let (mut sx, mut sy, mut weight) = (0.0f64, 0.0f64, 0.0f64);
+        for (x, y, pixel) in shot.enumerate_pixels() {
+            let (fx, fy) = (x as f32, y as f32);
+            if fy < band || fy >= frame.h - band {
+                continue;
+            }
+            let (gx, gy) = (frame.x + fx, frame.y + fy);
+            if skip.iter().any(|rect| gx >= rect.x && gx < rect.x + rect.w && gy >= rect.y && gy < rect.y + rect.h) {
+                continue;
+            }
+            let [r, _, b] = pixel.0;
+            let warmth = f64::from(r) - f64::from(b);
+            if r > 150 && warmth > 60.0 {
+                sx += f64::from(gx) * warmth;
+                sy += f64::from(gy) * warmth;
+                weight += warmth;
+            }
+        }
+        (weight > 2000.0).then(|| ((sx / weight) as f32, (sy / weight) as f32))
     }
 
     fn events(p: &mut Probe) -> Result<()> {
@@ -809,7 +857,10 @@ mod probe {
             std::thread::sleep(Duration::from_secs(5));
             Ok("no input".into())
         });
-        act(p, "move a probe icon", |p| move_icon(p, 0));
+        act(p, "move a probe icon", |p| {
+            let target = aside(p)?;
+            move_icon(p, target)
+        });
         let fresh = p.desktop.join("scooch-probe-new.txt");
         let renamed = p.desktop.join("scooch-probe-renamed.txt");
         p.made.push(fresh.clone());
@@ -837,7 +888,7 @@ mod probe {
 
     fn photo(width: u32, height: u32) -> RgbImage {
         let (w, h) = (width.max(1) as f32, height.max(1) as f32);
-        let (cx, cy, radius) = (0.07 * w, 0.42 * h, 0.13 * h);
+        let (cx, cy, radius) = (SUBJECT.0 * w, SUBJECT.1 * h, SUBJECT.2 * h);
         let mut bytes = Vec::with_capacity(width as usize * height as usize * 3);
         for y in 0..height {
             for x in 0..width {
@@ -880,6 +931,24 @@ mod probe {
         }
         let mse = total / count.max(1) as f64;
         Some(if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0f64 * 255.0 / mse).log10() })
+    }
+
+    fn matching(a: &RgbImage, b: &RgbImage, skip: &[Rect]) -> Option<f64> {
+        if a.dimensions() != b.dimensions() {
+            return None;
+        }
+        let (mut close, mut count) = (0usize, 0usize);
+        for (x, y, pixel) in a.enumerate_pixels() {
+            let (fx, fy) = (x as f32, y as f32);
+            if skip.iter().any(|rect| fx >= rect.x - 8.0 && fx < rect.x + rect.w + 8.0 && fy >= rect.y - 8.0 && fy < rect.y + rect.h + 8.0) {
+                continue;
+            }
+            count += 1;
+            if pixel.0.iter().zip(b.get_pixel(x, y).0.iter()).all(|(one, two)| one.abs_diff(*two) <= 12) {
+                close += 1;
+            }
+        }
+        (count > 0).then(|| 100.0 * close as f64 / count as f64)
     }
 
     fn keys(p: &Probe, screen: &Screen) -> Vec<(Box<dyn record::Settings>, String)> {
@@ -930,7 +999,7 @@ mod probe {
             match capture(p.session, &physical_frame) {
                 Ok(shot) => {
                     let _ = fs::write(p.out.join(format!("wallpaper-{}.png", kind.to_lowercase())), scooch_core::encode_png(&shot)?);
-                    p.line(format!("  - screen {}x{} against the picture {}x{}, icons and panels left out, PSNR {:?}, file against the picture PSNR {:?}, file {} bytes", shot.width(), shot.height(), file.width(), file.height(), psnr(&shot, &file, &bands), psnr(&file, &source, &[]), fs::metadata(&path).map_or(0, |meta| meta.len())));
+                    p.line(format!("  - screen {}x{} against the picture {}x{}, icons and panels left out, PSNR {:?}, pixels within 12 levels {:.1}%, file against the picture PSNR {:?}, file {} bytes", shot.width(), shot.height(), file.width(), file.height(), psnr(&shot, &file, &bands), matching(&shot, &file, &bands).unwrap_or(0.0), psnr(&file, &source, &[]), fs::metadata(&path).map_or(0, |meta| meta.len())));
                 }
                 Err(error) => p.line(format!("  - capture failed {error:#}")),
             }
@@ -1010,15 +1079,19 @@ mod probe {
         let first = wait_until(Duration::from_secs(60), || rendered(&home));
         p.line(format!("- first render after {:?} ms", first.map(|time| time.as_millis())));
         let mut times = Vec::new();
+        let frame = primary_frame(p).unwrap_or(screen.frame);
         for round in 1..=5 {
             let before = linux.wallpaper(&screen).ok().flatten();
             let rects_before = icons(&linux);
+            let seen = subject_on_screen(p, &linux);
+            let target = seen.unwrap_or((frame.x + SUBJECT.0 * frame.w, frame.y + SUBJECT.1 * frame.h));
             let moved = Instant::now();
-            let detail = move_icon(p, round).unwrap_or_else(|error| format!("failed {error:#}"));
+            let detail = move_icon(p, target).unwrap_or_else(|error| format!("failed {error:#}"));
             let changed = wait_until(Duration::from_secs(10), || linux.wallpaper(&screen).ok().flatten() != before);
             let latency = changed.map(|_| moved.elapsed().as_millis());
             let moved_icons = icons(&linux) != rects_before;
-            p.line(format!("- move {round} {detail}, icons moved by the adapter's reading {moved_icons}, new wallpaper after {latency:?} ms"));
+            let place = seen.map_or("not found, so the picture's own spot".to_string(), |(x, y)| format!("{x:.0},{y:.0}"));
+            p.line(format!("- move {round} onto the subject seen at {place}, {detail}, icons moved by the adapter's reading {moved_icons}, new wallpaper after {latency:?} ms"));
             times.extend(latency);
             std::thread::sleep(Duration::from_millis(800));
         }
