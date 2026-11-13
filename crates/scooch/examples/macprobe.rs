@@ -1337,6 +1337,9 @@ mod probe {
             let after = daemon_pid(p);
             p.line(format!("- {what} exit {:?} in {} ms, the same launchd daemon {} ticked {:?} ms later", ran.code, ran.took.as_millis(), after == job, ticked.map(|time| time.as_millis())));
             if ticked.is_none() || after != job {
+                if let Some(pid) = after {
+                    stuck(p, pid);
+                }
                 p.fail(format!("{what} did not reach the daemon under launchd"));
             }
         }
@@ -2373,6 +2376,17 @@ mod probe {
         returned == 0 && steady && moving.len() >= 2 && inked <= 0.1 && hand_over.is_some_and(|value| value <= 2) && settled.is_some()
     }
 
+    fn stuck(p: &mut Probe, pid: i32) {
+        let file = p.out.join(format!("stuck-{pid}-{}.txt", now()));
+        let _ = p.tool("/usr/bin/sample", &[&pid.to_string(), "2", "-file", &file.to_string_lossy()]);
+        let text = fs::read_to_string(&file).unwrap_or_default();
+        let ours: Vec<String> = text.lines().filter(|line| line.contains("scooch::") || line.contains("Thread_")).map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(160).collect()).take(40).collect();
+        p.line(format!("  - sample of the daemon {pid} kept as {}, its threads and our frames {ours:?}", file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+        let log = daemon_log(p);
+        let tail: Vec<&str> = log.lines().rev().take(25).collect::<Vec<_>>().into_iter().rev().collect();
+        p.line(format!("  - the last lines of the daemon log {tail:?}"));
+    }
+
     fn quiet_log(p: &Probe, quiet: Duration, limit: Duration) -> bool {
         let started = Instant::now();
         let mut count = daemon_log(p).lines().count();
@@ -2515,6 +2529,38 @@ mod probe {
         if !good || left > 0 {
             p.fail("the glide did not move steadily under the icons and hand over cleanly");
         }
+        quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
+        let menu = (30.0 * screen.scale) as usize;
+        let before = grab(display).context("the desktop could not be captured")?;
+        let lines = daemon_log(p).lines().count();
+        poke(p);
+        let poked = Instant::now();
+        let mut worst = 0u8;
+        let mut shots = 0;
+        while poked.elapsed() < Duration::from_millis(2500) {
+            if let Some(shot) = grab(display) {
+                worst = worst.max(difference(&before, &shot, &|_, y| y >= menu).max);
+                shots += 1;
+            }
+        }
+        let woke: Vec<String> = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(180).collect()).collect();
+        let opened = woke.iter().any(|line| line.contains("glide early open"));
+        let closed = woke.iter().any(|line| line.contains("closed early open"));
+        p.line(format!("- a wake that changes nothing: early open {opened}, closed again {closed}, {shots} captures over 2.5 s, largest change from before the wake {worst} of 255, log {woke:?}"));
+        if !opened || !closed || worst > 2 {
+            p.fail("an early open with nothing to glide was not invisible");
+        }
+        let calm_a = (screen.frame.x + screen.frame.w * 0.15, screen.frame.y + screen.frame.h * 0.75);
+        let calm_b = (screen.frame.x + screen.frame.w * 0.25, screen.frame.y + screen.frame.h * 0.75);
+        let mut laps = Vec::new();
+        for (index, target) in [calm_a, calm_b, calm_a, calm_b].into_iter().enumerate() {
+            quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
+            let from = position(p, name).unwrap_or(subject);
+            let (time, log) = wallpaper_after(p, &screen, |_| drag(from, target));
+            let render = log.iter().find(|line| line.contains(" tick ") && line.contains("Rendered")).map(|line| line.chars().take(260).collect::<String>());
+            laps.push(format!("move {} new wallpaper {time:?} ms, tick {render:?}", index + 1));
+        }
+        p.line(format!("- scenery moves on calm ground, the first leaves the subject and the rest hold the placement {laps:?}"));
         let ran = p.scooch(&["glide"], LIMIT);
         p.line(format!("- scooch glide said {:?}", ran.text()));
         let back = position(p, name).unwrap_or(aside);
