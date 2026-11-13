@@ -123,7 +123,7 @@ export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | n
         fade.current.style.opacity = '0';
       }
     }
-    if (!runtime.ready || !runtime.props || !runtime.scenery || runtime.sharpening) {
+    if (!runtime.ready || !runtime.props || !runtime.scenery) {
       state.start = now;
       state.frames.clear();
       state.gpu.clear();
@@ -145,7 +145,7 @@ export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | n
     const quiet = gpuLong.n >= 90 && gpuLong.max < UP_LIMIT;
     const framesLong = state.frames.stats(now, UP_WINDOW);
     const target = quality.level - 1;
-    const allowed = state.failures[target] < 1 && now - state.failedAt[target] > RETRY;
+    const allowed = state.failures[target] < 2 && now - state.failedAt[target] > RETRY;
     const roomy = allowed && quiet && framesLong.mean < 17.5 && now - state.changed > UP_WINDOW;
     if (roomy) change(() => quality.up());
   }, 2);
