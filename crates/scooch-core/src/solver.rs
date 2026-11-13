@@ -2,8 +2,9 @@ use crate::analysis::quantile;
 use crate::sat::{Place, Sat};
 use crate::table::{self, Curve, STEPS};
 use crate::warp::{self, Pchip, Plan, BINS};
-use crate::{Analysis, Options, Placement, Scene, Scenery, TABLE};
+use crate::{look, scenery, shape, Analysis, Options, Placement, Scene, TABLE};
 use rayon::prelude::*;
+use std::time::{Duration, Instant};
 
 const ZOOM_STEP: f64 = 0.05;
 const MOST_ZOOM: f64 = 2.0;
@@ -25,6 +26,9 @@ const KEEP_FLOOR: f64 = 0.02;
 const KEEP_SHARE: f64 = 0.10;
 const EPS: f64 = 1e-9;
 const TIE: f64 = 1e-12;
+const COVER_CELL: f32 = 1.0 / 3.0;
+const NEAR_PANS: usize = 3;
+const NEAR_SHARE: f64 = 0.8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Footprint {
@@ -32,6 +36,18 @@ pub struct Footprint {
     pub v0: f64,
     pub u1: f64,
     pub v1: f64,
+}
+
+#[derive(Clone, Copy)]
+struct Boxes<'a> {
+    icons: &'a [Footprint],
+    cover: &'a [Footprint],
+}
+
+impl<'a> Boxes<'a> {
+    fn bare(icons: &'a [Footprint]) -> Self {
+        Self { icons, cover: &[] }
+    }
 }
 
 pub fn screen_rects(scene: &Scene) -> Vec<[f64; 4]> {
@@ -122,7 +138,7 @@ struct Field {
     rows: usize,
     saliency: Vec<f32>,
     busy: Vec<f32>,
-    sb: Sat<2>,
+    sb: Sat<3>,
     total_s: f64,
     size: f64,
     image_aspect: f64,
@@ -144,7 +160,8 @@ impl Field {
         let clean = |v: &f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
         let saliency: Vec<f32> = if analysis.flat { vec![0.0; n] } else { analysis.saliency.iter().map(clean).collect() };
         let busy: Vec<f32> = analysis.busy.iter().map(clean).collect();
-        let sb = Sat::new([&saliency, &busy], columns, rows);
+        let scenic: Vec<f32> = saliency.iter().zip(&busy).map(|(s, b)| s * look::belonging(*s, *b)).collect();
+        let sb = Sat::new([&saliency, &busy, &scenic], columns, rows);
         let image_aspect = if analysis.source_width > 0 && analysis.source_height > 0 { table::aspect(analysis.source_width, analysis.source_height) } else { table::aspect(analysis.width, analysis.height) };
         let screen_aspect = table::aspect(scene.width, scene.height);
         let (cw, ch) = table::cover(image_aspect, screen_aspect, 1.0);
@@ -311,12 +328,17 @@ fn pans(slack: f64) -> Vec<f64> {
     }
 }
 
-fn under_icons(field: &Field, boxes: &[Footprint], x: &AxisMap, y: &AxisMap) -> (f64, f64) {
+fn under_icons(field: &Field, boxes: &Boxes, x: &AxisMap, y: &AxisMap) -> (f64, f64) {
     let (mut hid, mut busy, mut area) = (0.0f64, 0.0f64, 0.0f64);
-    for b in boxes {
+    for b in boxes.cover {
         let (xa, xb) = x.interval(b.u0, b.u1);
         let (ya, yb) = y.interval(b.v0, b.v1);
-        let [s, z] = field.sb.sum(xa * field.gw, ya * field.gh, xb * field.gw, yb * field.gh);
+        hid += field.sb.sum(xa * field.gw, ya * field.gh, xb * field.gw, yb * field.gh)[2];
+    }
+    for b in boxes.icons {
+        let (xa, xb) = x.interval(b.u0, b.u1);
+        let (ya, yb) = y.interval(b.v0, b.v1);
+        let [s, z, _] = field.sb.sum(xa * field.gw, ya * field.gh, xb * field.gw, yb * field.gh);
         hid += s;
         busy += z;
         area += (xb - xa) * field.gw * (yb - ya) * field.gh;
@@ -328,7 +350,7 @@ fn zoom_levels(settings: &Settings) -> usize {
     ((settings.max_zoom - 1.0) / ZOOM_STEP + 1e-6).floor() as usize + 1
 }
 
-fn stage_one(field: &Field, boxes: &[Footprint], settings: &Settings) -> Option<Vec<Frame>> {
+fn stage_one(field: &Field, boxes: &Boxes, settings: &Settings) -> Option<Vec<Frame>> {
     let middle = field.middle;
     let (hid_c, busy_c) = under_icons(field, boxes, &AxisMap::x(&middle, None), &AxisMap::y(&middle, None));
     if hid_c <= 0.0 && busy_c <= 0.0 {
@@ -352,7 +374,7 @@ fn stage_one(field: &Field, boxes: &[Footprint], settings: &Settings) -> Option<
         .map(|zi| {
             let z = 1.0 + ZOOM_STEP * zi as f64;
             let (_, ch) = table::cover(field.image_aspect, field.screen_aspect, z);
-            pans(1.0 - ch).into_iter().map(|y0| boxes.iter().map(|b| (field.sb.place_y((y0 + ch * b.v0) * field.gh), field.sb.place_y((y0 + ch * b.v1) * field.gh))).collect()).collect()
+            pans(1.0 - ch).into_iter().map(|y0| boxes.icons.iter().chain(boxes.cover).map(|b| (field.sb.place_y((y0 + ch * b.v0) * field.gh), field.sb.place_y((y0 + ch * b.v1) * field.gh))).collect()).collect()
         })
         .collect();
     let limit = hid_c * (1.0 + 1e-9) + 1e-12;
@@ -360,7 +382,9 @@ fn stage_one(field: &Field, boxes: &[Footprint], settings: &Settings) -> Option<
         .par_iter()
         .map(|&(zi, z, cw, ch, mirrored, xi, x0)| {
             let spans: Vec<(Place, Place)> = boxes
+                .icons
                 .iter()
+                .chain(boxes.cover)
                 .map(|b| {
                     let (ta, tb) = if mirrored { (1.0 - b.u1, 1.0 - b.u0) } else { (b.u0, b.u1) };
                     (field.sb.place_x((x0 + cw * ta) * field.gw), field.sb.place_x((x0 + cw * tb) * field.gw))
@@ -372,8 +396,12 @@ fn stage_one(field: &Field, boxes: &[Footprint], settings: &Settings) -> Option<
                 .filter_map(|(yi, y0)| {
                     let frame = Frame { z, x0, y0, cw, ch, mirrored };
                     let (mut hid, mut busy, mut area) = (0.0f64, 0.0f64, 0.0f64);
-                    for (&(xa, xb), &(ya, yb)) in spans.iter().zip(&lifts[zi][yi]) {
-                        let [s, b] = field.sb.sum_placed(xa, xb, ya, yb);
+                    for (k, (&(xa, xb), &(ya, yb))) in spans.iter().zip(&lifts[zi][yi]).enumerate() {
+                        let [s, b, h] = field.sb.sum_placed(xa, xb, ya, yb);
+                        if k >= boxes.icons.len() {
+                            hid += h;
+                            continue;
+                        }
                         hid += s;
                         if !field.flat && hid > limit {
                             return None;
@@ -449,7 +477,7 @@ struct Bend {
     curve: Pchip,
 }
 
-fn bend(field: &Field, boxes: &[Footprint], frame: &Frame, along_x: bool, other: &AxisMap, profile: &Profile, strength: f64) -> Option<Bend> {
+fn bend(field: &Field, boxes: &Boxes, frame: &Frame, along_x: bool, other: &AxisMap, profile: &Profile, strength: f64) -> Option<Bend> {
     let plan = Plan::new(&profile.peak, &profile.busy, strength)?;
     let total = field.total_s.max(EPS);
     let mut best: Option<(f64, f64, Pchip)> = None;
@@ -484,14 +512,19 @@ fn assemble(frame: &Frame, x: Option<&Bend>, y: Option<&Bend>) -> Placement {
     }
 }
 
-fn through_tables(field: &Field, boxes: &[Footprint], placement: &Placement) -> (f64, f64) {
+fn through_tables(field: &Field, boxes: &Boxes, placement: &Placement) -> (f64, f64) {
     let (xc, yc) = (Curve::new(&placement.fx), Curve::new(&placement.fy));
     let (mut hid, mut busy, mut area) = (0.0f64, 0.0f64, 0.0f64);
-    for b in boxes {
+    for b in boxes.cover {
+        let (p, q) = (xc.at(b.u0), xc.at(b.u1));
+        let (r, s) = (yc.at(b.v0), yc.at(b.v1));
+        hid += field.sb.sum(p.min(q) * field.gw, r.min(s) * field.gh, p.max(q) * field.gw, r.max(s) * field.gh)[2];
+    }
+    for b in boxes.icons {
         let (p, q) = (xc.at(b.u0), xc.at(b.u1));
         let (r, s) = (yc.at(b.v0), yc.at(b.v1));
         let (xa, xb, ya, yb) = (p.min(q) * field.gw, p.max(q) * field.gw, r.min(s) * field.gh, r.max(s) * field.gh);
-        let [h, z] = field.sb.sum(xa, ya, xb, yb);
+        let [h, z, _] = field.sb.sum(xa, ya, xb, yb);
         hid += h;
         busy += z;
         area += (xb - xa) * (yb - ya);
@@ -499,7 +532,7 @@ fn through_tables(field: &Field, boxes: &[Footprint], placement: &Placement) -> 
     (hid, if area > 0.0 { busy / area } else { 0.0 })
 }
 
-fn hidden_saliency(field: &Field, boxes: &[Footprint], placement: &Placement) -> f64 {
+fn hidden_saliency(field: &Field, boxes: &Boxes, placement: &Placement) -> f64 {
     if field.flat || !(table::usable(&placement.fx) && table::usable(&placement.fy)) {
         return 0.0;
     }
@@ -539,7 +572,7 @@ fn distortion(placement: &Placement, frame: &Frame, x: &Profile, y: &Profile) ->
     DISTORTION * (warp::penalty(&sx, &x.peak, &x.busy) + warp::penalty(&sy, &y.peak, &y.busy))
 }
 
-fn score(field: &Field, boxes: &[Footprint], placement: &Placement, profiles: Option<(&Profile, &Profile)>) -> f64 {
+fn score(field: &Field, boxes: &Boxes, placement: &Placement, profiles: Option<(&Profile, &Profile)>) -> f64 {
     let Some(frame) = Frame::of(placement) else { return f64::INFINITY };
     let (hid, busy) = through_tables(field, boxes, placement);
     let base = field.frame_cost(&frame, hid, busy);
@@ -587,7 +620,7 @@ fn ranks_before(a: &Choice, b: &Choice) -> std::cmp::Ordering {
         .then(a.placement.crop[1].total_cmp(&b.placement.crop[1]))
 }
 
-fn choices(field: &Field, boxes: &[Footprint], frame: &Frame, settings: &Settings) -> Vec<Choice> {
+fn choices(field: &Field, boxes: &Boxes, frame: &Frame, settings: &Settings) -> Vec<Choice> {
     let plain = assemble(frame, None, None);
     let mut out = vec![Choice { cost: score(field, boxes, &plain, None), placement: plain }];
     if field.flat || settings.strength <= 0.0 {
@@ -605,14 +638,67 @@ fn choices(field: &Field, boxes: &[Footprint], frame: &Frame, settings: &Setting
     out
 }
 
-fn fresh(field: &Field, boxes: &[Footprint], bare: &[Footprint], settings: &Settings, fallback: &Placement) -> Placement {
+fn usable<'a>(field: &'a Field, boxes: &'a Boxes<'a>, fallback: &Placement, most_lost: Option<f64>) -> impl Fn(&Choice) -> bool + 'a {
+    let limits = [hidden_saliency(field, boxes, fallback), hidden_saliency(field, &Boxes::bare(boxes.icons), fallback)];
+    move |c: &Choice| {
+        table::usable(&c.placement.fx)
+            && table::usable(&c.placement.fy)
+            && hidden_saliency(field, boxes, &c.placement) <= limits[0]
+            && hidden_saliency(field, &Boxes::bare(boxes.icons), &c.placement) <= limits[1]
+            && most_lost.is_none_or(|most| Frame::of(&c.placement).is_some_and(|f| field.crop_loss(&f) <= most + 1e-9))
+    }
+}
+
+fn fresh(field: &Field, boxes: &Boxes, settings: &Settings, fallback: &Placement, most_lost: Option<f64>) -> Placement {
     let Some(frames) = stage_one(field, boxes, settings) else { return fallback.clone() };
     let mut all: Vec<Choice> = frames.par_iter().flat_map(|frame| choices(field, boxes, frame, settings)).collect();
     all.sort_by(ranks_before);
-    let limits = [hidden_saliency(field, boxes, fallback), hidden_saliency(field, bare, fallback)];
-    all.into_iter()
-        .find(|c| table::usable(&c.placement.fx) && table::usable(&c.placement.fy) && hidden_saliency(field, boxes, &c.placement) <= limits[0] && hidden_saliency(field, bare, &c.placement) <= limits[1])
-        .map_or_else(|| fallback.clone(), |c| c.placement)
+    let ok = usable(field, boxes, fallback, most_lost);
+    all.into_iter().find(|c| ok(c)).map_or_else(|| fallback.clone(), |c| c.placement)
+}
+
+fn cover_boxes(scene: &Scene) -> Vec<Footprint> {
+    let Some(ground) = shape::ground(scene) else { return Vec::new() };
+    let cell = ((ground.u * COVER_CELL) as usize).max(8);
+    let Some((grid, mask)) = shape::coverage(scene, cell) else { return Vec::new() };
+    let (width, height) = (scene.width as f64, scene.height as f64);
+    let footprint = |x0: usize, x1: usize, y0: usize, y1: usize| Footprint {
+        u0: ((x0 * cell) as f64 / width).clamp(0.0, 1.0),
+        v0: ((y0 * cell) as f64 / height).clamp(0.0, 1.0),
+        u1: ((x1 * cell) as f64 / width).clamp(0.0, 1.0),
+        v1: ((y1 * cell) as f64 / height).clamp(0.0, 1.0),
+    };
+    let mut out = Vec::new();
+    let mut open: Vec<(usize, usize, usize)> = Vec::new();
+    for j in 0..=grid.h {
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        if j < grid.h {
+            for i in 0..grid.w {
+                if mask[j * grid.w + i] {
+                    match runs.last_mut() {
+                        Some(run) if run.1 == i => run.1 = i + 1,
+                        _ => runs.push((i, i + 1)),
+                    }
+                }
+            }
+        }
+        let mut next = Vec::new();
+        for (x0, x1, y0) in open.drain(..) {
+            if runs.contains(&(x0, x1)) {
+                next.push((x0, x1, y0));
+            } else {
+                out.push(footprint(x0, x1, y0, j));
+            }
+        }
+        for (x0, x1) in runs {
+            if !next.iter().any(|o| (o.0, o.1) == (x0, x1)) {
+                next.push((x0, x1, j));
+            }
+        }
+        open = next;
+    }
+    out.retain(|f| f.u1 > f.u0 && f.v1 > f.v0);
+    out
 }
 
 fn source_size(analysis: &Analysis) -> (u32, u32) {
@@ -631,9 +717,16 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
     if bare.is_empty() {
         return fallback;
     }
-    let boxes = if options.scenery == Scenery::Off { bare.clone() } else { footprints(&Scene { icons: crate::scenery::footprints(scene), ..scene.clone() }) };
+    let cover = if scenery::active(scene, options) { cover_boxes(scene) } else { Vec::new() };
+    let boxes = Boxes { icons: &bare, cover: &cover };
     let settings = settings(options);
-    let new = fresh(&field, &boxes, &bare, &settings, &fallback);
+    let new = if cover.is_empty() {
+        fresh(&field, &boxes, &settings, &fallback, None)
+    } else {
+        let plain = fresh(&field, &Boxes::bare(&bare), &settings, &fallback, None);
+        let lost = Frame::of(&plain).map(|f| field.crop_loss(&f));
+        fresh(&field, &boxes, &settings, &fallback, lost)
+    };
     let Some(old) = previous.filter(|p| fits(&field, p, &settings)) else { return new };
     if *old == new {
         return new;
@@ -646,9 +739,63 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
     }
 }
 
+fn nearest_pan(slack: f64, at: f64) -> usize {
+    let p = pans(slack);
+    (0..p.len()).min_by(|a, b| (p[*a] - at).abs().total_cmp(&(p[*b] - at).abs())).unwrap_or(0)
+}
+
+pub fn solve_near(analysis: &Analysis, scene: &Scene, options: &Options, previous: &Placement, budget: Duration) -> Placement {
+    let started = Instant::now();
+    let Some(field) = Field::new(analysis, scene) else { return previous.clone() };
+    let bare = footprints(scene);
+    let settings = settings(options);
+    let Some(held) = Frame::of(previous).filter(|_| !bare.is_empty() && fits(&field, previous, &settings)) else {
+        return solve(analysis, scene, options, None);
+    };
+    let cover = if scenery::active(scene, options) { cover_boxes(scene) } else { Vec::new() };
+    let boxes = Boxes { icons: &bare, cover: &cover };
+    let held_cost = score(&field, &boxes, previous, None);
+    let most_lost = (!cover.is_empty()).then(|| field.crop_loss(&held));
+    let zooms = zoom_levels(&settings);
+    let zi = ((held.z - 1.0) / ZOOM_STEP).round().clamp(0.0, (zooms - 1) as f64) as usize;
+    let mut frames = vec![held];
+    for z in zi.saturating_sub(1)..(zi + 2).min(zooms) {
+        let zoom = 1.0 + ZOOM_STEP * z as f64;
+        let (cw, ch) = table::cover(field.image_aspect, field.screen_aspect, zoom);
+        let (xs, ys) = (pans(1.0 - cw), pans(1.0 - ch));
+        let (xc, yc) = (nearest_pan(1.0 - cw, held.x0), nearest_pan(1.0 - ch, held.y0));
+        for x0 in &xs[xc.saturating_sub(NEAR_PANS)..(xc + NEAR_PANS + 1).min(xs.len())] {
+            for y0 in &ys[yc.saturating_sub(NEAR_PANS)..(yc + NEAR_PANS + 1).min(ys.len())] {
+                frames.push(Frame { z: zoom, x0: *x0, y0: *y0, cw, ch, mirrored: held.mirrored });
+            }
+        }
+    }
+    let mut ranked: Vec<(f64, Frame)> = frames
+        .par_iter()
+        .map(|f| {
+            let (hid, busy) = under_icons(&field, &boxes, &AxisMap::x(f, None), &AxisMap::y(f, None));
+            (field.frame_cost(f, hid, busy), *f)
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let ok = usable(&field, &boxes, previous, most_lost);
+    let mut best = Choice { placement: previous.clone(), cost: held_cost };
+    for (_, frame) in ranked {
+        if started.elapsed().as_secs_f64() > budget.as_secs_f64() * NEAR_SHARE {
+            break;
+        }
+        for c in choices(&field, &boxes, &frame, &settings) {
+            if ok(&c) && ranks_before(&c, &best) == std::cmp::Ordering::Less {
+                best = c;
+            }
+        }
+    }
+    best.placement
+}
+
 pub fn hidden_share(analysis: &Analysis, scene: &Scene, placement: &Placement) -> f32 {
     match Field::new(analysis, scene) {
-        Some(field) => hidden_saliency(&field, &footprints(scene), placement) as f32,
+        Some(field) => hidden_saliency(&field, &Boxes::bare(&footprints(scene)), placement) as f32,
         None => 0.0,
     }
 }
