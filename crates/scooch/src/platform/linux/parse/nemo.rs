@@ -15,7 +15,7 @@ pub const STANDARD_ICON: f64 = 48.0;
 pub const STANDARD_ZOOM: i64 = 3;
 pub const NON_PRIMARY_MARGIN: f64 = 25.0;
 pub const LINKS: [(&str, &str); 4] = [("computer", "computer-icon-visible"), ("home", "home-icon-visible"), ("trash", "trash-icon-visible"), ("network", "network-icon-visible")];
-pub const INSETS: Insets = Insets { left: 7.0, top: 7.0, right: 9.0, bottom: 6.0 };
+pub const INSETS: Insets = Insets { left: 7.0, top: 6.0, right: 9.0, bottom: 4.0 };
 
 pub fn icon_size(zoom: i64) -> f64 {
     match zoom {
