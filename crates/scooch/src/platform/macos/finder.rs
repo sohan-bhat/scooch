@@ -224,9 +224,12 @@ fn send(property_code: u32) -> std::result::Result<Option<Retained<NSAppleEventD
     Ok(unsafe { msg_send![&*reply, paramDescriptorForKeyword: code(b"----")] })
 }
 
+pub const FINDER_OFF: &str = "Finder is not running, so Scooch keeps the picture as it is until Finder starts.";
+
 fn failure(status: i32) -> Result<Option<Retained<NSAppleEventDescriptor>>> {
     match status {
-        NO_SUCH_OBJECT | NOT_RUNNING => Ok(None),
+        NO_SUCH_OBJECT => Ok(None),
+        NOT_RUNNING => Err(anyhow!("{FINDER_OFF}")),
         NOT_ALLOWED | WOULD_ASK => Err(anyhow!("{DENIED}")),
         TIMED_OUT => Err(anyhow!("Finder took over two seconds to list the desktop, so Scooch will try again at the next change.")),
         BUILD => Err(anyhow!("Scooch could not build its question for Finder, so run scooch doctor.")),
@@ -383,6 +386,12 @@ mod tests {
         let plain = item_rect((0.0, 0.0), &View::default(), Label { width: 50.0, lines: 1, line: 16.0 });
         let info = item_rect((0.0, 0.0), &View { info: true, ..View::default() }, Label { width: 50.0, lines: 1, line: 16.0 });
         assert_eq!(info.h - plain.h, 16.0);
+    }
+
+    #[test]
+    fn finder_not_running_is_an_error_and_an_empty_desktop_is_not() {
+        assert_eq!(failure(NOT_RUNNING).unwrap_err().to_string(), FINDER_OFF);
+        assert!(failure(NO_SUCH_OBJECT).unwrap().is_none());
     }
 
     #[test]

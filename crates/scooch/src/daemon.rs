@@ -527,12 +527,13 @@ pub mod tests {
         pub moving: Mutex<Option<PathBuf>>,
         pub lost: Mutex<Vec<PathBuf>>,
         pub gallery: Mutex<Vec<PathBuf>>,
+        pub broken: Mutex<Option<String>>,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens, icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()) })
+            Arc::new(Self { screens, icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None) })
         }
 
         pub fn showing(&self, screen: &str) -> PathBuf {
@@ -561,6 +562,9 @@ pub mod tests {
             self.snapshots.fetch_add(1, Ordering::SeqCst);
             if let Some(work) = self.hook.lock().unwrap().take() {
                 work();
+            }
+            if let Some(reason) = self.broken.lock().unwrap().clone() {
+                anyhow::bail!(reason);
             }
             Ok(Snapshot { screens: self.screens.clone(), icons: self.icons.lock().unwrap().clone() })
         }
@@ -1023,6 +1027,22 @@ pub mod tests {
         fake.place(vec![subject()]);
         daemon.tick();
         assert!(!daemon.store.load().screens["main"].flip_helps);
+    }
+
+    #[test]
+    fn a_desktop_that_cannot_be_read_keeps_the_picture_and_the_fingerprint() {
+        let (daemon, fake, _) = rig("finderoff", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let before = daemon.store.load().screens["main"].clone();
+        let showing = fake.showing("main");
+        *fake.broken.lock().unwrap() = Some("Finder is not running, so Scooch keeps the picture as it is until Finder starts.".into());
+        fake.place(Vec::new());
+        let report = daemon.tick();
+        assert!(report.problem.as_deref().is_some_and(|problem| problem.starts_with("Finder is not running")));
+        assert_eq!(daemon.store.load().screens["main"].fingerprint, before.fingerprint);
+        assert_eq!(fake.showing("main"), showing);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), 1);
     }
 
     #[test]
