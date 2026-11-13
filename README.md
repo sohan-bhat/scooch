@@ -47,7 +47,7 @@ One background process does this. It is event driven with no timer and no window
 | Windows | Windows 11 on a GitHub runner, one display at 100% scaling |
 | Linux | Real sessions on Ubuntu 24.04 of GNOME 46 with Desktop Icons NG, KDE Plasma 5.27, Xfce 4.18, Cinnamon 6.0 and MATE 1.26 |
 
-Not yet tested: several monitors, several macOS Spaces, Windows 10, Windows display scaling, Plasma 6 and Xfce 4.20.
+Several monitors, several macOS Spaces, Windows 10, Windows display scaling, Plasma 6 and Xfce 4.20 are not yet tested.
 
 ## Limits
 
