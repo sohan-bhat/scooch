@@ -29,6 +29,7 @@
 //! | `core_lift`, `core_drop`, `volume_lit`, `volume_dark` | how far light moves the cloud body toward rim or belly, inside the shade and in the open |
 
 mod analysis;
+mod area;
 mod blur;
 mod bundle;
 mod color;
@@ -39,6 +40,7 @@ mod paint;
 mod render;
 mod sat;
 mod scenery;
+mod session;
 mod shape;
 mod solver;
 mod table;
@@ -46,6 +48,7 @@ mod warp;
 
 pub use bundle::{Bundle, Constants, RAMP};
 pub use pack::{Canvas, TablesError};
+pub use session::Session;
 pub use image::{GrayImage, RgbImage, RgbaImage};
 pub use paint::Materials;
 pub use shape::FIELD_STEP as SCENERY_FIELD_STEP;
@@ -139,6 +142,7 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
     solver::solve(analysis, scene, options, previous)
 }
 
+/// A quick placement near the previous one, only for while an icon is held. It searches nearby pans only and can hide more of the subject than `solve`, so the caller follows it with a full `solve` when the icon is dropped.
 pub fn solve_near(analysis: &Analysis, scene: &Scene, options: &Options, previous: &Placement, budget: std::time::Duration) -> Placement {
     solver::solve_near(analysis, scene, options, previous, budget)
 }
