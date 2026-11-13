@@ -158,7 +158,7 @@ pub fn switch(image: Option<PathBuf>) -> Result<()> {
 
 fn picture_file(image: &Path) -> Result<PathBuf> {
     let image = expand(image);
-    let found = image.canonicalize().map_err(|_| anyhow!("{} was not found, so check the path and try again.", image.display()))?;
+    let found = state::canonical(&image).map_err(|_| anyhow!("{} was not found, so check the path and try again.", image.display()))?;
     if !found.is_file() {
         bail!("{} is a folder, so pass the path of a picture inside it.", tilde(&found));
     }
@@ -387,7 +387,7 @@ pub fn render(image: Option<PathBuf>, icons: Option<PathBuf>, out: Option<PathBu
         std::fs::write(&path, scooch_core::encode_png(&map)?).with_context(|| format!("Scooch could not write {}, so check the folder.", path.display()))?;
     }
     if !named {
-        println!("Wrote {}", tilde(&out.canonicalize().unwrap_or(out)));
+        println!("Wrote {}", tilde(&state::canonical(&out).unwrap_or(out)));
     }
     Ok(())
 }
@@ -484,7 +484,7 @@ fn begin(desktop: &dyn Desktop, store: &Store) -> Result<()> {
         }
     }
     let exe = std::env::current_exe().context("Scooch cannot find its own program file, so reinstall it.")?;
-    desktop.autostart(Some(&exe.canonicalize().unwrap_or(exe)))
+    desktop.autostart(Some(&state::canonical(&exe).unwrap_or(exe)))
 }
 
 fn wait(store: &Store, hint: Option<&str>) {
@@ -793,6 +793,16 @@ mod tests {
         assert_eq!(found, vec![own.join("new.png"), own.join("old.jpg"), system.join("apple.jpg"), nested.join("Meadow.jpg"), system.join("Zebra.heic")]);
         assert!(listing(&[], &[]).is_empty());
         assert_eq!(listing(&[], &gallery).len(), 3);
+    }
+
+    #[test]
+    fn picked_paths_are_clean_on_every_system() {
+        let folder = crate::state::scratch("clean");
+        let picture = folder.join("a.jpg");
+        std::fs::write(&picture, b"x").unwrap();
+        let found = picture_file(&folder.join(".").join("a.jpg")).unwrap();
+        assert_eq!(found, state::canonical(&picture).unwrap());
+        assert!(!found.to_string_lossy().starts_with(r"\\?\"), "{}", found.display());
     }
 
     #[test]
