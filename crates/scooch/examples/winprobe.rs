@@ -56,7 +56,7 @@ mod probe {
         SHCNRF_NewDelivery, SHCNRF_ShellLevel, SVSI_POSITIONITEM,
     };
     use ::windows::Win32::UI::WindowsAndMessaging::{
-        GetShellWindow, PostMessageW, SYSTEM_PARAMETERS_INFO_ACTION, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER, WM_COMMAND,
+        EnumWindows, GetShellWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, IsIconic, IsWindowVisible, ShowWindow, GWL_STYLE, SW_MINIMIZE, WM_CLOSE, WS_CAPTION, PostMessageW, SYSTEM_PARAMETERS_INFO_ACTION, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER, WM_COMMAND,
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW, GetClientRect, GetSystemMetrics, GetWindowThreadProcessId, MsgWaitForMultipleObjects, PeekMessageW, RegisterClassExW,
         SetCursorPos, SystemParametersInfoW, TranslateMessage, EVENT_MAX, EVENT_MIN, MSG, PM_REMOVE, QS_ALLINPUT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
         SPI_GETICONTITLELOGFONT, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_SETTINGCHANGE, WNDCLASSEXW,
@@ -638,12 +638,16 @@ mod probe {
         RgbImage::from_raw(width as u32, height as u32, rgb).context("the capture did not fit")
     }
 
-    fn changed_box(before: &RgbImage, after: &RgbImage, origin: (i32, i32)) -> Option<Rect> {
+    fn changed_box(before: &RgbImage, after: &RgbImage, origin: (i32, i32), clip: RECT) -> Option<Rect> {
         if before.dimensions() != after.dimensions() {
             return None;
         }
         let (mut left, mut top, mut right, mut bottom) = (u32::MAX, u32::MAX, 0u32, 0u32);
         for (x, y, pixel) in after.enumerate_pixels() {
+            let (screen_x, screen_y) = (origin.0 + x as i32, origin.1 + y as i32);
+            if screen_x < clip.left || screen_x >= clip.right || screen_y < clip.top || screen_y >= clip.bottom {
+                continue;
+            }
             let old = before.get_pixel(x, y);
             if pixel.0.iter().zip(old.0.iter()).any(|(a, b)| a.abs_diff(*b) > 10) {
                 (left, top, right, bottom) = (left.min(x), top.min(y), right.max(x), bottom.max(y));
@@ -723,7 +727,12 @@ mod probe {
         unsafe { MapWindowPoints(Some(view.list), None, &mut spot_screen) };
         let reach = (cell.width.max(cell.icon) * 2.0) as i32 + 40;
         let area = RECT { left: spot_screen[0].x - reach, top: spot_screen[0].y - reach / 2, right: spot_screen[0].x + reach, bottom: spot_screen[0].y + reach * 2 };
-        p.line(format!("- target spot {},{} in list coordinates, capture area {}", spot.x, spot.y, show(&rect_of(area))));
+        let tall = shell::spacing(&view).map_or(cell.width as i32 * 2, |spacing| spacing.y);
+        let middle = spot_screen[0].x + (cell.icon / 2.0) as i32;
+        let clip = RECT { left: middle - cell.width as i32, top: spot_screen[0].y - cell.line as i32, right: middle + cell.width as i32, bottom: spot_screen[0].y + tall + cell.line as i32 };
+        let dpi = unsafe { GetDpiForWindow(view.list) };
+        p.line(format!("- target spot {},{} in list coordinates, capture area {}, pixels judged inside {}, list DPI {dpi}, icon box {}", spot.x, spot.y, show(&rect_of(area)), show(&rect_of(clip)), cell.icon));
+        uncover(p);
         park_cursor();
         let mut measured = Vec::new();
         for (index, (name, folder)) in PROBES.iter().enumerate() {
@@ -738,7 +747,7 @@ mod probe {
                 let (_, at) = position(&view, &pidl)?;
                 let shown = shown_name(name, *folder);
                 let automation = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown || seen == name).map(|(_, rect)| rect);
-                let pixels = changed_box(&before, &after, (area.left, area.top));
+                let pixels = changed_box(&before, &after, (area.left, area.top), clip);
                 let _ = fs::write(p.out.join(format!("before-{index}.png")), scooch_core::encode_png(&before)?);
                 let _ = fs::write(p.out.join(format!("after-{index}.png")), scooch_core::encode_png(&after)?);
                 place(&view, &pidl, home)?;
@@ -778,7 +787,7 @@ mod probe {
                 to(&measure.pixels)
             ));
         }
-        solve(p, &measured, &cell);
+        solve(p, &measured, &cell, dpi);
         Ok(())
     }
 
@@ -786,55 +795,55 @@ mod probe {
         rect.map_or(RECT::default(), |rect| RECT { left: rect.x as i32, top: rect.y as i32, right: (rect.x + rect.w) as i32, bottom: (rect.y + rect.h) as i32 })
     }
 
-    fn solve(p: &mut Probe, measured: &[Measure], cell: &Cell) {
+    fn solve(p: &mut Probe, measured: &[Measure], cell: &Cell, dpi: u32) {
+        let limit = SPARE * dpi.max(96) as f32 / 96.0;
         let mut negative = Vec::new();
         p.line(String::new());
+        p.line(format!("- judged against drawn pixels, sideways against the drawn pixels or the {} px icon box whichever is wider, allowed spare 0 to {limit} px", cell.icon));
         for measure in measured {
             let Some(drawn) = measure.pixels else {
                 p.line(format!("- {} has no drawn pixels to judge", measure.name));
-                p.failed.push(format!("{} has no drawn pixels", measure.name));
+                p.failed.push(format!("{} at {dpi} DPI has no drawn pixels", measure.name));
                 continue;
             };
-            let edges = margins(&measure.adapter, &drawn);
-            let verdict = if edges.iter().any(|edge| *edge < 0.0) {
+            let raw = margins(&measure.adapter, &drawn);
+            let left = drawn.x.min(measure.at.0);
+            let right = (drawn.x + drawn.w).max(measure.at.0 + cell.icon);
+            let edges = [left - measure.adapter.x, raw[1], measure.adapter.x + measure.adapter.w - right, raw[3]];
+            let verdict = if raw.iter().any(|edge| *edge < 0.0) {
                 negative.push((measure, drawn));
                 "misses drawn pixels"
-            } else if edges.iter().any(|edge| *edge > SPARE) {
-                "spares more than 10 px"
+            } else if edges.iter().any(|edge| *edge > limit) {
+                "spares too much"
             } else {
-                "fits, every edge between 0 and 10 px"
+                "fits"
             };
-            p.line(format!("- {} {verdict} {edges:?}", measure.name));
-            if verdict != "fits, every edge between 0 and 10 px" {
-                p.failed.push(format!("{} {verdict}", measure.name));
+            p.line(format!("- {} {verdict}, judged {edges:?}, raw {raw:?}", measure.name));
+            if verdict != "fits" {
+                p.failed.push(format!("{} at {dpi} DPI {verdict} {edges:?}", measure.name));
             }
         }
         if negative.is_empty() {
             p.line(format!("- no rectangle misses a drawn pixel, so the constants stay `{SPACING:?}`"));
             return;
         }
-        let mut above = f32::MIN;
-        let mut tail = f32::MIN;
-        let mut one_line = f32::MIN;
-        let mut wrapped = f32::MIN;
+        let mut above = Vec::new();
+        let mut tail = Vec::new();
+        let mut one_line = Vec::new();
         for (measure, drawn) in &negative {
             let lines = layout::lines(cell, measure.label);
-            above = above.max(measure.at.1 - drawn.y);
-            tail = tail.max(drawn.y + drawn.h - (measure.at.1 + cell.icon + lines * cell.line));
+            above.push(measure.at.1 - drawn.y);
+            tail.push(drawn.y + drawn.h - (measure.at.1 + cell.icon + lines * cell.line));
             let anchor = measure.at.0 + cell.icon / 2.0;
             let width = 2.0 * (anchor - drawn.x).max(drawn.x + drawn.w - anchor);
-            if lines > 1.0 {
-                wrapped = wrapped.max(width);
-            } else {
-                one_line = one_line.max(width - cell.icon.max(measure.label.width.min(cell.cap(&SPACING))));
-            }
+            one_line.push(width - cell.icon.max(measure.label.width.min(cell.cap(&SPACING))));
         }
+        let most = |values: &[f32]| values.iter().copied().fold(None, |best: Option<f32>, value| Some(best.map_or(value, |best| best.max(value))));
         p.line(format!(
-            "- corrected constants from the misses, top at least {:.0} px above the reported point, {:.0} px below the label lines, {:.0} px of sides on one line, {:.0} px wide when wrapped",
-            above.ceil(),
-            tail.ceil(),
-            one_line.ceil(),
-            wrapped.ceil()
+            "- corrected constants from the misses, top at least {:?} px above the reported point, {:?} px below the label lines, {:?} px of sides",
+            most(&above).map(f32::ceil),
+            most(&tail).map(f32::ceil),
+            most(&one_line).map(f32::ceil)
         ));
     }
 
@@ -929,6 +938,49 @@ mod probe {
             }
             Err(error) => p.line(format!("- could not reach Shell.Application {error}")),
         }
+        for (class, title, done) in clear_windows(p.window) {
+            p.line(format!("- {done} a window in the way, class `{class}` titled `{title}`"));
+        }
+    }
+
+    fn clear_windows(own: HWND) -> Vec<(String, String, &'static str)> {
+        unsafe extern "system" fn each(window: HWND, data: LPARAM) -> ::windows::core::BOOL {
+            let found = unsafe { &mut *(data.0 as *mut Vec<isize>) };
+            found.push(window.0 as isize);
+            true.into()
+        }
+        let mut windows: Vec<isize> = Vec::new();
+        let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut windows as *mut Vec<isize> as isize)) };
+        let mut cleared = Vec::new();
+        let keep = ["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "ScoochProbe", "ScoochWatch"];
+        for raw in windows {
+            let window = HWND(raw as *mut c_void);
+            if window == own || !unsafe { IsWindowVisible(window) }.as_bool() || unsafe { IsIconic(window) }.as_bool() {
+                continue;
+            }
+            let class = class_name(window);
+            if keep.contains(&class.as_str()) {
+                continue;
+            }
+            let mut frame = RECT::default();
+            if unsafe { GetWindowRect(window, &mut frame) }.is_err() || frame.right - frame.left < 40 || frame.bottom - frame.top < 40 {
+                continue;
+            }
+            let mut text = [0u16; 128];
+            let length = unsafe { GetWindowTextW(window, &mut text) }.clamp(0, 128) as usize;
+            let title = String::from_utf16_lossy(&text[..length]);
+            if class == "#32770" {
+                let _ = unsafe { PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+                cleared.push((class, title, "closed"));
+            } else if unsafe { GetWindowLongW(window, GWL_STYLE) } as u32 & WS_CAPTION.0 == WS_CAPTION.0 {
+                let _ = unsafe { ShowWindow(window, SW_MINIMIZE) };
+                cleared.push((class, title, "minimized"));
+            }
+        }
+        if !cleared.is_empty() {
+            pump(Duration::from_millis(800));
+        }
+        cleared
     }
 
     fn rule_names() -> [&'static str; 2] {
@@ -1034,6 +1086,7 @@ mod probe {
     }
 
     fn events(p: &mut Probe) -> Result<()> {
+        uncover(p);
         let view = shell::view()?;
         let desk = Desk::of(&view);
         let hook = whole_hook(view.list).context("could not hook the desktop thread")?;
@@ -1746,6 +1799,7 @@ mod probe {
 
     fn end_to_end(p: &mut Probe) -> Result<()> {
         encode_times(p);
+        uncover(p);
         let desktop = platform::current()?;
         let screen = desktop.screens()?.first().context("no screen")?.clone();
         let twin = twin()?;
