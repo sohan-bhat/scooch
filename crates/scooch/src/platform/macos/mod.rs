@@ -1,6 +1,7 @@
 mod finder;
 mod launchd;
 mod picture;
+mod spaces;
 mod store;
 mod sys;
 mod watch;
@@ -90,6 +91,16 @@ impl Desktop for Mac {
 
     fn read_lag(&self) -> Duration {
         Duration::ZERO
+    }
+
+    fn known(&self) -> Result<Option<Vec<String>>> {
+        let mut found = Vec::new();
+        for screen in self.screens()? {
+            let (display, _) = spaces::split(&screen.id);
+            let Some(every) = spaces::all(display) else { return Ok(None) };
+            found.extend(every.iter().map(|space| spaces::join(display, Some(space))));
+        }
+        Ok(Some(found))
     }
 
     fn run(&self, wake: Wake) -> Result<()> {
@@ -251,7 +262,9 @@ mod tests {
         let screens = Mac.screens().unwrap();
         assert!(!screens.is_empty());
         for screen in &screens {
-            assert_eq!(screen.id.len(), 36, "{}", screen.id);
+            let (display, space) = spaces::split(&screen.id);
+            assert_eq!(display.len(), 36, "{}", screen.id);
+            assert!(space.is_some_and(|space| space.len() == 36), "{}", screen.id);
             assert!(screen.scale >= 1.0 && screen.frame.w > 0.0 && screen.frame.h > 0.0);
         }
         assert_eq!(screens, Mac.screens().unwrap());

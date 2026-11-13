@@ -1,4 +1,3 @@
-use super::finder::preference;
 use super::sys::{self, Owned, Ref};
 use crate::state::{same, Store};
 use objc2::rc::Retained;
@@ -65,7 +64,7 @@ pub fn parse(bytes: &[u8]) -> Option<Plist> {
     Some(convert(unsafe { &*(list.0 as *const AnyObject) }))
 }
 
-fn convert(object: &AnyObject) -> Plist {
+pub fn convert(object: &AnyObject) -> Plist {
     if let Some(text) = object.downcast_ref::<NSString>() {
         return Plist::Text(text.to_string());
     }
@@ -144,13 +143,6 @@ pub fn file_path(url: &str) -> Option<PathBuf> {
     Some(PathBuf::from(OsStr::from_bytes(&decoded)))
 }
 
-pub fn space_of(configuration: &Plist, display: &str) -> Option<String> {
-    let monitors = configuration.get("Management Data")?.get("Monitors")?.items()?;
-    let named = |name: &str| monitors.iter().find(|monitor| monitor.get("Display Identifier").and_then(Plist::text) == Some(name));
-    let monitor = named(display).filter(|monitor| monitor.get("Current Space").is_some()).or_else(|| named("Main"))?;
-    monitor.get("Current Space")?.get("uuid")?.text().map(str::to_string)
-}
-
 pub fn decide(kind: Kind, reported: Option<PathBuf>, still: impl Fn(&Path) -> bool, ours: impl Fn(&Path) -> bool, default_still: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     match kind {
         Kind::Picture(file) => {
@@ -168,18 +160,18 @@ pub fn decide(kind: Kind, reported: Option<PathBuf>, still: impl Fn(&Path) -> bo
     }
 }
 
-pub fn trusted(reported: Option<PathBuf>, display: &str) -> Option<PathBuf> {
+pub fn trusted(reported: Option<PathBuf>, id: &str) -> Option<PathBuf> {
     let Some(store) = read() else { return reported };
-    let space = current_space(display);
+    let (display, space) = place(id);
     match kind(&store, display, space.as_deref()) {
         Some(kind) => decide(kind, reported, still, |path| Store::open().owns(path), default_still),
         None => reported,
     }
 }
 
-pub fn restorable(reported: Option<PathBuf>, display: &str) -> Option<PathBuf> {
+pub fn restorable(reported: Option<PathBuf>, id: &str) -> Option<PathBuf> {
     let Some(store) = read() else { return reported };
-    let space = current_space(display);
+    let (display, space) = place(id);
     match kind(&store, display, space.as_deref()) {
         Some(kind) => keep(kind, reported),
         None => reported,
@@ -194,19 +186,22 @@ pub fn keep(kind: Kind, reported: Option<PathBuf>) -> Option<PathBuf> {
     }
 }
 
-pub fn describe(display: &str) -> Option<Kind> {
+pub fn describe(id: &str) -> Option<Kind> {
     let store = read()?;
-    kind(&store, display, current_space(display).as_deref())
+    let (display, space) = place(id);
+    kind(&store, display, space.as_deref())
+}
+
+fn place(id: &str) -> (&str, Option<String>) {
+    match super::spaces::split(id) {
+        (display, Some(space)) => (display, Some(space.to_string())),
+        (display, None) => (display, super::spaces::current(display)),
+    }
 }
 
 fn read() -> Option<Plist> {
     let home = super::real_home()?;
     parse(&std::fs::read(home.join(INDEX)).ok()?)
-}
-
-fn current_space(display: &str) -> Option<String> {
-    let configuration = preference("com.apple.spaces", "SpacesDisplayConfiguration")?;
-    space_of(&convert(&configuration), display)
 }
 
 pub fn still(path: &Path) -> bool {
@@ -333,21 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn the_current_space_comes_from_the_matching_monitor() {
-        let xml = format!(
-            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Management Data</key><dict><key>Monitors</key><array>\
-             <dict><key>Display Identifier</key><string>Main</string><key>Current Space</key><dict><key>uuid</key><string>{SPACE}</string></dict></dict>\
-             <dict><key>Display Identifier</key><string>SIDE</string><key>Current Space</key><dict><key>uuid</key><string>SIDE-SPACE</string></dict></dict>\
-             <dict><key>Display Identifier</key><string>{DISPLAY}</string></dict>\
-             </array></dict></dict></plist>"
-        );
-        let configuration = parse(xml.as_bytes()).unwrap();
-        assert_eq!(space_of(&configuration, "SIDE").as_deref(), Some("SIDE-SPACE"));
-        assert_eq!(space_of(&configuration, DISPLAY).as_deref(), Some(SPACE));
-        assert_eq!(space_of(&Plist::Other, DISPLAY), None);
-    }
-
-    #[test]
     fn decide_trusts_only_plain_pictures_and_a_still_default() {
         let yes = |_: &Path| true;
         let no = |_: &Path| false;
@@ -387,7 +367,7 @@ mod tests {
             return;
         }
         let screen = super::super::picture::screens(unsafe { objc2::MainThreadMarker::new_unchecked() }).unwrap().remove(0);
-        assert!(current_space(&screen.id).is_some());
+        assert!(screen.id.contains('@'));
         assert!(describe(&screen.id).is_some());
     }
 }

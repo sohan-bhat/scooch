@@ -70,6 +70,9 @@ pub trait Desktop: Send + Sync {
     fn read_lag(&self) -> std::time::Duration {
         std::time::Duration::from_secs(2)
     }
+    fn known(&self) -> Result<Option<Vec<String>>> {
+        Ok(None)
+    }
 }
 
 pub fn folder_and_children(root: &Path) -> Vec<PathBuf> {

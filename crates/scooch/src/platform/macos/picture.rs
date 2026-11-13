@@ -19,7 +19,9 @@ pub fn screens(marker: MainThreadMarker) -> Result<Vec<Screen>> {
         let Some(display) = number(&screen) else { continue };
         let bounds = unsafe { sys::CGDisplayBounds(display) };
         let frame = Rect { x: bounds.origin.x as f32, y: bounds.origin.y as f32, w: bounds.size.width as f32, h: bounds.size.height as f32 };
-        found.push(Screen { id: identifier(display), frame, scale: screen.backingScaleFactor() as f32 });
+        let display = identifier(display);
+        let space = super::spaces::current(&display);
+        found.push(Screen { id: super::spaces::join(&display, space.as_deref()), frame, scale: screen.backingScaleFactor() as f32 });
     }
     if found.is_empty() {
         bail!("macOS reports no screens, so try again once a display is connected.");
@@ -40,10 +42,17 @@ fn identifier(display: u32) -> String {
 }
 
 fn find(marker: MainThreadMarker, id: &str) -> Result<Retained<NSScreen>> {
-    NSScreen::screens(marker)
+    let (display, space) = super::spaces::split(id);
+    let screen = NSScreen::screens(marker)
         .into_iter()
-        .find(|screen| number(screen).is_some_and(|display| identifier(display) == id))
-        .ok_or_else(|| anyhow!("The screen {id} is not connected, so reconnect it and try again."))
+        .find(|screen| number(screen).is_some_and(|number| identifier(number) == display))
+        .ok_or_else(|| anyhow!("The screen {display} is not connected, so reconnect it and try again."))?;
+    if let Some(space) = space {
+        if super::spaces::current(display).as_deref() != Some(space) {
+            bail!("That desktop is no longer showing, so Scooch will finish when it shows again.");
+        }
+    }
+    Ok(screen)
 }
 
 pub fn wallpaper(marker: MainThreadMarker, id: &str) -> Result<Option<PathBuf>> {
