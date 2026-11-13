@@ -66,6 +66,7 @@ pub struct Report {
     pub outcomes: Vec<(String, Outcome)>,
     pub problem: Option<String>,
     pub retry: bool,
+    pub unsaved: bool,
 }
 
 pub struct Daemon {
@@ -137,6 +138,7 @@ impl Daemon {
         }
         if let Err(error) = self.store.save(&state) {
             report.problem.get_or_insert(error.to_string());
+            report.unsaved = true;
         }
         report
     }
@@ -385,50 +387,102 @@ fn relieve() {
 #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
 fn relieve() {}
 
-#[cfg(unix)]
-fn on_terminate(store: Store) -> Result<()> {
-    use std::sync::atomic::{AtomicI32, Ordering};
-    static WRITE: AtomicI32 = AtomicI32::new(-1);
-    extern "C" fn terminated(_signal: libc::c_int) {
-        let fd = WRITE.load(Ordering::Relaxed);
-        if fd >= 0 {
-            let byte = 1u8;
-            unsafe { libc::write(fd, &byte as *const u8 as *const libc::c_void, 1) };
-        }
-    }
-    let mut ends = [0 as libc::c_int; 2];
-    if unsafe { libc::pipe(ends.as_mut_ptr()) } != 0 {
-        anyhow::bail!("Scooch could not open a pipe, so restart it with scooch.");
-    }
-    WRITE.store(ends[1], Ordering::SeqCst);
-    unsafe { libc::signal(libc::SIGTERM, terminated as extern "C" fn(libc::c_int) as libc::sighandler_t) };
-    std::thread::Builder::new().name("scooch-term".into()).spawn(move || {
-        let mut byte = [0u8; 1];
-        while unsafe { libc::read(ends[0], byte.as_mut_ptr() as *mut libc::c_void, 1) } < 0 {}
-        let _ = store.mark(None);
-        std::process::exit(0);
-    })?;
-    Ok(())
+pub const STOP_CAP: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+pub struct Stop {
+    requested: std::sync::atomic::AtomicBool,
+    busy: Mutex<bool>,
+    idle: Condvar,
 }
 
-#[cfg(not(unix))]
-fn on_terminate(_store: Store) -> Result<()> {
-    Ok(())
+impl Stop {
+    pub fn request(&self) {
+        let _busy = self.busy.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.requested.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn requested(&self) -> bool {
+        self.requested.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn begin(&self) -> bool {
+        let mut busy = self.busy.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.requested() {
+            return false;
+        }
+        *busy = true;
+        true
+    }
+
+    pub fn end(&self) {
+        *self.busy.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+        self.idle.notify_all();
+    }
+
+    pub fn wait_idle(&self, cap: Duration) -> bool {
+        let busy = self.busy.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_busy, waited) = self.idle.wait_timeout_while(busy, cap, |busy| *busy).unwrap_or_else(|poisoned| poisoned.into_inner());
+        !waited.timed_out()
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Next {
+    Go,
+    Quit,
+}
+
+pub fn after(report: &Report) -> Next {
+    if report.unsaved {
+        Next::Quit
+    } else {
+        Next::Go
+    }
+}
+
+fn finish(store: &Store, stop: &Stop) -> ! {
+    if stop.wait_idle(STOP_CAP) {
+        let _ = store.mark(None);
+        let _ = std::fs::remove_file(store.pid_file());
+    }
+    std::process::exit(0)
 }
 
 pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
-    on_terminate(store.clone())?;
     let signal = Arc::new(Signal::default());
-    let daemon = Daemon::new(desktop.clone(), store);
+    let stop = Arc::new(Stop::default());
+    let poked = signal.clone();
+    let (stopper, stopping, stopped) = (stop.clone(), signal.clone(), store.clone());
+    poke::listen(
+        move || poked.wake(),
+        move || {
+            stopper.request();
+            stopping.wake();
+            finish(&stopped, &stopper);
+        },
+    )?;
+    let Some(_lock) = store.lock()? else {
+        println!("Scooch is already running.");
+        return Ok(());
+    };
+    if let Err(error) = store.mark(Some(crate::state::PROGRAM)) {
+        eprintln!("{error}");
+    }
+    let daemon = Daemon::new(desktop.clone(), store.clone());
     let worker = signal.clone();
     let tracing = trace();
     std::thread::Builder::new().name("scooch-tick".into()).spawn(move || {
         let mut said: Option<String> = None;
         loop {
             worker.settle(QUIET, LIMIT);
+            if !stop.begin() {
+                return;
+            }
             let started = Instant::now();
             let report = daemon.tick();
             relieve();
+            stop.end();
             if tracing {
                 eprintln!("{} tick {} ms {:?} {}", stamp(), started.elapsed().as_millis(), report.outcomes, laps());
             }
@@ -436,7 +490,12 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
                 if let Some(problem) = &report.problem {
                     eprintln!("{problem}");
                 }
-                said = report.problem;
+                said = report.problem.clone();
+            }
+            if after(&report) == Next::Quit {
+                eprintln!("Scooch could not save its settings, so it stopped until the disk has room.");
+                stop.request();
+                finish(&daemon.store, &stop);
             }
             if report.retry {
                 worker.wake();
@@ -444,9 +503,9 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
         }
     })?;
     signal.wake();
-    let poked = signal.clone();
-    poke::listen(move || poked.wake())?;
-    desktop.run(Box::new(move || signal.wake()))
+    let result = desktop.run(Box::new(move || signal.wake()));
+    let _ = store.mark(None);
+    result
 }
 
 #[cfg(test)]
@@ -967,6 +1026,45 @@ pub mod tests {
     }
 
     #[test]
+    fn a_stop_waits_for_the_running_tick() {
+        let stop = Arc::new(Stop::default());
+        assert!(stop.begin());
+        let ticking = stop.clone();
+        let tick = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            ticking.end();
+        });
+        let started = Instant::now();
+        stop.request();
+        assert!(stop.wait_idle(Duration::from_secs(5)));
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(!stop.begin());
+        tick.join().unwrap();
+    }
+
+    #[test]
+    fn a_stop_gives_up_waiting_at_the_cap() {
+        let stop = Stop::default();
+        assert!(stop.begin());
+        stop.request();
+        assert!(!stop.wait_idle(Duration::from_millis(100)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_state_that_cannot_be_saved_ends_the_daemon_quietly() {
+        use std::os::unix::fs::PermissionsExt;
+        let (daemon, fake, _) = rig("readonly", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        std::fs::set_permissions(&daemon.store.root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let report = daemon.tick();
+        std::fs::set_permissions(&daemon.store.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(report.unsaved);
+        assert_eq!(after(&report), Next::Quit);
+        assert_eq!(after(&Report::default()), Next::Go);
+    }
+
+    #[test]
     fn settle_turns_a_burst_into_one_tick() {
         let signal = Signal::default();
         for _ in 0..50 {
@@ -1034,7 +1132,7 @@ pub mod tests {
     fn a_poke_from_another_process_wakes_the_worker() {
         let signal = Arc::new(Signal::default());
         let poked = signal.clone();
-        poke::listen(move || poked.wake()).unwrap();
+        poke::listen(move || poked.wake(), || {}).unwrap();
         assert!(poke::send(std::process::id()));
         let started = Instant::now();
         signal.settle(Duration::from_millis(10), Duration::from_secs(1));

@@ -301,15 +301,8 @@ pub fn watch() -> Result<()> {
     if !store.load().on {
         return Ok(());
     }
-    let Some(_lock) = store.lock()? else {
-        println!("Scooch is already running.");
-        return Ok(());
-    };
-    store.mark(Some(state::PROGRAM))?;
     let desktop: Arc<dyn Desktop> = Arc::from(desktop()?);
-    let result = daemon::watch(desktop, store.clone());
-    store.mark(None)?;
-    result
+    daemon::watch(desktop, store)
 }
 
 pub fn flip() -> Result<()> {

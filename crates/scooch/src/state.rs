@@ -95,6 +95,13 @@ pub struct Store {
 
 pub struct Lock {
     _file: fs::File,
+    pid: PathBuf,
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.pid);
+    }
 }
 
 impl Store {
@@ -113,6 +120,14 @@ impl Store {
 
     pub fn lock_file(&self) -> PathBuf {
         self.root.join("watch.lock")
+    }
+
+    pub fn pid_file(&self) -> PathBuf {
+        self.root.join("watch.pid")
+    }
+
+    pub fn recorded_pid(&self) -> Option<u32> {
+        fs::read_to_string(self.pid_file()).ok()?.trim().parse().ok()
     }
 
     pub fn out(&self) -> PathBuf {
@@ -180,21 +195,18 @@ impl Store {
 
     pub fn lock(&self) -> Result<Option<Lock>> {
         fs::create_dir_all(&self.root)?;
-        let mut file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(self.lock_file())?;
+        let file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(self.lock_file())?;
         if file.try_lock().is_err() {
             return Ok(None);
         }
-        file.set_len(0)?;
-        file.write_all(std::process::id().to_string().as_bytes())?;
-        Ok(Some(Lock { _file: file }))
+        if let Err(error) = write_atomic(&self.pid_file(), std::process::id().to_string().as_bytes()) {
+            eprintln!("{error}");
+        }
+        Ok(Some(Lock { _file: file, pid: self.pid_file() }))
     }
 
     pub fn watcher(&self) -> Option<u32> {
-        let file = fs::File::open(self.lock_file()).ok()?;
-        if file.try_lock().is_ok() {
-            return None;
-        }
-        Some(fs::read_to_string(self.lock_file()).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0))
+        self.recorded_pid().filter(|process| crate::poke::alive(*process))
     }
 }
 
@@ -404,10 +416,22 @@ mod tests {
         let held = store.lock().unwrap();
         assert!(held.is_some());
         assert!(store.lock().unwrap().is_none());
+        assert_eq!(store.recorded_pid(), Some(std::process::id()));
+        #[cfg(unix)]
         assert_eq!(store.watcher(), Some(std::process::id()));
         drop(held);
+        assert_eq!(store.recorded_pid(), None);
         assert_eq!(store.watcher(), None);
         assert!(store.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_stale_pid_file_is_not_a_watcher() {
+        let store = Store::at(scratch("stale"));
+        fs::write(store.pid_file(), b"1").unwrap();
+        assert_eq!(store.watcher(), None);
+        fs::write(store.pid_file(), b"not a number").unwrap();
+        assert_eq!(store.watcher(), None);
     }
 
     #[test]

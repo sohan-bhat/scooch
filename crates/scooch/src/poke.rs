@@ -7,16 +7,18 @@ mod unix {
     use std::sync::atomic::{AtomicI32, Ordering};
 
     static WRITE: AtomicI32 = AtomicI32::new(-1);
+    const WAKE: u8 = 1;
+    const STOP: u8 = 2;
 
-    extern "C" fn poked(_signal: c_int) {
+    extern "C" fn poked(signal: c_int) {
         let fd = WRITE.load(Ordering::Relaxed);
         if fd >= 0 {
-            let byte = 1u8;
+            let byte = if signal == libc::SIGTERM { STOP } else { WAKE };
             unsafe { libc::write(fd, &byte as *const u8 as *const libc::c_void, 1) };
         }
     }
 
-    pub fn listen(wake: impl Fn() + Send + 'static) -> Result<()> {
+    pub fn listen(wake: impl Fn() + Send + 'static, stop: impl Fn() + Send + 'static) -> Result<()> {
         let mut ends = [0 as c_int; 2];
         if unsafe { libc::pipe(ends.as_mut_ptr()) } != 0 {
             bail!("Scooch could not open a pipe, so restart it with scooch.");
@@ -28,13 +30,21 @@ mod unix {
         }
         WRITE.store(ends[1], Ordering::SeqCst);
         let handler = poked as extern "C" fn(c_int) as libc::sighandler_t;
-        unsafe { libc::signal(libc::SIGUSR1, handler) };
+        unsafe {
+            libc::signal(libc::SIGUSR1, handler);
+            libc::signal(libc::SIGTERM, handler);
+        }
         std::thread::Builder::new().name("scooch-poke".into()).spawn(move || {
             let mut buffer = [0u8; 64];
             loop {
                 let read = unsafe { libc::read(ends[0], buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
                 if read > 0 {
-                    wake();
+                    let bytes = &buffer[..read as usize];
+                    if bytes.contains(&STOP) {
+                        stop();
+                    } else {
+                        wake();
+                    }
                 } else if read == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
                     break;
                 }
@@ -44,20 +54,50 @@ mod unix {
     }
 
     pub fn send(process: u32) -> bool {
-        process > 1 && unsafe { libc::kill(process as libc::pid_t, libc::SIGUSR1) } == 0
+        alive(process) && unsafe { libc::kill(process as libc::pid_t, libc::SIGUSR1) } == 0
     }
 
     pub fn stop(process: u32) -> bool {
-        process > 1 && unsafe { libc::kill(process as libc::pid_t, libc::SIGTERM) } == 0
+        alive(process) && unsafe { libc::kill(process as libc::pid_t, libc::SIGTERM) } == 0
+    }
+
+    pub fn alive(process: u32) -> bool {
+        if process <= 1 || process > i32::MAX as u32 {
+            return false;
+        }
+        let exists = unsafe { libc::kill(process as libc::pid_t, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        exists && named_scooch(process)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn named_scooch(process: u32) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let mut buffer = vec![0u8; 4096];
+        let length = unsafe { libc::proc_pidpath(process as c_int, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+        length > 0 && super::scooch_name(std::path::Path::new(std::ffi::OsStr::from_bytes(&buffer[..length as usize])))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn named_scooch(process: u32) -> bool {
+        std::fs::read_link(format!("/proc/{process}/exe")).is_ok_and(|exe| super::scooch_name(&exe)) || std::fs::read_to_string(format!("/proc/{process}/comm")).is_ok_and(|name| name.trim().starts_with("scooch"))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn named_scooch(_process: u32) -> bool {
+        true
     }
 }
 
-#[cfg(unix)]
-pub use unix::{send, stop};
+pub fn scooch_name(exe: &std::path::Path) -> bool {
+    exe.file_name().is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().starts_with("scooch"))
+}
 
 #[cfg(unix)]
-pub fn listen(wake: impl Fn() + Send + 'static) -> Result<()> {
-    unix::listen(wake)
+pub use unix::{alive, send, stop};
+
+#[cfg(unix)]
+pub fn listen(wake: impl Fn() + Send + 'static, stop: impl Fn() + Send + 'static) -> Result<()> {
+    unix::listen(wake, stop)
 }
 
 #[cfg(windows)]
@@ -87,7 +127,7 @@ mod named {
         unsafe { CreateEventW(None, false, false, &here(kind)) }.map_err(|_| anyhow!("Scooch could not open its wake signal, so restart it with scooch."))
     }
 
-    pub fn listen(wake: impl Fn() + Send + 'static) -> Result<()> {
+    pub fn listen(wake: impl Fn() + Send + 'static, stop: impl Fn() + Send + 'static) -> Result<()> {
         let events = Events([create(POKE)?, create(STOP)?]);
         std::thread::Builder::new().name("scooch-poke".into()).spawn(move || {
             let events = events;
@@ -96,7 +136,7 @@ mod named {
                 if woke == WAIT_OBJECT_0 {
                     wake();
                 } else if woke.0 == WAIT_OBJECT_0.0 + 1 {
-                    std::process::exit(0);
+                    stop();
                 } else {
                     break;
                 }
@@ -110,6 +150,12 @@ mod named {
         let set = unsafe { SetEvent(event) }.is_ok();
         let _ = unsafe { CloseHandle(event) };
         set
+    }
+
+    pub fn open(kind: &str) -> bool {
+        let Ok(event) = (unsafe { OpenEventW(EVENT_MODIFY_STATE, false, &here(kind)) }) else { return false };
+        let _ = unsafe { CloseHandle(event) };
+        true
     }
 
     #[cfg(test)]
@@ -130,16 +176,18 @@ mod named {
             let kind = format!("test-{}", std::process::id());
             let event = create(&kind).unwrap();
             assert!(signal(&kind));
+            assert!(open(&kind));
             assert_eq!(unsafe { WaitForSingleObject(event, 1000) }, WAIT_OBJECT_0);
             assert!(!signal("missing-event"));
+            assert!(!open("missing-event"));
             let _ = unsafe { CloseHandle(event) };
         }
     }
 }
 
 #[cfg(windows)]
-pub fn listen(wake: impl Fn() + Send + 'static) -> Result<()> {
-    named::listen(wake)
+pub fn listen(wake: impl Fn() + Send + 'static, stop: impl Fn() + Send + 'static) -> Result<()> {
+    named::listen(wake, stop)
 }
 
 #[cfg(windows)]
@@ -152,8 +200,13 @@ pub fn stop(_process: u32) -> bool {
     named::signal(named::STOP)
 }
 
+#[cfg(windows)]
+pub fn alive(_process: u32) -> bool {
+    named::open(named::POKE)
+}
+
 #[cfg(not(any(unix, windows)))]
-pub fn listen(_wake: impl Fn() + Send + 'static) -> Result<()> {
+pub fn listen(_wake: impl Fn() + Send + 'static, _stop: impl Fn() + Send + 'static) -> Result<()> {
     Ok(())
 }
 
@@ -165,4 +218,34 @@ pub fn send(_process: u32) -> bool {
 #[cfg(not(any(unix, windows)))]
 pub fn stop(_process: u32) -> bool {
     false
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn alive(_process: u32) -> bool {
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_scooch_programs_count() {
+        assert!(scooch_name(std::path::Path::new("/opt/bin/scooch")));
+        assert!(scooch_name(std::path::Path::new("/Applications/Scooch/scoochw.exe")));
+        assert!(!scooch_name(std::path::Path::new("/usr/bin/zsh")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_running_scooch_is_alive_and_others_are_not() {
+        assert!(alive(std::process::id()));
+        assert!(!alive(0) && !alive(1));
+        assert!(!alive(u32::MAX));
+        let mut child = std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        assert!(!alive(child.id()));
+        assert!(!send(child.id()));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
