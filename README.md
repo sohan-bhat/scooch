@@ -43,11 +43,11 @@ One background process does this. It is event driven with no timer and no window
 
 | System | Tested on |
 |---|---|
-| macOS | A real Mac on macOS 15.5, one display |
-| Windows | Windows 11 on a GitHub runner, one display at 100% scaling |
-| Linux | Real sessions on Ubuntu 24.04 of GNOME 46 with Desktop Icons NG, KDE Plasma 5.27, Xfce 4.18, Cinnamon 6.0 and MATE 1.26 |
+| macOS | A real Mac on macOS 15.5. GitHub runners on macOS 15 for Apple silicon and Intel, with the login item and two Spaces |
+| Windows | GitHub runners on Windows 11 build 26100 and on Windows Server 2022, which has the Windows 10 desktop, at 100% and 150% scaling |
+| Linux | Real sessions of GNOME 46 with Desktop Icons NG, KDE Plasma 5.27, 6.7 and 6.8, Xfce 4.18 and 4.20, Cinnamon 6.0 and 6.8, MATE 1.26 and 1.28. Two monitors on Plasma and GNOME |
 
-Several monitors, several macOS Spaces, Windows 10, Windows display scaling, Plasma 6 and Xfce 4.20 are not yet tested.
+More than one monitor on macOS and Windows is not yet tested. On Plasma 6.8 under Wayland only reading the icons and setting the picture are tested.
 
 ## Limits
 
