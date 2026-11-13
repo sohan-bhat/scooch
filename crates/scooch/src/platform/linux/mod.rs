@@ -78,7 +78,7 @@ mod system {
         fn x11_scale(&self) -> f32 {
             1.0
         }
-        fn adjust(&self, session: Session, found: &mut [screens::Found]) {
+        fn adjust(&self, session: Session, found: &mut Vec<screens::Found>) {
             if session != Session::X11 {
                 return;
             }

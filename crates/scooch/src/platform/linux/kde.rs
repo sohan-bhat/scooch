@@ -1,5 +1,5 @@
 use super::parse::desktop::Session;
-use super::parse::kde::{self, Containment, Layout, Mapping, State};
+use super::parse::kde::{self, Containment, Fit, Layout, Mapping, State};
 use super::parse::{gio, keyfile, wakes};
 use super::settings::{self, Plasma};
 use super::{screens, tool, FileWatch, Shell, Watches};
@@ -126,7 +126,7 @@ impl Kde {
         let manual = containment.setting("sortMode") == Some(-1);
         let saved = containment.general.get("positions").filter(|_| manual).and_then(|raw| kde::positions(raw, &kde::resolution(&screen.frame)));
         let present = |url: &str| kde::item_path(url, &folder).is_some_and(|path| path.exists() && path.file_name().is_some_and(|name| mine.contains(name.to_string_lossy().as_ref())));
-        kde::occupied(saved.as_ref(), &present, total, per_stripe, plasma6).into_iter().map(|index| kde::INSETS.apply(layout.rect(index, &area))).collect()
+        kde::occupied(saved.as_ref(), &present, total, per_stripe, plasma6).into_iter().map(|index| if plasma6 { kde::INSETS_6 } else { kde::INSETS }.apply(layout.rect(index, &area))).collect()
     }
 }
 
@@ -138,11 +138,27 @@ impl Shell for Kde {
         Ok(screens.iter().flat_map(|screen| self.icons_on(&state, screen, plasma6, &mapping)).collect())
     }
 
-    fn adjust(&self, _session: Session, found: &mut [screens::Found]) {
+    fn adjust(&self, _session: Session, found: &mut Vec<screens::Found>) {
         let Ok(state) = state() else { return };
         let plasma: Vec<Rect> = state.screens.iter().map(|(_, rect)| *rect).collect();
         let frames: Vec<Rect> = found.iter().map(|found| found.screen.frame).collect();
-        for (index, matched) in kde::match_screens(&plasma, &frames).into_iter().enumerate() {
+        let matched = match kde::fit_screens(&plasma, &frames) {
+            Fit::Scaled(matched) => matched,
+            Fit::Own => {
+                let owned: Vec<screens::Found> = state
+                    .screens
+                    .iter()
+                    .map(|(number, rect)| {
+                        let same = found.iter().find(|found| close(&found.screen.frame, rect));
+                        let id = same.map_or_else(|| format!("Plasma-{number}"), |found| found.screen.id.clone());
+                        screens::Found { screen: Screen { id, frame: *rect, scale: same.map_or(1.0, |found| found.screen.scale) }, primary: *number == 0 }
+                    })
+                    .collect();
+                *found = owned;
+                return;
+            }
+        };
+        for (index, matched) in matched.into_iter().enumerate() {
             let Some(target) = matched else { continue };
             let rect = plasma[index];
             let screen = &mut found[target].screen;

@@ -14,6 +14,7 @@ pub const PLASMA5_SIZES: [f64; 7] = [22.0, 32.0, 48.0, 64.0, 96.0, 128.0, 256.0]
 pub const SMALL_ICON: f64 = 16.0;
 pub const GRID_UNIT: f64 = 18.0;
 pub const PLASMA5_GRID_UNIT: f64 = 21.0;
+pub const INSETS_6: Insets = Insets { left: 4.0, top: 7.0, right: 3.0, bottom: -3.0 };
 pub const SMALL_SPACING: f64 = 4.0;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -342,6 +343,33 @@ fn normalized(rects: &[Rect]) -> Vec<[f32; 4]> {
     rects.iter().map(|rect| [(rect.x - left) / wide, (rect.y - top) / tall, rect.w / wide, rect.h / tall]).collect()
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum Fit {
+    Scaled(Vec<Option<usize>>),
+    Own,
+}
+
+pub fn fit_screens(plasma: &[Rect], frames: &[Rect]) -> Fit {
+    if plasma.is_empty() {
+        return Fit::Scaled(Vec::new());
+    }
+    if plasma.len() != frames.len() {
+        return Fit::Own;
+    }
+    let matched = match_screens(plasma, frames);
+    for (rect, target) in plasma.iter().zip(&matched) {
+        let Some(frame) = target.and_then(|index| frames.get(index)) else { return Fit::Own };
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return Fit::Own;
+        }
+        let (across, down) = (frame.w / rect.w, frame.h / rect.h);
+        if (across - down).abs() > 0.02 * across.max(down) {
+            return Fit::Own;
+        }
+    }
+    Fit::Scaled(matched)
+}
+
 pub fn match_screens(plasma: &[Rect], frames: &[Rect]) -> Vec<Option<usize>> {
     let (one, two) = (normalized(plasma), normalized(frames));
     let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
@@ -620,5 +648,17 @@ mod tests {
         assert!(!shows_on(None, 1, &[0, 1]));
         assert!(shows_on(Some(3), 0, &[0, 1]));
         assert!(mapping(&super::super::keyfile::parse("[ScreenMapping]\nsharedDesktops=true\n")).shared);
+    }
+
+    #[test]
+    fn plasma_screens_win_when_they_do_not_line_up_with_randr() {
+        let wide = Rect { x: 0.0, y: 0.0, w: 3840.0, h: 1080.0 };
+        let left = Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 };
+        let right = Rect { x: 1920.0, y: 0.0, w: 1920.0, h: 1080.0 };
+        assert_eq!(fit_screens(&[wide], &[left, right]), Fit::Own);
+        assert_eq!(fit_screens(&[wide], &[left]), Fit::Own);
+        assert_eq!(fit_screens(&[left, right], &[left, right]), Fit::Scaled(vec![Some(0), Some(1)]));
+        assert_eq!(fit_screens(&[Rect { w: 1280.0, h: 720.0, ..left }], &[left]), Fit::Scaled(vec![Some(0)]));
+        assert_eq!(fit_screens(&[], &[left]), Fit::Scaled(Vec::new()));
     }
 }
