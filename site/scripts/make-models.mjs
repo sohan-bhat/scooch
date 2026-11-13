@@ -13,6 +13,8 @@ const cache = joinPath(site, '.cache', 'polyhaven');
 const out = joinPath(site, 'public', 'models');
 const agent = { 'User-Agent': 'scooch-site-build/1.0' };
 
+const small = { color: 512, normal: 256, arm: 256 };
+
 const models = [
   {
     id: 'classic_laptop',
@@ -20,6 +22,7 @@ const models = [
     file: 'laptop.glb',
     textures: { color: 2048, normal: 1024, arm: 1024 },
     pivots: ['classic_laptop_screen'],
+    lite: true,
   },
   {
     id: 'metal_office_desk',
@@ -27,25 +30,35 @@ const models = [
     file: 'desk.glb',
     textures: { color: 2048, normal: 1024, arm: 1024 },
     merge: true,
+    lite: true,
   },
   {
     id: 'desk_lamp_arm_01',
     resolution: '2k',
     file: 'lamp.glb',
-    textures: { color: 1024, normal: 1024, arm: 1024 },
+    textures: { color: 1024, normal: 512, arm: 1024 },
+    lite: true,
+  },
+  {
+    id: 'television_02',
+    resolution: '2k',
+    file: 'television.glb',
+    textures: { color: 1024, normal: 1024, arm: 512 },
+    glass: { material: 'television_02_screen', uv: [0.68, 1, 0, 0.25], facing: 0.5 },
+    lite: true,
   },
   {
     id: 'office_notepads',
     resolution: '1k',
     file: 'notepads.glb',
-    textures: { color: 1024, normal: 512, arm: 512 },
+    textures: { color: 1024, normal: 256, arm: 256 },
     keep: ['office_notepads_yellow_pad', 'office_notepads_note_stack', 'office_notepads_sticky_stack'],
   },
   {
     id: 'stationery_supplies',
     resolution: '1k',
     file: 'stationery.glb',
-    textures: { color: 1024, normal: 512, arm: 512 },
+    textures: { color: 512, normal: 256, arm: 256 },
     keep: [
       'stationery_supplies_pencilcup',
       'stationery_supplies_pencil_new_a',
@@ -54,9 +67,16 @@ const models = [
       'stationery_supplies_eraser',
     ],
   },
+  { id: 'alarm_clock_01', resolution: '1k', file: 'clock.glb', textures: small, merge: true },
+  { id: 'cassette_player', resolution: '1k', file: 'cassette.glb', textures: small, merge: true },
+  { id: 'potted_plant_04', resolution: '1k', file: 'plant.glb', textures: small, merge: true },
+  { id: 'vintage_stapler', resolution: '1k', file: 'stapler.glb', textures: small, merge: true },
+  { id: 'round_spectacles', resolution: '1k', file: 'glasses.glb', textures: small, merge: true },
+  { id: 'digital_wrist_watch', resolution: '1k', file: 'watch.glb', textures: small, merge: true },
+  { id: 'gamepad', resolution: '1k', file: 'gamepad.glb', textures: small, merge: true },
 ];
 
-const environment = { id: 'studio_small_08', resolution: '1k', file: 'studio.hdr', width: 512 };
+const environment = { id: 'studio_small_08', resolution: '1k', file: 'studio.hdr', width: 256 };
 
 const variants = [
   { name: 'full', folder: out, scale: 1 },
@@ -107,6 +127,51 @@ function keepOnly(document, names) {
   for (const node of document.getRoot().listNodes()) if (!names.includes(node.getName())) node.dispose();
 }
 
+function splitGlass(document, glass) {
+  const [u0, u1, v0, v1] = glass.uv;
+  for (const mesh of document.getRoot().listMeshes()) {
+    for (const primitive of mesh.listPrimitives()) {
+      const indices = primitive.getIndices();
+      const uv = primitive.getAttribute('TEXCOORD_0');
+      const normal = primitive.getAttribute('NORMAL');
+      const keepers = [];
+      const screen = [];
+      const coordinate = [];
+      const direction = [];
+      for (let triangle = 0; triangle < indices.getCount() / 3; triangle++) {
+        const corners = [0, 1, 2].map((corner) => indices.getScalar(triangle * 3 + corner));
+        let u = 0;
+        let v = 0;
+        let z = 0;
+        for (const index of corners) {
+          uv.getElement(index, coordinate);
+          normal.getElement(index, direction);
+          u += coordinate[0] / 3;
+          v += coordinate[1] / 3;
+          z += direction[2] / 3;
+        }
+        const inside = u >= u0 && u <= u1 && v >= v0 && v <= v1 && z > glass.facing;
+        (inside ? screen : keepers).push(...corners);
+      }
+      if (screen.length === 0) continue;
+      const IndexArray = indices.getArray().constructor;
+      indices.setArray(new IndexArray(keepers));
+      const material = document.createMaterial(glass.material).setBaseColorFactor([0.02, 0.02, 0.02, 1]).setRoughnessFactor(0.1).setMetallicFactor(0);
+      const split = primitive.clone().setIndices(document.createAccessor().setType('SCALAR').setArray(new IndexArray(screen)).setBuffer(indices.getBuffer())).setMaterial(material);
+      mesh.addPrimitive(split);
+    }
+  }
+}
+
+function plainGlass(document) {
+  for (const material of document.getRoot().listMaterials()) {
+    if (material.getAlphaMode() !== 'BLEND') continue;
+    material.setBaseColorTexture(null).setMetallicRoughnessTexture(null).setNormalTexture(null).setOcclusionTexture(null);
+    material.setBaseColorFactor([0.86, 0.9, 0.92, 0.18]).setRoughnessFactor(0.06).setMetallicFactor(0);
+    for (const extension of material.listExtensions()) material.setExtension(extension.extensionName, null);
+  }
+}
+
 function shareOcclusion(document) {
   for (const material of document.getRoot().listMaterials()) {
     const packed = material.getMetallicRoughnessTexture();
@@ -131,6 +196,8 @@ async function buildModel(io, model, variant) {
   const document = await io.read(await fetchModel(model));
   if (model.keep) keepOnly(document, model.keep);
   if (model.pivots) addPivots(document, model.pivots);
+  if (model.glass) splitGlass(document, model.glass);
+  plainGlass(document);
   shareOcclusion(document);
   const steps = [prune(), dedup()];
   if (model.merge) steps.push(flatten(), join());
@@ -237,7 +304,8 @@ const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies(
 for (const variant of variants.filter((candidate) => !only || candidate.name === only)) {
   await mkdir(variant.folder, { recursive: true });
   let total = 0;
-  for (const model of models) {
+  for (const model of models.filter((candidate) => variant.name === 'full' || candidate.lite)) {
+    if (process.argv.includes('--only') && !process.argv.includes(model.file)) continue;
     const size = await buildModel(io, model, variant);
     total += size;
     console.log(variant.name, model.file, (size / 1e6).toFixed(2), 'MB');
