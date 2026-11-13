@@ -13,7 +13,7 @@ pub const RIM: usize = 6;
 pub const BELLY: usize = 7;
 
 const LABEL_LIGHT: f32 = 0.62;
-const CORE_LIGHT: f32 = 0.56;
+const CORE_LIGHT: f32 = 0.60;
 const GRAIN: f32 = 0.06;
 const SHARE: f32 = 0.03;
 const FAMILY: f32 = 0.5;
