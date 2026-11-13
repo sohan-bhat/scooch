@@ -102,6 +102,25 @@ fn paint(looks: texture_2d<f32>, paints: texture_2d_array<f32>, table: texture_2
     return mix(land, cloud, sky) * belong;
 }
 
+fn encode(c: vec3<f32>) -> vec3<f32> {
+    let v = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    return select(1.055 * pow(v, vec3<f32>(1.0 / 2.4)) - 0.055, v * 12.92, v <= vec3<f32>(0.0031308));
+}
+
+fn decode(c: vec3<f32>) -> vec3<f32> {
+    let v = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    return select(pow((v + 0.055) / 1.055, vec3<f32>(2.4)), v / 12.92, v <= vec3<f32>(0.04045));
+}
+
+fn over_picture(picture: vec3<f32>, land: vec4<f32>) -> vec3<f32> {
+    let a = clamp(land.a, 0.0, 1.0);
+    if (a <= 0.0) {
+        return picture;
+    }
+    let straight = encode(land.rgb / a);
+    return decode(straight * a + encode(picture) * (1.0 - a));
+}
+
 fn luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
@@ -140,5 +159,5 @@ fn draw(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let a = paint(look_a, paints_a, ramps_a, p, reads, grain);
     let b = paint(look_b, paints_b, ramps_b, p, reads, grain);
     let land = mix(a, b, frame.s);
-    return vec4<f32>(land.rgb + picture * (1.0 - land.a), 1.0);
+    return vec4<f32>(over_picture(picture, land), 1.0);
 }
