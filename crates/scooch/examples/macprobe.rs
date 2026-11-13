@@ -1375,6 +1375,7 @@ mod probe {
         frames: Vec<Instant>,
         ticks: Vec<f64>,
         rate: f64,
+        hidden: usize,
     }
 
     fn animate(renderer: Renderer, display: u32, cross: f64, hold: f64, park: Option<f32>) -> std::thread::JoinHandle<(Renderer, Run)> {
@@ -1384,6 +1385,7 @@ mod probe {
             let rate = pace.as_ref().map_or(0.0, |pace| pace.rate);
             let begin = Instant::now();
             let mut frames = Vec::new();
+            let mut hidden = 0;
             loop {
                 let t = begin.elapsed().as_secs_f64();
                 let bar = if t < cross {
@@ -1393,13 +1395,17 @@ mod probe {
                 } else {
                     break;
                 };
-                if renderer.frame(bar).is_err() {
-                    break;
+                match renderer.frame(bar) {
+                    Ok(()) => frames.push(Instant::now()),
+                    Err(error) if error.contains("occluded") => {
+                        hidden += 1;
+                        std::thread::sleep(Duration::from_millis(4));
+                    }
+                    Err(_) => break,
                 }
-                frames.push(Instant::now());
             }
             let ticks = pace.map(|pace| pace.stop()).unwrap_or_default().into_iter().map(|seconds| seconds * 1000.0).collect();
-            (renderer, Run { frames, ticks, rate })
+            (renderer, Run { frames, ticks, rate, hidden })
         })
     }
 
@@ -1411,7 +1417,7 @@ mod probe {
         let period = if run.rate > 0.0 { 1000.0 / run.rate } else { 16.67 };
         let presents = intervals(&run.frames);
         p.line(format!("- display link nominal rate {:.2} Hz, its callbacks {}, longer than 1.5 periods {}", run.rate, stats(&run.ticks), over(&run.ticks, period)));
-        p.line(format!("- frames presented {}, intervals {}, longer than 1.5 periods {}", run.frames.len(), stats(&presents), over(&presents, period)));
+        p.line(format!("- frames presented {}, skipped while macOS called the window occluded {}, intervals {}, longer than 1.5 periods {}", run.frames.len(), run.hidden, stats(&presents), over(&presents, period)));
     }
 
     fn cycles(p: &mut Probe, marker: MainThreadMarker, screen: &Screen, shared: bool) -> Result<()> {
@@ -1419,9 +1425,11 @@ mod probe {
         let pattern = |layer: &layer::Layer| Pattern { width: layer.pixels.0, height: layer.pixels.1, rgba: GRAY.iter().copied().chain([255]).cycle().take(layer.pixels.0 as usize * layer.pixels.1 as usize * 4).collect() };
         let before = (ours().len(), ports(), threads(pid).len(), rusage(pid));
         let mut opens = Vec::new();
+        let mut shown = Vec::new();
         for _ in 0..20 {
             let started = Instant::now();
             let layer = layer::open(marker, screen)?;
+            shown.push(started.elapsed().as_secs_f64() * 1000.0);
             let gpu = match (&p.gpu, shared) {
                 (Some(gpu), true) => gpu.clone(),
                 _ => Gpu::new(false).map_err(anyhow::Error::msg)?,
@@ -1435,7 +1443,7 @@ mod probe {
             drop(renderer);
             drop(gpu);
             drop(layer);
-            std::thread::sleep(Duration::from_millis(50));
+            layer::spin(0.05);
         }
         std::thread::sleep(Duration::from_millis(500));
         let after = (ours().len(), ports(), threads(pid).len(), rusage(pid));
@@ -1452,7 +1460,7 @@ mod probe {
             memory(before.3),
             memory(after.3)
         ));
-        p.line(format!("- open to first frame {}", stats(&opens)));
+        p.line(format!("- open to visible {}, open to first frame {}", stats(&shown), stats(&opens)));
         Ok(())
     }
 
@@ -1536,7 +1544,7 @@ mod probe {
         drop(renderer);
         drop(layer);
         let closed = Instant::now();
-        std::thread::sleep(Duration::from_millis(400));
+        layer::spin(0.4);
         let after = grab(display);
         let leftover = ours();
         let first = run.frames.first().map(|frame| (*frame - opened).as_secs_f64() * 1000.0);
@@ -1621,7 +1629,7 @@ mod probe {
             say("shown", format!(", front app before {before} after {}, this helper active {}, policy {:?}", front(), me.isActive(), me.activationPolicy()));
             drop(renderer);
             drop(layer);
-            spin(0.3);
+            layer::spin(0.3);
             say("closed", String::new());
             drop(gpu);
             spin(0.5);
@@ -1681,6 +1689,7 @@ mod probe {
         let back = showing();
         drop(renderer);
         drop(layer);
+        layer::spin(0.2);
         p.line(format!("- the layer on the first Space is listed on screen there {one}, on the second Space {two}, back on the first {back}"));
         if !one || two || !back {
             p.fail("the layer did not stay on its own Space");
@@ -1714,12 +1723,13 @@ mod probe {
                 let (renderer, run) = animate(renderer, layer.display, 0.5, 0.8, None).join().map_err(|_| anyhow::anyhow!("the render thread panicked"))?;
                 drop(renderer);
                 drop(layer);
+                layer::spin(0.1);
                 let first = run.frames.first().map(|frame| (*frame - started).as_millis());
                 let period = if run.rate > 0.0 { 1000.0 / run.rate } else { 16.67 };
                 let presents = intervals(&run.frames);
                 lines.push(format!("- open {} level {}, {}x{}, open to first frame {first:?} ms", index + 1, layer::levels().0, width, height));
                 lines.push(format!("  - display link {:.2} Hz, callbacks {}, longer than 1.5 periods {}", run.rate, stats(&run.ticks), over(&run.ticks, period)));
-                lines.push(format!("  - frames {}, intervals {}, longer than 1.5 periods {}", run.frames.len(), stats(&presents), over(&presents, period)));
+                lines.push(format!("  - frames {}, skipped while occluded {}, intervals {}, longer than 1.5 periods {}", run.frames.len(), run.hidden, stats(&presents), over(&presents, period)));
                 std::thread::sleep(Duration::from_millis(300));
             }
             lines.push(format!("- adapter {}, with the device after five opens {}", gpu.as_ref().map(|gpu| gpu.name.clone()).unwrap_or_default(), memory(pid)));

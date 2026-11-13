@@ -5,14 +5,17 @@ use anyhow::{Context, Result};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSBackingStoreType, NSColor, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowStyleMask};
+use objc2_app_kit::{NSBackingStoreType, NSColor, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowStyleMask};
 use objc2_foundation::{NSPoint, NSRect};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 use scooch_core::Rect;
 use std::ffi::c_void;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub const NO_ROOM: &str = "macOS shows no wallpaper window below and icon window above the desktop level on this screen, so Scooch keeps the plain swap.";
+pub const HIDDEN: &str = "macOS never reported the live layer as visible, so Scooch keeps the plain swap.";
+const SHOW_WAIT: Duration = Duration::from_secs(1);
 
 const ON_SCREEN: u32 = 1;
 const EVERY_WINDOW: u32 = 0;
@@ -95,6 +98,16 @@ extern "C" {
     fn mach_timebase_info(info: *mut Timebase) -> i32;
 }
 
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    static kCFRunLoopDefaultMode: Ref;
+    fn CFRunLoopRunInMode(mode: Ref, seconds: f64, after_source: u8) -> i32;
+}
+
+pub fn spin(seconds: f64) {
+    unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, 0) };
+}
+
 pub fn levels() -> (i64, i64) {
     unsafe { (CGWindowLevelForKey(DESKTOP_KEY) as i64, CGWindowLevelForKey(ICON_KEY) as i64) }
 }
@@ -173,13 +186,30 @@ impl Layer {
     pub fn commit(&self) {
         CATransaction::flush();
     }
+
+    pub fn visible(&self) -> bool {
+        self.window.occlusionState().contains(NSWindowOcclusionState::Visible)
+    }
+
+    pub fn shown_after(&self) -> Option<Duration> {
+        let started = Instant::now();
+        while started.elapsed() < SHOW_WAIT {
+            if self.visible() {
+                return Some(started.elapsed());
+            }
+            spin(0.01);
+        }
+        None
+    }
 }
 
 impl Drop for Layer {
     fn drop(&mut self) {
-        self.window.orderOut(None);
-        self.window.close();
-        CATransaction::flush();
+        objc2::rc::autoreleasepool(|_| {
+            self.window.orderOut(None);
+            self.window.close();
+            CATransaction::flush();
+        });
     }
 }
 
@@ -211,7 +241,9 @@ pub fn open(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
     window.orderFrontRegardless();
     CATransaction::flush();
     let pixels = ((frame.size.width * scale).round() as u32, (frame.size.height * scale).round() as u32);
-    Ok(Layer { window, _view: view, metal, level, pixels, display: number })
+    let layer = Layer { window, _view: view, metal, level, pixels, display: number };
+    layer.shown_after().context(HIDDEN)?;
+    Ok(layer)
 }
 
 pub fn seconds(host: u64) -> f64 {
