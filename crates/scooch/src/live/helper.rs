@@ -28,7 +28,9 @@ pub fn refuse(why: &str) -> ExitCode {
 pub fn main() -> ExitCode {
     #[cfg(windows)]
     return crate::platform::windows::layer::serve();
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    return crate::platform::macos::host::serve();
+    #[cfg(not(any(windows, target_os = "macos")))]
     refuse("this system has no live layer yet, so Scooch keeps the plain swap")
 }
 

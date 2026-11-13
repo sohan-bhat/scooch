@@ -1,4 +1,5 @@
 pub mod finder;
+pub mod host;
 pub mod launchd;
 pub mod layer;
 pub mod picture;
@@ -184,6 +185,14 @@ impl Desktop for Mac {
 
     fn profile(&self) -> Option<Vec<u8>> {
         picture::profile()
+    }
+
+    fn live(&self) -> bool {
+        true
+    }
+
+    fn reduce_motion(&self) -> bool {
+        on_main(|_| objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion())
     }
 }
 

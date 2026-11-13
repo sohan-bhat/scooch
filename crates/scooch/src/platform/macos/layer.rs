@@ -7,6 +7,7 @@ use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{NSBackingStoreType, NSColor, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowStyleMask};
 use objc2_foundation::{NSPoint, NSRect};
+use objc2_core_graphics::{kCGColorSpaceSRGB, CGColorSpace};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 use scooch_core::Rect;
 use std::ffi::c_void;
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 
 pub const NO_ROOM: &str = "macOS shows no wallpaper window below and icon window above the desktop level on this screen, so Scooch keeps the plain swap.";
 pub const HIDDEN: &str = "macOS never reported the live layer as visible, so Scooch keeps the plain swap.";
-const SHOW_WAIT: Duration = Duration::from_secs(1);
+const SHOW_WAIT: Duration = Duration::from_millis(400);
 
 const ON_SCREEN: u32 = 1;
 const EVERY_WINDOW: u32 = 0;
@@ -108,6 +109,26 @@ extern "C" {
 
 pub fn spin(seconds: f64) {
     unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, 0) };
+}
+
+pub fn wait(timeout: Duration) {
+    unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, timeout.as_secs_f64(), 1) };
+}
+
+extern "C" fn nothing(_context: *mut c_void) {}
+
+pub fn nudge() {
+    unsafe { super::sys::dispatch_async_f(super::sys::main_queue(), std::ptr::null_mut(), nothing) };
+}
+
+pub fn period(display: u32) -> Option<Duration> {
+    let mut link: *mut c_void = std::ptr::null_mut();
+    if unsafe { CVDisplayLinkCreateWithCGDisplay(display, &mut link) } != 0 || link.is_null() {
+        return None;
+    }
+    let period = unsafe { CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link) };
+    unsafe { CVDisplayLinkRelease(link) };
+    (period.value > 0 && period.scale > 0).then(|| Duration::from_secs_f64(period.value as f64 / period.scale as f64))
 }
 
 pub fn levels() -> (i64, i64) {
@@ -277,6 +298,7 @@ fn build(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
     let metal = CAMetalLayer::new();
     metal.setContentsScale(scale);
     metal.setOpaque(true);
+    metal.setColorspace(CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).as_deref());
     view.setLayer(Some(&**metal));
     view.setWantsLayer(true);
     window.setContentView(Some(&view));

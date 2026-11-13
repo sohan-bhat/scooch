@@ -132,6 +132,7 @@ extern "C" {
     pub static _dispatch_main_q: c_void;
     pub static _dispatch_source_type_vnode: c_void;
     pub fn dispatch_sync_f(queue: Ref, context: *mut c_void, work: Work);
+    pub fn dispatch_async_f(queue: Ref, context: *mut c_void, work: Work);
     pub fn dispatch_source_create(kind: Ref, handle: usize, mask: usize, queue: Ref) -> Ref;
     pub fn dispatch_set_context(object: Ref, context: *mut c_void);
     pub fn dispatch_source_set_event_handler_f(source: Ref, handler: Work);
