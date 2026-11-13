@@ -3,7 +3,9 @@ use crate::live::helper::{Platform, Waker};
 use crate::live::Hints;
 use crate::platform::Screen;
 use anyhow::{bail, Context, Result};
+use scooch_core::RgbImage;
 use scooch_live::Target;
+use std::path::Path;
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -12,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ::windows::core::{w, PCWSTR};
 use ::windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use ::windows::Win32::Graphics::Gdi::{MapWindowPoints, ValidateRect};
+use ::windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, MapWindowPoints, ValidateRect, DEVMODEW, ENUM_CURRENT_SETTINGS};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::System::Threading::GetCurrentThreadId;
 use ::windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
@@ -380,6 +382,17 @@ impl Platform for Host {
         ORDERED.with(|ordered| ordered.borrow_mut().retain(|(ours, _)| *ours != layer.window.0 as isize));
         let _ = unsafe { ShowWindow(layer.window, SW_HIDE) };
         let _ = unsafe { DestroyWindow(layer.window) };
+    }
+
+    fn period(&self, _layer: &Window) -> Duration {
+        let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+        let read = unsafe { EnumDisplaySettingsW(PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut mode) }.as_bool();
+        let rate = if read && mode.dmDisplayFrequency > 1 { mode.dmDisplayFrequency } else { 60 };
+        Duration::from_secs_f64(1.0 / f64::from(rate))
+    }
+
+    fn decode(path: &Path) -> Result<RgbImage> {
+        super::picture::decode(path)
     }
 
     fn wait(&mut self, timeout: Duration) {
