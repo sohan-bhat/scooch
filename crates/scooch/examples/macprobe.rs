@@ -826,6 +826,9 @@ mod probe {
         if rendered.is_none() || !ours {
             p.fail("the probe started daemon never rendered");
         }
+        if let Some(pid) = scooch_pid(p) {
+            quiet_minute(p, pid, "the probe started daemon right after its launch, with no consent pending")?;
+        }
         Ok(())
     }
 
@@ -965,133 +968,110 @@ mod probe {
         found
     }
 
-    fn state_word(state: i32) -> &'static str {
-        match state {
-            1 => "running",
-            2 => "stopped",
-            3 => "waiting",
-            4 => "uninterruptible",
-            5 => "halted",
-            _ => "unknown",
+    fn stacks(text: &str) -> Vec<(u64, Vec<String>)> {
+        let mut found = Vec::new();
+        let mut frames: Vec<String> = Vec::new();
+        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            match line.parse::<u64>() {
+                Ok(count) if !frames.is_empty() => found.push((count, std::mem::take(&mut frames))),
+                Ok(_) => frames.clear(),
+                Err(_) => frames.push(line.to_string()),
+            }
         }
+        found.sort_by_key(|stack| std::cmp::Reverse(stack.0));
+        found
     }
 
     fn quiet_minute(p: &mut Probe, pid: i32, label: &str) -> Result<()> {
+        let age = p.tool("/bin/ps", &["-o", "etime=", "-p", &pid.to_string()]).out.trim().to_string();
         let seen = daemon_log(p).lines().count();
+        let traced = p.out.join(format!("oncpu-{pid}-{}.txt", now()));
+        let script = format!("sched:::on-cpu /pid == {pid}/ {{ @[ustack(32)] = count(); }} tick-60s {{ exit(0); }}");
+        let dtrace = Command::new("/usr/bin/sudo").args(["-n", "/usr/sbin/dtrace", "-q", "-x", "ustackframes=32", "-o", &traced.to_string_lossy(), "-n", &script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
         let threads_before = threads(pid);
         let before = rusage(pid).context("the daemon usage could not be read")?;
         let from = epoch();
-        std::thread::sleep(Duration::from_secs(60));
+        let mut buckets = Vec::new();
+        let mut last = before;
+        for _ in 0..12 {
+            std::thread::sleep(Duration::from_secs(5));
+            if let Some(now) = rusage(pid) {
+                buckets.push(now.idle_wakeups.saturating_sub(last.idle_wakeups));
+                last = now;
+            }
+        }
         let to = epoch();
         let after = rusage(pid).context("the daemon usage could not be read after the quiet minute")?;
         let threads_after = threads(pid);
+        if let Ok(mut child) = dtrace {
+            let _ = wait_until(Duration::from_secs(15), || child.try_wait().ok().flatten().is_some());
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         let cpu = nanos((after.user + after.system).saturating_sub(before.user + before.system)) / 1_000_000;
         p.line(format!(
-            "- {label} pid {pid} over a quiet 60 s: CPU {cpu} ms, idle wakeups {}, interrupt wakeups {}, footprint {:.1} MB, resident {:.1} MB",
+            "- {label} pid {pid}, running for {age} when the minute began, over a quiet 60 s: CPU {cpu} ms, idle wakeups {}, interrupt wakeups {}, footprint {:.1} MB",
             after.idle_wakeups.saturating_sub(before.idle_wakeups),
             after.interrupt_wakeups.saturating_sub(before.interrupt_wakeups),
-            after.footprint as f64 / 1_048_576.0,
-            after.resident as f64 / 1_048_576.0
+            after.footprint as f64 / 1_048_576.0
         ));
+        p.line(format!("- idle wakeups in each 5 s of that minute {buckets:?}"));
         let quiet = new_lines(&daemon_log(p), seen);
-        let ticked = quiet.iter().filter(|line| line.contains(" tick ")).count();
-        let woke: Vec<String> = quiet.iter().filter_map(|line| line.split(" wake ").nth(1).map(|source| source.trim().to_string())).collect();
-        p.line(format!("- during that minute the daemon logged {ticked} ticks and wakes {woke:?}, log stamps from {from:.0} to {to:.0}"));
-        p.line(format!("- {} threads", threads_after.len()));
-        for (handle, name, state, total) in &threads_after {
-            let earlier = threads_before.iter().find(|(seen, _, _, _)| seen == handle).map(|(_, _, _, total)| *total);
-            let spent = earlier.map(|earlier| total.saturating_sub(earlier));
-            p.line(format!("  - thread {handle:#x} `{name}` {}, CPU during the minute {:?} us", state_word(*state), spent.map(|spent| spent / 1000)));
+        p.line(format!("- the daemon logged {} ticks and wakes {:?}", quiet.iter().filter(|line| line.contains(" tick ")).count(), quiet.iter().filter_map(|line| line.split(" wake ").nth(1).map(str::trim)).collect::<Vec<_>>()));
+        let busy: Vec<String> = threads_after
+            .iter()
+            .filter_map(|(handle, name, _, total)| {
+                let earlier = threads_before.iter().find(|(seen, _, _, _)| seen == handle).map(|(_, _, _, total)| *total)?;
+                let spent = total.saturating_sub(earlier) / 1000;
+                (spent > 0).then(|| format!("{name} {spent} us"))
+            })
+            .collect();
+        p.line(format!("- {} threads, CPU by thread during the minute {busy:?}", threads_after.len()));
+        let stacks = stacks(&fs::read_to_string(&traced).unwrap_or_default());
+        p.line(format!("- dtrace on-cpu stacks during the minute {} distinct, {} on-cpu events, kept as {}", stacks.len(), stacks.iter().map(|(count, _)| count).sum::<u64>(), traced.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+        for (count, frames) in stacks.iter().take(8) {
+            let shown: Vec<String> = frames.iter().map(|frame| frame.split('+').next().unwrap_or(frame).to_string()).filter(|frame| !frame.starts_with("libsystem_kernel") && !frame.starts_with("scooch`0x")).take(9).collect();
+            p.line(format!("  - {count} times: {}", shown.join(" < ")));
         }
-        let logged = p.tool("/usr/bin/log", &["show", "--last", "80s", "--info", "--debug", "--style", "ndjson", "--predicate", &format!("processIdentifier == {pid}")]);
-        let mut kinds = std::collections::BTreeMap::<String, usize>::new();
-        let mut examples: Vec<String> = Vec::new();
+        let logged = p.tool("/usr/bin/log", &["show", "--last", "100s", "--info", "--debug", "--style", "ndjson", "--predicate", &format!("processIdentifier == {pid}")]);
+        let mut inside = Vec::new();
         for line in logged.out.lines() {
             let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-            let kind = format!("{} {} {}", entry["senderImagePath"].as_str().and_then(|path| path.rsplit('/').next()).unwrap_or("?"), entry["subsystem"].as_str().unwrap_or(""), entry["category"].as_str().unwrap_or(""));
-            *kinds.entry(kind.clone()).or_default() += 1;
-            let message = format!("{kind}: {}", entry["eventMessage"].as_str().unwrap_or("").chars().take(120).collect::<String>());
-            if examples.len() < 12 && !examples.contains(&message) {
-                examples.push(message);
+            let stamp = entry["timestamp"].as_str().unwrap_or("");
+            let when = chrono_free_epoch(stamp);
+            if when >= from && when <= to {
+                inside.push(format!("+{:.1} s {} {} {}: {}", when - from, entry["senderImagePath"].as_str().and_then(|path| path.rsplit('/').next()).unwrap_or("?"), entry["subsystem"].as_str().unwrap_or(""), entry["category"].as_str().unwrap_or(""), entry["eventMessage"].as_str().unwrap_or("").chars().take(110).collect::<String>()));
             }
         }
-        p.line(format!("- unified log entries from the daemon in the last 80 s: {} by sender, subsystem and category {kinds:?}", kinds.values().sum::<usize>()));
-        for example in &examples {
-            p.line(format!("  - `{example}`"));
+        p.line(format!("- unified log entries from the daemon inside the minute {}", inside.len()));
+        for entry in inside.iter().take(15) {
+            p.line(format!("  - `{entry}`"));
         }
-        let file = p.out.join(format!("sample-{pid}.txt"));
-        let sampled = p.tool("/usr/bin/sample", &[&pid.to_string(), "30", "1", "-file", &file.to_string_lossy()]);
+        let file = p.out.join(format!("sample-{pid}-{}.txt", now()));
+        let sampled = p.tool("/usr/bin/sample", &[&pid.to_string(), "5", "-file", &file.to_string_lossy()]);
         let text = fs::read_to_string(&file).unwrap_or_default();
-        p.line(format!("- sample 30 s at 1 ms {}, kept as {}", if sampled.ok() { "ok" } else { "failed" }, file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
-        let mut thread = String::new();
-        let mut total = 0u64;
-        let mut shown = 0;
-        let mut inside = false;
-        for line in text.lines() {
-            if line.starts_with("Call graph:") {
-                inside = true;
-                continue;
-            }
-            if inside && line.trim().is_empty() {
-                break;
-            }
-            if !inside {
-                continue;
-            }
-            let trimmed = line.trim_start().trim_start_matches(['+', '|', '!', ':', ' ']);
-            let count: u64 = trimmed.split_whitespace().next().and_then(|word| word.parse().ok()).unwrap_or(0);
-            if trimmed.split_whitespace().nth(1).is_some_and(|word| word.starts_with("Thread_")) && !line.trim_start().starts_with(['+', '|', '!', ':']) {
-                thread = trimmed.chars().take(80).collect();
-                total = count;
-                continue;
-            }
-            if count < total && shown < 60 {
-                let depth = line.len() - line.trim_start_matches([' ', '+', '|', '!', ':']).len();
-                p.line(format!("  - {thread} at depth {depth}: `{}`", trimmed.chars().take(150).collect::<String>()));
-                shown += 1;
-            }
-        }
-        if shown == 0 {
-            p.line("  - every thread stayed in one place for all 30 s".to_string());
-        }
-        let protection = p.tool("/usr/bin/csrutil", &["status"]);
-        p.line(format!("- csrutil {}", protection.text()));
-        let traced = p.out.join(format!("oncpu-{pid}.txt"));
-        let script = format!("sched:::on-cpu /pid == {pid}/ {{ @[tid, ustack(28)] = count(); }} tick-25s {{ exit(0); }}");
-        let dtrace = p.run(Path::new("/usr/bin/sudo"), &["-n", "/usr/sbin/dtrace", "-q", "-x", "ustackframes=28", "-o", &traced.to_string_lossy(), "-n", &script], Duration::from_secs(60));
-        let stacks = fs::read_to_string(&traced).unwrap_or_default();
-        p.line(format!("- dtrace on-cpu stacks for 25 s exit {:?} {}, {} lines kept as {}", dtrace.code, dtrace.err.lines().next().unwrap_or(""), stacks.lines().count(), traced.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
-        let mut chunk: Vec<String> = Vec::new();
-        let mut printed = 0;
-        for line in stacks.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            chunk.push(trimmed.to_string());
-            if trimmed.chars().all(|letter| letter.is_ascii_digit()) && chunk.len() > 1 && printed < 8 {
-                let frames: Vec<&String> = chunk.iter().filter(|frame| !frame.chars().all(|letter| letter.is_ascii_digit())).take(14).collect();
-                p.line(format!("  - {} wakes: {}", trimmed, frames.iter().map(|frame| frame.as_str()).collect::<Vec<_>>().join(" < ")));
-                printed += 1;
-                chunk.clear();
-            } else if trimmed.chars().all(|letter| letter.is_ascii_digit()) {
-                chunk.clear();
-            }
-        }
-        let usage = p.tool("/usr/bin/sudo", &["-n", "/usr/bin/fs_usage", "-w", "-t", "10", &pid.to_string()]);
-        let lines: Vec<String> = usage.out.lines().filter(|line| !line.trim().is_empty()).map(str::to_string).collect();
-        p.line(format!("- fs_usage for 10 s exit {:?}, {} lines", usage.code, lines.len()));
-        let mut calls = std::collections::BTreeMap::<String, usize>::new();
-        for line in &lines {
-            if let Some(call) = line.split_whitespace().nth(1) {
-                *calls.entry(call.to_string()).or_default() += 1;
-            }
-        }
-        p.line(format!("  - calls {calls:?}"));
-        for line in lines.iter().take(12) {
-            p.line(format!("  - `{}`", line.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(160).collect::<String>()));
-        }
+        let tops: Vec<String> = text.lines().skip_while(|line| !line.starts_with("Sort by top of stack")).skip(1).take_while(|line| !line.trim().is_empty()).map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+        p.line(format!("- sample 5 s after the minute {}, leaf frames {tops:?}", if sampled.ok() { "ok" } else { "failed" }));
         Ok(())
+    }
+
+    fn chrono_free_epoch(stamp: &str) -> f64 {
+        let parse = || -> Option<f64> {
+            let (date, rest) = stamp.split_once(' ')?;
+            let mut parts = date.split('-').map(|part| part.parse::<i64>().ok());
+            let (year, month, day) = (parts.next()??, parts.next()??, parts.next()??);
+            let clock = rest.get(..15)?;
+            let mut time = clock.split(':');
+            let (hour, minute) = (time.next()?.parse::<i64>().ok()?, time.next()?.parse::<i64>().ok()?);
+            let second = time.next()?.parse::<f64>().ok()?;
+            let offset = rest.get(15..)?;
+            let sign = if offset.starts_with('-') { -1 } else { 1 };
+            let offset_minutes = sign * (offset.get(1..3)?.parse::<i64>().ok()? * 60 + offset.get(3..5)?.parse::<i64>().ok()?);
+            let (y, m) = if month <= 2 { (year - 1, month + 9) } else { (year, month - 3) };
+            let days = 365 * y + y / 4 - y / 100 + y / 400 + (153 * m + 2) / 5 + day - 719469;
+            Some((days * 86400 + hour * 3600 + minute * 60 - offset_minutes * 60) as f64 + second)
+        };
+        parse().unwrap_or(0.0)
     }
 
     fn idle(p: &mut Probe) -> Result<()> {
@@ -1169,6 +1149,10 @@ mod probe {
         p.line(format!("- mirror saved {}, source now {:?}", state(p)["options"]["mirror"], state(p)["screens"].as_object().and_then(|screens| screens.values().next().map(|entry| entry["source"].clone()))));
         if let Some(pid) = scooch_pid(p) {
             quiet_minute(p, pid, "the launchd daemon waiting for consent")?;
+            std::thread::sleep(Duration::from_secs(120));
+            let still = problem(p).is_some_and(|problem| problem == finder::ASKING) && windows().iter().any(|(owner, _, _)| owner == "UserNotificationCenter");
+            p.line(format!("- two minutes later, the consent window is still open {still}"));
+            quiet_minute(p, pid, "the same daemon still waiting for consent")?;
         }
         let ran = p.scooch(&["off"], Duration::from_secs(60));
         p.line(format!("- scooch off exit {:?} after {} ms: {}", ran.code, ran.took.as_millis(), ran.text()));
