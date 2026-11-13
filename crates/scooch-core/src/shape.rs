@@ -25,7 +25,7 @@ const PUFF_REACH: f32 = 1.1;
 const PUFF_SPAN: (f32, f32) = (0.8, 1.6);
 const OPEN: f32 = 1.0;
 const GAPS: f32 = 0.25;
-const FOLDS: (f32, f32, u32) = (0.25, 0.6, 61);
+const FOLDS: (f32, f32, u32) = (0.12, 0.6, 61);
 const BILLOWS: (f32, f32, u32) = (0.75, 1.25, 67);
 const MARGIN: f32 = 2.6;
 const PAINT_REACH: f32 = 0.45;
@@ -300,7 +300,7 @@ impl Lattice {
     }
 }
 
-pub fn clouds(base: &Base) -> Vec<f32> {
+pub fn clouds(base: &Base, wanted: impl Fn(usize) -> bool + Sync) -> Vec<f32> {
     let (grid, u) = (base.grid, base.u);
     let calmer: Vec<f32> = base.d.iter().zip(&base.meanders).map(|(d, m)| d + m * CLOUD_MEANDER).collect();
     let d = &calmer;
@@ -308,7 +308,7 @@ pub fn clouds(base: &Base) -> Vec<f32> {
     (0..d.len())
         .into_par_iter()
         .map(|i| {
-            if base.owner[i] < 0 {
+            if base.owner[i] < 0 || !wanted(i) {
                 return d[i];
             }
             let (px, py) = grid.center(i);
@@ -351,11 +351,14 @@ pub fn shade(base: &Base) -> Vec<f32> {
     out
 }
 
-pub fn billows(grid: &Grid, u: f32) -> Vec<f32> {
+pub fn billows(grid: &Grid, u: f32, wanted: impl Fn(usize) -> bool + Sync) -> Vec<f32> {
     let lattice = Lattice::new(None, grid, u, (BILLOWS.0, BILLOWS.1, BILLOWS.2));
     (0..grid.w * grid.h)
         .into_par_iter()
         .map(|i| {
+            if !wanted(i) {
+                return FAR * u;
+            }
             let (px, py) = grid.center(i);
             lattice.near(px, py).fold(FAR * u, |acc, &[x, y, r, _]| smooth_min(acc, ((px - x) * (px - x) + (py - y) * (py - y)).sqrt() - r, GAPS * u))
         })
