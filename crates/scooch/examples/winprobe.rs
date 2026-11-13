@@ -32,7 +32,9 @@ mod probe {
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW, MapWindowPoints, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
         BI_RGB, DIB_RGB_COLORS, HDC, HMONITOR, LOGFONTW, MONITORINFO, SRCCOPY,
     };
-    use ::windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use ::windows::core::Interface;
+    use ::windows::Win32::System::Com::{CoCreateInstance, IServiceProvider, CLSCTX_ALL, CLSCTX_INPROC_SERVER};
+    use ::windows::Win32::System::Variant::VARIANT;
     use ::windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First, Thread32Next, PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32};
     use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use ::windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
@@ -43,7 +45,8 @@ mod probe {
     use ::windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, MOUSE_EVENT_FLAGS};
     use ::windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use ::windows::Win32::UI::Shell::{
-        IDesktopWallpaper, IShellItem, IShellItemArray, SHCreateItemFromParsingName, SHCreateShellItemArrayFromShellItem, FWF_NOICONS,
+        IDesktopWallpaper, IFolderView2, IShellBrowser, IShellItem, IShellItemArray, IShellWindows, SHCreateItemFromParsingName, SHCreateShellItemArrayFromShellItem, ShellWindows, FWF_NOICONS,
+        SID_STopLevelBrowser, SVGIO_ALLVIEW, SWC_DESKTOP, SWFO_NEEDDISPATCH,
         SHChangeNotification_Lock, SHChangeNotification_Unlock, SHChangeNotifyDeregister, SHChangeNotifyEntry, SHChangeNotifyRegister, SHGetSpecialFolderLocation, CSIDL_DESKTOP, CSIDL_DESKTOPDIRECTORY, FOLDERVIEWMODE,
         FVM_ICON, FWF_AUTOARRANGE, FWF_SNAPTOGRID, SHCNE_ALLEVENTS, SHCNE_CREATE, SHCNE_DELETE, SHCNE_MKDIR, SHCNE_RENAMEFOLDER, SHCNE_RENAMEITEM, SHCNE_RMDIR, SHCNE_UPDATEDIR, SHCNRF_InterruptLevel,
         SHCNRF_NewDelivery, SHCNRF_ShellLevel, SVSI_POSITIONITEM,
@@ -211,7 +214,7 @@ mod probe {
 
     fn setup(p: &mut Probe) -> Result<()> {
         let desktop = platform::current()?;
-        com::enter(false)?;
+        com::enter(true)?;
         p.window = window()?;
         let root = notify(p.window, CSIDL_DESKTOP, ROOT_NOTE);
         let folder = notify(p.window, CSIDL_DESKTOPDIRECTORY, FOLDER_NOTE);
@@ -350,6 +353,67 @@ mod probe {
         Some(area)
     }
 
+    fn steps(single: bool) -> Vec<String> {
+        let outcome = std::thread::spawn(move || -> Vec<String> {
+            let mut log = Vec::new();
+            let step = |log: &mut Vec<String>, name: &str, result: std::result::Result<String, ::windows::core::Error>| -> bool {
+                let ok = result.is_ok();
+                log.push(format!("{name} {}", result.unwrap_or_else(|error| format!("failed {:#010x} {}", error.code().0, error.message()))));
+                ok
+            };
+            if let Err(error) = com::enter(single) {
+                log.push(format!("joining COM failed {error:#}"));
+                return log;
+            }
+            let windows: ::windows::core::Result<IShellWindows> = unsafe { CoCreateInstance(&ShellWindows, None, CLSCTX_ALL) };
+            let Ok(windows) = windows else {
+                step(&mut log, "CoCreateInstance ShellWindows", windows.map(|_| String::new()));
+                return log;
+            };
+            log.push("CoCreateInstance ShellWindows ok".into());
+            let place = shell::desktop_place();
+            let root = VARIANT::default();
+            let mut handle = 0i32;
+            let dispatch = unsafe { windows.FindWindowSW(&place, &root, SWC_DESKTOP, &mut handle, SWFO_NEEDDISPATCH) };
+            let Ok(dispatch) = dispatch else {
+                step(&mut log, "FindWindowSW", dispatch.map(|_| String::new()));
+                return log;
+            };
+            log.push(format!("FindWindowSW ok hwnd {handle:#x}"));
+            let provider = dispatch.cast::<IServiceProvider>();
+            let Ok(provider) = provider else {
+                step(&mut log, "cast to IServiceProvider", provider.map(|_| String::new()));
+                return log;
+            };
+            log.push("cast to IServiceProvider ok".into());
+            let browser: ::windows::core::Result<IShellBrowser> = unsafe { provider.QueryService(&SID_STopLevelBrowser) };
+            let Ok(browser) = browser else {
+                step(&mut log, "QueryService SID_STopLevelBrowser", browser.map(|_| String::new()));
+                return log;
+            };
+            log.push("QueryService SID_STopLevelBrowser ok".into());
+            let view = unsafe { browser.QueryActiveShellView() };
+            let Ok(view) = view else {
+                step(&mut log, "QueryActiveShellView", view.map(|_| String::new()));
+                return log;
+            };
+            log.push("QueryActiveShellView ok".into());
+            let host = unsafe { view.GetWindow() };
+            step(&mut log, "IShellView GetWindow", host.map(|host| format!("ok {:#x}", host.0 as isize)));
+            let folder = view.cast::<IFolderView2>();
+            let Ok(folder) = folder else {
+                step(&mut log, "cast to IFolderView2", folder.map(|_| String::new()));
+                return log;
+            };
+            log.push("cast to IFolderView2 ok".into());
+            let count = unsafe { folder.ItemCount(SVGIO_ALLVIEW) };
+            step(&mut log, "ItemCount", count.map(|count| format!("ok {count}")));
+            log
+        })
+        .join();
+        outcome.unwrap_or_else(|_| vec!["the thread stopped".into()])
+    }
+
     fn items_on_thread(single: bool) -> String {
         let outcome = std::thread::spawn(move || -> Result<usize> {
             com::enter(single)?;
@@ -412,6 +476,12 @@ mod probe {
         }
         p.line(format!("- items read from a multithreaded apartment {}", items_on_thread(false)));
         p.line(format!("- items read from a single threaded apartment {}", items_on_thread(true)));
+        for (label, single) in [("multithreaded", false), ("single threaded", true)] {
+            p.line(format!("- each view step from a fresh {label} apartment"));
+            for line in steps(single) {
+                p.line(format!("  - {line}"));
+            }
+        }
         let mut key = HKEY::default();
         let opened = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops"), None, KEY_READ, &mut key) } == ERROR_SUCCESS;
         if opened {
@@ -1274,7 +1344,35 @@ mod probe {
         Ok(twin)
     }
 
+    fn encode_times(p: &mut Probe) {
+        let scene = scooch_core::Scene { width: 3840, height: 2160, icons: Vec::new() };
+        let source = p.wallpapers.iter().find_map(|(_, shown)| shown.clone()).and_then(|path| scooch_core::open(&path).ok());
+        let photo = source.map(|image| {
+            let placement = scooch_core::fill(image.width(), image.height(), &scene);
+            scooch_core::render(&image, &placement, &scene, &scooch_core::Options::default())
+        });
+        let noise = detailed(3840, 2160);
+        for (label, picture) in [("the default wallpaper", photo.as_ref()), ("the fine detail test picture", Some(&noise))] {
+            let Some(picture) = picture else {
+                p.line(format!("- no {label} to encode"));
+                continue;
+            };
+            let started = Instant::now();
+            let png = scooch_core::encode_png(picture).map(|bytes| bytes.len());
+            let png_time = started.elapsed().as_millis();
+            let started = Instant::now();
+            let jpeg_size = jpeg(picture).map(|bytes| bytes.len());
+            let jpeg_time = started.elapsed().as_millis();
+            p.line(format!(
+                "- 3840x2160 {label} PNG {png_time} ms {:?} bytes, JPEG quality 95 {jpeg_time} ms {:?} bytes",
+                png.map_err(|error| error.to_string()),
+                jpeg_size.map_err(|error| error.to_string())
+            ));
+        }
+    }
+
     fn end_to_end(p: &mut Probe) -> Result<()> {
+        encode_times(p);
         let desktop = platform::current()?;
         let screen = desktop.screens()?.first().context("no screen")?.clone();
         let twin = twin()?;
