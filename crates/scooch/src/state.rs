@@ -196,6 +196,11 @@ impl Store {
         parse(self.read().as_deref())
     }
 
+    pub fn retire_aside(&self) {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|since| since.as_secs()).unwrap_or(0);
+        let _ = fs::rename(self.aside_file(), self.root.join(format!("state.unreadable-{stamp}.json")));
+    }
+
     pub fn aside_line(&self) -> Option<String> {
         self.aside_file().is_file().then(|| format!("Scooch could not read its saved settings, so it started fresh and kept them at {}.", self.aside_file().display()))
     }

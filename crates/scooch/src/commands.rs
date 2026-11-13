@@ -39,7 +39,13 @@ fn desktop() -> Result<Box<dyn Desktop>> {
 }
 
 pub fn outdated(state: &State, running: bool, version: &str) -> bool {
-    running && state.daemon.as_deref() != Some(version)
+    running && state.daemon.as_deref().is_some_and(|known| known != version)
+}
+
+pub fn aside(store: &Store) -> Option<String> {
+    let line = store.aside_line()?;
+    store.retire_aside();
+    Some(line)
 }
 
 fn replace_outdated(store: &Store) -> Result<()> {
@@ -56,7 +62,7 @@ pub fn start() -> Result<()> {
     let store = Store::open();
     let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
     store.load();
-    if let Some(line) = store.aside_line() {
+    if let Some(line) = aside(&store) {
         println!("{line}");
     }
     replace_outdated(&store)?;
@@ -85,7 +91,7 @@ pub fn start() -> Result<()> {
 pub fn status() -> Result<()> {
     let store = Store::open();
     store.load();
-    if let Some(line) = store.aside_line() {
+    if let Some(line) = aside(&store) {
         println!("{line}");
     }
     match desktop() {
@@ -268,7 +274,7 @@ pub fn turn_off(desktop: &dyn Desktop, store: &Store, patience: Duration) -> Res
     Ok(match wind_down(desktop, store)? {
         Off::Unreadable => {
             desktop.autostart(None)?;
-            let mut lines: Vec<String> = store.aside_line().into_iter().collect();
+            let mut lines: Vec<String> = aside(store).into_iter().collect();
             lines.push(UNREADABLE_OFF.into());
             lines
         }
@@ -723,7 +729,7 @@ mod tests {
     fn only_a_running_watcher_of_another_version_is_replaced() {
         let mut state = on();
         assert!(!outdated(&state, false, "0.2.0"));
-        assert!(outdated(&state, true, "0.2.0"));
+        assert!(!outdated(&state, true, "0.2.0"));
         state.daemon = Some("0.1.0".into());
         assert!(outdated(&state, true, "0.2.0"));
         assert!(!outdated(&state, false, "0.2.0"));
@@ -1471,6 +1477,22 @@ mod tests {
         drop(held);
         assert_eq!(turn_off(fake.as_ref(), &store, Duration::from_millis(150)).unwrap(), vec![closing(&tally(2, 0, 0, 0, 0))]);
         assert_eq!(fake.unloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_unreadable_record_is_mentioned_once_then_left_behind() {
+        let (fake, store, _, _) = pair("asideonce");
+        std::fs::write(store.state_file(), b"{ broken").unwrap();
+        let lines = turn_off(fake.as_ref(), &store, Duration::ZERO).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("state.unreadable.json") && lines[1] == UNREADABLE_OFF);
+        assert!(!store.aside_file().exists());
+        let renamed: Vec<String> = std::fs::read_dir(&store.root).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).filter(|name| name.starts_with("state.unreadable-")).collect();
+        assert_eq!(renamed.len(), 1);
+        assert_eq!(std::fs::read(store.root.join(&renamed[0])).unwrap(), b"{ broken");
+        assert_eq!(aside(&store), None);
+        assert_eq!(turn_off(fake.as_ref(), &store, Duration::ZERO).unwrap(), vec![closing(&Tally { strays: 2, ..Tally::default() })]);
+        assert!(store.output("L", 1, "jpg").exists() && store.output("R", 1, "jpg").exists());
     }
 
     #[test]
