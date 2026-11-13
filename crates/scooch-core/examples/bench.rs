@@ -1,7 +1,7 @@
 #[path = "../tests/support/layouts.rs"]
 mod layouts;
 
-use scooch_core::{Options, Scene};
+use scooch_core::{Options, Scene, Scenery};
 use std::time::Instant;
 
 struct Timing(f64, f64);
@@ -44,6 +44,14 @@ fn main() {
         }
         let crowd_placement = scooch_core::solve(&analysis, &crowd, &options, None);
         println!("render 100 icons {w}x{h} {}", median_ms(9, || scooch_core::render(&photo, &crowd_placement, &crowd, &options)));
+        let plain = Options { pads: 0.0, scenery: Scenery::Off, ..options };
+        for (layout, icons) in [("mac", layouts::mac(w, h, 30)), ("scattered", layouts::scattered(w, h, 30, 7))] {
+            let scene = Scene { width: w, height: h, icons };
+            let placement = scooch_core::solve(&analysis, &scene, &options, None);
+            let off = median_ms(9, || scooch_core::render_with(&photo, &analysis, &placement, &scene, &plain));
+            let on = median_ms(9, || scooch_core::render_with(&photo, &analysis, &placement, &scene, &options));
+            println!("scenery 30 {layout:9} {w}x{h} off {off} | on {on} | adds {:.1} ms", on.1 - off.1);
+        }
         let bare = Scene { width: w, height: h, icons: Vec::new() };
         let fill = scooch_core::fill(photo.width(), photo.height(), &bare);
         println!("render plain {w}x{h} {}", median_ms(9, || scooch_core::render(&photo, &fill, &bare, &options)));

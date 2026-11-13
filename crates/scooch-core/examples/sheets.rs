@@ -1,146 +1,53 @@
+#[path = "../tests/support/desk.rs"]
+mod desk;
 #[path = "../tests/support/layouts.rs"]
 mod layouts;
 
-use image::{imageops, Rgb, RgbImage};
-use scooch_core::{Analysis, Options, Rect, Scene};
+use image::RgbImage;
+use scooch_core::{Analysis, Options, Scene, Scenery};
 use std::path::PathBuf;
 use std::time::Instant;
 
-const GAP: u32 = 12;
-const CELL_W: u32 = 640;
-const CELL_H: u32 = 400;
-const PAPER: Rgb<u8> = Rgb([28, 28, 30]);
+const TILE_W: u32 = 400;
+const TILE_H: u32 = 250;
+const SCREEN: (u32, u32) = (2880, 1800);
+const LAYOUTS: [&str; 4] = ["mac", "windows", "scattered", "cluster"];
 
-fn thumb(image: &RgbImage, rects: &[Rect], box_w: u32, box_h: u32) -> RgbImage {
-    let scale = (box_w as f32 / image.width() as f32).min(box_h as f32 / image.height() as f32);
-    let (w, h) = (((image.width() as f32 * scale).round() as u32).max(1), ((image.height() as f32 * scale).round() as u32).max(1));
-    let mut small = imageops::resize(image, w, h, imageops::FilterType::Triangle);
-    for r in rects {
-        outline(&mut small, r.x * scale, r.y * scale, r.w * scale, r.h * scale);
-    }
-    small
-}
-
-fn outline(image: &mut RgbImage, x: f32, y: f32, w: f32, h: f32) {
-    let (x0, y0) = (x.round().max(0.0) as i64, y.round().max(0.0) as i64);
-    let (x1, y1) = (((x + w).round() as i64).min(image.width() as i64 - 1), ((y + h).round() as i64).min(image.height() as i64 - 1));
-    if x1 <= x0 || y1 <= y0 {
-        return;
-    }
-    let mut put = |px: i64, py: i64, color: Rgb<u8>| {
-        if px >= 0 && py >= 0 && (px as u32) < image.width() && (py as u32) < image.height() {
-            image.put_pixel(px as u32, py as u32, color);
-        }
-    };
-    for (inset, color) in [(0i64, Rgb([255, 40, 200])), (1, Rgb([0, 0, 0]))] {
-        for px in x0 + inset..=x1 - inset {
-            put(px, y0 + inset, color);
-            put(px, y1 - inset, color);
-        }
-        for py in y0 + inset..=y1 - inset {
-            put(x0 + inset, py, color);
-            put(x1 - inset, py, color);
-        }
-    }
-}
-
-fn gray_to_rgb(gray: &image::GrayImage) -> RgbImage {
-    RgbImage::from_fn(gray.width(), gray.height(), |x, y| {
-        let v = gray.get_pixel(x, y).0[0];
-        Rgb([v, v, v])
-    })
-}
-
-struct Row {
-    before: RgbImage,
-    after: RgbImage,
-}
-
-fn compose(header: Vec<RgbImage>, rows: &[Row], cell_w: u32) -> RgbImage {
-    let header_h = header.iter().map(|i| i.height()).max().unwrap_or(0);
-    let row_h: Vec<u32> = rows.iter().map(|r| r.before.height().max(r.after.height())).collect();
-    let width = 2 * cell_w + 3 * GAP;
-    let height = GAP + header_h + GAP + row_h.iter().map(|h| h + GAP).sum::<u32>();
-    let mut sheet = RgbImage::from_pixel(width, height, PAPER);
-    let mut x = GAP;
-    for part in &header {
-        imageops::replace(&mut sheet, part, x as i64, GAP as i64);
-        x += part.width() + GAP;
-    }
-    let mut y = GAP + header_h + GAP;
-    for (row, h) in rows.iter().zip(&row_h) {
-        imageops::replace(&mut sheet, &row.before, GAP as i64, y as i64);
-        imageops::replace(&mut sheet, &row.after, (2 * GAP + cell_w) as i64, y as i64);
-        y += h + GAP;
-    }
-    sheet
-}
-
-fn through(values: &[f32], source: f32) -> f32 {
-    let falling = values[values.len() - 1] < values[0];
-    for (k, pair) in values.windows(2).enumerate() {
-        let (a, b) = if falling { (pair[1], pair[0]) } else { (pair[0], pair[1]) };
-        if source >= a && source <= b && b > a {
-            let t = (source - a) / (b - a);
-            let t = if falling { 1.0 - t } else { t };
-            return (k as f32 + t) / (values.len() - 1) as f32;
-        }
-    }
-    if (source < values[0]) != falling { 0.0 } else { 1.0 }
-}
-
-fn subject_shape(analysis: &Analysis, placement: &scooch_core::Placement) -> f32 {
-    let s = analysis.subject;
-    let [x0, y0, cw, ch] = placement.crop;
-    let (a, b) = (s.x.max(x0), (s.x + s.w).min(x0 + cw));
-    let (c, d) = (s.y.max(y0), (s.y + s.h).min(y0 + ch));
-    if b <= a || d <= c {
-        return 1.0;
-    }
-    let width = (through(&placement.fx, b) - through(&placement.fx, a)).abs() / ((b - a) / cw);
-    let height = (through(&placement.fy, d) - through(&placement.fy, c)).abs() / ((d - c) / ch);
-    width / height
-}
-
-fn row(name: &str, photo: &RgbImage, analysis: &Analysis, layout: &str, (w, h): (u32, u32), options: Options) -> Row {
-    let (cell_w, cell_h) = (CELL_W, CELL_H);
+fn row(name: &str, photo: &RgbImage, analysis: &Analysis, layout: &str) -> Vec<RgbImage> {
+    let (w, h) = SCREEN;
     let icons = layouts::layout(layout, analysis, w, h);
     let scene = Scene { width: w, height: h, icons: icons.clone() };
-    let started = Instant::now();
-    let placement = scooch_core::solve(analysis, &scene, &options, None);
-    let solved = started.elapsed();
+    let plain = Options { pads: 0.0, scenery: Scenery::Off, ..Options::default() };
+    let off = Options { scenery: Scenery::Off, ..Options::default() };
+    let on = Options::default();
     let fill = scooch_core::fill(analysis.source_width, analysis.source_height, &scene);
+    let before = scooch_core::render_with(photo, analysis, &fill, &scene, &plain);
+    let off_placement = scooch_core::solve(analysis, &scene, &off, None);
+    let today = scooch_core::render_with(photo, analysis, &off_placement, &scene, &off);
     let started = Instant::now();
-    let after = scooch_core::render(photo, &placement, &scene, &options);
-    let rendered = started.elapsed();
-    let before = scooch_core::render(photo, &fill, &Scene { icons: Vec::new(), ..scene.clone() }, &options);
-    let hidden_before = scooch_core::hidden_share(analysis, &scene, &fill);
-    let hidden_after = scooch_core::hidden_share(analysis, &scene, &placement);
+    let on_placement = scooch_core::solve(analysis, &scene, &on, None);
+    let scenery = scooch_core::render_with(photo, analysis, &on_placement, &scene, &on);
+    let spent = started.elapsed().as_secs_f64() * 1000.0;
+    let hidden = |p| scooch_core::hidden_share(analysis, &scene, p);
+    let land = Scene { icons: scooch_core::scenery_footprints(&scene), ..scene.clone() };
     println!(
-        "{name:16} {w}x{h} {layout:9} shape {:.3} zoom {:.2} mirror {} crop [{:.3} {:.3} {:.3} {:.3}] shift [{:+.3} {:+.3}] hidden {:.3} -> {:.3} solve {:.1} ms render {:.0} ms",
-        subject_shape(analysis, &placement),
-        placement.zoom,
-        placement.mirrored,
-        placement.crop[0],
-        placement.crop[1],
-        placement.crop[2],
-        placement.crop[3],
-        placement.shift[0],
-        placement.shift[1],
-        hidden_before,
-        hidden_after,
-        solved.as_secs_f64() * 1000.0,
-        rendered.as_secs_f64() * 1000.0
+        "{name:16} {layout:9} hidden {:.3} | off {:.3} zoom {:.2} | scenery {:.3} land {:.3} zoom {:.2} shift [{:+.3} {:+.3}] {spent:.0} ms",
+        hidden(&fill),
+        hidden(&off_placement),
+        off_placement.zoom,
+        hidden(&on_placement),
+        scooch_core::hidden_share(analysis, &land, &on_placement),
+        on_placement.zoom,
+        on_placement.shift[0],
+        on_placement.shift[1]
     );
-    if let Some(dir) = std::env::var_os("SCOOCH_FULL") {
-        let mut marked = after.clone();
-        for r in &icons {
-            outline(&mut marked, r.x, r.y, r.w, r.h);
-        }
-        let path = PathBuf::from(dir).join(format!("{name}-{w}x{h}-{layout}.png"));
-        marked.save(path).expect("save full");
-    }
-    Row { before: thumb(&before, &icons, cell_w, cell_h), after: thumb(&after, &icons, cell_w, cell_h) }
+    [before, today, scenery]
+        .into_iter()
+        .map(|mut picture| {
+            desk::draw_icons(&mut picture, &icons);
+            desk::fit(&picture, TILE_W, TILE_H)
+        })
+        .collect()
 }
 
 fn main() {
@@ -148,8 +55,6 @@ fn main() {
     let out = PathBuf::from(args.next().unwrap_or_else(|| "sheets".into()));
     let only: Vec<String> = args.collect();
     std::fs::create_dir_all(&out).expect("out folder");
-    let cell_w = CELL_W;
-    let mut strips: Vec<(String, Row)> = Vec::new();
     for path in layouts::photos() {
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
         if !only.is_empty() && !only.contains(&name) {
@@ -157,43 +62,7 @@ fn main() {
         }
         let photo = scooch_core::open(&path).expect("photo");
         let analysis = scooch_core::analyze(&photo);
-        let header = vec![
-            thumb(&photo, &[], 300, 200),
-            thumb(&gray_to_rgb(&scooch_core::saliency_image(&analysis)), &[], 300, 200),
-            thumb(&gray_to_rgb(&scooch_core::busy_image(&analysis)), &[], 300, 200),
-        ];
-        println!("{name} flat {} subject {:?}", analysis.flat, analysis.subject);
-        if let Some(dir) = std::env::var_os("SCOOCH_FULL") {
-            scooch_core::saliency_image(&analysis).save(PathBuf::from(&dir).join(format!("{name}-saliency.png"))).expect("save");
-            scooch_core::busy_image(&analysis).save(PathBuf::from(&dir).join(format!("{name}-busy.png"))).expect("save");
-        }
-        let main: Vec<Row> = layouts::NAMES.iter().map(|layout| row(&name, &photo, &analysis, layout, (2880, 1800), Options::default())).collect();
-        compose(header.clone(), &main, cell_w).save(out.join(format!("{name}-a.png"))).expect("save");
-        let others = [((1920, 1080), "mac"), ((1920, 1080), "windows"), ((3840, 2160), "cluster"), ((5120, 2880), "mac"), ((1080, 1920), "mac"), ((1080, 1920), "cluster")];
-        let mut extra: Vec<Row> = others.iter().map(|(screen, layout)| row(&name, &photo, &analysis, layout, *screen, Options::default())).collect();
-        let crops = layouts::SHIFTS.iter().map(|(at, layout)| (*at, *layout, "@", layouts::shifted(&photo, &analysis, *at))).chain(layouts::EDGES.iter().map(|(at, layout)| (*at, *layout, "^", layouts::edged(&photo, &analysis, *at))));
-        for (at, layout, mark, crop) in crops {
-            if let Some(crop) = crop {
-                let moved = scooch_core::analyze(&crop);
-                let label = format!("{name}{mark}{}", (at * 100.0).round());
-                let box_ = moved.subject;
-                println!("{label} crop {}x{} subject x {:.2} to {:.2} y {:.2} to {:.2}", crop.width(), crop.height(), box_.x, box_.x + box_.w, box_.y, box_.y + box_.h);
-                let options = Options { mirror: mark == "@", ..Options::default() };
-                if mark == "^" {
-                    strips.push((label.clone(), row(&label, &crop, &moved, layout, (2880, 1800), options)));
-                }
-                extra.push(row(&label, &crop, &moved, layout, (2880, 1800), options));
-            }
-        }
-        compose(header, &extra, cell_w).save(out.join(format!("{name}-b.png"))).expect("save");
-    }
-    for (side, tag) in [("mac", "^90"), ("windows", "^10")] {
-        let picked: Vec<Row> = strips.iter().filter(|(label, _)| label.ends_with(tag)).map(|(label, r)| {
-            println!("strip sheet {side} row {label}");
-            Row { before: r.before.clone(), after: r.after.clone() }
-        }).collect();
-        if !picked.is_empty() {
-            compose(Vec::new(), &picked, cell_w).save(out.join(format!("strip-{side}.png"))).expect("save");
-        }
+        let tiles: Vec<RgbImage> = LAYOUTS.iter().flat_map(|layout| row(&name, &photo, &analysis, layout)).collect();
+        desk::grid(&tiles, 3, 10).save(out.join(format!("{name}.png"))).expect("save");
     }
 }
