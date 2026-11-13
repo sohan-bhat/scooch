@@ -1926,117 +1926,6 @@ mod probe {
         Ok(last)
     }
 
-    const ANSWER: Duration = Duration::from_secs(3);
-
-    fn hold(args: &[String]) -> ExitCode {
-        let run = || -> Result<()> {
-            let [program, picture, x, y, w, h, present] = args else { bail!("hold needs a program, a picture, a rectangle and a presentation") };
-            let frame = Rect { x: x.parse()?, y: y.parse()?, w: w.parse()?, h: h.parse()? };
-            let screen = Screen { id: "held".into(), frame, scale: 1.0 };
-            let mut helper = Helper::spawn(Path::new(program), Duration::from_secs(5))?;
-            helper.warm(Hints { present: Some(present.clone()) }, Duration::from_secs(20))?;
-            helper.open(1, &screen, Some(Path::new(picture)), ANSWER)?;
-            println!("shown {}", helper.pid);
-            let _ = std::io::stdout().flush();
-            loop {
-                let _ = helper.play(1, PATTERN, 1000, ANSWER);
-            }
-        };
-        match run() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                println!("failed {error:#}");
-                ExitCode::FAILURE
-            }
-        }
-    }
-
-    fn parent_check(p: &mut Probe, program: &Path, screen: &Screen, picture: &Path, method: Method) -> Result<()> {
-        let spot = spot_of(screen_rect(screen));
-        let frame = screen.frame;
-        let mut holder = Command::new(std::env::current_exe()?)
-            .arg("--hold")
-            .arg(program)
-            .arg(picture)
-            .args([frame.x, frame.y, frame.w, frame.h].map(|value| value.to_string()))
-            .arg(method.hint())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .spawn()?;
-        let output = holder.stdout.take().context("the holder has no output")?;
-        let (sender, lines) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for text in std::io::BufRead::lines(std::io::BufReader::new(output)).map_while(Result::ok) {
-                if sender.send(text).is_err() {
-                    break;
-                }
-            }
-        });
-        let said = lines.recv_timeout(Duration::from_secs(40)).unwrap_or_default();
-        let Some(pid) = said.strip_prefix("shown ").and_then(|pid| pid.trim().parse::<u32>().ok()) else {
-            let _ = holder.kill();
-            let _ = holder.wait();
-            bail!("the holding process said {said:?}");
-        };
-        let before = marker_on(spot);
-        holder.kill()?;
-        let _ = holder.wait();
-        let off = marker_until(spot, false, Duration::from_secs(2));
-        let ended = gone_within(pid, Duration::from_secs(3));
-        p.line(format!("- the process that started the helper was ended with the layer open, layer on screen before {before}, gone from the screen after {:?} ms, helper process gone after {:?} ms", off.map(|off| off.as_millis()), ended.map(|ended| ended.as_millis())));
-        if !before || off.is_none_or(|off| off > Duration::from_millis(500)) || ended.is_none() {
-            p.failed.push("ending the daemon side did not take the layer and the helper away within 500 ms".into());
-        }
-        Ok(())
-    }
-
-    fn hang_up_check(p: &mut Probe, program: &Path, screen: &Screen, picture: &Path, method: Method) -> Result<()> {
-        let spot = spot_of(screen_rect(screen));
-        let mut helper = Helper::spawn(program, Duration::from_secs(5))?;
-        helper.warm(hints(method), Duration::from_secs(20))?;
-        helper.open(1, screen, Some(picture), ANSWER)?;
-        let before = marker_until(spot, true, Duration::from_secs(1)).is_some();
-        helper.hang_up();
-        let off = marker_until(spot, false, Duration::from_secs(2));
-        let ended = helper.wait_exit(Duration::from_secs(3));
-        p.line(format!("- the pipe to the helper was closed with the layer open, layer on screen before {before}, gone from the screen after {:?} ms, helper exited after {:?} ms", off.map(|off| off.as_millis()), ended.map(|ended| ended.as_millis())));
-        if !before || off.is_none_or(|off| off > Duration::from_millis(500)) || ended.is_none() {
-            p.failed.push("closing the pipe did not take the layer and the helper away within 500 ms".into());
-        }
-        Ok(())
-    }
-
-    fn helper_kill_check(p: &mut Probe, program: &Path, screen: &Screen, picture: &Path, field: &RgbImage, method: Method) -> Result<()> {
-        let area = screen_rect(screen);
-        let spot = spot_of(area);
-        let shell_before = shell_process();
-        let mut helper = Helper::spawn(program, Duration::from_secs(5))?;
-        helper.warm(hints(method), Duration::from_secs(20))?;
-        helper.open(1, screen, Some(picture), ANSWER)?;
-        let before = marker_until(spot, true, Duration::from_secs(1)).is_some();
-        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, false, helper.pid) }?;
-        let ended = unsafe { TerminateProcess(handle, 9) };
-        let _ = unsafe { CloseHandle(handle) };
-        ended?;
-        let off = marker_until(spot, false, Duration::from_secs(2));
-        let cleared = wait_until(Duration::from_secs(2), || layer::ours_left() == 0);
-        let gap = capture(area).ok().map(|shot| mean_gap(&shot, field));
-        let explorer = shell_process() == shell_before && shell::view().is_ok();
-        let asked = Instant::now();
-        let answer = helper.close(1, Duration::from_millis(400));
-        let took = asked.elapsed().as_millis();
-        p.line(format!(
-            "- the helper was ended with the layer open, layer on screen before {before}, gone from the screen after {:?} ms, windows gone after {:?} ms, screen gap to the picture {gap:?}, Explorer unchanged {explorer}, close answered {:?} after {took} ms",
-            off.map(|off| off.as_millis()),
-            cleared.map(|cleared| cleared.as_millis()),
-            answer.map_err(|error| error.to_string())
-        ));
-        if !before || off.is_none() || cleared.is_none() || !explorer || took > 450 {
-            p.failed.push("ending the helper did not leave a clean desktop and a quick failure".into());
-        }
-        Ok(())
-    }
-
     fn shell_process() -> u32 {
         let shell = unsafe { GetShellWindow() };
         let mut process = 0u32;
@@ -2044,149 +1933,6 @@ mod probe {
             unsafe { GetWindowThreadProcessId(shell, Some(&mut process)) };
         }
         process
-    }
-
-    fn idle_check(p: &mut Probe, program: &Path, screen: &Screen, picture: &Path, method: Method) -> Result<()> {
-        let mut helper = Helper::spawn(program, Duration::from_secs(5))?;
-        helper.warm(hints(method), Duration::from_secs(20))?;
-        helper.open(1, screen, Some(picture), ANSWER)?;
-        helper.play(1, PATTERN, 100, ANSWER)?;
-        helper.close(1, ANSWER)?;
-        let last = Instant::now();
-        let pid = helper.pid;
-        let ended = wait_until(Duration::from_secs(45), || helper.exited()).map(|_| last.elapsed());
-        let left = layer::ours_left();
-        p.line(format!("- a helper left alone exited {:?} ms after its last command, process gone {}, windows left {left}", ended.map(|ended| ended.as_millis()), process_gone(pid)));
-        if ended.is_none_or(|ended| ended < Duration::from_secs(29) || ended > Duration::from_secs(36)) || left > 0 {
-            p.failed.push("a helper left alone did not exit by itself after about 30 seconds".into());
-        }
-        Ok(())
-    }
-
-    fn live(p: &mut Probe) -> Result<()> {
-        uncover(p);
-        let desktop = platform::current()?;
-        let screen = desktop.screens()?.first().context("no screen")?.clone();
-        let area = screen_rect(&screen);
-        p.line("- Progman and WorkerW windows before".to_string());
-        for line in layer::tree() {
-            p.line(format!("  - `{line}`"));
-        }
-        let (layout, notes) = layer::layout()?;
-        for note in notes {
-            p.line(format!("- {note}"));
-        }
-        p.line(format!("- layout {}", layout.describe()));
-        p.line("- Progman and WorkerW windows after".to_string());
-        for line in layer::tree() {
-            p.line(format!("  - `{line}`"));
-        }
-        let original = desktop.wallpaper(&screen).ok().flatten();
-        p.line(format!("- wallpaper before {original:?}"));
-        let (width, height) = (screen.frame.w as u32, screen.frame.h as u32);
-        let field = subject_picture(width, height);
-        let other = RgbImage::from_raw(width, height, field.as_raw().iter().map(|value| value / 2 + 60).collect()).context("no second picture")?;
-        let field_path = p.home.join("layer-field.png");
-        let other_path = p.home.join("layer-other.png");
-        fs::write(&field_path, scooch_core::encode_png(&field)?)?;
-        fs::write(&other_path, scooch_core::encode_png(&other)?)?;
-        let previous = capture(area)?;
-        fade(p, "with no layer, the adapter", area, &previous, &field, || desktop.set_wallpaper(&screen, &field_path));
-        fade(p, "with no layer, the adapter", area, &field, &other, || desktop.set_wallpaper(&screen, &other_path));
-        fade(p, "with no layer, SystemParametersInfo", area, &other, &field, || spi_wallpaper(&field_path.to_string_lossy()));
-        pump(Duration::from_millis(800));
-        let sight = sight_of(p, area, &field, "layer-baseline")?;
-        let stage = Stage { screen: &screen, picture: &field_path, field: &field, sight: &sight };
-        let program = twin()?;
-        let helpers_before = running("scoochw.exe").len();
-        let own_before = own_private();
-        p.line(format!("- probe private bytes before any helper {own_before}"));
-        let spawned = Instant::now();
-        let mut helper = Helper::spawn(&program, Duration::from_secs(10))?;
-        let hello = spawned.elapsed().as_millis();
-        let (adapter, warm) = helper.warm(hints(Method::Bare), Duration::from_secs(30))?;
-        let ready = spawned.elapsed().as_millis();
-        p.line(format!("- helper {} said hello {hello} ms after spawn, device and shader ready on {adapter} after {warm} ms, spawn to ready {ready} ms cold, once warm {:?} private bytes and handles", helper.pid, process_numbers(helper.pid)));
-        let mut id = 0u32;
-        let mut kept = None;
-        for method in Method::ALL {
-            p.line(format!("- **{}**", method.name()));
-            match helper.warm(hints(method), Duration::from_secs(30)) {
-                Ok((_, ms)) => p.line(format!("  - device for this presentation ready after {ms} ms")),
-                Err(error) => {
-                    p.line(format!("  - no device {error:#}"));
-                    continue;
-                }
-            }
-            id += 1;
-            match rung(p, &mut helper, id, &stage, &format!("layer-{}", method.hint())) {
-                Ok(verdict) => {
-                    let good = works(&verdict, sight.icons.len()) && verdict.flashes == 0;
-                    p.line(format!("  - {}", if good { "shows the pattern under the icons with no flash" } else { "does not show the pattern under the icons cleanly" }));
-                    if good && kept.is_none() {
-                        kept = Some(method);
-                    }
-                }
-                Err(error) => p.line(format!("  - failed {error:#}")),
-            }
-        }
-        let Some(method) = kept else {
-            p.failed.push("no presentation showed the pattern under the icons through the helper".into());
-            return Ok(());
-        };
-        p.line(format!("- kept {}", method.name()));
-        helper.warm(hints(method), Duration::from_secs(30))?;
-        latency(p, &mut helper, &mut id, &screen, &field_path)?;
-        id += 1;
-        while_set(p, &mut helper, id, &stage, "the adapter", || desktop.set_wallpaper(&screen, &other_path))?;
-        pump(Duration::from_millis(1500));
-        id += 1;
-        while_set(p, &mut helper, id, &stage, "SystemParametersInfo", || spi_wallpaper(&field_path.to_string_lossy()))?;
-        pump(Duration::from_millis(1500));
-        if desktop.set_wallpaper(&screen, &field_path).is_ok() {
-            pump(Duration::from_millis(1500));
-        }
-        input_check(p, &mut helper, &mut id, &screen, &field_path)?;
-        cycles(p, &mut helper, &mut id, &screen, &field_path)?;
-        let pid = helper.pid;
-        drop(helper);
-        p.line(format!("- after quit the helper process is gone {}", gone_within(pid, Duration::from_secs(2)).is_some()));
-        hang_up_check(p, &program, &screen, &field_path, method)?;
-        parent_check(p, &program, &screen, &field_path, method)?;
-        helper_kill_check(p, &program, &screen, &field_path, &field, method)?;
-        idle_check(p, &program, &screen, &field_path, method)?;
-        let mut helper = Helper::spawn(&program, Duration::from_secs(10))?;
-        helper.warm(hints(method), Duration::from_secs(30))?;
-        restart_explorer(p)?;
-        helper.send(&LiveCommand::Hello { version: scooch::live::VERSION })?;
-        p.line("- **after an Explorer restart, with the same helper**".to_string());
-        for line in layer::tree() {
-            p.line(format!("  - `{line}`"));
-        }
-        let sight = sight_of(p, area, &field, "restart-baseline")?;
-        let stage = Stage { screen: &screen, picture: &field_path, field: &field, sight: &sight };
-        id += 1;
-        match rung(p, &mut helper, id, &stage, "restart-layer") {
-            Ok(verdict) if works(&verdict, sight.icons.len()) => p.line("  - shows the pattern under the icons after the restart".to_string()),
-            Ok(_) => p.failed.push("the layer did not show under the icons after an Explorer restart".into()),
-            Err(error) => p.failed.push(format!("the helper could not open a layer after an Explorer restart {error:#}")),
-        }
-        p.line("- Progman and WorkerW windows after the helper's open".to_string());
-        for line in layer::tree() {
-            p.line(format!("  - `{line}`"));
-        }
-        drop(helper);
-        pump(Duration::from_millis(500));
-        let helpers_after = running("scoochw.exe").len();
-        let own_after = own_private();
-        p.line(format!("- probe private bytes after every helper ran and exited {own_after}, change {} bytes, scoochw processes before {helpers_before} after {helpers_after}", own_after as i64 - own_before as i64));
-        if helpers_after > helpers_before {
-            p.failed.push("a helper process remained".into());
-        }
-        if let Some(path) = original {
-            let _ = desktop.set_wallpaper(&screen, &path);
-        }
-        Ok(())
     }
 
     fn press(view: &shell::View, pidl: &com::Pidl, at: POINT) -> (bool, Option<u128>) {
@@ -2213,48 +1959,11 @@ mod probe {
         (sent, took)
     }
 
-    fn input_check(p: &mut Probe, helper: &mut Helper, id: &mut u32, screen: &Screen, picture: &Path) -> Result<()> {
-        let view = shell::view()?;
-        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
-        let (name, folder) = PROBES[5];
-        let shown = shown_name(name, folder);
-        let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect).context("no rect for the click target")?;
-        let pidl = pidl_of(&view, name, folder)?;
-        let target = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 };
-        click(empty_spot(), false);
-        pump(Duration::from_millis(400));
-        let (sent, bare) = press(&view, &pidl, target);
-        p.line(format!("- with no layer, a click on `{shown}` sent {sent} selected it {bare:?} ms after the button went down"));
-        click(empty_spot(), false);
-        pump(Duration::from_millis(400));
-        *id += 1;
-        helper.open(*id, screen, Some(picture), ANSWER)?;
-        helper.ask_play(*id, PATTERN, 4000)?;
-        pump(Duration::from_millis(300));
-        let (sent, took) = press(&view, &pidl, target);
-        p.line(format!("- with the helper's layer open and playing, a click on `{shown}` sent {sent} selected it {took:?} ms after the button went down"));
-        if took.is_none_or(|took| took > 200) {
-            p.failed.push(format!("a click on an icon with the layer open selected it after {took:?} ms"));
-        }
-        let (moved_name, moved_folder) = PROBES[6];
-        let moved = shown_name(moved_name, moved_folder);
-        let moved_pidl = pidl_of(&view, moved_name, moved_folder)?;
-        let (_, before) = position(&view, &moved_pidl)?;
-        let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == moved).map(|(_, rect)| rect).context("no rect for the drag target")?;
-        let from = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 };
-        let to = POINT { x: (screen.frame.x + screen.frame.w * 0.7) as i32, y: (screen.frame.y + screen.frame.h * 0.7) as i32 };
-        let dragged = drag_to(from, to);
-        pump(Duration::from_millis(600));
-        let (_, after) = position(&view, &moved_pidl)?;
-        p.line(format!("- with the helper's layer open and playing, a drag of `{moved}` sent {dragged} moved it from {},{} to {},{}", before.x, before.y, after.x, after.y));
-        if before.x == after.x && before.y == after.y {
-            p.failed.push("a drag with the layer open did not move the icon".into());
-        }
-        let played = helper.played(*id, Duration::from_secs(6));
-        helper.close(*id, ANSWER)?;
-        p.line(format!("  - the helper played {:?} during the click and the drag", played.map_err(|error| error.to_string())));
-        park_cursor();
-        Ok(())
+    const ANSWER: Duration = Duration::from_secs(3);
+    const GLIDE_MS: u32 = 450;
+
+    fn bare() -> Hints {
+        Hints { present: Some(Method::Bare.hint().into()) }
     }
 
     struct Kit {
@@ -2939,8 +2648,296 @@ mod probe {
         Ok(())
     }
 
-    fn bare() -> Hints {
-        Hints { present: Some(Method::Bare.hint().into()) }
+    fn hold(args: &[String]) -> ExitCode {
+        let run = || -> Result<()> {
+            let [program, still, x, y, w, h, present] = args else { bail!("hold needs a program, a still, a rectangle and a presentation") };
+            let frame = Rect { x: x.parse()?, y: y.parse()?, w: w.parse()?, h: h.parse()? };
+            let screen = Screen { id: "held".into(), frame, scale: 1.0 };
+            let mut helper = Helper::spawn(Path::new(program), Duration::from_secs(5))?;
+            helper.warm(Hints { present: Some(present.clone()) }, None, None, Duration::from_secs(20))?;
+            helper.open(1, &screen, Path::new(still), ANSWER)?;
+            println!("shown {}", helper.pid);
+            let _ = std::io::stdout().flush();
+            loop {
+                let _ = helper.ask_settle(1, Path::new(still), Some(1));
+                let _ = helper.settled(1, ANSWER);
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        };
+        match run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                println!("failed {error:#}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    fn other_on_screen(kit: &Kit, area: RECT, limit: Duration) -> Option<Duration> {
+        patch_until(kit.spot, &patch_of(&kit.other.1, area, kit.spot), true, limit)
+    }
+
+    fn other_gone(kit: &Kit, area: RECT, limit: Duration) -> Option<Duration> {
+        patch_until(kit.spot, &patch_of(&kit.other.1, area, kit.spot), false, limit)
+    }
+
+    fn parent_check(p: &mut Probe, program: &Path, screen: &Screen, kit: &Kit) -> Result<()> {
+        let area = screen_rect(screen);
+        let frame = screen.frame;
+        let mut holder = Command::new(std::env::current_exe()?)
+            .arg("--hold")
+            .arg(program)
+            .arg(&kit.other.0)
+            .args([frame.x, frame.y, frame.w, frame.h].map(|value| value.to_string()))
+            .arg(Method::Bare.hint())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let output = holder.stdout.take().context("the holder has no output")?;
+        let (sender, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for text in std::io::BufRead::lines(std::io::BufReader::new(output)).map_while(Result::ok) {
+                if sender.send(text).is_err() {
+                    break;
+                }
+            }
+        });
+        let said = lines.recv_timeout(Duration::from_secs(40)).unwrap_or_default();
+        let Some(pid) = said.strip_prefix("shown ").and_then(|pid| pid.trim().parse::<u32>().ok()) else {
+            let _ = holder.kill();
+            let _ = holder.wait();
+            bail!("the holding process said {said:?}");
+        };
+        let before = other_on_screen(kit, area, Duration::from_secs(3));
+        holder.kill()?;
+        let _ = holder.wait();
+        let off = other_gone(kit, area, Duration::from_secs(2));
+        let ended = gone_within(pid, Duration::from_secs(3));
+        p.line(format!("- the process that started the helper was ended after a capture saw its layer {:?} ms after shown, gone from the screen after {:?} ms, helper process gone after {:?} ms", before.map(|d| d.as_millis()), off.map(|off| off.as_millis()), ended.map(|ended| ended.as_millis())));
+        if before.is_none() || off.is_none_or(|off| off > Duration::from_millis(500)) || ended.is_none() {
+            p.failed.push("ending the daemon side did not take the layer and the helper away within 500 ms".into());
+        }
+        Ok(())
+    }
+
+    fn hang_up_check(p: &mut Probe, program: &Path, screen: &Screen, kit: &Kit) -> Result<()> {
+        let area = screen_rect(screen);
+        let mut helper = Helper::spawn(program, Duration::from_secs(5))?;
+        helper.warm(bare(), None, None, Duration::from_secs(20))?;
+        helper.open(1, screen, &kit.other.0, ANSWER)?;
+        let before = other_on_screen(kit, area, Duration::from_secs(2));
+        helper.hang_up();
+        let off = other_gone(kit, area, Duration::from_secs(2));
+        let ended = helper.wait_exit(Duration::from_secs(3));
+        p.line(format!("- the pipe to the helper was closed with the layer on screen after {:?} ms, gone from the screen after {:?} ms, helper exited after {:?} ms", before.map(|d| d.as_millis()), off.map(|off| off.as_millis()), ended.map(|ended| ended.as_millis())));
+        if before.is_none() || off.is_none_or(|off| off > Duration::from_millis(500)) || ended.is_none() {
+            p.failed.push("closing the pipe did not take the layer and the helper away within 500 ms".into());
+        }
+        Ok(())
+    }
+
+    fn helper_kill_check(p: &mut Probe, program: &Path, screen: &Screen, kit: &Kit) -> Result<()> {
+        let area = screen_rect(screen);
+        let shell_before = shell_process();
+        let mut helper = Helper::spawn(program, Duration::from_secs(5))?;
+        helper.warm(bare(), None, None, Duration::from_secs(20))?;
+        helper.open(1, screen, &kit.other.0, ANSWER)?;
+        let before = other_on_screen(kit, area, Duration::from_secs(2));
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, false, helper.pid) }?;
+        let ended = unsafe { TerminateProcess(handle, 9) };
+        let _ = unsafe { CloseHandle(handle) };
+        ended?;
+        let off = other_gone(kit, area, Duration::from_secs(2));
+        let cleared = wait_until(Duration::from_secs(2), || layer::ours_left() == 0);
+        let explorer = shell_process() == shell_before && shell::view().is_ok();
+        let asked = Instant::now();
+        let answer = helper.close(1, Duration::from_millis(400));
+        let took = asked.elapsed().as_millis();
+        p.line(format!(
+            "- the helper was ended with its layer on screen after {:?} ms, gone from the screen after {:?} ms, windows gone after {:?} ms, Explorer unchanged {explorer}, close answered {:?} after {took} ms",
+            before.map(|d| d.as_millis()),
+            off.map(|off| off.as_millis()),
+            cleared.map(|cleared| cleared.as_millis()),
+            answer.map_err(|error| error.to_string())
+        ));
+        if before.is_none() || off.is_none() || cleared.is_none() || !explorer || took > 450 {
+            p.failed.push("ending the helper did not leave a clean desktop and a quick failure".into());
+        }
+        Ok(())
+    }
+
+    fn idle_check(p: &mut Probe, program: &Path, screen: &Screen, kit: &Kit) -> Result<()> {
+        let mut helper = Helper::spawn(program, Duration::from_secs(5))?;
+        helper.warm(bare(), None, None, Duration::from_secs(20))?;
+        helper.open(1, screen, &kit.stills[0].0, ANSWER)?;
+        helper.close(1, ANSWER)?;
+        let last = Instant::now();
+        let pid = helper.pid;
+        let ended = wait_until(Duration::from_secs(45), || helper.exited()).map(|_| last.elapsed());
+        let left = layer::ours_left();
+        p.line(format!("- a helper left alone exited {:?} ms after its last command, process gone {}, windows left {left}", ended.map(|ended| ended.as_millis()), process_gone(pid)));
+        if ended.is_none_or(|ended| ended < Duration::from_secs(29) || ended > Duration::from_secs(36)) || left > 0 {
+            p.failed.push("a helper left alone did not exit by itself after about 30 seconds".into());
+        }
+        Ok(())
+    }
+
+    fn input_check(p: &mut Probe, helper: &mut Helper, id: &mut u32, screen: &Screen, kit: &Kit) -> Result<()> {
+        let view = shell::view()?;
+        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
+        let (name, folder) = PROBES[5];
+        let shown = shown_name(name, folder);
+        let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect).context("no rect for the click target")?;
+        let pidl = pidl_of(&view, name, folder)?;
+        let target = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 };
+        click(empty_spot(), false);
+        pump(Duration::from_millis(400));
+        let (sent, bare_click) = press(&view, &pidl, target);
+        p.line(format!("- with no layer, a click on `{shown}` sent {sent} selected it {bare_click:?} ms after the button went down"));
+        click(empty_spot(), false);
+        pump(Duration::from_millis(400));
+        *id += 1;
+        helper.open(*id, screen, &kit.stills[0].0, ANSWER)?;
+        helper.ask_glide(*id, &kit.tables[0], &kit.tables[1], 4000)?;
+        pump(Duration::from_millis(300));
+        let (sent, took) = press(&view, &pidl, target);
+        p.line(format!("- during a glide, a click on `{shown}` sent {sent} selected it {took:?} ms after the button went down"));
+        if took.is_none_or(|took| took > 200) {
+            p.failed.push(format!("a click on an icon during a glide selected it after {took:?} ms"));
+        }
+        let (moved_name, moved_folder) = PROBES[6];
+        let moved = shown_name(moved_name, moved_folder);
+        let moved_pidl = pidl_of(&view, moved_name, moved_folder)?;
+        let (_, before) = position(&view, &moved_pidl)?;
+        let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == moved).map(|(_, rect)| rect).context("no rect for the drag target")?;
+        let from = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 };
+        let to = POINT { x: (screen.frame.x + screen.frame.w * 0.7) as i32, y: (screen.frame.y + screen.frame.h * 0.7) as i32 };
+        let dragged = drag_to(from, to);
+        pump(Duration::from_millis(600));
+        let (_, after) = position(&view, &moved_pidl)?;
+        p.line(format!("- during a glide, a drag of `{moved}` sent {dragged} moved it from {},{} to {},{}", before.x, before.y, after.x, after.y));
+        if before.x == after.x && before.y == after.y {
+            p.failed.push("a drag during a glide did not move the icon".into());
+        }
+        let glided = helper.glided(*id, Duration::from_secs(6));
+        helper.close(*id, ANSWER)?;
+        p.line(format!("  - the helper glided {:?} during the click and the drag", glided.map_err(|error| error.to_string())));
+        park_cursor();
+        Ok(())
+    }
+
+    fn live(p: &mut Probe) -> Result<()> {
+        uncover(p);
+        let desktop = platform::current()?;
+        let screen = desktop.screens()?.first().context("no screen")?.clone();
+        let area = screen_rect(&screen);
+        p.line("- Progman and WorkerW windows before".to_string());
+        for line in layer::tree() {
+            p.line(format!("  - `{line}`"));
+        }
+        let (layout, notes) = layer::layout()?;
+        for note in notes {
+            p.line(format!("- {note}"));
+        }
+        p.line(format!("- layout {}", layout.describe()));
+        p.line("- Progman and WorkerW windows after".to_string());
+        for line in layer::tree() {
+            p.line(format!("  - `{line}`"));
+        }
+        let original = desktop.wallpaper(&screen).ok().flatten();
+        p.line(format!("- wallpaper before {original:?}"));
+        let (width, height) = (screen.frame.w as u32, screen.frame.h as u32);
+        let field = subject_picture(width, height);
+        let other = RgbImage::from_raw(width, height, field.as_raw().iter().map(|value| value / 2 + 60).collect()).context("no second picture")?;
+        let field_path = p.home.join("layer-field.png");
+        let other_path = p.home.join("layer-other.png");
+        fs::write(&field_path, scooch_core::encode_png(&field)?)?;
+        fs::write(&other_path, scooch_core::encode_png(&other)?)?;
+        let previous = capture(area)?;
+        fade(p, "with no layer, the adapter", area, &previous, &field, || desktop.set_wallpaper(&screen, &field_path));
+        fade(p, "with no layer, the adapter", area, &field, &other, || desktop.set_wallpaper(&screen, &other_path));
+        fade(p, "with no layer, SystemParametersInfo", area, &other, &field, || spi_wallpaper(&field_path.to_string_lossy()));
+        plain_window_latency(p)?;
+        let made = Instant::now();
+        let kit = kit(p, &screen)?;
+        p.line(format!("- the probe built the pictures, bundles, stills, tables and CPU frames in {} ms", made.elapsed().as_millis()));
+        let program = twin()?;
+        let helpers_before = running("scoochw.exe").len();
+        let own_before = own_private();
+        p.line(format!("- probe private bytes before any helper {own_before}"));
+        let spawned = Instant::now();
+        let mut helper = Helper::spawn(&program, Duration::from_secs(10))?;
+        let hello = spawned.elapsed().as_millis();
+        let ready = helper.warm(bare(), Some(&kit.picture), Some(kit.size), Duration::from_secs(60))?;
+        let warm_took = spawned.elapsed().as_millis();
+        p.line(format!(
+            "- helper {} said hello {hello} ms after spawn, device, shaders and picture ready on {} after {} ms, spawn to ready {warm_took} ms cold, pictures uploaded {}, once warm {:?} private bytes and handles",
+            helper.pid,
+            ready.adapter,
+            ready.ms,
+            ready.uploads,
+            process_numbers(helper.pid)
+        ));
+        let mut id = 0u32;
+        id += 1;
+        color_check(p, &mut helper, id, &screen, &kit.stills[0], "color at the first scale, the glide still")?;
+        id += 1;
+        color_check(p, &mut helper, id, &screen, &kit.detail, "scale at the first scale, a fine detail still")?;
+        let runs = [
+            Pass { label: "glide from A to B, settle sent with the new wallpaper at 150 ms", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, strip: Some("glide-strip") },
+            Pass { label: "cross-fade to a mirrored B", tables: (&kit.tables[0], &kit.tables[2]), track: false, old: &kit.stills[0], new: &kit.stills[2], frames: &kit.mirrored_frames, ending: Ending::During, strip: Some("mirrored-strip") },
+            Pass { label: "glide with settle sent together with the glide", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::AtOnce, strip: None },
+            Pass { label: "glide with no settle, left to the helper's five second rule", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::Never, strip: None },
+        ];
+        for run in &runs {
+            id += 1;
+            if let Err(error) = glide_run(p, &mut helper, id, &screen, &kit, run) {
+                p.failed.push(format!("{} stopped with {error:#}", run.label));
+                p.line(format!("  - stopped with {error:#}"));
+            }
+            pump(Duration::from_millis(500));
+        }
+        timing(p, &mut helper, &mut id, &screen, &kit)?;
+        glides(p, &mut helper, &mut id, &screen, &kit)?;
+        input_check(p, &mut helper, &mut id, &screen, &kit)?;
+        let pid = helper.pid;
+        drop(helper);
+        p.line(format!("- after quit the helper process is gone {}", gone_within(pid, Duration::from_secs(2)).is_some()));
+        desktop.set_wallpaper(&screen, &kit.stills[0].0)?;
+        pump(Duration::from_millis(1500));
+        hang_up_check(p, &program, &screen, &kit)?;
+        parent_check(p, &program, &screen, &kit)?;
+        helper_kill_check(p, &program, &screen, &kit)?;
+        idle_check(p, &program, &screen, &kit)?;
+        let mut helper = Helper::spawn(&program, Duration::from_secs(10))?;
+        helper.warm(bare(), Some(&kit.picture), Some(kit.size), Duration::from_secs(60))?;
+        restart_explorer(p)?;
+        helper.send(&LiveCommand::Hello { version: scooch::live::VERSION })?;
+        p.line("- **after an Explorer restart, with the same helper**".to_string());
+        for line in layer::tree() {
+            p.line(format!("  - `{line}`"));
+        }
+        id += 1;
+        let after_restart = Pass { label: "glide after the restart", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, strip: Some("restart-strip") };
+        if let Err(error) = glide_run(p, &mut helper, id, &screen, &kit, &after_restart) {
+            p.failed.push(format!("the helper could not glide after an Explorer restart {error:#}"));
+        }
+        p.line("- Progman and WorkerW windows after the helper's open".to_string());
+        for line in layer::tree() {
+            p.line(format!("  - `{line}`"));
+        }
+        drop(helper);
+        pump(Duration::from_millis(500));
+        let helpers_after = running("scoochw.exe").len();
+        let own_after = own_private();
+        p.line(format!("- probe private bytes after every helper ran and exited {own_after}, change {} bytes, scoochw processes before {helpers_before} after {helpers_after}", own_after as i64 - own_before as i64));
+        if helpers_after > helpers_before {
+            p.failed.push("a helper process remained".into());
+        }
+        if let Some(path) = original {
+            let _ = desktop.set_wallpaper(&screen, &path);
+        }
+        Ok(())
     }
 
     fn live_scaled(p: &mut Probe) -> Result<()> {
@@ -2959,14 +2956,6 @@ mod probe {
             let _ = desktop.set_wallpaper(&screen, &path);
         }
         Ok(())
-    }
-
-    fn other_on_screen(kit: &Kit, area: RECT, limit: Duration) -> Option<Duration> {
-        patch_until(kit.spot, &patch_of(&kit.other.1, area, kit.spot), true, limit)
-    }
-
-    fn other_gone(kit: &Kit, area: RECT, limit: Duration) -> Option<Duration> {
-        patch_until(kit.spot, &patch_of(&kit.other.1, area, kit.spot), false, limit)
     }
 
     fn new_lines(path: &Path, read: &mut u64) -> Vec<String> {
