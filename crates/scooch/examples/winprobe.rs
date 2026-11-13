@@ -2330,190 +2330,6 @@ mod probe {
         Ok(())
     }
 
-    fn live(p: &mut Probe) -> Result<()> {
-        uncover(p);
-        let desktop = platform::current()?;
-        let screen = desktop.screens()?.first().context("no screen")?.clone();
-        let area = screen_rect(&screen);
-        p.line("- Progman and WorkerW windows before".to_string());
-        for line in layer::tree() {
-            p.line(format!("  - `{line}`"));
-        }
-        let (layout, notes) = layer::layout()?;
-        for note in notes {
-            p.line(format!("- {note}"));
-        }
-        p.line(format!("- layout {}", layout.describe()));
-        p.line("- Progman and WorkerW windows after".to_string());
-        for line in layer::tree() {
-            p.line(format!("  - `{line}`"));
-        }
-        let original = desktop.wallpaper(&screen).ok().flatten();
-        p.line(format!("- wallpaper before {original:?}"));
-        let (width, height) = (screen.frame.w as u32, screen.frame.h as u32);
-        let field = subject_picture(width, height);
-        let other = RgbImage::from_raw(width, height, field.as_raw().iter().map(|value| value / 2 + 60).collect()).context("no second picture")?;
-        let field_path = p.home.join("layer-field.png");
-        let other_path = p.home.join("layer-other.png");
-        fs::write(&field_path, scooch_core::encode_png(&field)?)?;
-        fs::write(&other_path, scooch_core::encode_png(&other)?)?;
-        let previous = capture(area)?;
-        fade(p, "with no layer, the adapter", area, &previous, &field, || desktop.set_wallpaper(&screen, &field_path));
-        fade(p, "with no layer, the adapter", area, &field, &other, || desktop.set_wallpaper(&screen, &other_path));
-        fade(p, "with no layer, SystemParametersInfo", area, &other, &field, || spi_wallpaper(&field_path.to_string_lossy()));
-        pump(Duration::from_millis(800));
-        let sight = sight_of(p, area, &field, "layer-baseline")?;
-        let mut kept = None;
-        for method in Method::ALL {
-            p.line(format!("- **{}**", method.name()));
-            match rung(p, &screen, method, &field, &sight, Some(&format!("layer-{method:?}"))) {
-                Ok(verdict) => {
-                    let good = works(&verdict, sight.icons.len());
-                    p.line(format!("  - {}", if good { "shows the pattern under the icons" } else { "does not show the pattern under the icons" }));
-                    if good && kept.is_none() {
-                        kept = Some(method);
-                    }
-                }
-                Err(error) => p.line(format!("  - failed {error:#}")),
-            }
-        }
-        let Some(method) = kept else {
-            p.failed.push("no presentation method showed the pattern under the icons".into());
-            return Ok(());
-        };
-        p.line(format!("- kept {}", method.name()));
-        for (label, set) in [("the adapter", 0), ("SystemParametersInfo", 1)] {
-            let layer = layer::open(&screen, method, pattern_of(&field), Duration::from_millis(500))?;
-            let showing = wait_until(Duration::from_secs(1), || capture(area).is_ok_and(|shot| sight.look(&shot, 0).marker));
-            let before_repairs = layer::repairs();
-            let target = if set == 0 { other_path.clone() } else { field_path.clone() };
-            let started = Instant::now();
-            let (mut looks, mut through, mut done) = (Vec::new(), None, false);
-            while started.elapsed() < Duration::from_millis(2500) {
-                let at = started.elapsed().as_millis();
-                if !done && at > 300 {
-                    done = true;
-                    let _ = if set == 0 { desktop.set_wallpaper(&screen, &target) } else { spi_wallpaper(&target.to_string_lossy()) };
-                }
-                if let Ok(shot) = capture(area) {
-                    let look = sight.look(&shot, at);
-                    if through.is_none() && !look.marker && look.bar.is_none() {
-                        through = Some(shot);
-                    }
-                    looks.push(look);
-                }
-                drain();
-            }
-            let verdict = judge(&looks, Duration::from_millis(2500));
-            let missing: Vec<u128> = looks.iter().filter(|look| !look.marker && look.bar.is_none()).map(|look| look.at).collect();
-            let partial: Vec<u128> = looks.iter().filter(|look| look.marker != look.bar.is_some()).map(|look| look.at).collect();
-            let in_place = layer.in_place();
-            drop(layer);
-            if let Some(shot) = through {
-                let _ = fs::write(p.out.join(format!("through-{set}.png")), scooch_core::encode_png(&shot)?);
-            }
-            p.line(format!(
-                "- wallpaper set through {label} at 300 ms while open, layer on screen after {:?} ms, {} captures, system layer showed through in {} at {:?} ms, bar or marker alone in {} at {:?} ms, order repairs {}, still under the icons {in_place}, bar steps forward {} backward {}",
-                showing.map(|took| took.as_millis()),
-                verdict.captures,
-                missing.len(),
-                missing.iter().take(12).collect::<Vec<_>>(),
-                partial.len(),
-                partial.iter().take(12).collect::<Vec<_>>(),
-                layer::repairs() - before_repairs,
-                verdict.forward,
-                verdict.backward
-            ));
-            pump(Duration::from_millis(1500));
-        }
-        if desktop.set_wallpaper(&screen, &field_path).is_ok() {
-            pump(Duration::from_millis(1500));
-        }
-        cycles(p, &screen, method, &field, None, "each on a new device");
-        match layer::Gpu::new(method != Method::Hwnd) {
-            Ok(gpu) => cycles(p, &screen, method, &field, Some(gpu), "on one shared device"),
-            Err(error) => p.line(format!("- no shared device {error}")),
-        }
-        input_check(p, &screen, method, &field)?;
-        restart_explorer(p)?;
-        p.line("- **after an Explorer restart**".to_string());
-        p.line(format!("- layout now {}", layer::layout().map(|(layout, notes)| format!("{}, {}", layout.describe(), notes.join(", "))).unwrap_or_else(|error| error.to_string())));
-        let sight = sight_of(p, area, &field, "restart-baseline")?;
-        match rung(p, &screen, method, &field, &sight, Some("restart-layer")) {
-            Ok(verdict) if works(&verdict, sight.icons.len()) => p.line("  - shows the pattern under the icons after the restart".to_string()),
-            Ok(_) => p.failed.push("the layer did not show under the icons after an Explorer restart".into()),
-            Err(error) => p.failed.push(format!("the layer did not open after an Explorer restart {error:#}")),
-        }
-        if let Some(path) = original {
-            let _ = desktop.set_wallpaper(&screen, &path);
-        }
-        Ok(())
-    }
-
-    fn press(view: &shell::View, pidl: &com::Pidl, at: POINT) -> (bool, Option<u128>) {
-        let selected = || unsafe { view.folder.GetSelectionState(pidl.0) }.is_ok_and(|state| state & SVSI_SELECT.0 as u32 != 0);
-        let mut sent = mouse(at.x, at.y, MOUSE_EVENT_FLAGS(0));
-        pump(Duration::from_millis(100));
-        let pressed = Instant::now();
-        sent &= mouse(at.x, at.y, MOUSEEVENTF_LEFTDOWN);
-        let (mut took, mut up) = (None, false);
-        while pressed.elapsed() < Duration::from_secs(1) {
-            if selected() {
-                took = Some(pressed.elapsed().as_millis());
-                break;
-            }
-            if !up && pressed.elapsed() >= Duration::from_millis(80) {
-                sent &= mouse(at.x, at.y, MOUSEEVENTF_LEFTUP);
-                up = true;
-            }
-            pump(Duration::from_millis(4));
-        }
-        if !up {
-            sent &= mouse(at.x, at.y, MOUSEEVENTF_LEFTUP);
-        }
-        (sent, took)
-    }
-
-    fn input_check(p: &mut Probe, screen: &Screen, method: Method, field: &RgbImage) -> Result<()> {
-        let view = shell::view()?;
-        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
-        let (name, folder) = PROBES[5];
-        let shown = shown_name(name, folder);
-        let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect).context("no rect for the click target")?;
-        let pidl = pidl_of(&view, name, folder)?;
-        let target = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 };
-        click(empty_spot(), false);
-        pump(Duration::from_millis(400));
-        let (sent, bare) = press(&view, &pidl, target);
-        p.line(format!("- with no layer, a click on `{shown}` sent {sent} selected it {bare:?} ms after the button went down"));
-        click(empty_spot(), false);
-        pump(Duration::from_millis(400));
-        let layer = layer::open(screen, method, pattern_of(field), Duration::from_millis(500))?;
-        pump(Duration::from_millis(300));
-        let (sent, took) = press(&view, &pidl, target);
-        p.line(format!("- with the layer open, a click on `{shown}` sent {sent} selected it {took:?} ms after the button went down"));
-        if took.is_none_or(|took| took > 200) {
-            p.failed.push(format!("a click on an icon with the layer open selected it after {took:?} ms"));
-        }
-        let (moved_name, moved_folder) = PROBES[6];
-        let moved = shown_name(moved_name, moved_folder);
-        let moved_pidl = pidl_of(&view, moved_name, moved_folder)?;
-        let (_, before) = position(&view, &moved_pidl)?;
-        let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == moved).map(|(_, rect)| rect).context("no rect for the drag target")?;
-        let from = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 };
-        let to = POINT { x: (screen.frame.x + screen.frame.w * 0.7) as i32, y: (screen.frame.y + screen.frame.h * 0.7) as i32 };
-        let dragged = drag_to(from, to);
-        pump(Duration::from_millis(600));
-        let (_, after) = position(&view, &moved_pidl)?;
-        p.line(format!("- with the layer open, a drag of `{moved}` sent {dragged} moved it from {},{} to {},{}", before.x, before.y, after.x, after.y));
-        if before.x == after.x && before.y == after.y {
-            p.failed.push("a drag with the layer open did not move the icon".into());
-        }
-        drop(layer);
-        park_cursor();
-        Ok(())
-    }
-
     fn hold(args: &[String]) -> ExitCode {
         let run = || -> Result<()> {
             let [program, picture, x, y, w, h, present] = args else { bail!("hold needs a program, a picture, a rectangle and a presentation") };
@@ -2646,6 +2462,200 @@ mod probe {
         if ended.is_none_or(|ended| ended < Duration::from_secs(29) || ended > Duration::from_secs(36)) || left > 0 {
             p.failed.push("a helper left alone did not exit by itself after about 30 seconds".into());
         }
+        Ok(())
+    }
+
+    fn live(p: &mut Probe) -> Result<()> {
+        uncover(p);
+        let desktop = platform::current()?;
+        let screen = desktop.screens()?.first().context("no screen")?.clone();
+        let area = screen_rect(&screen);
+        p.line("- Progman and WorkerW windows before".to_string());
+        for line in layer::tree() {
+            p.line(format!("  - `{line}`"));
+        }
+        let (layout, notes) = layer::layout()?;
+        for note in notes {
+            p.line(format!("- {note}"));
+        }
+        p.line(format!("- layout {}", layout.describe()));
+        p.line("- Progman and WorkerW windows after".to_string());
+        for line in layer::tree() {
+            p.line(format!("  - `{line}`"));
+        }
+        let original = desktop.wallpaper(&screen).ok().flatten();
+        p.line(format!("- wallpaper before {original:?}"));
+        let (width, height) = (screen.frame.w as u32, screen.frame.h as u32);
+        let field = subject_picture(width, height);
+        let other = RgbImage::from_raw(width, height, field.as_raw().iter().map(|value| value / 2 + 60).collect()).context("no second picture")?;
+        let field_path = p.home.join("layer-field.png");
+        let other_path = p.home.join("layer-other.png");
+        fs::write(&field_path, scooch_core::encode_png(&field)?)?;
+        fs::write(&other_path, scooch_core::encode_png(&other)?)?;
+        let previous = capture(area)?;
+        fade(p, "with no layer, the adapter", area, &previous, &field, || desktop.set_wallpaper(&screen, &field_path));
+        fade(p, "with no layer, the adapter", area, &field, &other, || desktop.set_wallpaper(&screen, &other_path));
+        fade(p, "with no layer, SystemParametersInfo", area, &other, &field, || spi_wallpaper(&field_path.to_string_lossy()));
+        pump(Duration::from_millis(800));
+        let sight = sight_of(p, area, &field, "layer-baseline")?;
+        let stage = Stage { screen: &screen, picture: &field_path, field: &field, sight: &sight };
+        let program = twin()?;
+        let helpers_before = running("scoochw.exe").len();
+        let own_before = own_private();
+        p.line(format!("- probe private bytes before any helper {own_before}"));
+        let spawned = Instant::now();
+        let mut helper = Helper::spawn(&program, Duration::from_secs(10))?;
+        let hello = spawned.elapsed().as_millis();
+        let (adapter, warm) = helper.warm(hints(Method::Bare), Duration::from_secs(30))?;
+        let ready = spawned.elapsed().as_millis();
+        p.line(format!("- helper {} said hello {hello} ms after spawn, device and shader ready on {adapter} after {warm} ms, spawn to ready {ready} ms cold, once warm {:?} private bytes and handles", helper.pid, process_numbers(helper.pid)));
+        let mut id = 0u32;
+        let mut kept = None;
+        for method in Method::ALL {
+            p.line(format!("- **{}**", method.name()));
+            match helper.warm(hints(method), Duration::from_secs(30)) {
+                Ok((_, ms)) => p.line(format!("  - device for this presentation ready after {ms} ms")),
+                Err(error) => {
+                    p.line(format!("  - no device {error:#}"));
+                    continue;
+                }
+            }
+            id += 1;
+            match rung(p, &mut helper, id, &stage, &format!("layer-{}", method.hint())) {
+                Ok(verdict) => {
+                    let good = works(&verdict, sight.icons.len()) && verdict.flashes == 0;
+                    p.line(format!("  - {}", if good { "shows the pattern under the icons with no flash" } else { "does not show the pattern under the icons cleanly" }));
+                    if good && kept.is_none() {
+                        kept = Some(method);
+                    }
+                }
+                Err(error) => p.line(format!("  - failed {error:#}")),
+            }
+        }
+        let Some(method) = kept else {
+            p.failed.push("no presentation showed the pattern under the icons through the helper".into());
+            return Ok(());
+        };
+        p.line(format!("- kept {}", method.name()));
+        helper.warm(hints(method), Duration::from_secs(30))?;
+        latency(p, &mut helper, &mut id, &screen, &field_path)?;
+        id += 1;
+        while_set(p, &mut helper, id, &stage, "the adapter", || desktop.set_wallpaper(&screen, &other_path))?;
+        pump(Duration::from_millis(1500));
+        id += 1;
+        while_set(p, &mut helper, id, &stage, "SystemParametersInfo", || spi_wallpaper(&field_path.to_string_lossy()))?;
+        pump(Duration::from_millis(1500));
+        if desktop.set_wallpaper(&screen, &field_path).is_ok() {
+            pump(Duration::from_millis(1500));
+        }
+        input_check(p, &mut helper, &mut id, &screen, &field_path)?;
+        cycles(p, &mut helper, &mut id, &screen, &field_path)?;
+        let pid = helper.pid;
+        drop(helper);
+        p.line(format!("- after quit the helper process is gone {}", gone_within(pid, Duration::from_secs(2)).is_some()));
+        hang_up_check(p, &program, &screen, &field_path, method)?;
+        parent_check(p, &program, &screen, &field_path, method)?;
+        helper_kill_check(p, &program, &screen, &field_path, &field, method)?;
+        idle_check(p, &program, &screen, &field_path, method)?;
+        let mut helper = Helper::spawn(&program, Duration::from_secs(10))?;
+        helper.warm(hints(method), Duration::from_secs(30))?;
+        restart_explorer(p)?;
+        helper.send(&LiveCommand::Hello { version: scooch::live::VERSION })?;
+        p.line("- **after an Explorer restart, with the same helper**".to_string());
+        for line in layer::tree() {
+            p.line(format!("  - `{line}`"));
+        }
+        let sight = sight_of(p, area, &field, "restart-baseline")?;
+        let stage = Stage { screen: &screen, picture: &field_path, field: &field, sight: &sight };
+        id += 1;
+        match rung(p, &mut helper, id, &stage, "restart-layer") {
+            Ok(verdict) if works(&verdict, sight.icons.len()) => p.line("  - shows the pattern under the icons after the restart".to_string()),
+            Ok(_) => p.failed.push("the layer did not show under the icons after an Explorer restart".into()),
+            Err(error) => p.failed.push(format!("the helper could not open a layer after an Explorer restart {error:#}")),
+        }
+        p.line("- Progman and WorkerW windows after the helper's open".to_string());
+        for line in layer::tree() {
+            p.line(format!("  - `{line}`"));
+        }
+        drop(helper);
+        pump(Duration::from_millis(500));
+        let helpers_after = running("scoochw.exe").len();
+        let own_after = own_private();
+        p.line(format!("- probe private bytes after every helper ran and exited {own_after}, change {} bytes, scoochw processes before {helpers_before} after {helpers_after}", own_after as i64 - own_before as i64));
+        if helpers_after > helpers_before {
+            p.failed.push("a helper process remained".into());
+        }
+        if let Some(path) = original {
+            let _ = desktop.set_wallpaper(&screen, &path);
+        }
+        Ok(())
+    }
+
+    fn press(view: &shell::View, pidl: &com::Pidl, at: POINT) -> (bool, Option<u128>) {
+        let selected = || unsafe { view.folder.GetSelectionState(pidl.0) }.is_ok_and(|state| state & SVSI_SELECT.0 as u32 != 0);
+        let mut sent = mouse(at.x, at.y, MOUSE_EVENT_FLAGS(0));
+        pump(Duration::from_millis(100));
+        let pressed = Instant::now();
+        sent &= mouse(at.x, at.y, MOUSEEVENTF_LEFTDOWN);
+        let (mut took, mut up) = (None, false);
+        while pressed.elapsed() < Duration::from_secs(1) {
+            if selected() {
+                took = Some(pressed.elapsed().as_millis());
+                break;
+            }
+            if !up && pressed.elapsed() >= Duration::from_millis(80) {
+                sent &= mouse(at.x, at.y, MOUSEEVENTF_LEFTUP);
+                up = true;
+            }
+            pump(Duration::from_millis(4));
+        }
+        if !up {
+            sent &= mouse(at.x, at.y, MOUSEEVENTF_LEFTUP);
+        }
+        (sent, took)
+    }
+
+    fn input_check(p: &mut Probe, helper: &mut Helper, id: &mut u32, screen: &Screen, picture: &Path) -> Result<()> {
+        let view = shell::view()?;
+        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
+        let (name, folder) = PROBES[5];
+        let shown = shown_name(name, folder);
+        let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect).context("no rect for the click target")?;
+        let pidl = pidl_of(&view, name, folder)?;
+        let target = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 };
+        click(empty_spot(), false);
+        pump(Duration::from_millis(400));
+        let (sent, bare) = press(&view, &pidl, target);
+        p.line(format!("- with no layer, a click on `{shown}` sent {sent} selected it {bare:?} ms after the button went down"));
+        click(empty_spot(), false);
+        pump(Duration::from_millis(400));
+        *id += 1;
+        helper.open(*id, screen, Some(picture), ANSWER)?;
+        helper.ask_play(*id, PATTERN, 4000)?;
+        pump(Duration::from_millis(300));
+        let (sent, took) = press(&view, &pidl, target);
+        p.line(format!("- with the helper's layer open and playing, a click on `{shown}` sent {sent} selected it {took:?} ms after the button went down"));
+        if took.is_none_or(|took| took > 200) {
+            p.failed.push(format!("a click on an icon with the layer open selected it after {took:?} ms"));
+        }
+        let (moved_name, moved_folder) = PROBES[6];
+        let moved = shown_name(moved_name, moved_folder);
+        let moved_pidl = pidl_of(&view, moved_name, moved_folder)?;
+        let (_, before) = position(&view, &moved_pidl)?;
+        let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == moved).map(|(_, rect)| rect).context("no rect for the drag target")?;
+        let from = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 };
+        let to = POINT { x: (screen.frame.x + screen.frame.w * 0.7) as i32, y: (screen.frame.y + screen.frame.h * 0.7) as i32 };
+        let dragged = drag_to(from, to);
+        pump(Duration::from_millis(600));
+        let (_, after) = position(&view, &moved_pidl)?;
+        p.line(format!("- with the helper's layer open and playing, a drag of `{moved}` sent {dragged} moved it from {},{} to {},{}", before.x, before.y, after.x, after.y));
+        if before.x == after.x && before.y == after.y {
+            p.failed.push("a drag with the layer open did not move the icon".into());
+        }
+        let played = helper.played(*id, Duration::from_secs(6));
+        helper.close(*id, ANSWER)?;
+        p.line(format!("  - the helper played {:?} during the click and the drag", played.map_err(|error| error.to_string())));
+        park_cursor();
         Ok(())
     }
 
