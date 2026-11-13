@@ -7,18 +7,18 @@ use std::mem::{size_of, ManuallyDrop};
 use ::windows::core::{w, Interface, PCWSTR, PWSTR};
 use ::windows::Win32::Foundation::{HWND, POINT, RECT, S_OK};
 use ::windows::Win32::Graphics::Gdi::{
-    CreateFontIndirectW, DeleteObject, DrawTextW, GetDC, GetTextMetricsW, MapWindowPoints, ReleaseDC, SelectObject, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_WORDBREAK, HDC, HFONT, HGDIOBJ,
+    CreateFontIndirectW, DeleteObject, DrawTextW, GetDC, GetTextMetricsW, MapWindowPoints, ReleaseDC, SelectObject, DT_CALCRECT, DT_CENTER, DT_EDITCONTROL, DT_NOPREFIX, DT_WORDBREAK, HDC, HFONT, HGDIOBJ,
     LOGFONTW, TEXTMETRICW,
 };
 use ::windows::Win32::System::Com::{CoCreateInstance, IServiceProvider, CLSCTX_ALL};
 use ::windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
 use ::windows::Win32::UI::Shell::Common::STRRET;
 use ::windows::Win32::UI::Shell::{
-    IEnumIDList, IFolderView2, IShellBrowser, IShellFolder, IShellView, IShellWindows, ShellWindows, StrRetToStrW, CSIDL_DESKTOP, FOLDERVIEWMODE, SHGDN_NORMAL, SID_STopLevelBrowser, SVGIO_ALLVIEW, SWC_DESKTOP,
+    IEnumIDList, IFolderView2, IShellBrowser, IShellFolder, IShellView, IShellWindows, ShellWindows, StrRetToStrW, CSIDL_DESKTOP, FOLDERVIEWMODE, SHGDN_NORMAL, SID_STopLevelBrowser, SVGIO_ALLVIEW, SVSI_FOCUSED, SVSI_SELECT, SWC_DESKTOP,
     SWFO_NEEDDISPATCH,
 };
 use ::windows::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
-use ::windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetShellWindow, IsWindowVisible, SystemParametersInfoW, SPI_GETICONTITLELOGFONT, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS};
+use ::windows::Win32::UI::WindowsAndMessaging::{GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO, FindWindowExW, GetShellWindow, IsWindowVisible, SystemParametersInfoW, SPI_GETICONTITLELOGFONT, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS};
 
 pub const UNREADABLE: &str = "Scooch could not read the desktop icons, so it will try again at the next change.";
 const BATCH: usize = 64;
@@ -34,6 +34,7 @@ pub struct View {
 pub struct Item {
     pub name: String,
     pub at: POINT,
+    pub unfolded: bool,
 }
 
 pub fn explorer() -> bool {
@@ -116,16 +117,26 @@ pub fn name(folder: &IShellFolder, pidl: &Pidl) -> String {
 pub fn items(view: &View) -> Result<Vec<Item>> {
     let folder: IShellFolder = unsafe { view.folder.GetFolder() }?;
     let pidls = pidls(view)?;
+    let focused = list_focused(view);
+    let open = (SVSI_FOCUSED.0 | SVSI_SELECT.0) as u32;
     let mut names = Vec::with_capacity(pidls.len());
     let mut points = Vec::with_capacity(pidls.len());
+    let mut unfolded = Vec::with_capacity(pidls.len());
     for pidl in &pidls {
         points.push(unsafe { view.folder.GetItemPosition(pidl.0) }?);
         names.push(name(&folder, pidl));
+        unfolded.push(focused && unsafe { view.folder.GetSelectionState(pidl.0) }.is_ok_and(|state| state & open == open));
     }
     if !points.is_empty() {
         unsafe { MapWindowPoints(Some(view.list), None, &mut points) };
     }
-    Ok(names.into_iter().zip(points).map(|(name, at)| Item { name, at }).collect())
+    Ok(names.into_iter().zip(points).zip(unfolded).map(|((name, at), unfolded)| Item { name, at, unfolded }).collect())
+}
+
+pub fn list_focused(view: &View) -> bool {
+    let thread = unsafe { GetWindowThreadProcessId(view.list, None) };
+    let mut info = GUITHREADINFO { cbSize: size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+    thread != 0 && unsafe { GetGUIThreadInfo(thread, &mut info) }.is_ok() && info.hwndFocus == view.list
 }
 
 pub struct Font {
@@ -166,13 +177,15 @@ impl Font {
         Ok(opened)
     }
 
-    pub fn measure(&self, name: &str, wrap: i32) -> Label {
+    pub fn measure(&self, name: &str, wrap: i32, unfolded: bool) -> Label {
         let mut text: Vec<u16> = name.encode_utf16().collect();
         let mut room = RECT { left: 0, top: 0, right: wrap.max(1), bottom: 0 };
+        let flags = DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_CENTER;
+        let flags = if unfolded { flags | DT_EDITCONTROL } else { flags };
         if !text.is_empty() {
-            unsafe { DrawTextW(self.dc, &mut text, &mut room, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_CENTER) };
+            unsafe { DrawTextW(self.dc, &mut text, &mut room, flags) };
         }
-        Label { width: (room.right - room.left).max(0) as f32, height: (room.bottom - room.top).max(self.line) as f32 }
+        Label { width: (room.right - room.left).max(0) as f32, height: (room.bottom - room.top).max(self.line) as f32, unfolded }
     }
 }
 
@@ -186,7 +199,7 @@ impl Drop for Font {
 
 pub fn rects(items: &[Item], cell: &Cell, font: &Font, spacing: &Spacing) -> Vec<Rect> {
     let wrap = cell.wrap(spacing).round() as i32;
-    items.iter().map(|item| layout::item_rect((item.at.x as f32, item.at.y as f32), cell, font.measure(&item.name, wrap), spacing)).collect()
+    items.iter().map(|item| layout::item_rect((item.at.x as f32, item.at.y as f32), cell, font.measure(&item.name, wrap, item.unfolded), spacing)).collect()
 }
 
 pub fn icons() -> Result<Vec<Rect>> {

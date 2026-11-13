@@ -27,6 +27,7 @@ pub struct Cell {
 pub struct Label {
     pub width: f32,
     pub height: f32,
+    pub unfolded: bool,
 }
 
 impl Cell {
@@ -40,7 +41,12 @@ impl Cell {
 }
 
 pub fn lines(cell: &Cell, label: Label) -> f32 {
-    (label.height / cell.line.max(1.0)).round().clamp(1.0, 2.0)
+    let lines = (label.height / cell.line.max(1.0)).round().max(1.0);
+    if label.unfolded {
+        lines
+    } else {
+        lines.min(2.0)
+    }
 }
 
 pub fn scaled(size: f32, dpi: u32) -> f32 {
@@ -138,13 +144,13 @@ mod tests {
 
     #[test]
     fn a_short_label_sits_under_the_icon_box() {
-        let rect = item_rect((100.0, 200.0), &cell(), Label { width: 30.0, height: 15.0 }, &SPACING);
+        let rect = item_rect((100.0, 200.0), &cell(), Label { width: 30.0, height: 15.0, unfolded: false }, &SPACING);
         assert_eq!(rect, Rect { x: 100.0 + 24.0 - 27.0, y: 203.0, w: 54.0, h: -3.0 + 48.0 + 6.0 + 15.0 + 4.0 });
     }
 
     #[test]
     fn a_long_word_is_capped_on_one_line() {
-        let rect = item_rect((0.0, 0.0), &cell(), Label { width: 140.0, height: 15.0 }, &SPACING);
+        let rect = item_rect((0.0, 0.0), &cell(), Label { width: 140.0, height: 15.0, unfolded: false }, &SPACING);
         assert_eq!((cell().wrap(&SPACING), cell().cap(&SPACING)), (74.0, 68.0));
         assert_eq!(rect.w, 68.0 + 6.0);
         assert_eq!(rect.x, 24.0 - 37.0);
@@ -153,11 +159,25 @@ mod tests {
 
     #[test]
     fn a_wrapped_label_is_as_wide_as_its_widest_line() {
-        let rect = item_rect((0.0, 0.0), &cell(), Label { width: 72.0, height: 45.0 }, &SPACING);
+        let rect = item_rect((0.0, 0.0), &cell(), Label { width: 72.0, height: 45.0, unfolded: false }, &SPACING);
         assert_eq!(rect.w, 68.0 + 6.0);
         assert_eq!(rect.y + rect.h, 48.0 + 6.0 + 30.0 + 4.0);
-        let narrow = item_rect((0.0, 0.0), &cell(), Label { width: 52.0, height: 30.0 }, &SPACING);
+        let narrow = item_rect((0.0, 0.0), &cell(), Label { width: 52.0, height: 30.0, unfolded: false }, &SPACING);
         assert_eq!(narrow.w, 58.0);
+    }
+
+    #[test]
+    fn the_focused_label_shows_every_line() {
+        let folded = Label { width: 104.0, height: 75.0, unfolded: false };
+        let open = Label { unfolded: true, ..folded };
+        assert_eq!((lines(&cell(), folded), lines(&cell(), open)), (2.0, 5.0));
+        let large = Cell { width: 112.0, icon: scaled(48.0, 144), line: 25.0 };
+        let at = (960.0, 360.0);
+        let rect = item_rect(at, &large, Label { width: 104.0, height: 50.0, unfolded: true }, &SPACING);
+        let drawn = Rect { x: 945.0, y: 369.0, w: 102.0, h: 116.0 };
+        assert!(contains(&rect, &drawn), "{rect:?}");
+        let edges = judged(&rect, &drawn, at, large.icon);
+        assert!(edges.iter().all(|edge| (0.0..=15.0).contains(edge)), "{edges:?}");
     }
 
     #[test]
@@ -188,11 +208,11 @@ mod tests {
     #[test]
     fn the_rect_holds_what_explorer_drew_on_windows_11() {
         let rows = [
-            (Label { width: 85.0, height: 15.0 }, Rect { x: 502.0, y: 263.0, w: 69.0, h: 64.0 }, 70.0),
-            (Label { width: 72.0, height: 45.0 }, Rect { x: 501.0, y: 263.0, w: 71.0, h: 79.0 }, 85.0),
-            (Label { width: 110.0, height: 15.0 }, Rect { x: 502.0, y: 267.0, w: 69.0, h: 60.0 }, 70.0),
-            (Label { width: 11.0, height: 15.0 }, Rect { x: 519.0, y: 263.0, w: 34.0, h: 61.0 }, 70.0),
-            (Label { width: 60.0, height: 15.0 }, Rect { x: 507.0, y: 263.0, w: 59.0, h: 61.0 }, 70.0),
+            (Label { width: 85.0, height: 15.0, unfolded: false }, Rect { x: 502.0, y: 263.0, w: 69.0, h: 64.0 }, 70.0),
+            (Label { width: 72.0, height: 45.0, unfolded: false }, Rect { x: 501.0, y: 263.0, w: 71.0, h: 79.0 }, 85.0),
+            (Label { width: 110.0, height: 15.0, unfolded: false }, Rect { x: 502.0, y: 267.0, w: 69.0, h: 60.0 }, 70.0),
+            (Label { width: 11.0, height: 15.0, unfolded: false }, Rect { x: 519.0, y: 263.0, w: 34.0, h: 61.0 }, 70.0),
+            (Label { width: 60.0, height: 15.0, unfolded: false }, Rect { x: 507.0, y: 263.0, w: 59.0, h: 61.0 }, 70.0),
         ];
         check(cell(), (512.0, 256.0), &rows, 10.0);
     }
@@ -200,11 +220,11 @@ mod tests {
     #[test]
     fn the_rect_holds_what_explorer_drew_on_server_2022() {
         let rows = [
-            (Label { width: 142.0, height: 15.0 }, Rect { x: 501.0, y: 264.0, w: 70.0, h: 63.0 }, 70.0),
-            (Label { width: 72.0, height: 45.0 }, Rect { x: 500.0, y: 264.0, w: 72.0, h: 78.0 }, 85.0),
-            (Label { width: 110.0, height: 15.0 }, Rect { x: 501.0, y: 266.0, w: 70.0, h: 61.0 }, 70.0),
-            (Label { width: 11.0, height: 15.0 }, Rect { x: 520.0, y: 264.0, w: 32.0, h: 60.0 }, 70.0),
-            (Label { width: 60.0, height: 15.0 }, Rect { x: 506.0, y: 264.0, w: 60.0, h: 60.0 }, 70.0),
+            (Label { width: 142.0, height: 15.0, unfolded: false }, Rect { x: 501.0, y: 264.0, w: 70.0, h: 63.0 }, 70.0),
+            (Label { width: 72.0, height: 45.0, unfolded: false }, Rect { x: 500.0, y: 264.0, w: 72.0, h: 78.0 }, 85.0),
+            (Label { width: 110.0, height: 15.0, unfolded: false }, Rect { x: 501.0, y: 266.0, w: 70.0, h: 61.0 }, 70.0),
+            (Label { width: 11.0, height: 15.0, unfolded: false }, Rect { x: 520.0, y: 264.0, w: 32.0, h: 60.0 }, 70.0),
+            (Label { width: 60.0, height: 15.0, unfolded: false }, Rect { x: 506.0, y: 264.0, w: 60.0, h: 60.0 }, 70.0),
         ];
         check(cell(), (512.0, 256.0), &rows, 10.0);
     }
@@ -213,27 +233,27 @@ mod tests {
     fn the_rect_holds_what_explorer_drew_at_150_percent() {
         let large = Cell { width: 112.0, icon: scaled(48.0, 144), line: 25.0 };
         let rows = [
-            (Label { width: 211.0, height: 25.0 }, Rect { x: 944.0, y: 369.0, w: 103.0, h: 95.0 }, 104.0),
-            (Label { width: 89.0, height: 100.0 }, Rect { x: 952.0, y: 369.0, w: 87.0, h: 120.0 }, 129.0),
-            (Label { width: 165.0, height: 25.0 }, Rect { x: 950.0, y: 372.0, w: 92.0, h: 92.0 }, 104.0),
-            (Label { width: 16.0, height: 25.0 }, Rect { x: 972.0, y: 369.0, w: 48.0, h: 91.0 }, 104.0),
-            (Label { width: 90.0, height: 25.0 }, Rect { x: 951.0, y: 369.0, w: 90.0, h: 91.0 }, 104.0),
+            (Label { width: 211.0, height: 25.0, unfolded: false }, Rect { x: 944.0, y: 369.0, w: 103.0, h: 95.0 }, 104.0),
+            (Label { width: 89.0, height: 100.0, unfolded: false }, Rect { x: 952.0, y: 369.0, w: 87.0, h: 120.0 }, 129.0),
+            (Label { width: 165.0, height: 25.0, unfolded: false }, Rect { x: 950.0, y: 372.0, w: 92.0, h: 92.0 }, 104.0),
+            (Label { width: 16.0, height: 25.0, unfolded: false }, Rect { x: 972.0, y: 369.0, w: 48.0, h: 91.0 }, 104.0),
+            (Label { width: 90.0, height: 25.0, unfolded: false }, Rect { x: 951.0, y: 369.0, w: 90.0, h: 91.0 }, 104.0),
         ];
         check(large, (960.0, 360.0), &rows, 15.0);
     }
 
     #[test]
     fn labels_count_at_most_two_lines() {
-        assert_eq!(lines(&cell(), Label { width: 10.0, height: 60.0 }), 2.0);
-        assert_eq!(lines(&cell(), Label { width: 10.0, height: 0.0 }), 1.0);
-        assert_eq!(lines(&cell(), Label { width: 10.0, height: 30.0 }), 2.0);
+        assert_eq!(lines(&cell(), Label { width: 10.0, height: 60.0, unfolded: false }), 2.0);
+        assert_eq!(lines(&cell(), Label { width: 10.0, height: 0.0, unfolded: false }), 1.0);
+        assert_eq!(lines(&cell(), Label { width: 10.0, height: 30.0, unfolded: false }), 2.0);
     }
 
     #[test]
     fn the_rect_follows_every_constant() {
         let wide = Spacing { sides: SPACING.sides + 4.0, above: SPACING.above + 2.0, ..SPACING };
-        let base = item_rect((10.0, 10.0), &cell(), Label { width: 20.0, height: 15.0 }, &SPACING);
-        let moved = item_rect((10.0, 10.0), &cell(), Label { width: 20.0, height: 15.0 }, &wide);
+        let base = item_rect((10.0, 10.0), &cell(), Label { width: 20.0, height: 15.0, unfolded: false }, &SPACING);
+        let moved = item_rect((10.0, 10.0), &cell(), Label { width: 20.0, height: 15.0, unfolded: false }, &wide);
         assert_eq!(moved.w - base.w, 4.0);
         assert_eq!(base.y - moved.y, 2.0);
         assert_eq!(moved.h - base.h, 2.0);
