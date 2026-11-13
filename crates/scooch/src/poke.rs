@@ -103,10 +103,15 @@ pub fn listen(wake: impl Fn() + Send + 'static, stop: impl Fn() + Send + 'static
 #[cfg(windows)]
 mod named {
     use anyhow::{anyhow, Result};
-    use std::path::Path;
-    use windows::core::HSTRING;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
-    use windows::Win32::System::Threading::{CreateEventW, OpenEventW, SetEvent, WaitForMultipleObjects, EVENT_MODIFY_STATE, INFINITE};
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::{Path, PathBuf};
+    use windows::core::{HSTRING, PWSTR};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{
+        CreateEventW, OpenEventW, OpenProcess, QueryFullProcessImageNameW, SetEvent, WaitForMultipleObjects, WaitForSingleObject, EVENT_MODIFY_STATE, INFINITE, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
 
     pub const POKE: &str = "poke";
     pub const STOP: &str = "stop";
@@ -152,10 +157,23 @@ mod named {
         set
     }
 
-    pub fn open(kind: &str) -> bool {
-        let Ok(event) = (unsafe { OpenEventW(EVENT_MODIFY_STATE, false, &here(kind)) }) else { return false };
-        let _ = unsafe { CloseHandle(event) };
-        true
+    pub fn alive(process: u32) -> bool {
+        if process == 0 {
+            return false;
+        }
+        let Ok(handle) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, false, process) }) else { return false };
+        let running = unsafe { WaitForSingleObject(handle, 0) } == WAIT_TIMEOUT;
+        let named = running && image(handle).is_some_and(|path| super::scooch_name(&path));
+        let _ = unsafe { CloseHandle(handle) };
+        named
+    }
+
+    fn image(handle: HANDLE) -> Option<PathBuf> {
+        let mut buffer = vec![0u16; 32_768];
+        let mut size = buffer.len() as u32;
+        unsafe { QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buffer.as_mut_ptr()), &mut size) }.ok()?;
+        let length = (size as usize).min(buffer.len());
+        Some(PathBuf::from(OsString::from_wide(&buffer[..length])))
     }
 
     #[cfg(test)]
@@ -176,11 +194,21 @@ mod named {
             let kind = format!("test-{}", std::process::id());
             let event = create(&kind).unwrap();
             assert!(signal(&kind));
-            assert!(open(&kind));
             assert_eq!(unsafe { WaitForSingleObject(event, 1000) }, WAIT_OBJECT_0);
             assert!(!signal("missing-event"));
-            assert!(!open("missing-event"));
             let _ = unsafe { CloseHandle(event) };
+        }
+
+        #[test]
+        fn a_running_scooch_is_alive_and_others_are_not() {
+            assert!(alive(std::process::id()));
+            assert!(!alive(0));
+            assert!(!alive(u32::MAX));
+            let mut child = std::process::Command::new("cmd").args(["/C", "ping -n 6 127.0.0.1 > NUL"]).spawn().unwrap();
+            assert!(!alive(child.id()));
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(!alive(child.id()));
         }
     }
 }
@@ -201,8 +229,8 @@ pub fn stop(_process: u32) -> bool {
 }
 
 #[cfg(windows)]
-pub fn alive(_process: u32) -> bool {
-    named::open(named::POKE)
+pub fn alive(process: u32) -> bool {
+    named::alive(process)
 }
 
 #[cfg(not(any(unix, windows)))]
