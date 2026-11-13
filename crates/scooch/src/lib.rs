@@ -55,9 +55,6 @@ enum Command {
 }
 
 pub fn run() -> ExitCode {
-    if std::env::args_os().nth(1).is_some_and(|first| first == live::HELPER) {
-        return live::helper::main();
-    }
     let code = match dispatch() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
