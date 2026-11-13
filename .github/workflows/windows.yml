@@ -11,8 +11,12 @@ on:
 
 jobs:
   probe:
-    runs-on: windows-latest
-    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [windows-2025, windows-2022]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +38,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: winprobe
+          name: winprobe-${{ matrix.image }}
           path: winprobe
           if-no-files-found: warn
 
