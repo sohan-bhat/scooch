@@ -252,13 +252,8 @@ pub fn layout() -> Result<(Layout, Vec<String>)> {
     if let Some(found) = seen(progman) {
         return Ok((found, notes));
     }
-    for (wparam, lparam) in [(0usize, 0isize), (0xD, 0x1)] {
-        if let Some(found) = spawn(progman, wparam, lparam, &mut notes) {
-            return Ok((found, notes));
-        }
-        if child_of_class(progman, "SHELLDLL_DefView").is_none() && icons_host().is_some() {
-            break;
-        }
+    if let Some(found) = spawn(progman, 0xD, 0x1, &mut notes) {
+        return Ok((found, notes));
     }
     let icons = child_of_class(progman, "SHELLDLL_DefView").context("the desktop icons are neither in Progman nor in a WorkerW")?;
     notes.push("attaching under Progman directly, below the icons".into());
