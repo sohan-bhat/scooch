@@ -213,7 +213,15 @@ impl Drop for Layer {
     }
 }
 
+pub fn present<T>(work: impl FnOnce() -> T) -> T {
+    objc2::rc::autoreleasepool(|_| work())
+}
+
 pub fn open(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
+    objc2::rc::autoreleasepool(|_| build(marker, screen))
+}
+
+fn build(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
     let (display, number) = super::picture::screen_for(marker, &screen.id)?;
     let (desktop, _) = levels();
     let level = choose(&listing(), &screen.frame, desktop, std::process::id() as i64).context(NO_ROOM)?;
@@ -226,8 +234,8 @@ pub fn open(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
     window.setLevel(level as isize);
     window.setIgnoresMouseEvents(true);
     window.setHasShadow(false);
-    window.setOpaque(true);
-    window.setBackgroundColor(Some(&NSColor::blackColor()));
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
     window.setExcludedFromWindowsMenu(true);
     window.setCollectionBehavior(NSWindowCollectionBehavior::Stationary | NSWindowCollectionBehavior::IgnoresCycle | NSWindowCollectionBehavior::FullScreenNone);
     window.setAnimationBehavior(NSWindowAnimationBehavior::None);
@@ -257,14 +265,18 @@ pub fn seconds(host: u64) -> f64 {
 
 type Ticks = Mutex<Vec<u64>>;
 
+const HOST_VALID: u64 = 1 << 1;
+
 extern "C" fn tick(_link: *mut c_void, _now: *const TimeStamp, output: *const TimeStamp, _flags: u64, _out: *mut u64, context: *mut c_void) -> i32 {
     if output.is_null() || context.is_null() {
         return 0;
     }
     let ticks = unsafe { &*(context as *const Ticks) };
-    let host = unsafe { (*output).host };
-    if let Ok(mut ticks) = ticks.lock() {
-        ticks.push(host);
+    let (host, flags) = unsafe { ((*output).host, (*output).flags) };
+    if flags & HOST_VALID != 0 && host != 0 {
+        if let Ok(mut ticks) = ticks.lock() {
+            ticks.push(host);
+        }
     }
     0
 }
@@ -297,7 +309,9 @@ impl Pace {
             CVDisplayLinkRelease(self.link);
         }
         let ticks = unsafe { Box::from_raw(self.ticks) };
-        let hosts = ticks.into_inner().unwrap_or_default();
+        let mut hosts = ticks.into_inner().unwrap_or_default();
+        hosts.sort_unstable();
+        hosts.dedup();
         hosts.windows(2).map(|pair| seconds(pair[1].saturating_sub(pair[0]))).collect()
     }
 }

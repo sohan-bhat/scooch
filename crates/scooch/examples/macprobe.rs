@@ -1395,7 +1395,7 @@ mod probe {
                 } else {
                     break;
                 };
-                match renderer.frame(bar) {
+                match layer::present(|| renderer.frame(bar)) {
                     Ok(()) => frames.push(Instant::now()),
                     Err(error) if error.contains("occluded") => {
                         hidden += 1;
@@ -1436,10 +1436,10 @@ mod probe {
             };
             let mut renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &pattern(&layer)).map_err(anyhow::Error::msg)?;
             layer.commit();
-            renderer.frame(Some(0.2)).map_err(anyhow::Error::msg)?;
+            layer::present(|| renderer.frame(Some(0.2))).map_err(anyhow::Error::msg)?;
             opens.push(started.elapsed().as_secs_f64() * 1000.0);
-            renderer.frame(Some(0.5)).map_err(anyhow::Error::msg)?;
-            renderer.frame(Some(0.8)).map_err(anyhow::Error::msg)?;
+            layer::present(|| renderer.frame(Some(0.5))).map_err(anyhow::Error::msg)?;
+            layer::present(|| renderer.frame(Some(0.8))).map_err(anyhow::Error::msg)?;
             drop(renderer);
             drop(gpu);
             drop(layer);
@@ -1555,10 +1555,14 @@ mod probe {
         let steady = crossing.windows(2).all(|pair| pair[1].1 >= pair[0].1 - 2.0);
         p.line(format!("- {} captures in all, {} during the 500 ms crossing, bar centres in pixels {:?}, increasing {steady}", looks.len(), crossing.len(), crossing.iter().map(|(at, bar)| format!("{:.0} ms {:.0}", at, bar)).collect::<Vec<_>>()));
         let inside: Vec<&(f64, Option<f32>, Vec<f32>, usize)> = looks.iter().filter(|(at, _, _, _)| first.zip(last).is_some_and(|(first, last)| *at >= first && *at <= last)).collect();
-        let bare = inside.iter().filter(|(_, bar, _, _)| bar.is_none()).count();
-        p.line(format!("- captures between the first and last pattern frame {}, without the layer {bare}", inside.len()));
+        let settled_from = first.map(|first| first + 50.0);
+        let bare_times: Vec<f64> = inside.iter().filter(|(_, bar, _, _)| bar.is_none()).map(|(at, _, _, _)| *at).collect();
+        let bare = bare_times.iter().filter(|at| settled_from.is_some_and(|from| **at > from)).count();
+        p.line(format!("- captures between the first and last pattern frame {}, without the layer {} at {:?} ms, of which later than 50 ms after the first frame {bare}", inside.len(), bare_times.len(), bare_times.iter().map(|at| at.round()).collect::<Vec<_>>()));
         let worst: Vec<String> = masks.iter().enumerate().map(|(index, (name, _))| format!("{name} {:.3}", looks.iter().map(|look| look.2.get(index).copied().unwrap_or_default()).fold(0.0f32, f32::max))).collect();
         p.line(format!("- largest share of icon ink that changed in any capture {worst:?}"));
+        let marked: Vec<String> = looks.iter().filter(|look| look.2.iter().any(|share| *share > 0.05)).map(|look| format!("{:.0} ms {:?}", look.0, look.2.iter().map(|share| (share * 1000.0).round() / 1000.0).collect::<Vec<_>>())).collect();
+        p.line(format!("- captures where more than 5% of an icon's ink changed {} {:?}, the first frame came at {:?} ms", marked.len(), marked.iter().take(6).collect::<Vec<_>>(), first.map(|value| value.round())));
         let through = looks.iter().filter(|look| look.3 > 0 && first.zip(last).is_some_and(|(first, last)| look.0 >= first && look.0 <= last)).count();
         p.line(format!("- wallpaper set {:?} ms after open, the system's own window showed it {:?} ms after the set, captures where the new picture showed through or above the layer {through}", set_at.map(|set| (set - opened).as_millis()), system_shows.map(|value| value.round())));
         let after_bar = after.as_ref().and_then(|shot| bar_at(shot, row));
@@ -1619,10 +1623,10 @@ mod probe {
             let (width, height) = layer.pixels;
             let mut renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &Pattern { width, height, rgba: GRAY.iter().copied().chain([255]).cycle().take(width as usize * height as usize * 4).collect() }).map_err(anyhow::Error::msg)?;
             layer.commit();
-            renderer.frame(Some(0.0)).map_err(anyhow::Error::msg)?;
+            layer::present(|| renderer.frame(Some(0.0))).map_err(anyhow::Error::msg)?;
             say("frame", String::new());
             for index in 1..30 {
-                renderer.frame(Some(index as f32 / 30.0)).map_err(anyhow::Error::msg)?;
+                layer::present(|| renderer.frame(Some(index as f32 / 30.0))).map_err(anyhow::Error::msg)?;
             }
             spin(0.3);
             let me = NSRunningApplication::currentApplication();
@@ -1679,7 +1683,7 @@ mod probe {
         let (width, height) = layer.pixels;
         let mut renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &Pattern { width, height, rgba: GRAY.iter().copied().chain([255]).cycle().take(width as usize * height as usize * 4).collect() }).map_err(anyhow::Error::msg)?;
         layer.commit();
-        renderer.frame(Some(0.5)).map_err(anyhow::Error::msg)?;
+        layer::present(|| renderer.frame(Some(0.5))).map_err(anyhow::Error::msg)?;
         let number = layer.number();
         let showing = || layer::listing().iter().any(|window| window.number == number);
         let one = showing();
