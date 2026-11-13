@@ -44,7 +44,7 @@ mod probe {
     use ::windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow, SystemParametersInfoForDpi, MDT_EFFECTIVE_DPI};
     use ::windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK,
-        MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL,
+        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_SHIFT,
     };
     use ::windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use ::windows::Win32::UI::Shell::{
@@ -56,7 +56,7 @@ mod probe {
     };
     use ::windows::Win32::UI::WindowsAndMessaging::{
         PostMessageW, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER, WM_COMMAND,
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW, GetClientRect, GetSystemMetrics, GetWindowThreadProcessId, MsgWaitForMultipleObjects, PeekMessageW, RegisterClassExW,
+        FindWindowW, GetForegroundWindow, IsWindowVisible, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW, GetClientRect, GetSystemMetrics, GetWindowThreadProcessId, MsgWaitForMultipleObjects, PeekMessageW, RegisterClassExW,
         SetCursorPos, SystemParametersInfoW, TranslateMessage, EVENT_MAX, EVENT_MIN, MSG, PM_REMOVE, QS_ALLINPUT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
         SPI_GETICONTITLELOGFONT, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_SETTINGCHANGE, WNDCLASSEXW,
     };
@@ -66,12 +66,14 @@ mod probe {
     const FOLDER_NOTE: u32 = WM_APP + 12;
     const SETTLE: Duration = Duration::from_millis(1500);
     const FILE_WAIT: Duration = Duration::from_secs(5);
-    const PROBES: [(&str, bool); 5] = [
+    const PROBES: [(&str, bool); 7] = [
         ("scooch-probe-a.txt", false),
         ("scooch-probe-twentyeight.txt", false),
         ("scooch probe with spaces that wraps.txt", false),
         ("scooch-probe-a-name-long-enough-that-the-desktop-has-to-cut-it-after-two-lines.txt", false),
         ("scooch-probe-folder", true),
+        ("sc.txt", false),
+        ("short name.txt", false),
     ];
     const ADAPTER_EVENTS: u32 = SHCNE_CREATE.0 | SHCNE_DELETE.0 | SHCNE_MKDIR.0 | SHCNE_RMDIR.0 | SHCNE_RENAMEITEM.0 | SHCNE_RENAMEFOLDER.0 | SHCNE_UPDATEDIR.0;
 
@@ -839,6 +841,23 @@ mod probe {
         INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: code, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } }
     }
 
+    fn chord(codes: &[VIRTUAL_KEY]) -> bool {
+        let mut inputs: Vec<INPUT> = codes.iter().map(|code| key(*code, false)).collect();
+        inputs.extend(codes.iter().rev().map(|code| key(*code, true)));
+        let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
+        sent as usize == inputs.len()
+    }
+
+    fn click(at: POINT, right: bool) -> bool {
+        let (down, up) = if right { (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP) } else { (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP) };
+        let mut sent = mouse(at.x, at.y, MOUSE_EVENT_FLAGS(0));
+        pump(Duration::from_millis(100));
+        sent &= mouse(at.x, at.y, down);
+        pump(Duration::from_millis(80));
+        sent &= mouse(at.x, at.y, up);
+        sent
+    }
+
     fn control_wheel(at: POINT, notches: i32) -> bool {
         let mut sent = mouse(at.x, at.y, MOUSE_EVENT_FLAGS(0));
         pump(Duration::from_millis(150));
@@ -879,8 +898,8 @@ mod probe {
         }
     }
 
-    fn rule_names() -> [&'static str; 4] {
-        ["capture end on the desktop thread", "create, destroy, show or hide of the list or its view", "reorder on the list client", "location change of an item on the list"]
+    fn rule_names() -> [&'static str; 2] {
+        ["capture end on the desktop thread", "create, destroy, show or hide of the list or its view"]
     }
 
     fn adapter_rule(seen: &Seen, desk: Desk) -> Option<usize> {
@@ -945,7 +964,7 @@ mod probe {
             };
             *kinds.entry(format!("{:#06x} {} obj {} {}", seen.kind, target, seen.object, if seen.child > 0 { "item" } else { "self" })).or_default() += 1;
         }
-        let rules: Vec<&str> = (0..4).filter(|rule| action.seen.iter().any(|seen| adapter_rule(seen, desk) == Some(*rule))).map(|rule| rule_names()[rule]).collect();
+        let rules: Vec<&str> = (0..wakes::HOOKS.len()).filter(|rule| action.seen.iter().any(|seen| adapter_rule(seen, desk) == Some(*rule))).map(|rule| rule_names()[rule]).collect();
         let shell_hits = action.notes.iter().filter(|note| note.1 == "root" && (note.2 as u32) & ADAPTER_EVENTS != 0).count();
         let settings: Vec<String> = action.settings.iter().map(|(_, value)| format!("{value:#x}")).collect();
         p.line(format!("  - events {}", if kinds.is_empty() { "none".into() } else { kinds.iter().map(|(kind, count)| format!("{kind} x{count}")).collect::<Vec<_>>().join(", ") }));
@@ -1051,6 +1070,42 @@ mod probe {
         }));
         let _ = unsafe { view.folder.SetViewModeAndIconSize(original.0, original.1) };
         pump(Duration::from_millis(600));
+        let _ = click(empty_spot(), false);
+        pump(Duration::from_millis(600));
+        actions.push(act(p, "make icons small with Ctrl Shift 4 on the focused desktop", |_| {
+            let before = shell::mode(&view).map(|mode| mode.1).ok();
+            let sent = chord(&[VK_CONTROL, VK_SHIFT, VIRTUAL_KEY(0x34)]);
+            pump(Duration::from_millis(600));
+            Ok(format!("sent {sent}, view size {before:?} then {:?}", shell::mode(&view).map(|mode| mode.1).ok()))
+        }));
+        actions.push(act(p, "make icons medium with Ctrl Shift 3 on the focused desktop", |_| {
+            let before = shell::mode(&view).map(|mode| mode.1).ok();
+            let sent = chord(&[VK_CONTROL, VK_SHIFT, VIRTUAL_KEY(0x33)]);
+            pump(Duration::from_millis(600));
+            Ok(format!("sent {sent}, view size {before:?} then {:?}", shell::mode(&view).map(|mode| mode.1).ok()))
+        }));
+        actions.push(act(p, "make icons small through the desktop menu", |_| {
+            let before = shell::mode(&view).map(|mode| mode.1).ok();
+            let mut sent = click(empty_spot(), true);
+            pump(Duration::from_millis(900));
+            let front = class_name(unsafe { GetForegroundWindow() });
+            let menu = unsafe { FindWindowW(w!("#32768"), PCWSTR::null()) }.ok().filter(|menu| unsafe { IsWindowVisible(*menu) }.as_bool());
+            if menu.is_some() {
+                for code in [VIRTUAL_KEY(0x56), VK_DOWN, VK_DOWN, VK_RETURN] {
+                    sent &= chord(&[code]);
+                    pump(Duration::from_millis(400));
+                }
+                pump(Duration::from_millis(600));
+            }
+            let after = shell::mode(&view).map(|mode| mode.1).ok();
+            for _ in 0..3 {
+                chord(&[VK_ESCAPE]);
+                pump(Duration::from_millis(150));
+            }
+            Ok(format!("sent {sent}, front window `{front}`, classic menu open {}, view size {before:?} then {after:?}", menu.is_some()))
+        }));
+        let _ = unsafe { view.folder.SetViewModeAndIconSize(original.0, original.1) };
+        pump(Duration::from_millis(600));
         actions.push(act(p, "hide desktop icons", |_| toggle_icons(&view, false)));
         actions.push(act(p, "show desktop icons", |_| toggle_icons(&view, true)));
         if !shell::visible(&view) {
@@ -1116,7 +1171,7 @@ mod probe {
         p.line(format!("- rules that fired at rest or during mouse moves {}", if noisy.is_empty() { "none".into() } else { noisy.iter().cloned().collect::<Vec<_>>().join(", ") }));
         p.line(format!("- smallest hook set silent at rest {}", if chosen.is_empty() { "none".into() } else { chosen.join(", ") }));
         p.line(format!("- actions no quiet hook catches {}", if missed.is_empty() { "none".into() } else { missed.join(", ") }));
-        let adapter_noise: Vec<&str> = (0..4).filter(|rule| quiet.iter().any(|action| action.seen.iter().any(|seen| adapter_rule(seen, desk) == Some(*rule)))).map(|rule| rule_names()[rule]).collect();
+        let adapter_noise: Vec<&str> = (0..wakes::HOOKS.len()).filter(|rule| quiet.iter().any(|action| action.seen.iter().any(|seen| adapter_rule(seen, desk) == Some(*rule)))).map(|rule| rule_names()[rule]).collect();
         p.line(format!("- adapter hooks that fired at rest or during mouse moves {}", if adapter_noise.is_empty() { "none".into() } else { adapter_noise.join(", ") }));
     }
 
