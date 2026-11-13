@@ -142,9 +142,17 @@ pub fn layers(image: &RgbImage, given: Option<&Analysis>, placement: &Placement,
     if width == 0 || height == 0 || sw == 0 || sh == 0 {
         return (RgbImage::new(width, height), RgbaImage::new(width, height));
     }
-    let scenic = scenery::active(scene, options);
-    if !scenic && !pads::wanted(scene, options) {
-        return (plain(image, placement, width, height), RgbaImage::new(width, height));
+    if !scenery::active(scene, options) {
+        let placement: Cow<Placement> = if table::usable(&placement.fx) && table::usable(&placement.fy) { Cow::Borrowed(placement) } else { Cow::Owned(table::fill(sw, sh, width, height)) };
+        let (base, found) = match (pads::wanted(scene, options), given) {
+            (false, _) => (plain(image, &placement, width, height), None),
+            (true, Some(given)) => (plain(image, &placement, width, height), Some(Cow::Borrowed(given))),
+            (true, None) => {
+                let (base, made) = rayon::join(|| plain(image, &placement, width, height), || analysis::analyze(image));
+                (base, Some(Cow::Owned(made)))
+            }
+        };
+        return (pads::apply(base, found.as_deref(), &placement, scene, options), RgbaImage::new(width, height));
     }
     let made;
     let found = match given {
@@ -154,9 +162,6 @@ pub fn layers(image: &RgbImage, given: Option<&Analysis>, placement: &Placement,
             &made
         }
     };
-    if !scenic && !pads::active(found, placement, scene, options) {
-        return (plain(image, placement, width, height), RgbaImage::new(width, height));
-    }
     let own;
     let materials = match materials {
         Some(given) => given,
