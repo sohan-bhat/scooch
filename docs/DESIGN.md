@@ -100,10 +100,12 @@ autostart(exe or none)        -> add or remove the login item
 | GNOME | Desktop Icons NG positions in gvfs metadata | gsettings | The gvfs metadata signal, the dconf signal, the Desktop folder |
 | KDE Plasma | Folder view positions in the applet config | Plasma scripting | The config folder, the Desktop folder |
 | Xfce | The xfdesktop positions file | xfconf | The positions folder, the xfconf signal, the Desktop folder |
+| Cinnamon | Nemo positions in gvfs metadata, on Nemo's desktop grid | gsettings | The gvfs metadata signal, the dconf signal, Nemo's desktop file, the Desktop folder |
+| MATE | Caja positions in gvfs metadata | gsettings | The gvfs metadata signal, the dconf signal, Caja's desktop file, the Desktop folder |
 
 Windows builds two programs from the same code. `scooch.exe` is the console command. `scoochw.exe` is the same program with no console, which is what runs at login. No code is injected into Explorer and no input is hooked.
 
-Linux uses pure Rust libraries only, so one static program runs on every distribution. Cinnamon and MATE are not supported yet.
+Linux uses pure Rust libraries only, so one static program runs on every distribution. On GNOME, Cinnamon and MATE one picture covers every monitor, so Scooch arranges it for the main one.
 
 ## Daemon
 

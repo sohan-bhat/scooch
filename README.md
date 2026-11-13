@@ -49,15 +49,14 @@ One small background program does this. It runs only when an icon moves, a file 
 |---|---|
 | macOS 14 and 15 | Tested on a real Mac |
 | Windows 10 and 11 | Written, not yet run on Windows |
-| Linux with GNOME, KDE Plasma or Xfce | Written, not yet run on Linux |
+| Linux with GNOME, KDE Plasma, Xfce, Cinnamon or MATE | Written, not yet run on Linux |
 
 ## Limits
 
 - A subject that touches the screen edge under your icons cannot slide clear, because there is no picture beyond that edge. `scooch flip` lets Scooch flip the picture, which clears it.
 - Scooch needs a picture file. With a slideshow, a video wallpaper or a plain color it leaves your wallpaper alone until you pick a picture with `scooch use`.
 - On macOS the first run asks once for permission to read icon positions from Finder.
-- On GNOME one picture covers every monitor, so Scooch arranges it for the main one.
-- Cinnamon and MATE are not supported yet.
+- On GNOME, Cinnamon and MATE one picture covers every monitor, so Scooch arranges it for the main one.
 
 ## Remove
 
