@@ -8,6 +8,8 @@ pub mod picture;
 #[cfg(target_os = "windows")]
 pub mod shell;
 #[cfg(target_os = "windows")]
+pub mod sta;
+#[cfg(target_os = "windows")]
 pub mod startup;
 #[cfg(target_os = "windows")]
 pub mod watch;
@@ -20,7 +22,7 @@ use super::Wake;
 
 #[cfg(target_os = "windows")]
 mod system {
-    use super::{com, layout, picture, shell, startup, wakes, watch, Wake};
+    use super::{com, layout, picture, shell, sta, startup, wakes, watch, Wake};
     use crate::platform::{Desktop, Format, Screen, Snapshot};
     use anyhow::{anyhow, Result};
     use scooch_core::RgbImage;
@@ -58,7 +60,7 @@ mod system {
 
         fn snapshot(&self) -> Result<Snapshot> {
             let screens = picture::screens()?;
-            let icons = shell::icons()?;
+            let icons = sta::call(shell::icons)?;
             Ok(Snapshot { screens, icons })
         }
 
@@ -142,8 +144,8 @@ mod system {
     }
 
     fn check_desktop() -> Result<String> {
-        let view = shell::view().map_err(|_| anyhow!("not found, so restart Explorer from Task Manager"))?;
-        Ok(if shell::visible(&view) { "found".into() } else { "found with icons hidden".into() })
+        let visible = sta::call(|| shell::view().map(|view| shell::visible(&view))).map_err(|_| anyhow!("not found, so restart Explorer from Task Manager"))?;
+        Ok(if visible { "found".into() } else { "found with icons hidden".into() })
     }
 
     fn check_startup() -> Result<String> {

@@ -1,4 +1,4 @@
-use super::{com, shell, startup, wakes, Wake};
+use super::{com, shell, sta, startup, wakes, Wake};
 use anyhow::{bail, Context, Result};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -29,6 +29,7 @@ type Shared = Arc<dyn Fn() + Send + Sync>;
 pub const CLASS: PCWSTR = w!("ScoochWatch");
 pub const CHANGED: u32 = WM_APP + 1;
 pub const REATTACH: u32 = WM_APP + 2;
+pub const FOUND: u32 = WM_APP + 3;
 const DESKTOPS: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops");
 const PAUSE: Duration = Duration::from_secs(1);
 
@@ -54,7 +55,7 @@ thread_local! {
     static WAKE: RefCell<Option<Shared>> = const { RefCell::new(None) };
     static LIST: Cell<isize> = const { Cell::new(0) };
     static VIEW: Cell<isize> = const { Cell::new(0) };
-    static ATTACHING: Cell<bool> = const { Cell::new(false) };
+    static PENDING: Cell<bool> = const { Cell::new(false) };
     static TASKBAR: Cell<u32> = const { Cell::new(0) };
     static NOTIFY: Cell<u32> = const { Cell::new(0) };
     static HOOKS: RefCell<Vec<HWINEVENTHOOK>> = const { RefCell::new(Vec::new()) };
@@ -85,9 +86,9 @@ pub fn run(wake: Wake) -> Result<()> {
     TASKBAR.with(|taskbar| taskbar.set(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) }));
     let sessions = unsafe { WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION) }.is_ok();
     desktops(wake);
-    if !attach(window) {
-        retry(window);
-    }
+    register(window);
+    request(window);
+    retry(window);
     let mut message = MSG::default();
     while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
         let _ = unsafe { TranslateMessage(&message) };
@@ -110,25 +111,34 @@ fn window() -> Result<HWND> {
         .context("Scooch could not open its hidden window, so restart it with scooch.")
 }
 
-fn attach(window: HWND) -> bool {
-    if ATTACHING.with(|flag| flag.replace(true)) {
-        return ATTACHED.load(Ordering::SeqCst);
+fn request(window: HWND) {
+    if PENDING.with(|pending| pending.replace(true)) {
+        return;
     }
-    let attached = attach_once(window);
-    ATTACHED.store(attached, Ordering::SeqCst);
-    ATTACHING.with(|flag| flag.set(false));
-    attached
+    let target = window.0 as isize;
+    let sent = sta::post(move || {
+        let (list, host) = shell::view().map_or((0, 0), |view| (view.list.0 as isize, view.host.0 as isize));
+        let _ = unsafe { PostMessageW(Some(HWND(target as *mut c_void)), FOUND, WPARAM(list as usize), LPARAM(host)) };
+    });
+    if !sent {
+        PENDING.with(|pending| pending.set(false));
+    }
 }
 
-fn attach_once(window: HWND) -> bool {
-    detach();
-    register(window);
-    let Ok(view) = shell::view() else { return false };
-    LIST.with(|list| list.set(view.list.0 as isize));
-    VIEW.with(|host| host.set(view.host.0 as isize));
-    let hooks = hook(view.list);
+fn attach(window: HWND, list: isize, host: isize) -> bool {
+    replace_hooks(Vec::new());
+    LIST.with(|slot| slot.set(0));
+    VIEW.with(|slot| slot.set(0));
+    let list_window = HWND(list as *mut c_void);
+    let hooks = if list == 0 { Vec::new() } else { hook(list_window) };
     let attached = !hooks.is_empty();
-    replace_hooks(hooks);
+    if attached {
+        LIST.with(|slot| slot.set(list));
+        VIEW.with(|slot| slot.set(host));
+        replace_hooks(hooks);
+        register(window);
+    }
+    ATTACHED.store(attached, Ordering::SeqCst);
     attached
 }
 
@@ -274,14 +284,19 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
             LRESULT(0)
         }
         REATTACH => {
-            if attach(window) {
+            request(window);
+            LRESULT(0)
+        }
+        FOUND => {
+            PENDING.with(|pending| pending.set(false));
+            if attach(window, wparam.0 as isize, lparam.0) {
                 wake("explorer");
             }
             LRESULT(0)
         }
         other if other != 0 && other == TASKBAR.with(Cell::get) => {
             ATTACHED.store(false, Ordering::SeqCst);
-            let _ = unsafe { PostMessageW(Some(window), REATTACH, WPARAM(0), LPARAM(0)) };
+            request(window);
             retry(window);
             LRESULT(0)
         }

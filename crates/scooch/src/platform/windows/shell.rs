@@ -39,7 +39,7 @@ pub fn explorer() -> bool {
     !unsafe { GetShellWindow() }.is_invalid()
 }
 
-fn desktop_place() -> VARIANT {
+pub fn desktop_place() -> VARIANT {
     let inner = VARIANT_0_0 { vt: VT_I4, Anonymous: VARIANT_0_0_0 { lVal: CSIDL_DESKTOP as i32 }, ..Default::default() };
     VARIANT { Anonymous: VARIANT_0 { Anonymous: ManuallyDrop::new(inner) } }
 }
