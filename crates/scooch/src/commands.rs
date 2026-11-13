@@ -54,6 +54,7 @@ fn replace_outdated(store: &Store) -> Result<()> {
 
 pub fn start() -> Result<()> {
     let store = Store::open();
+    let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
     store.load();
     if let Some(line) = store.aside_line() {
         println!("{line}");
@@ -70,7 +71,7 @@ pub fn start() -> Result<()> {
         FirstRun::Pick => {
             println!("{GUIDE}");
             let Some(pick) = choose(&desktop.gallery())? else { return Ok(()) };
-            return switch(Some(pick));
+            return switch_with(&store, Some(pick));
         }
     }
     state.problem = None;
@@ -160,20 +161,25 @@ pub fn tilde(path: &Path) -> String {
 }
 
 pub fn switch(image: Option<PathBuf>) -> Result<()> {
+    let store = Store::open();
+    let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
+    switch_with(&store, image)
+}
+
+fn switch_with(store: &Store, image: Option<PathBuf>) -> Result<()> {
     let desktop = desktop()?;
     let Some(image) = image.map_or_else(|| choose(&desktop.gallery()), |image| Ok(Some(image)))? else { return Ok(()) };
     let image = picture_file(&image)?;
     desktop.decode(&image).map_err(|_| anyhow!("Scooch cannot read {} as a picture, so pick a JPEG, PNG or HEIC file.", tilde(&image)))?;
-    let store = Store::open();
-    replace_outdated(&store)?;
+    replace_outdated(store)?;
     let mut state = store.load();
-    choose_picture(&mut state, desktop.as_ref(), &store, &image)?;
+    choose_picture(&mut state, desktop.as_ref(), store, &image)?;
     state.on = true;
     state.problem = None;
     store.save(&state)?;
-    begin(desktop.as_ref(), &store)?;
-    wait(&store, desktop.consent_hint());
-    print_status(desktop.as_ref(), &store);
+    begin(desktop.as_ref(), store)?;
+    wait(store, desktop.consent_hint());
+    print_status(desktop.as_ref(), store);
     Ok(())
 }
 
@@ -251,27 +257,30 @@ pub fn is_picture(path: &Path) -> bool {
 pub fn off() -> Result<()> {
     let store = Store::open();
     let desktop = desktop()?;
+    print(&turn_off(desktop.as_ref(), &store, state::COMMAND_PATIENCE)?);
+    Ok(())
+}
+
+pub fn turn_off(desktop: &dyn Desktop, store: &Store, patience: Duration) -> Result<Vec<String>> {
+    let _lock = store.command_lock(patience)?;
     desktop.screens()?;
-    stop(&store)?;
-    let off = wind_down(desktop.as_ref(), &store)?;
-    match off {
+    stop(store)?;
+    Ok(match wind_down(desktop, store)? {
         Off::Unreadable => {
             desktop.autostart(None)?;
-            if let Some(line) = store.aside_line() {
-                println!("{line}");
-            }
-            println!("{UNREADABLE_OFF}");
+            let mut lines: Vec<String> = store.aside_line().into_iter().collect();
+            lines.push(UNREADABLE_OFF.into());
+            lines
         }
         Off::Done(tally) => {
             desktop.autostart(None)?;
-            println!("{}", closing(&tally));
+            vec![closing(&tally)]
         }
         Off::Pending(tally) => {
-            begin(desktop.as_ref(), &store)?;
-            println!("{}", closing(&tally));
+            begin(desktop, store)?;
+            vec![closing(&tally)]
         }
-    }
-    Ok(())
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -416,6 +425,7 @@ pub fn watch() -> Result<()> {
 
 pub fn flip() -> Result<()> {
     let store = Store::open();
+    let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
     let mut state = store.load();
     state.options.mirror = !state.options.mirror;
     store.save(&state)?;
@@ -1448,6 +1458,19 @@ mod tests {
         assert!(daemon.tick().unload);
         let state = store.load();
         assert!(!state.restoring && state.screens.is_empty() && !output.exists());
+    }
+
+    #[test]
+    fn off_started_while_another_command_runs_changes_nothing() {
+        let (fake, store, _, _) = pair("busyoff");
+        let held = store.command_lock(Duration::ZERO).unwrap();
+        let before = store.read();
+        assert_eq!(turn_off(fake.as_ref(), &store, Duration::from_millis(150)).unwrap_err().to_string(), state::BUSY);
+        assert_eq!(store.read(), before);
+        assert!(store.output("L", 1, "jpg").exists() && fake.unloads.load(std::sync::atomic::Ordering::SeqCst) == 0);
+        drop(held);
+        assert_eq!(turn_off(fake.as_ref(), &store, Duration::from_millis(150)).unwrap(), vec![closing(&tally(2, 0, 0, 0, 0))]);
+        assert_eq!(fake.unloads.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

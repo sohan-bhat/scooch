@@ -1,12 +1,15 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use scooch_core::{Options, Placement};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub const VERSION: u32 = 1;
+pub const BUSY: &str = "Another scooch command is still running, so try again in a moment.";
+pub const COMMAND_PATIENCE: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -241,6 +244,20 @@ impl Store {
         Ok(Some(Lock { _file: file, pid: self.pid_file() }))
     }
 
+    pub fn command_lock(&self, patience: Duration) -> Result<fs::File> {
+        fs::create_dir_all(&self.root).with_context(|| format!("Scooch could not make its folder at {}.", self.root.display()))?;
+        let file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(self.root.join("command.lock"))?;
+        let started = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(fs::TryLockError::WouldBlock) if started.elapsed() < patience => std::thread::sleep(Duration::from_millis(50)),
+                Err(fs::TryLockError::WouldBlock) => bail!(BUSY),
+                Err(fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+    }
+
     pub fn watcher(&self) -> Option<u32> {
         self.recorded_pid().filter(|process| crate::poke::alive(*process))
     }
@@ -423,6 +440,21 @@ mod tests {
         assert!(store.owns(&store.output("main", 1, "jpg")));
         assert!(!store.owns(Path::new("/Library/Desktop Pictures/lake.jpg")));
         assert!(!store.owns(&store.state_file()));
+    }
+
+    #[test]
+    fn one_command_runs_at_a_time() {
+        let store = Store::at(scratch("commandlock"));
+        let held = store.command_lock(Duration::ZERO).unwrap();
+        assert_eq!(store.command_lock(Duration::from_millis(150)).unwrap_err().to_string(), BUSY);
+        let waiting = {
+            let store = store.clone();
+            std::thread::spawn(move || store.command_lock(Duration::from_secs(5)).map(drop))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        drop(held);
+        assert!(waiting.join().unwrap().is_ok());
+        assert!(store.lock().unwrap().is_some());
     }
 
     #[test]
