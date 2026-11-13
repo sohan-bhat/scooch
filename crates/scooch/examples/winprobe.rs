@@ -1777,6 +1777,11 @@ mod probe {
         baseline: RgbImage,
         icons: Vec<usize>,
         others: Vec<usize>,
+        fidelity: (f32, u8, u8, usize),
+    }
+
+    fn magenta(raw: &[u8], at: usize) -> bool {
+        raw.get(at..at + 3).is_some_and(|pixel| pixel[0] > 200 && pixel[1] < 70 && pixel[2] > 200)
     }
 
     impl Sight {
@@ -1788,68 +1793,107 @@ mod probe {
                 rects.iter().any(|rect| x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h)
             };
             let (mut icons, mut others) = (Vec::new(), Vec::new());
+            let mut spread = [0usize; 256];
             if field.dimensions() == baseline.dimensions() {
                 for (index, (a, b)) in baseline.as_raw().as_chunks::<3>().0.iter().zip(field.as_raw().as_chunks::<3>().0.iter()).enumerate() {
                     let (x, y) = (index % width, index / width);
-                    if y < work_bottom && x + 40 < width && a.iter().zip(b.iter()).any(|(p, q)| p.abs_diff(*q) > 60) {
-                        if inside(x, y) {
+                    if y >= work_bottom || x + 40 >= width {
+                        continue;
+                    }
+                    let gap = a.iter().zip(b.iter()).map(|(p, q)| p.abs_diff(*q)).max().unwrap_or(0);
+                    let icon = inside(x, y);
+                    if gap > 60 {
+                        if icon {
                             icons.push(index);
                         } else {
                             others.push(index);
                         }
+                    } else if !icon {
+                        spread[gap as usize] += 1;
                     }
                 }
             }
-            Sight { width, row: height * 6 / 10, baseline, icons, others }
+            let total: usize = spread.iter().sum();
+            let mean = spread.iter().enumerate().map(|(gap, count)| gap * count).sum::<usize>() as f32 / total.max(1) as f32;
+            let mut seen = 0usize;
+            let high = spread.iter().position(|count| {
+                seen += count;
+                seen * 100 >= total * 99
+            });
+            let top = spread.iter().rposition(|count| *count > 0);
+            let over = spread[9..].iter().sum();
+            Sight { width, row: height * 6 / 10, baseline, icons, others, fidelity: (mean, high.unwrap_or(0) as u8, top.unwrap_or(0) as u8, over) }
         }
 
-        fn changed(&self, pixels: &[usize], raw: &[u8], band: Option<f32>) -> usize {
+        fn changed(&self, pixels: &[usize], raw: &[u8]) -> usize {
             let base = self.baseline.as_raw();
-            pixels.iter().filter(|index| {
-                let x = (**index % self.width) as f32;
-                if band.is_some_and(|center| (x - center).abs() < 28.0) {
-                    return false;
-                }
-                let at = **index * 3;
-                (0..3).any(|channel| raw.get(at + channel).zip(base.get(at + channel)).is_some_and(|(a, b)| a.abs_diff(*b) > 40))
-            }).count()
+            pixels
+                .iter()
+                .filter(|index| {
+                    let at = **index * 3;
+                    if !(0..3).any(|channel| raw.get(at + channel).zip(base.get(at + channel)).is_some_and(|(a, b)| a.abs_diff(*b) > 40)) {
+                        return false;
+                    }
+                    let (x, row) = (**index % self.width, **index / self.width * self.width);
+                    !(x.saturating_sub(28)..(x + 29).min(self.width)).any(|near| magenta(raw, (row + near) * 3))
+                })
+                .count()
         }
 
         fn look(&self, shot: &RgbImage, at: u128) -> Look {
             let raw = shot.as_raw();
-            let mut columns = Vec::new();
-            for x in 0..self.width {
-                let at = (self.row * self.width + x) * 3;
-                if raw.get(at..at + 3).is_some_and(|pixel| pixel[0] > 200 && pixel[1] < 70 && pixel[2] > 200) {
-                    columns.push(x);
-                }
-            }
+            let columns: Vec<usize> = (0..self.width).filter(|x| magenta(raw, (self.row * self.width + x) * 3)).collect();
             let bar = (!columns.is_empty()).then(|| columns.iter().sum::<usize>() as f32 / columns.len() as f32 / self.width as f32);
             let spot = (16 * self.width + self.width.saturating_sub(16)) * 3;
-            let marker = raw.get(spot..spot + 3).is_some_and(|pixel| pixel[0] < 60 && pixel[1] > 200 && pixel[2] < 60);
-            let band = bar.map(|bar| bar * self.width as f32);
-            let icons_changed = self.changed(&self.icons, raw, band);
-            let others_changed = self.changed(&self.others, raw, band);
-            Look { at, bar, marker, icons_changed, others_changed }
+            let marker = raw.get(spot..spot + 3).is_some_and(green);
+            Look { at, bar, marker, icons_changed: self.changed(&self.icons, raw), others_changed: self.changed(&self.others, raw) }
         }
+    }
+
+    fn green(pixel: &[u8]) -> bool {
+        pixel.len() >= 3 && pixel[0] < 60 && pixel[1] > 200 && pixel[2] < 60
     }
 
     fn screen_rect(screen: &Screen) -> RECT {
         RECT { left: screen.frame.x as i32, top: screen.frame.y as i32, right: (screen.frame.x + screen.frame.w) as i32, bottom: (screen.frame.y + screen.frame.h) as i32 }
     }
 
-    fn watch_screen(area: RECT, sight: &Sight, length: Duration, mut during: impl FnMut(u128)) -> Vec<Look> {
+    fn spot_of(area: RECT) -> RECT {
+        RECT { left: area.right - 24, top: area.top + 8, right: area.right - 8, bottom: area.top + 24 }
+    }
+
+    fn marker_on(spot: RECT) -> bool {
+        capture(spot).is_ok_and(|shot| green(&shot.get_pixel(8, 8).0))
+    }
+
+    fn marker_until(spot: RECT, wanted: bool, limit: Duration) -> Option<Duration> {
         let started = Instant::now();
-        let mut looks = Vec::new();
+        while started.elapsed() < limit {
+            if marker_on(spot) == wanted {
+                return Some(started.elapsed());
+            }
+            std::thread::yield_now();
+        }
+        None
+    }
+
+    fn watch(area: RECT, sight: &Sight, length: Duration, mut during: impl FnMut(u128)) -> (Vec<Look>, Option<RgbImage>) {
+        let started = Instant::now();
+        let (mut looks, mut worst, mut most) = (Vec::new(), None, 0usize);
         while started.elapsed() < length {
             let at = started.elapsed().as_millis();
             during(at);
             if let Ok(shot) = capture(area) {
-                looks.push(sight.look(&shot, at));
+                let look = sight.look(&shot, at);
+                if look.icons_changed > most || (most == 0 && look.bar.is_some()) {
+                    most = look.icons_changed;
+                    worst = Some(shot);
+                }
+                looks.push(look);
             }
             drain();
         }
-        looks
+        (looks, worst)
     }
 
     struct Verdict {
@@ -1862,6 +1906,7 @@ mod probe {
         gaps: usize,
         icons_changed: usize,
         others_changed: usize,
+        flashes: usize,
     }
 
     fn judge(looks: &[Look], length: Duration) -> Verdict {
@@ -1891,19 +1936,8 @@ mod probe {
             gaps,
             icons_changed: looks.iter().map(|look| look.icons_changed).max().unwrap_or(0),
             others_changed: looks.iter().map(|look| look.others_changed).max().unwrap_or(0),
+            flashes: 0,
         }
-    }
-
-    fn present_rate(layer: &layer::Layer) -> (usize, f32, Option<u128>, String, Option<String>) {
-        let Ok(stats) = layer.stats.lock() else { return (0, 0.0, None, String::new(), None) };
-        let span = stats.presents.last().copied().unwrap_or_default();
-        let rate = if span.is_zero() { 0.0 } else { (stats.presents.len().saturating_sub(1)) as f32 / span.as_secs_f32() };
-        (stats.presents.len(), rate, stats.first.map(|first| first.as_millis()), stats.adapter.clone(), stats.error.clone())
-    }
-
-    fn pattern_of(picture: &RgbImage) -> scooch_live::Pattern {
-        let rgba = picture.as_raw().as_chunks::<3>().0.iter().flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255]).collect();
-        scooch_live::Pattern { width: picture.width(), height: picture.height(), rgba }
     }
 
     fn mean_gap(shot: &RgbImage, target: &RgbImage) -> f32 {
@@ -1943,16 +1977,158 @@ mod probe {
         ));
     }
 
-    fn own_counts() -> (usize, u32, u32, u32, usize) {
+    fn own_private() -> usize {
         let process = unsafe { GetCurrentProcess() };
-        let gdi = unsafe { GetGuiResources(process, GR_GDIOBJECTS) };
-        let user = unsafe { GetGuiResources(process, GR_USEROBJECTS) };
-        let mut handles = 0u32;
-        let _ = unsafe { GetProcessHandleCount(process, &mut handles) };
         let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
         let _ = unsafe { GetProcessMemoryInfo(process, &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS, counters.cb) };
-        (layer::ours_left(), gdi, user, handles, counters.PrivateUsage)
+        counters.PrivateUsage
     }
+
+    fn process_numbers(pid: u32) -> Option<(usize, u32)> {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) }.ok()?;
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+        let read = unsafe { GetProcessMemoryInfo(handle, &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS, counters.cb) }.is_ok();
+        let mut handles = 0u32;
+        let counted = unsafe { GetProcessHandleCount(handle, &mut handles) }.is_ok();
+        let _ = unsafe { CloseHandle(handle) };
+        (read && counted).then_some((counters.PrivateUsage, handles))
+    }
+
+    fn process_gone(pid: u32) -> bool {
+        let Ok(handle) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else { return true };
+        let ended = unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0;
+        let _ = unsafe { CloseHandle(handle) };
+        ended
+    }
+
+    fn gone_within(pid: u32, limit: Duration) -> Option<Duration> {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            if process_gone(pid) {
+                return Some(started.elapsed());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        process_gone(pid).then(|| started.elapsed())
+    }
+
+    fn type_names() -> BTreeMap<u16, String> {
+        let mut words = vec![0u64; 1 << 13];
+        for _ in 0..8 {
+            let mut needed = 0u32;
+            let status = unsafe { NtQueryObject(None, OBJECT_INFORMATION_CLASS(3), Some(words.as_mut_ptr() as *mut c_void), (words.len() * 8) as u32, Some(&mut needed)) };
+            if status.is_ok() {
+                break;
+            }
+            let wanted = (needed as usize / 8 + 1).max(words.len() * 2);
+            words = vec![0u64; wanted];
+        }
+        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let read16 = |at: usize| bytes.get(at..at + 2).map_or(0, |pair| u16::from_le_bytes([pair[0], pair[1]]));
+        let count = bytes.get(0..4).map_or(0, |four| u32::from_le_bytes([four[0], four[1], four[2], four[3]]));
+        let mut names = BTreeMap::new();
+        let mut at = 8usize;
+        for _ in 0..count {
+            if at + 0x68 > bytes.len() {
+                break;
+            }
+            let (length, maximum) = (read16(at) as usize, read16(at + 2) as usize);
+            let index = bytes[at + 0x5a];
+            let units: Vec<u16> = (0..length / 2).map(|unit| read16(at + 0x68 + unit * 2)).collect();
+            names.insert(u16::from(index), String::from_utf16_lossy(&units));
+            at = (at + 0x68 + maximum + 7) & !7;
+        }
+        names
+    }
+
+    fn handle_types(pid: u32) -> Option<BTreeMap<String, usize>> {
+        let mut words = vec![0u64; 1 << 17];
+        let mut read = false;
+        for _ in 0..8 {
+            let mut needed = 0u32;
+            let status = unsafe { NtQuerySystemInformation(SYSTEM_INFORMATION_CLASS(64), words.as_mut_ptr() as *mut c_void, (words.len() * 8) as u32, &mut needed) };
+            if status.is_ok() {
+                read = true;
+                break;
+            }
+            let wanted = (needed as usize / 8 + 8192).max(words.len() * 2);
+            if wanted > 1 << 26 {
+                break;
+            }
+            words = vec![0u64; wanted];
+        }
+        if !read {
+            return None;
+        }
+        let names = type_names();
+        let count = words[0] as usize;
+        let mut kinds = BTreeMap::new();
+        for entry in 0..count {
+            let base = 2 + entry * 5;
+            let Some(fields) = words.get(base..base + 5) else { break };
+            if fields[1] as u32 == pid {
+                let kind = (fields[3] >> 48) as u16;
+                *kinds.entry(names.get(&kind).cloned().unwrap_or_else(|| format!("type {kind}"))).or_insert(0usize) += 1;
+            }
+        }
+        Some(kinds)
+    }
+
+    fn works(verdict: &Verdict, watched: usize) -> bool {
+        watched > 0 && verdict.bars >= 3 && verdict.forward > verdict.backward && verdict.markers > 0 && verdict.icons_changed * 50 < watched
+    }
+
+    fn icon_rects() -> Result<Vec<Rect>> {
+        let view = shell::view()?;
+        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
+        Ok(automation_rects(&automation, view.list)?.into_iter().map(|(_, rect)| rect).collect())
+    }
+
+    fn settle(area: RECT, limit: Duration) -> Result<RgbImage> {
+        let started = Instant::now();
+        let bottom = work_area().map_or(area.bottom, |work| work.bottom.min(area.bottom)) - area.top;
+        let mut last = capture(area)?;
+        while started.elapsed() < limit {
+            pump(Duration::from_millis(300));
+            let shot = capture(area)?;
+            let rows = (bottom.max(0) as usize * shot.width() as usize * 3).min(shot.as_raw().len());
+            let still = shot.dimensions() == last.dimensions() && shot.as_raw()[..rows] == last.as_raw()[..rows];
+            last = shot;
+            if still {
+                break;
+            }
+        }
+        Ok(last)
+    }
+
+    fn sight_of(p: &mut Probe, area: RECT, field: &RgbImage, name: &str) -> Result<Sight> {
+        park_cursor();
+        let baseline = settle(area, Duration::from_secs(6))?;
+        let _ = fs::write(p.out.join(format!("{name}.png")), scooch_core::encode_png(&baseline)?);
+        let rects = icon_rects().unwrap_or_default();
+        let sight = Sight::new(baseline, field, (area.left, area.top), &rects);
+        let (mean, high, top, over) = sight.fidelity;
+        p.line(format!(
+            "- {} icon pixels watched inside {} icon rectangles, {} other pixels differ from the picture by more than 60, bar row {}, screen gap to the picture {:.2}",
+            sight.icons.len(),
+            rects.len(),
+            sight.others.len(),
+            sight.row,
+            mean_gap(&sight.baseline, field)
+        ));
+        p.line(format!("- the wallpaper as Windows draws it against the picture file, outside the icons: mean difference {mean:.2}, 99th percentile {high}, largest {top}, pixels off by more than 8 {over}"));
+        if sight.icons.is_empty() {
+            p.failed.push(format!("no icon pixels to watch for {name}"));
+        }
+        Ok(sight)
+    }
+
+    fn hints(method: Method) -> Hints {
+        Hints { present: Some(method.hint().into()) }
+    }
+
+    const PATTERN: TestPattern = TestPattern { cycle_ms: 500 };
+    const ANSWER: Duration = Duration::from_secs(3);
 
     fn rung(p: &mut Probe, screen: &Screen, method: Method, field: &RgbImage, sight: &Sight, save: Option<&str>) -> Result<Verdict> {
         let area = screen_rect(screen);
@@ -2248,133 +2424,6 @@ mod probe {
         drop(layer);
         park_cursor();
         Ok(())
-    }
-
-    fn hints(method: Method) -> Hints {
-        Hints { present: Some(method.hint().into()) }
-    }
-
-    const PATTERN: TestPattern = TestPattern { cycle_ms: 500 };
-    const ANSWER: Duration = Duration::from_secs(3);
-
-    fn green(pixel: &[u8]) -> bool {
-        pixel.len() >= 3 && pixel[0] < 60 && pixel[1] > 200 && pixel[2] < 60
-    }
-
-    fn spot_of(area: RECT) -> RECT {
-        RECT { left: area.right - 24, top: area.top + 8, right: area.right - 8, bottom: area.top + 24 }
-    }
-
-    fn marker_on(spot: RECT) -> bool {
-        capture(spot).is_ok_and(|shot| green(&shot.get_pixel(8, 8).0))
-    }
-
-    fn marker_until(spot: RECT, wanted: bool, limit: Duration) -> Option<Duration> {
-        let started = Instant::now();
-        while started.elapsed() < limit {
-            if marker_on(spot) == wanted {
-                return Some(started.elapsed());
-            }
-            std::thread::yield_now();
-        }
-        None
-    }
-
-    fn own_private() -> usize {
-        let process = unsafe { GetCurrentProcess() };
-        let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
-        let _ = unsafe { GetProcessMemoryInfo(process, &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS, counters.cb) };
-        counters.PrivateUsage
-    }
-
-    fn process_numbers(pid: u32) -> Option<(usize, u32)> {
-        let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) }.ok()?;
-        let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
-        let read = unsafe { GetProcessMemoryInfo(handle, &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS, counters.cb) }.is_ok();
-        let mut handles = 0u32;
-        let counted = unsafe { GetProcessHandleCount(handle, &mut handles) }.is_ok();
-        let _ = unsafe { CloseHandle(handle) };
-        (read && counted).then_some((counters.PrivateUsage, handles))
-    }
-
-    fn process_gone(pid: u32) -> bool {
-        let Ok(handle) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else { return true };
-        let ended = unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0;
-        let _ = unsafe { CloseHandle(handle) };
-        ended
-    }
-
-    fn gone_within(pid: u32, limit: Duration) -> Option<Duration> {
-        let started = Instant::now();
-        while started.elapsed() < limit {
-            if process_gone(pid) {
-                return Some(started.elapsed());
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        process_gone(pid).then(|| started.elapsed())
-    }
-
-    fn type_names() -> BTreeMap<u16, String> {
-        let mut words = vec![0u64; 1 << 13];
-        for _ in 0..8 {
-            let mut needed = 0u32;
-            let status = unsafe { NtQueryObject(None, OBJECT_INFORMATION_CLASS(3), Some(words.as_mut_ptr() as *mut c_void), (words.len() * 8) as u32, Some(&mut needed)) };
-            if status.is_ok() {
-                break;
-            }
-            let wanted = (needed as usize / 8 + 1).max(words.len() * 2);
-            words = vec![0u64; wanted];
-        }
-        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
-        let read16 = |at: usize| bytes.get(at..at + 2).map_or(0, |pair| u16::from_le_bytes([pair[0], pair[1]]));
-        let count = bytes.get(0..4).map_or(0, |four| u32::from_le_bytes([four[0], four[1], four[2], four[3]]));
-        let mut names = BTreeMap::new();
-        let mut at = 8usize;
-        for _ in 0..count {
-            if at + 0x68 > bytes.len() {
-                break;
-            }
-            let (length, maximum) = (read16(at) as usize, read16(at + 2) as usize);
-            let index = bytes[at + 0x5a];
-            let units: Vec<u16> = (0..length / 2).map(|unit| read16(at + 0x68 + unit * 2)).collect();
-            names.insert(u16::from(index), String::from_utf16_lossy(&units));
-            at = (at + 0x68 + maximum + 7) & !7;
-        }
-        names
-    }
-
-    fn handle_types(pid: u32) -> Option<BTreeMap<String, usize>> {
-        let mut words = vec![0u64; 1 << 17];
-        let mut read = false;
-        for _ in 0..8 {
-            let mut needed = 0u32;
-            let status = unsafe { NtQuerySystemInformation(SYSTEM_INFORMATION_CLASS(64), words.as_mut_ptr() as *mut c_void, (words.len() * 8) as u32, &mut needed) };
-            if status.is_ok() {
-                read = true;
-                break;
-            }
-            let wanted = (needed as usize / 8 + 8192).max(words.len() * 2);
-            if wanted > 1 << 26 {
-                break;
-            }
-            words = vec![0u64; wanted];
-        }
-        if !read {
-            return None;
-        }
-        let names = type_names();
-        let count = words[0] as usize;
-        let mut kinds = BTreeMap::new();
-        for entry in 0..count {
-            let base = 2 + entry * 5;
-            let Some(fields) = words.get(base..base + 5) else { break };
-            if fields[1] as u32 == pid {
-                let kind = (fields[3] >> 48) as u16;
-                *kinds.entry(names.get(&kind).cloned().unwrap_or_else(|| format!("type {kind}"))).or_insert(0usize) += 1;
-            }
-        }
-        Some(kinds)
     }
 
     fn hold(args: &[String]) -> ExitCode {
