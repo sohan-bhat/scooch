@@ -1858,11 +1858,10 @@
             "width": 320
           },
           "paints": {
-            "file": "a.paints.bin",
+            "file": "a.paints.png",
             "height": 60,
             "layers": 8,
-            "width": 80,
-            "format": "rgba8"
+            "width": 80
           },
           "ramps": {
             "file": "a.ramps.png",
@@ -1923,11 +1922,10 @@
             "width": 320
           },
           "paints": {
-            "file": "b.paints.bin",
+            "file": "b.paints.png",
             "height": 60,
             "layers": 8,
-            "width": 80,
-            "format": "rgba8"
+            "width": 80
           },
           "ramps": {
             "file": "b.ramps.png",
@@ -3125,11 +3123,10 @@
                 "width": 320
               },
               "paints": {
-                "file": "a.paints.bin",
+                "file": "a.paints.png",
                 "height": 60,
                 "layers": 8,
-                "width": 80,
-                "format": "rgba8"
+                "width": 80
               },
               "ramps": {
                 "file": "a.ramps.png",

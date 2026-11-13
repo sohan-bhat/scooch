@@ -99,8 +99,18 @@ async function fieldTexture(url: string, table: Table) {
   return data(new DataTexture(new Uint16Array(await bytes(url)), table.width, table.height, RedFormat, HalfFloatType), LinearFilter);
 }
 
+async function pixels(url: string) {
+  const bitmap = await createImageBitmap(new Blob([await bytes(url)]), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) throw new Error('no 2d context');
+  context.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  return new Uint8Array(context.getImageData(0, 0, canvas.width, canvas.height).data.buffer);
+}
+
 async function paintsTexture(url: string, table: Table) {
-  const texture = data(new DataArrayTexture(new Uint8Array(await bytes(url)), table.width, table.height, table.layers ?? 8), LinearFilter);
+  const texture = data(new DataArrayTexture(await pixels(url), table.width, table.height, table.layers ?? 8), LinearFilter);
   texture.format = RGBAFormat;
   texture.type = UnsignedByteType;
   texture.colorSpace = SRGBColorSpace;

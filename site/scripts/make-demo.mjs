@@ -200,11 +200,7 @@ async function scenery(id, source, layouts) {
   await sharp(join(folder, bundle.canvas.file)).toFile(join(target, bundle.canvas.file));
   for (const state of bundle.states) {
     const tables = state.tables;
-    for (const key of ['map', 'field', 'look', 'pad', 'ramps']) await writeFile(join(target, tables[key].file), await readFile(join(folder, tables[key].file)));
-    const raw = await sharp(join(folder, tables.paints.file)).ensureAlpha().raw().toBuffer();
-    tables.paints.file = tables.paints.file.replace(/\.png$/, '.bin');
-    tables.paints.format = 'rgba8';
-    await writeFile(join(target, tables.paints.file), raw);
+    for (const key of ['map', 'field', 'look', 'pad', 'paints', 'ramps']) await writeFile(join(target, tables[key].file), await readFile(join(folder, tables[key].file)));
   }
   return { folder: `scenery/${id}`, ...bundle };
 }
