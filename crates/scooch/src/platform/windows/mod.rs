@@ -120,6 +120,10 @@ mod system {
             animations_off()
         }
 
+        fn hold(&self) -> std::time::Duration {
+            std::time::Duration::from_millis(700)
+        }
+
         fn gallery(&self) -> Vec<std::path::PathBuf> {
             std::env::var_os("WINDIR").map(|dir| crate::platform::folder_and_children(&Path::new(&dir).join("Web").join("Wallpaper"))).unwrap_or_default()
         }
