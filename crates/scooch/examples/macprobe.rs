@@ -208,6 +208,7 @@ mod probe {
         stand: Option<Child>,
         gpu: Option<Gpu>,
         finder: bool,
+        motion: Option<Option<String>>,
     }
 
     impl Probe {
@@ -342,6 +343,7 @@ mod probe {
             stand: None,
             gpu: None,
             finder: true,
+            motion: None,
         };
         probe.section("1 Session facts", facts);
         if !probe.runner {
@@ -2234,7 +2236,7 @@ mod probe {
                 break;
             }
         }
-        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ") || line.contains("without the glide") || line.contains("turned the glide")).collect();
+        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).collect();
         Some(Dragged { dropped, seen, log })
     }
 
@@ -2307,7 +2309,7 @@ mod probe {
         let home = p.home.clone();
         let _ = wait_until(Duration::from_secs(5), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" tick ")));
         std::thread::sleep(Duration::from_millis(600));
-        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ") || line.contains("without the glide")).map(|line| line.chars().take(180).collect()).collect();
+        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(180).collect()).collect();
         (changed, log)
     }
 
@@ -2327,7 +2329,38 @@ mod probe {
         Ok(window)
     }
 
+    fn motion_now(p: &mut Probe) -> Option<String> {
+        let read = p.tool("/usr/bin/defaults", &["read", "com.apple.universalaccess", "reduceMotion"]);
+        read.ok().then(|| read.out.trim().to_string())
+    }
+
+    fn set_motion(p: &mut Probe, reduce: bool) -> bool {
+        if p.motion.is_none() {
+            p.motion = Some(motion_now(p));
+        }
+        p.tool("/usr/bin/defaults", &["write", "com.apple.universalaccess", "reduceMotion", "-bool", if reduce { "true" } else { "false" }]).ok()
+    }
+
+    fn put_motion_back(p: &mut Probe) {
+        let Some(before) = p.motion.take() else { return };
+        let put = match &before {
+            None => p.tool("/usr/bin/defaults", &["delete", "com.apple.universalaccess", "reduceMotion"]),
+            Some(value) => p.tool("/usr/bin/defaults", &["write", "com.apple.universalaccess", "reduceMotion", "-bool", if value == "1" { "true" } else { "false" }]),
+        };
+        let after = motion_now(p);
+        p.line(format!("- reduce motion put back as found, before {before:?} now {after:?} {}", if put.ok() || before.is_none() { "ok" } else { "failed" }));
+        if after != before {
+            p.fail("reduce motion was not put back as the probe found it");
+        }
+    }
+
     fn glide_check(p: &mut Probe) -> Result<()> {
+        let result = glide_steps(p);
+        put_motion_back(p);
+        result
+    }
+
+    fn glide_steps(p: &mut Probe) -> Result<()> {
         let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
         accessory(marker);
         let desktop = platform::current()?;
@@ -2344,14 +2377,22 @@ mod probe {
             return Ok(());
         };
         p.line(format!("- glide setting `{}`, scenery `{}`, daemon {daemon}", state(p)["glide"], state(p)["options"]["scenery"].as_str().unwrap_or("missing")));
+        let found = motion_now(p);
+        let wrote = set_motion(p, false);
+        let now = motion_now(p);
+        p.line(format!("- reduce motion found as {found:?}, turned off for the glide checks {wrote}, now {now:?}"));
         let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
         let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
-        let (setup, _) = wallpaper_after(p, &screen, |p| {
+        let (setup, setup_log) = wallpaper_after(p, &screen, |p| {
             let _ = place(p, name, subject);
             poke(p);
         });
         std::thread::sleep(Duration::from_millis(1500));
-        p.line(format!("- set up with {name} on the subject, new wallpaper after {setup:?} ms"));
+        p.line(format!("- set up with {name} on the subject, new wallpaper after {setup:?} ms, daemon log {setup_log:?}"));
+        if setup_log.iter().any(|line| line.contains("glide skipped, reduce motion")) {
+            p.fail("the daemon still read reduce motion as on after the probe turned it off");
+            return Ok(());
+        }
         let paper = picture_window(&screen).and_then(|window| grab_window(window.number));
         let baseline = grab(display).context("the desktop could not be captured")?;
         let still: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().filter(|(found, _)| found.starts_with("scooch") && found != name).map(|(_, rect)| rect).collect();
@@ -2374,28 +2415,17 @@ mod probe {
         p.line(format!("- glide off, the same drag back: new wallpaper after {off:?} ms, log {off_log:?}"));
         let ran = p.scooch(&["glide"], LIMIT);
         p.line(format!("- scooch glide said {:?}", ran.text()));
-        let reduce_before = p.tool("/usr/bin/defaults", &["read", "com.apple.universalaccess", "reduceMotion"]).out.trim().to_string();
-        let wrote = p.tool("/usr/bin/defaults", &["write", "com.apple.universalaccess", "reduceMotion", "-bool", "true"]);
-        std::thread::sleep(Duration::from_millis(800));
-        let reducing = NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
-        p.line(format!("- reduce motion written {}, read back by AppKit as {reducing}, value before `{reduce_before}`", if wrote.ok() { "ok".to_string() } else { wrote.text() }));
-        if reducing {
-            let back = position(p, name).unwrap_or(subject);
-            let (time, log) = wallpaper_after(p, &screen, |_| drag(back, aside));
-            let glided = log.iter().any(|line| line.contains(" glide open"));
-            p.line(format!("- reduce motion on, drag: new wallpaper after {time:?} ms, glided {glided}, log {log:?}"));
-            if glided {
-                p.fail("the daemon glided with reduce motion on");
-            }
-        } else {
-            p.limit("the runner would not take the reduce motion setting, so that path is proven only by the unit tests");
+        let wrote = set_motion(p, true);
+        let back = position(p, name).unwrap_or(subject);
+        let (time, log) = wallpaper_after(p, &screen, |_| drag(back, aside));
+        let glided = log.iter().any(|line| line.contains(" glide open"));
+        let read = log.iter().any(|line| line.contains("glide skipped, reduce motion"));
+        p.line(format!("- reduce motion on {wrote}, drag: new wallpaper after {time:?} ms, glided {glided}, the daemon logged reduce motion {read}, log {log:?}"));
+        if glided || !read {
+            p.fail("the daemon did not take today's path with reduce motion on");
         }
-        if reduce_before.is_empty() {
-            let _ = p.tool("/usr/bin/defaults", &["delete", "com.apple.universalaccess", "reduceMotion"]);
-        } else {
-            let _ = p.tool("/usr/bin/defaults", &["write", "com.apple.universalaccess", "reduceMotion", "-bool", if reduce_before == "1" { "true" } else { "false" }]);
-        }
-        std::thread::sleep(Duration::from_millis(800));
+        set_motion(p, false);
+        std::thread::sleep(Duration::from_millis(500));
         let window = cover(marker, &screen)?;
         let target = if position(p, name).is_some_and(|at| (at.0 - subject.0).abs() < 5.0) { aside } else { subject };
         let (covered, covered_log) = wallpaper_after(p, &screen, |p| {
@@ -2431,7 +2461,7 @@ mod probe {
         let icons: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().map(|(_, rect)| rect).collect();
         let matches = shot.as_ref().zip(now_shown.as_ref()).and_then(|(shot, file)| matches_file(shot, file, &icons, &screen));
         let alive = scooch_pid(p).is_some();
-        let kill_log: Vec<String> = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains("without the glide")).map(|line| line.chars().take(180).collect()).collect();
+        let kill_log: Vec<String> = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ")).map(|line| line.chars().take(180).collect()).collect();
         p.line(format!("- helper killed mid glide after the layer opened {:?} ms: killed {killed:?}, wallpaper changed {}, it is the recorded output {}, screen matches the file {matches:?}, daemon alive {alive}, log {kill_log:?}", opened.map(|time| time.as_millis()), now_shown != shown_before, now_shown == recorded));
         std::thread::sleep(Duration::from_millis(1500));
         let from = position(p, name).unwrap_or(subject);
@@ -2524,25 +2554,12 @@ mod probe {
             let drained = Instant::now();
             drop(screen);
             lines.push(format!("- 300 glide frames presented to an offscreen Metal layer with three drawables, time between frames {}, the last frames finished {} ms after the loop", timed(&paced), drained.elapsed().as_millis()));
-            let mut whole = Vec::new();
-            for index in 0..60 {
-                let started = Instant::now();
-                gpu.snapshot(width, height, &[(Layered::Glide(&glide, frame(index)), 1.0)]).map_err(anyhow::Error::msg)?;
-                whole.push(started.elapsed().as_secs_f64() * 1000.0);
+            let mut timed_frames = Vec::new();
+            for index in 0..300 {
+                let took = gpu.time(width, height, &[(Layered::Glide(&glide, frame(index)), 1.0)]).map_err(anyhow::Error::msg)?;
+                timed_frames.push(took.as_secs_f64() * 1000.0);
             }
-            let mut empty = Vec::new();
-            for _ in 0..30 {
-                let started = Instant::now();
-                gpu.snapshot(width, height, &[]).map_err(anyhow::Error::msg)?;
-                empty.push(started.elapsed().as_secs_f64() * 1000.0);
-            }
-            let mut base = empty.clone();
-            base.sort_by(f64::total_cmp);
-            let floor = base[base.len() / 2];
-            let drawn: Vec<f64> = whole.iter().map(|value| (value - floor).max(0.0)).collect();
-            lines.push(format!("- 60 glide frames each drawn alone to an offscreen target and read back, submit to finished and read {}", stats(&whole)));
-            lines.push(format!("- 30 empty frames read back the same way {}, so the readback costs about {floor:.2} ms", stats(&empty)));
-            lines.push(format!("- the glide frames with that readback taken off {}", timed(&drawn)));
+            lines.push(format!("- 300 glide frames each drawn alone to an offscreen target, submit until the GPU finished {}", timed(&timed_frames)));
             lines.push(format!("- with the device and pictures {}", memory(pid)));
             drop(glide);
             drop(picture);
@@ -2632,6 +2649,7 @@ mod probe {
     }
 
     fn cleanup(p: &mut Probe) -> Result<()> {
+        put_motion_back(p);
         if p.stand.is_some() || launchd::loaded() || launchd::plist_path().is_ok_and(|path| path.exists()) {
             let ran = p.scooch(&["off"], Duration::from_secs(60));
             p.line(format!("- scooch off during cleanup exit {:?}: {}", ran.code, ran.text()));

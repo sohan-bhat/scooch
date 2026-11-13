@@ -399,8 +399,20 @@ impl Daemon {
         Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)) }
     }
 
+    fn glide_block(&self, state: &State) -> Option<&'static str> {
+        if !self.desktop.live() {
+            Some("not live")
+        } else if !state.glide {
+            Some("setting off")
+        } else if self.desktop.reduce_motion() {
+            Some("reduce motion")
+        } else {
+            None
+        }
+    }
+
     fn glide_wanted(&self, state: &State) -> bool {
-        self.desktop.live() && state.on && state.glide && !self.desktop.reduce_motion()
+        state.on && self.glide_block(state).is_none()
     }
 
     pub fn warm(&self) {
@@ -532,7 +544,8 @@ impl Daemon {
         let known = self.desktop.known().ok().flatten();
         prune(state, self.desktop.as_ref(), &self.store, known.as_deref(), &snapshot.screens, unix_now());
         let glider = self.glider.clone();
-        let mut gliding = self.glide_wanted(state).then(|| glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+        let blocked = self.glide_block(state);
+        let mut gliding = blocked.is_none().then(|| glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
         for screen in &snapshot.screens {
             if unplaced(state, &screen.id) {
                 report.outcomes.push((screen.id.clone(), Outcome::Skipped));
@@ -540,7 +553,7 @@ impl Daemon {
                 continue;
             }
             let previous = state.screens.get(&screen.id).and_then(|entry| entry.output.clone());
-            let outcome = self.screen(state, screen, snapshot, &options, known.as_deref(), gliding.as_deref_mut());
+            let outcome = self.screen(state, screen, snapshot, &options, known.as_deref(), (gliding.as_deref_mut(), blocked));
             if state.screens.get(&screen.id).and_then(|entry| entry.output.clone()) != previous {
                 sweep(self.desktop.as_ref(), &self.store, state, &screen.id, previous.as_slice());
             }
@@ -578,7 +591,7 @@ impl Daemon {
         }
     }
 
-    fn screen(&self, state: &mut State, screen: &Screen, snapshot: &Snapshot, options: &Options, known: Option<&[String]>, glider: Option<&mut Glider>) -> Result<Outcome> {
+    fn screen(&self, state: &mut State, screen: &Screen, snapshot: &Snapshot, options: &Options, known: Option<&[String]>, glider: (Option<&mut Glider>, Option<&'static str>)) -> Result<Outcome> {
         let current = self.desktop.wallpaper(screen)?;
         let ours = current.as_deref().is_some_and(|path| self.store.owns(path));
         let usable = current.clone().filter(|path| path.is_file());
@@ -639,7 +652,7 @@ impl Daemon {
         Ok(outcome)
     }
 
-    fn place(&self, entry: &mut Entry, screen: &Screen, scene: &Scene, options: &Options, (current, seen): (Option<&Path>, Option<&Path>), mut glider: Option<&mut Glider>) -> Result<Outcome> {
+    fn place(&self, entry: &mut Entry, screen: &Screen, scene: &Scene, options: &Options, (current, seen): (Option<&Path>, Option<&Path>), (mut glider, blocked): (Option<&mut Glider>, Option<&'static str>)) -> Result<Outcome> {
         let source = entry.source.clone();
         let mut image: Option<RgbImage> = None;
         let mut clock = Instant::now();
@@ -667,8 +680,11 @@ impl Daemon {
             entry.placement = Some(placement);
             if current.is_some_and(|path| same(path, &source)) {
                 entry.output = None;
-            } else if !copied && !self.plain(entry, screen, current, seen)? {
-                return Ok(Outcome::Interrupted);
+            } else if !copied {
+                crate::glide::skipped(blocked.unwrap_or("plain picture"), "");
+                if !self.plain(entry, screen, current, seen)? {
+                    return Ok(Outcome::Interrupted);
+                }
             }
             entry.painted = false;
             return Ok(Outcome::Plain);
@@ -696,14 +712,21 @@ impl Daemon {
             lap("tables", &mut clock);
             if written.is_ok() {
                 let from = output.as_ref().filter(|_| showing_output).map(|output| self.store.tables_for(output, tables_key)).filter(|from| from.is_file());
-                if let (Some(from), Some(still)) = (from, output.as_deref().filter(|_| showing_output)) {
-                    flight = glider.begin(&Plan { screen, picture: &source, size: [scene.width, scene.height], still, from: &from, to: &made });
-                    lap("open", &mut clock);
+                match (from, output.as_deref().filter(|_| showing_output)) {
+                    (Some(from), Some(still)) => {
+                        flight = glider.begin(&Plan { screen, picture: &source, size: [scene.width, scene.height], still, from: &from, to: &made });
+                        lap("open", &mut clock);
+                    }
+                    (_, None) => crate::glide::skipped("output not shown", ""),
+                    (None, _) => crate::glide::skipped("no tables", ""),
                 }
                 tables = Some(made);
+            } else {
+                crate::glide::skipped("tables not written", "");
             }
             picture
         } else {
+            crate::glide::skipped(blocked.unwrap_or("not live"), "");
             let picture = scooch_core::render_with(&decoded, &analysis, &placement, scene, options);
             lap("render", &mut clock);
             picture
@@ -743,6 +766,7 @@ impl Daemon {
         if !published? {
             return Ok(Outcome::Interrupted);
         }
+        let set = Instant::now();
         entry.placement = Some(placement);
         lap("set", &mut clock);
         if let (Some(made), Some(output), Ok(tables_key)) = (&tables, &entry.output, tables_key(&source, options)) {
@@ -752,7 +776,7 @@ impl Daemon {
             }
         }
         if let (Some(glider), Some(id), Some(output)) = (glider, flight, entry.output.as_ref()) {
-            glider.settle(id, output);
+            glider.settle(id, output, set);
         }
         Ok(Outcome::Rendered)
     }
@@ -1166,7 +1190,7 @@ pub mod tests {
         pub watched: Mutex<Option<Wake>>,
         pub live: Mutex<bool>,
         pub reduce: Mutex<bool>,
-        pub events: Arc<Mutex<Vec<String>>>,
+        pub events: crate::glide::tests::Events,
     }
 
     impl Fake {
@@ -1263,7 +1287,7 @@ pub mod tests {
                 anyhow::bail!("The desktop would not take the picture.");
             }
             self.sets.fetch_add(1, Ordering::SeqCst);
-            self.events.lock().unwrap().push(format!("set {}", path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+            self.events.lock().unwrap().push((format!("set {}", path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()), Instant::now()));
             let lag = *self.lag.lock().unwrap();
             if let Some(old) = self.shown.lock().unwrap().get(&screen.id).cloned().filter(|_| lag > 0) {
                 self.stale.lock().unwrap().insert(screen.id.clone(), (old, lag));
@@ -2434,12 +2458,27 @@ pub mod tests {
     type Breaker = fn(&mut crate::glide::tests::Script);
 
     fn glide_rig(name: &str, live: bool) -> Rigged {
+        glide_rig_waits(name, live).0
+    }
+
+    fn glide_rig_waits(name: &str, live: bool) -> (Rigged, crate::glide::tests::Waits) {
         let (mut daemon, fake, _) = rig(name, vec![screen("main", 0.0, 2.0)]);
         *fake.live.lock().unwrap() = live;
         let spawner = crate::glide::tests::FakeSpawner::new(fake.events.clone());
-        let (script, spawned) = (spawner.script.clone(), spawner.spawned.clone());
+        let (script, spawned, waits) = (spawner.script.clone(), spawner.spawned.clone(), spawner.waits.clone());
         daemon.glider = Arc::new(Mutex::new(Glider::new(Box::new(spawner))));
-        (daemon, fake, script, spawned)
+        ((daemon, fake, script, spawned), waits)
+    }
+
+    fn inside_budget(waits: &[(&'static str, Duration)]) -> bool {
+        let shared: Vec<Duration> = waits.iter().filter(|(what, _)| *what != "spawn").map(|(_, wait)| *wait).collect();
+        waits.iter().all(|(_, wait)| *wait <= crate::glide::BUDGET) && shared.windows(2).all(|pair| pair[1] <= pair[0])
+    }
+
+    fn held(script: &Mutex<crate::glide::tests::Script>) -> Arc<std::sync::atomic::AtomicBool> {
+        let held = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        script.lock().unwrap().held = Some(held.clone());
+        held
     }
 
     fn moved_subject() -> Rect {
@@ -2455,7 +2494,11 @@ pub mod tests {
     }
 
     fn events(fake: &Fake) -> Vec<String> {
-        fake.events.lock().unwrap().clone()
+        fake.events.lock().unwrap().iter().map(|(event, _)| event.clone()).collect()
+    }
+
+    fn when(fake: &Fake, start: &str) -> Instant {
+        fake.events.lock().unwrap().iter().rev().find(|(event, _)| event.starts_with(start)).map(|(_, at)| *at).unwrap_or_else(|| panic!("no {start}"))
     }
 
     fn at(events: &[String], start: &str) -> usize {
@@ -2480,10 +2523,36 @@ pub mod tests {
         assert!(events[open].ends_with(&first.file_name().unwrap().to_string_lossy().into_owned()), "{events:?}");
         assert!(events[settle].ends_with(&second.file_name().unwrap().to_string_lossy().into_owned()), "{events:?}");
         assert!(events.contains(&"glide 1 true true".to_string()), "{events:?}");
+        assert!(when(&fake, "close") >= when(&fake, "set ") + fake.hold(), "the layer closed before the hold after the set");
         assert_eq!(*spawned.lock().unwrap(), 1);
         assert_eq!(std::fs::read(&second).unwrap(), today("glide-order-today"));
         let tables: Vec<_> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|file| file.path()).collect();
         assert_eq!(tables, vec![daemon.store.tables_for(&second, tables_key(&daemon.store.load().screens["main"].source, &Options::default()).unwrap())]);
+    }
+
+    #[test]
+    fn two_screens_glide_in_one_helper_and_each_holds_from_its_own_set() {
+        let (mut daemon, fake, _) = rig("glide-two", vec![screen("left", 0.0, 2.0), screen("right", 160.0, 2.0)]);
+        *fake.live.lock().unwrap() = true;
+        let spawner = crate::glide::tests::FakeSpawner::new(fake.events.clone());
+        let spawned = spawner.spawned.clone();
+        daemon.glider = Arc::new(Mutex::new(Glider::new(Box::new(spawner))));
+        let right = |rect: Rect| Rect { x: rect.x + 160.0, ..rect };
+        fake.place(vec![subject(), right(subject())]);
+        daemon.tick();
+        fake.place(vec![moved_subject(), right(moved_subject())]);
+        let report = daemon.tick();
+        assert_eq!(report.outcomes.iter().map(|(_, outcome)| *outcome).collect::<Vec<_>>(), vec![Outcome::Rendered, Outcome::Rendered]);
+        let stamped = fake.events.lock().unwrap().clone();
+        let names: Vec<&str> = stamped.iter().map(|(event, _)| event.as_str()).collect();
+        assert_eq!(*spawned.lock().unwrap(), 1, "{names:?}");
+        let sets: Vec<Instant> = stamped.iter().filter(|(event, _)| event.starts_with("set ")).map(|(_, at)| *at).collect();
+        for (id, set) in [1u32, 2].into_iter().zip(sets[sets.len() - 2..].iter().copied()) {
+            let close = stamped.iter().find(|(event, _)| *event == format!("close {id}")).map(|(_, at)| *at).unwrap_or_else(|| panic!("{names:?}"));
+            let settled = stamped.iter().position(|(event, _)| *event == format!("settled {id}")).unwrap();
+            assert!(settled < stamped.iter().position(|(event, _)| *event == format!("close {id}")).unwrap(), "{names:?}");
+            assert!(close >= set + fake.hold(), "{id} {names:?}");
+        }
     }
 
     #[test]
@@ -2497,11 +2566,10 @@ pub mod tests {
             ("dies", |script| script.dies_after_glide = true),
         ];
         for (name, break_it) in cases {
-            let (daemon, fake, script, _) = glide_rig(&format!("glide-fail-{name}"), true);
+            let ((daemon, fake, script, _), waits) = glide_rig_waits(&format!("glide-fail-{name}"), true);
             break_it(&mut script.lock().unwrap());
-            let started = Instant::now();
             assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered), "{name}");
-            assert!(started.elapsed() < Duration::from_secs(4), "{name}");
+            assert!(inside_budget(&waits.lock().unwrap()), "{name} {:?}", waits.lock().unwrap());
             assert_eq!(std::fs::read(fake.showing("main")).unwrap(), expected, "{name}");
             let events = events(&fake);
             let opened = events.iter().filter(|event| event.starts_with("open")).count();
@@ -2514,22 +2582,18 @@ pub mod tests {
         }
     }
 
-    fn second_tick(name: &str, live: bool, shown_fails: bool) -> Duration {
-        let (daemon, fake, script, _) = glide_rig(name, live);
-        script.lock().unwrap().shown_fails = shown_fails;
-        fake.place(vec![subject()]);
-        daemon.tick();
-        fake.place(vec![moved_subject()]);
-        let started = Instant::now();
-        daemon.tick();
-        started.elapsed()
-    }
-
     #[test]
-    fn a_failed_open_delays_the_still_by_the_budget_at_most() {
-        let without = second_tick("glide-budget-today", false, false);
-        let with = second_tick("glide-budget", true, true);
-        assert!(with < without + crate::glide::BUDGET + Duration::from_millis(250), "{with:?} {without:?}");
+    fn a_failed_open_waits_inside_the_budget_and_then_sets_the_still() {
+        let ((daemon, fake, script, _), waits) = glide_rig_waits("glide-budget", true);
+        script.lock().unwrap().shown_fails = true;
+        assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
+        let waits = waits.lock().unwrap().clone();
+        assert!(waits.iter().any(|(what, _)| *what == "shown") && inside_budget(&waits), "{waits:?}");
+        let events = events(&fake);
+        let hidden = at(&events, "hidden");
+        let set = events.iter().rposition(|event| event.starts_with("set ")).unwrap();
+        assert!(at(&events, "open") < hidden && hidden < at(&events, "close") && at(&events, "close") < set, "{events:?}");
+        assert!(daemon.glider.lock().unwrap().said.iter().any(|line| line.starts_with("skipped, hidden")));
     }
 
     #[test]
@@ -2570,17 +2634,18 @@ pub mod tests {
     #[test]
     fn a_tick_returns_only_after_its_glide_settles_and_the_next_glides_from_there() {
         let (daemon, fake, script, _) = glide_rig("glide-second", true);
-        script.lock().unwrap().settle_after = Duration::from_millis(300);
         fake.place(vec![subject()]);
         daemon.tick();
+        let gate = held(&script);
         fake.place(vec![moved_subject()]);
         let daemon = Arc::new(daemon);
         let ticking = daemon.clone();
         let first = std::thread::spawn(move || outcome(&ticking.tick()));
-        while !events(&fake).iter().any(|event| event.starts_with("glide")) {
+        while !events(&fake).iter().any(|event| event.starts_with("settle ")) {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(!first.is_finished());
+        gate.store(false, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(first.join().unwrap(), Outcome::Rendered);
         let settled = at(&events(&fake), "settled 1");
         let middle = fake.showing("main");
@@ -2595,14 +2660,13 @@ pub mod tests {
     #[test]
     fn turning_scooch_off_during_a_glide_closes_it_at_once() {
         let (daemon, fake, script, _) = glide_rig("glide-off", true);
-        script.lock().unwrap().settle_after = Duration::from_millis(1500);
         fake.place(vec![subject()]);
         daemon.tick();
+        let _gate = held(&script);
         fake.place(vec![moved_subject()]);
         let store = daemon.store.clone();
         let daemon = Arc::new(daemon);
         let ticking = daemon.clone();
-        let started = Instant::now();
         let first = std::thread::spawn(move || ticking.tick());
         while !events(&fake).iter().any(|event| event.starts_with("settle ")) {
             std::thread::sleep(Duration::from_millis(5));
@@ -2611,9 +2675,10 @@ pub mod tests {
         state.on = false;
         store.save(&state).unwrap();
         first.join().unwrap();
-        assert!(started.elapsed() < Duration::from_millis(1200), "{:?}", started.elapsed());
         let events = events(&fake);
         assert!(events.iter().any(|event| event.starts_with("close")) && !events.iter().any(|event| event.starts_with("settled")), "{events:?}");
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.contains("interrupted")) && !said.iter().any(|line| line.contains("did not settle")), "{said:?}");
     }
 
     fn opens(fake: &Fake) -> usize {
@@ -2635,6 +2700,13 @@ pub mod tests {
         daemon.glider.lock().unwrap().forced = true;
         first_and_moved(&daemon, &fake);
         assert_eq!(opens(&fake), 1);
+        for (kind, glides) in [("cpu", 0), ("virtual", 1), ("integrated", 1)] {
+            let (daemon, fake, script, _) = glide_rig(&format!("glide-kind-{kind}"), true);
+            script.lock().unwrap().adapter = "Apple Paravirtual device".into();
+            script.lock().unwrap().kind = kind.into();
+            first_and_moved(&daemon, &fake);
+            assert_eq!(opens(&fake), glides, "{kind}");
+        }
     }
 
     #[test]

@@ -94,7 +94,17 @@ fn the_gpu_glide_matches_the_cpu_frame() {
     let plain = measure(&gpu, &Options { pads: 0.0, ..Options::default() }, "picture only");
     assert!(plain.0 <= 1.5 && plain.1 <= 0.005, "the picture is too far from the CPU frame: mean {:.3}/255, share {:.3}%", plain.0, plain.1 * 100.0);
     let scenic = measure(&gpu, &Options { scenery: Scenery::Auto, ..Options::default() }, "with scenery");
-    assert!(scenic.0 <= 1.5, "the scenery frame is too far from the CPU frame: mean {:.3}/255", scenic.0);
+    assert!(scenic.0 <= 1.5 && scenic.1 <= 0.005, "the scenery frame is too far from the CPU frame: mean {:.3}/255, share {:.3}%", scenic.0, scenic.1 * 100.0);
+}
+
+#[test]
+fn a_frame_can_be_timed_without_a_readback() {
+    let Some(gpu) = device() else { return };
+    let raw = vec![90u8; 64 * 48 * 3];
+    let still = gpu.still(&RgbImage::from_raw(64, 48, raw).expect("image")).expect("still");
+    let took = gpu.time(64, 48, &[(Look::Still(&still), 1.0)]).expect("time");
+    println!("one still frame at 64x48 took {took:?}");
+    assert!(took < std::time::Duration::from_secs(10));
 }
 
 #[test]
@@ -132,6 +142,6 @@ fn a_mirrored_pair_cross_fades_like_the_cpu() {
         let drawn = gpu.snapshot(WIDTH, HEIGHT, &[(Look::Glide(&glide, s), 1.0)]).expect("snapshot");
         let (mean, off, largest) = compare(&drawn, &scooch_core::frame(&first, &second, s));
         println!("mirrored s {s}: mean {mean:.3}/255, off by more than 8 {:.3}%, largest {largest}", off * 100.0);
-        assert!(mean <= 1.5, "the mirrored cross-fade is too far from the CPU frame: mean {mean:.3}/255");
+        assert!(mean <= 1.5 && off <= 0.005, "the mirrored cross-fade is too far from the CPU frame: mean {mean:.3}/255, share {:.3}%", off * 100.0);
     }
 }

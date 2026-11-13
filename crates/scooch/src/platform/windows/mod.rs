@@ -112,9 +112,24 @@ mod system {
             picture::decode(path)
         }
 
+        fn live(&self) -> bool {
+            false
+        }
+
+        fn reduce_motion(&self) -> bool {
+            animations_off()
+        }
+
         fn gallery(&self) -> Vec<std::path::PathBuf> {
             std::env::var_os("WINDIR").map(|dir| crate::platform::folder_and_children(&Path::new(&dir).join("Web").join("Wallpaper"))).unwrap_or_default()
         }
+    }
+
+    fn animations_off() -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS};
+        let mut enabled = windows::core::BOOL(1);
+        let read = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut enabled as *mut windows::core::BOOL as *mut std::ffi::c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) };
+        read.is_ok() && !enabled.as_bool()
     }
 
     impl Win {
