@@ -113,7 +113,7 @@ mod system {
         }
 
         fn live(&self) -> bool {
-            false
+            true
         }
 
         fn reduce_motion(&self) -> bool {
