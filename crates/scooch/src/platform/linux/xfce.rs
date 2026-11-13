@@ -117,7 +117,7 @@ impl Shell for Xfce {
                 let Some(grid) = xfce::grid(&area, icon, &STYLE) else { continue };
                 for (id, (row, col)) in &config.icons {
                     if self.shown(id) {
-                        found.extend(grid.rect(*row, *col).map(|rect| xfce::INSETS.apply(rect)));
+                        found.extend(grid.rect(*row, *col).map(|rect| xfce::INSETS_4_20.apply(rect)));
                     }
                 }
             }
