@@ -13,9 +13,9 @@ mod probe {
     use anyhow::{anyhow, bail, Context, Result};
     use scooch::platform::linux::parse::desktop::{Kind, Session};
     use scooch::platform::linux::parse::geometry::Insets;
-    use scooch::platform::linux::parse::{ding, gio, kde as kde_rules, keyfile, record, wakes, xfce as xfce_rules};
+    use scooch::platform::linux::parse::{caja, ding, gio, kde as kde_rules, keyfile, nemo, record, wakes, xfce as xfce_rules};
     use scooch::platform::linux::settings::{self, Gsettings, Plasma, Xfconf};
-    use scooch::platform::linux::{bus, decode, gnome, gvfs, kde, screens, tool, xfce, Linux};
+    use scooch::platform::linux::{bus, cinnamon, decode, gnome, gvfs, kde, mate, screens, tool, xfce, Linux};
     use scooch::platform::{Desktop, Screen};
     use scooch_core::{Rect, RgbImage};
     use std::collections::BTreeMap;
@@ -205,8 +205,14 @@ mod probe {
             Some(Kind::Gnome) => gnome_facts(p),
             Some(Kind::Kde) => kde_facts(p),
             Some(Kind::Xfce) => xfce_facts(p),
-            Some(Kind::Cinnamon) => file_manager_facts(p, "nemo", &["org.cinnamon.desktop.background picture-uri", "org.cinnamon.desktop.background picture-options", "org.nemo.desktop desktop-layout", "org.nemo.desktop font", "org.nemo.icon-view default-zoom-level"]),
-            Some(Kind::Mate) => file_manager_facts(p, "caja", &["org.mate.background picture-filename", "org.mate.background picture-options", "org.mate.caja.desktop font", "org.mate.caja.icon-view default-zoom-level", "org.mate.caja.desktop computer-icon-visible"]),
+            Some(Kind::Cinnamon) => {
+                file_manager_facts(p, "nemo", &["org.cinnamon.desktop.background picture-uri", "org.cinnamon.desktop.background picture-options", "org.nemo.desktop desktop-layout", "org.nemo.desktop font", "org.nemo.desktop home-icon-visible", "org.nemo.desktop trash-icon-visible", "org.nemo.desktop text-ellipsis-limit", "org.nemo.preferences show-hidden-files"]);
+                nemo_facts(p);
+            }
+            Some(Kind::Mate) => {
+                file_manager_facts(p, "caja", &["org.mate.background picture-filename", "org.mate.background picture-options", "org.mate.background show-desktop-icons", "org.mate.caja.desktop font", "org.mate.caja.desktop text-ellipsis-limit", "org.mate.caja.icon-view default-zoom-level", "org.mate.caja.desktop computer-icon-visible"]);
+                caja_facts(p);
+            }
             None => {}
         }
         let adapter = p.linux();
@@ -343,6 +349,28 @@ mod probe {
             }
             Err(error) => p.line(format!("- gio info failed {error:#}")),
         }
+    }
+
+    fn nemo_facts(p: &mut Probe) {
+        p.line(format!("- org.Cinnamon work rects {:?}", cinnamon::work_rects().map_err(|error| error.to_string())));
+        let Some(home) = dirs::home_dir() else { return };
+        let shell = cinnamon::Cinnamon { desktop: p.desktop.clone(), home, config: kde::config_folder(), session: p.session };
+        let groups = shell.metadata();
+        for window in shell.windows() {
+            let settings = nemo::settings(&groups, window.index);
+            let grid = nemo::Grid::new(window.canvas, &settings);
+            p.line(format!("- Nemo window {} primary {} canvas {} settings {settings:?} grid {:?}", window.index, window.primary, show(&window.canvas), grid.map(|grid| (grid.snap_x, grid.snap_y, grid.cols, grid.rows, grid.left, grid.top))));
+        }
+        p.line(format!("- Nemo items {:?}", shell.items(&groups).map_err(|error| error.to_string())));
+    }
+
+    fn caja_facts(p: &mut Probe) {
+        let Some(home) = dirs::home_dir() else { return };
+        let shell = mate::Mate { desktop: p.desktop.clone(), home, config: kde::config_folder(), session: p.session };
+        let groups = shell.metadata();
+        let all: Vec<Screen> = screens::read(p.session).map(|found| found.into_iter().map(|found| found.screen).collect()).unwrap_or_default();
+        p.line(format!("- Caja layout {:?}", shell.layout(&groups, &all)));
+        p.line(format!("- Caja items {:?}", shell.items(&groups).map_err(|error| error.to_string())));
     }
 
     fn defaults(p: &mut Probe) {
@@ -576,6 +604,8 @@ mod probe {
             Some(Kind::Gnome) => ding::INSETS,
             Some(Kind::Kde) => kde_rules::INSETS,
             Some(Kind::Xfce) => xfce_rules::INSETS,
+            Some(Kind::Cinnamon) => nemo::INSETS,
+            Some(Kind::Mate) => caja::INSETS,
             _ => Insets { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 },
         };
         let solved = Insets { left: current.left + lows[0].floor() as f64, top: current.top + lows[1].floor() as f64, right: current.right + lows[2].floor() as f64, bottom: current.bottom + lows[3].floor() as f64 };
@@ -819,6 +849,8 @@ mod probe {
                 vec![(Box::new(Xfconf) as Box<dyn record::Settings>, format!("{prefix}/last-image")), (Box::new(Xfconf), format!("{prefix}/image-style"))]
             }
             Some(Kind::Kde) => vec![(Box::new(Plasma) as Box<dyn record::Settings>, settings::plasma_key(kde::number_of(screen)))],
+            Some(Kind::Cinnamon) => ["org.cinnamon.desktop.background picture-uri", "org.cinnamon.desktop.background picture-options"].iter().map(|key| (Box::new(Gsettings) as Box<dyn record::Settings>, key.to_string())).collect(),
+            Some(Kind::Mate) => ["org.mate.background picture-filename", "org.mate.background picture-options"].iter().map(|key| (Box::new(Gsettings) as Box<dyn record::Settings>, key.to_string())).collect(),
             _ => Vec::new(),
         }
     }
@@ -980,6 +1012,7 @@ mod probe {
                 Some(Kind::Gnome) => Some(Box::new(Gsettings)),
                 Some(Kind::Xfce) => Some(Box::new(Xfconf)),
                 Some(Kind::Kde) => Some(Box::new(Plasma)),
+                Some(Kind::Cinnamon) | Some(Kind::Mate) => Some(Box::new(Gsettings)),
                 _ => None,
             };
             if let Some(store) = store {
