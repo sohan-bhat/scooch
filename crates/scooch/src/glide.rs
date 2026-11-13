@@ -389,3 +389,147 @@ impl Glider {
         note(&mut self.said, format!("closed {ids:?} after holding {} ms", hold.as_millis()));
     }
 }
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    pub struct Script {
+        pub adapter: String,
+        pub glided: Option<(u32, u32)>,
+        pub spawn_fails: bool,
+        pub ready_fails: bool,
+        pub shown_fails: bool,
+        pub settle_never: bool,
+        pub dies_after_glide: bool,
+        pub settle_after: Duration,
+    }
+
+    pub struct FakeHelper {
+        log: Arc<Mutex<Vec<String>>>,
+        script: Arc<Mutex<Script>>,
+        settles: Vec<(u32, Instant)>,
+        glides: Vec<u32>,
+        dead: bool,
+    }
+
+    pub struct FakeSpawner {
+        pub log: Arc<Mutex<Vec<String>>>,
+        pub script: Arc<Mutex<Script>>,
+        pub spawned: Arc<Mutex<usize>>,
+    }
+
+    impl FakeSpawner {
+        pub fn new(log: Arc<Mutex<Vec<String>>>) -> Self {
+            Self { log, script: Arc::new(Mutex::new(Script::default())), spawned: Arc::new(Mutex::new(0)) }
+        }
+    }
+
+    impl Spawn for FakeSpawner {
+        fn spawn(&self, _timeout: Duration) -> Result<Box<dyn Link>> {
+            if self.script.lock().unwrap().spawn_fails {
+                return Err(anyhow!("the test helper could not start"));
+            }
+            *self.spawned.lock().unwrap() += 1;
+            self.log.lock().unwrap().push("spawn".into());
+            Ok(Box::new(FakeHelper { log: self.log.clone(), script: self.script.clone(), settles: Vec::new(), glides: Vec::new(), dead: false }))
+        }
+    }
+
+    impl FakeHelper {
+        fn say(&self, what: String) {
+            self.log.lock().unwrap().push(what);
+        }
+
+        fn script(&self) -> Script {
+            self.script.lock().unwrap().clone()
+        }
+
+        fn living(&self) -> Result<()> {
+            if self.dead {
+                return Err(anyhow!("the helper is gone"));
+            }
+            Ok(())
+        }
+    }
+
+    impl Link for FakeHelper {
+        fn warm(&mut self, _picture: &Path, size: [u32; 2]) -> Result<()> {
+            self.living()?;
+            self.say(format!("warm {}x{}", size[0], size[1]));
+            Ok(())
+        }
+
+        fn ready(&mut self, _timeout: Duration) -> Result<String> {
+            self.living()?;
+            if self.script().ready_fails {
+                return Err(anyhow!("no device"));
+            }
+            let adapter = self.script().adapter;
+            Ok(if adapter.is_empty() { "Fake GPU".into() } else { adapter })
+        }
+
+        fn open(&mut self, id: u32, _screen: &Screen, still: &Path) -> Result<()> {
+            self.living()?;
+            self.say(format!("open {id} {}", still.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+            Ok(())
+        }
+
+        fn shown(&mut self, id: u32, timeout: Duration) -> Result<()> {
+            self.living()?;
+            if self.script().shown_fails {
+                std::thread::sleep(timeout);
+                return Err(anyhow!("macOS never reported the live layer as visible"));
+            }
+            self.say(format!("shown {id}"));
+            Ok(())
+        }
+
+        fn glide(&mut self, id: u32, a: &Path, b: &Path, _ms: u32) -> Result<()> {
+            self.living()?;
+            self.say(format!("glide {id} {} {}", a.exists(), b.exists()));
+            self.glides.push(id);
+            if self.script().dies_after_glide {
+                self.dead = true;
+            }
+            Ok(())
+        }
+
+        fn settle(&mut self, id: u32, still: &Path) -> Result<()> {
+            self.living()?;
+            self.say(format!("settle {id} {}", still.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+            self.settles.push((id, Instant::now() + self.script().settle_after));
+            Ok(())
+        }
+
+        fn hear(&mut self, timeout: Duration) -> Result<Heard> {
+            self.living()?;
+            if self.script().settle_never {
+                std::thread::sleep(timeout);
+                return Ok(Heard::Nothing);
+            }
+            if let (Some((frames, slow)), Some(id)) = (self.script().glided, self.glides.pop()) {
+                return Ok(Heard::Glided { id, frames, slow });
+            }
+            if let Some(index) = self.settles.iter().position(|(_, at)| *at <= Instant::now()) {
+                let (id, _) = self.settles.remove(index);
+                self.say(format!("settled {id}"));
+                return Ok(Heard::Settled(id));
+            }
+            std::thread::sleep(timeout.min(Duration::from_millis(5)));
+            Ok(Heard::Nothing)
+        }
+
+        fn close(&mut self, id: u32) {
+            if !self.dead {
+                self.say(format!("close {id}"));
+            }
+        }
+
+        fn alive(&mut self) -> bool {
+            !self.dead
+        }
+    }
+}
