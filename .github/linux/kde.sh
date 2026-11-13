@@ -9,7 +9,7 @@ KDE_SESSION_VERSION="$(plasmashell --version 2>/dev/null | sed -E 's/[^0-9]*([0-
 export KDE_SESSION_VERSION
 
 kwin_x11 >"$out/kwin.log" 2>&1 &
-ready "KWin work area" 30 workarea_set
+sleep 2
 plasmashell >"$out/plasmashell.log" 2>&1 &
 
 plasma_answers() {
@@ -18,4 +18,6 @@ plasma_answers() {
 
 ready "Plasma shell" 120 owned org.kde.plasmashell
 ready "Plasma desktop containment" 60 plasma_answers
+ready "work area" 60 workarea_set
+dbus-send --session --print-reply --dest=org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "string:var d = desktops()[0]; d.currentConfigGroup = ['General']; d.writeConfig('sortMode', -1); print(d.readConfig('sortMode'));" >>"$out/readiness.txt" 2>&1 || true
 run_probe 15
