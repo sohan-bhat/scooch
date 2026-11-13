@@ -1,9 +1,5 @@
-import { Color, ShaderMaterial, Texture, Vector2, Vector3, Vector4 } from 'three';
-
-export const ICON_SLOTS = 6;
-export const ATLAS_GRID = 4;
-export const CURSOR_CELL = 6;
-export const CURSOR_TIP = 0.066;
+import { Color, ShaderMaterial, Vector2, Vector3 } from 'three';
+import { pictureBody, pictureHead, pictureUniforms, type PictureUniforms } from './picture';
 
 const vertex = `
 uniform vec2 uOrigin;
@@ -24,112 +20,18 @@ void main() {
 
 const fragment = `
 precision highp float;
-
-#define ICON_SLOTS ${ICON_SLOTS}
-#define GRID ${ATLAS_GRID}.0
-
-uniform sampler2D uPhoto;
-uniform highp sampler2D uTables;
-uniform sampler2D uSaliency;
-uniform sampler2D uAtlas;
-uniform float uPlace;
-uniform float uStates;
-uniform float uSweep;
+${pictureHead}
 uniform float uPower;
-uniform float uTime;
-uniform float uAspect;
 uniform vec2 uGrid;
-uniform vec4 uIcons[ICON_SLOTS];
-uniform float uGhost[ICON_SLOTS];
-uniform vec3 uCursor;
-uniform vec2 uCursorSize;
 uniform vec3 uLamp;
 uniform vec3 uLampColor;
 uniform float uLampLevel;
-uniform vec3 uRoom;
-uniform vec3 uHeat;
-uniform vec3 uGlow;
-uniform vec3 uHot;
 uniform vec3 uRim;
 
 varying vec2 vUv;
 varying vec3 vWorld;
 varying vec3 vNormal;
-
-float hash(vec2 p) {
-  vec3 q = fract(vec3(p.xyx) * 0.1031);
-  q += dot(q, q.yzx + 33.33);
-  return fract((q.x + q.y) * q.z);
-}
-
-float noise(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  vec2 u = f * f * (3.0 - 2.0 * f);
-  float a = hash(i);
-  float b = hash(i + vec2(1.0, 0.0));
-  float c = hash(i + vec2(0.0, 1.0));
-  float d = hash(i + vec2(1.0, 1.0));
-  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-float fbm(vec2 p) {
-  float sum = 0.0;
-  float amp = 0.5;
-  for (int i = 0; i < 5; i++) {
-    sum += amp * noise(p);
-    p = p * 2.03 + vec2(17.1, 9.2);
-    amp *= 0.5;
-  }
-  return sum;
-}
-
-float lookup(int row, float at) {
-  float k = clamp(at, 0.0, 1.0) * 256.0;
-  int i = int(min(floor(k), 255.0));
-  float a = texelFetch(uTables, ivec2(i, row), 0).r;
-  float b = texelFetch(uTables, ivec2(i + 1, row), 0).r;
-  return mix(a, b, k - float(i));
-}
-
-vec2 place(vec2 uv) {
-  float clamped = clamp(uPlace, 0.0, uStates - 1.0);
-  float from = min(floor(clamped), uStates - 2.0);
-  float t = clamped - from;
-  int a = int(from) * 2;
-  int b = a + 2;
-  vec2 start = vec2(lookup(a, uv.x), lookup(a + 1, uv.y));
-  vec2 end = vec2(lookup(b, uv.x), lookup(b + 1, uv.y));
-  return mix(start, end, t);
-}
-
-vec3 picture(vec2 uv) {
-  return texture(uPhoto, place(clamp(uv, 0.0, 1.0))).rgb;
-}
-
-vec3 heatmap(vec3 photo, float s, float soft) {
-  float level = clamp(max(s, soft * 0.8), 0.0, 1.0);
-  float grey = dot(photo, vec3(0.2126, 0.7152, 0.0722));
-  vec3 base = vec3(grey) * 0.055 * (1.0 - smoothstep(0.35, 0.95, level) * 0.6);
-  vec3 glow = uHeat * smoothstep(0.05, 0.55, level) * 0.8;
-  glow += uGlow * smoothstep(0.45, 0.9, level) * 0.7;
-  glow += uHot * smoothstep(0.9, 1.0, level) * 0.4;
-  glow += uHeat * smoothstep(0.02, 0.35, soft) * 0.12;
-  float lines = abs(fract(level * 7.0) - 0.5);
-  float width = fwidth(level * 7.0) * 1.2;
-  float contour = 1.0 - smoothstep(0.0, width + 0.001, lines - 0.46);
-  glow += uGlow * contour * 0.05 * smoothstep(0.05, 0.3, level);
-  return base + glow;
-}
-
-vec4 atlasCell(float index, float row, vec2 q, vec2 dx, vec2 dy, vec2 scale) {
-  vec2 cell = vec2(mod(index, GRID), row + floor(index / GRID));
-  vec2 at = (cell + clamp(q, 0.002, 0.998)) / GRID;
-  vec2 size = vec2(textureSize(uAtlas, 0));
-  float footprint = max(length(dx * scale * size), length(dy * scale * size));
-  float lod = clamp(log2(max(footprint, 1e-4)), 0.0, 10.0);
-  return clamp(textureLod(uAtlas, at, lod), 0.0, 1.0);
-}
+${pictureBody}
 
 void main() {
   vec2 uv = vUv;
@@ -137,54 +39,9 @@ void main() {
   vec2 dy = dFdy(uv);
   float inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
 
-  float saliency = texture(uSaliency, uv).r;
-  float saliencySoft = textureLod(uSaliency, uv, 2.5).r;
-  float reveal = step(0.5, uSweep);
-  float wet = 0.0;
-  float rim = 0.0;
-  if (uSweep > 0.0005 && uSweep < 0.9995) {
-    vec2 paper = vec2(uv.x * uAspect, uv.y);
-    float diagonal = (paper.x + uv.y) / (uAspect + 1.0);
-    float warp = fbm(paper * 2.3 + vec2(0.0, uTime * 0.025));
-    float wobble = (warp - 0.5) * 0.13;
-    float feather = (fbm(paper * 9.0 + warp * 2.5) - 0.5) * 0.02;
-    float front = mix(-0.2, 1.2, uSweep);
-    float behind = front - (diagonal + wobble + feather);
-    reveal = smoothstep(0.0, 0.055, behind);
-    wet = smoothstep(-0.06, 0.0, behind) * (1.0 - smoothstep(0.0, 0.08, behind));
-    rim = exp(-abs(behind) * 110.0) * (0.5 + 0.4 * fbm(paper * 30.0)) + exp(-max(behind, 0.0) * 24.0) * step(0.0, behind) * 0.14;
-  }
-
-  vec3 photo = picture(uv);
-  vec3 color = photo * (1.0 - wet * 0.5);
-  color = mix(color, heatmap(photo, saliency, saliencySoft), reveal);
-
-  vec2 ghostScale = vec2(1.0);
-  for (int i = 0; i < ICON_SLOTS; i++) {
-    vec4 rect = uIcons[i];
-    vec2 q = (uv - rect.xy) / rect.zw;
-    float hit = step(0.0, q.x) * step(q.x, 1.0) * step(0.0, q.y) * step(q.y, 1.0);
-    if (hit > 0.0) {
-      vec2 scale = 1.0 / (rect.zw * GRID);
-      vec4 filled = atlasCell(float(i), 0.0, q, dx, dy, scale);
-      vec4 outline = atlasCell(float(i), 2.0, q, dx, dy, scale);
-      vec4 icon = mix(filled, outline, reveal);
-      float alpha = icon.a * (1.0 - uGhost[i] * 0.45);
-      color = color * (1.0 - alpha) + icon.rgb * alpha;
-    }
-  }
-
-  if (uCursor.z > 0.0) {
-    vec2 q = (uv - uCursor.xy) / uCursorSize + ${CURSOR_TIP};
-    float hit = step(0.0, q.x) * step(q.x, 1.0) * step(0.0, q.y) * step(q.y, 1.0);
-    if (hit > 0.0) {
-      vec4 pointer = atlasCell(${CURSOR_CELL}.0, 0.0, q, dx, dy, 1.0 / (uCursorSize * GRID));
-      color = color * (1.0 - pointer.a * uCursor.z) + pointer.rgb * pointer.a * uCursor.z;
-    }
-  }
-
-  vec3 ink = mix(uHeat, uGlow, 0.7);
-  color += ink * rim;
+  vec3 color = picture(uv);
+  color = icons(color, uv, dx, dy);
+  color = cursor(color, uv, dx, dy);
 
   vec2 cell = uv * uGrid;
   vec2 sub = fract(cell);
@@ -197,8 +54,7 @@ void main() {
       smoothstep(0.66, 0.72, sub.x) * (1.0 - smoothstep(0.94, 1.0, sub.x))
     );
     float rows = smoothstep(0.02, 0.12, sub.y) * (1.0 - smoothstep(0.86, 0.98, sub.y));
-    vec3 lattice = stripes * rows * 2.4;
-    color *= mix(vec3(1.0), lattice, near * 0.38);
+    color *= mix(vec3(1.0), stripes * rows * 2.4, near * 0.38);
   }
 
   vec2 centered = uv - 0.5;
@@ -224,67 +80,29 @@ void main() {
 }
 `;
 
-export type ScreenUniforms = {
-  uPhoto: { value: Texture | null };
-  uTables: { value: Texture | null };
-  uSaliency: { value: Texture | null };
-  uAtlas: { value: Texture | null };
-  uPlace: { value: number };
-  uStates: { value: number };
-  uSweep: { value: number };
+export type LcdUniforms = PictureUniforms & {
   uPower: { value: number };
-  uTime: { value: number };
-  uAspect: { value: number };
   uGrid: { value: Vector2 };
   uOrigin: { value: Vector2 };
   uExtent: { value: Vector2 };
-  uIcons: { value: Vector4[] };
-  uGhost: { value: number[] };
-  uCursor: { value: Vector3 };
-  uCursorSize: { value: Vector2 };
   uLamp: { value: Vector3 };
   uLampColor: { value: Color };
   uLampLevel: { value: number };
-  uRoom: { value: Color };
-  uHeat: { value: Color };
-  uGlow: { value: Color };
-  uHot: { value: Color };
   uRim: { value: Color };
 };
 
-export function createScreenMaterial() {
-  const uniforms: ScreenUniforms = {
-    uPhoto: { value: null },
-    uTables: { value: null },
-    uSaliency: { value: null },
-    uAtlas: { value: null },
-    uPlace: { value: 0 },
-    uStates: { value: 3 },
-    uSweep: { value: 0 },
+export function createLcdMaterial() {
+  const uniforms: LcdUniforms = {
+    ...pictureUniforms(),
     uPower: { value: 1 },
-    uTime: { value: 0 },
-    uAspect: { value: 4 / 3 },
     uGrid: { value: new Vector2(640, 480) },
     uOrigin: { value: new Vector2() },
     uExtent: { value: new Vector2(1, 1) },
-    uIcons: { value: Array.from({ length: ICON_SLOTS }, () => new Vector4(-1, -1, 0.01, 0.01)) },
-    uGhost: { value: new Array(ICON_SLOTS).fill(0) },
-    uCursor: { value: new Vector3(0.5, 0.5, 0) },
-    uCursorSize: { value: new Vector2(0.06, 0.08) },
     uLamp: { value: new Vector3(0, 2, 0) },
     uLampColor: { value: new Color(1, 0.7, 0.4) },
     uLampLevel: { value: 1 },
-    uRoom: { value: new Color() },
-    uHeat: { value: new Color() },
-    uGlow: { value: new Color() },
-    uHot: { value: new Color() },
     uRim: { value: new Color() },
   };
-  const material = new ShaderMaterial({
-    name: 'scooch-screen',
-    vertexShader: vertex,
-    fragmentShader: fragment,
-    uniforms,
-  });
+  const material = new ShaderMaterial({ name: 'scooch-lcd', vertexShader: vertex, fragmentShader: fragment, uniforms });
   return { material, uniforms };
 }

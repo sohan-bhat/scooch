@@ -15,11 +15,21 @@ export type DemoFrame = {
 export type DemoManifest = {
   screen: { width: number; height: number };
   icons: { id: string; label: string; glyph: string }[];
-  photo: { file: string; width: number; height: number };
+  photo: { file: string; width: number; height: number; saliency: string };
   order: string[];
   tables: Record<string, { fx: number[]; fy: number[] }>;
   frames: Record<string, DemoFrame> & { before: DemoFrame; fixed: DemoFrame; moved: DemoFrame };
   drag: { icon: string; from: [number, number]; to: [number, number] };
+  pictures: DemoPicture[];
+};
+
+export type DemoPicture = {
+  id: string;
+  photo: { file: string; width: number; height: number };
+  order: string[];
+  tables: Record<string, { fx: number[]; fy: number[] }>;
+  frames: Record<string, { average: [number, number, number]; hidden: number; subject: Rect }>;
+  icons: Record<string, Rect>;
 };
 
 let pending: Promise<DemoManifest> | null = null;
