@@ -22,10 +22,11 @@ pub const FLIP_HINT: &str = "Icons still cover part of the picture. Run scooch f
 pub const FLIP_ON: &str = "Scooch may now flip your picture when that clears your icons.";
 pub const FLIP_OFF: &str = "Scooch now keeps your picture the way round it is.";
 pub const GUIDE: &str = "Your wallpaper is not a picture file, so pick a picture for Scooch to move.";
+pub const MADE: &str = "This desktop still shows a picture Scooch made, so pick a picture for Scooch to move.";
 pub const NO_SCREEN: &str = "No screen was found, so connect one and try again.";
 pub const NO_PICTURE: &str = "Scooch needs a picture file as your wallpaper, so pick one in your system settings or run scooch use with a picture.";
 pub const NO_TERMINAL: &str = "To switch the picture, run scooch use followed by the path of an image.";
-pub const WAITING: &str = "Scooch is on. It starts when a desktop shows.";
+pub const WAITING: &str = "Scooch is on. No desktop is showing right now.";
 
 #[derive(serde::Deserialize)]
 struct SceneFile {
@@ -75,7 +76,7 @@ pub fn start() -> Result<()> {
         FirstRun::Go => {}
         FirstRun::Fail => bail!(NO_PICTURE),
         FirstRun::Pick => {
-            println!("{GUIDE}");
+            println!("{}", guide(desktop.as_ref(), &store));
             let Some(pick) = choose(&desktop.gallery())? else { return Ok(()) };
             return switch_with(&store, Some(pick));
         }
@@ -597,6 +598,15 @@ pub enum FirstRun {
     Fail,
 }
 
+pub fn guide(desktop: &dyn Desktop, store: &Store) -> &'static str {
+    let made = desktop.screens().unwrap_or_default().iter().any(|screen| desktop.wallpaper(screen).ok().flatten().is_some_and(|path| store.owns(&path)));
+    if made {
+        MADE
+    } else {
+        GUIDE
+    }
+}
+
 pub fn turn_on(state: &mut State, desktop: &dyn Desktop, store: &Store, terminal: bool) -> Result<FirstRun> {
     if wake_up(state) || state.on {
         return Ok(FirstRun::Go);
@@ -834,7 +844,7 @@ mod tests {
         assert_eq!(first_run(true, true), FirstRun::Go);
         assert_eq!(first_run(false, true), FirstRun::Pick);
         assert_eq!(first_run(false, false), FirstRun::Fail);
-        for line in [GUIDE, NO_PICTURE] {
+        for line in [GUIDE, MADE, NO_PICTURE, WAITING] {
             assert!(!line.contains(['—', '–', ';', '(', ')']) && !line.contains(": "), "{line}");
         }
     }
@@ -1574,6 +1584,18 @@ mod tests {
         store.save(&State { restoring: true, ..State::default() }).unwrap();
         assert!(!idle(fake.as_ref(), &store).unwrap());
         assert_eq!(unloads(), 2);
+    }
+
+    #[test]
+    fn a_desktop_left_on_scoochs_picture_is_named_as_such() {
+        let (fake, store, _, _) = desk("madeguide");
+        let mut state = State::default();
+        assert_eq!(turn_on(&mut state, fake.as_ref(), &store, true).unwrap(), FirstRun::Pick);
+        assert_eq!(guide(fake.as_ref(), &store), GUIDE);
+        shown_output(&fake, &store);
+        let mut state = State::default();
+        assert_eq!(turn_on(&mut state, fake.as_ref(), &store, true).unwrap(), FirstRun::Pick);
+        assert_eq!(guide(fake.as_ref(), &store), MADE);
     }
 
     #[test]
