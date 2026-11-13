@@ -2327,13 +2327,64 @@ mod probe {
 
     struct Pass<'a> {
         label: &'a str,
+        name: &'a str,
         tables: (&'a Path, &'a Path),
         track: bool,
         old: &'a (PathBuf, RgbImage),
         new: &'a (PathBuf, RgbImage),
         frames: &'a [(f32, RgbImage)],
         ending: Ending,
-        strip: Option<&'a str>,
+        ms: u32,
+        strip: bool,
+    }
+
+    fn equal_until(area: RECT, still: &RgbImage, keep: &[usize], limit: Duration) -> (Option<Duration>, (f32, u8, u8)) {
+        let started = Instant::now();
+        let mut last = (f32::MAX, 255, 255);
+        while started.elapsed() < limit {
+            if let Ok(shot) = capture(area) {
+                last = difference(&shot, still, keep);
+                if last.1 <= 2 && last.0 < 0.3 {
+                    return (Some(started.elapsed()), last);
+                }
+            }
+            pump(Duration::from_millis(15));
+        }
+        (None, last)
+    }
+
+    fn evidence(p: &mut Probe, name: &str, shot: &RgbImage, reference: &RgbImage, keep: &[usize], marks: &[(&str, Option<i128>)]) -> String {
+        let width = shot.width() as usize;
+        let (s, r) = (shot.as_raw(), reference.as_raw());
+        let mut shades = vec![0u8; s.len()];
+        let (mut count, mut left, mut top, mut right, mut bottom, mut sx, mut sy) = (0usize, usize::MAX, usize::MAX, 0usize, 0usize, 0f64, 0f64);
+        for index in keep {
+            let at = index * 3;
+            let gap = (0..3).map(|c| s[at + c].abs_diff(r[at + c])).max().unwrap_or(0);
+            let (x, y) = (index % width, index / width);
+            shades[at..at + 3].fill(gap.saturating_mul(4));
+            if gap > 8 {
+                count += 1;
+                (left, top, right, bottom) = (left.min(x), top.min(y), right.max(x), bottom.max(y));
+                sx += x as f64;
+                sy += y as f64;
+            }
+        }
+        let _ = save_png(&p.out.join(format!("{name}-capture.png")), shot);
+        let _ = save_png(&p.out.join(format!("{name}-still.png")), reference);
+        if let Some(diff) = RgbImage::from_raw(shot.width(), shot.height(), shades) {
+            let _ = save_png(&p.out.join(format!("{name}-diff.png")), &diff);
+        }
+        let when: Vec<String> = marks.iter().map(|(label, at)| format!("{label} {}", at.map_or("never".to_string(), |at| format!("{at:+} ms")))).collect();
+        if count == 0 {
+            return format!("saved {name}-capture.png, no pixel off by more than 8, taken {}", when.join(", "));
+        }
+        format!(
+            "saved {name}-capture.png, {name}-still.png and {name}-diff.png, {count} pixels off by more than 8 between {left},{top} and {right},{bottom}, centred at {:.0},{:.0}, taken {}",
+            sx / count as f64,
+            sy / count as f64,
+            when.join(", ")
+        )
     }
 
     fn glide_run(p: &mut Probe, helper: &mut Helper, id: u32, screen: &Screen, kit: &Kit, run: &Pass) -> Result<()> {
@@ -2342,20 +2393,35 @@ mod probe {
         let (width, height) = (kit.size[0], kit.size[1]);
         let keep = outside(width, height, &kit.icons, 2);
         let wide = outside(width, height, &kit.icons, 1);
-        p.line(format!("- **{}**", run.label));
+        p.line(format!("- **{}**, {} ms", run.label, run.ms));
+        let asked_old = Instant::now();
         desktop.set_wallpaper(screen, &run.old.0)?;
-        let landed = shows(area, &run.old.1, &keep, Duration::from_secs(4));
+        let (landed, landed_gap) = equal_until(area, &run.old.1, &wide, Duration::from_secs(6));
         park_cursor();
         let baseline = settle(area, Duration::from_secs(3))?;
         let mask = strong(&baseline, &run.old.1, &kit.icons);
         let system = difference(&baseline, &run.old.1, &wide);
+        p.line(format!(
+            "  - the old still was set and a capture equalled it after {:?} ms of {} ms waited (last gap mean {:.2} 99th {} largest {}), the system against the file mean {:.2} 99th {} largest {}",
+            landed.map(|d| d.as_millis()),
+            asked_old.elapsed().as_millis(),
+            landed_gap.0,
+            landed_gap.1,
+            landed_gap.2,
+            system.0,
+            system.1,
+            system.2
+        ));
+        if landed.is_none() {
+            p.failed.push(format!("{}: the old still never showed exactly before open", run.label));
+        }
         let asked = Instant::now();
         helper.ask_open(id, screen, &run.old.0)?;
-        let mut opening: Vec<(f32, u8, u8)> = Vec::new();
+        let mut opening: Vec<(u128, RgbImage)> = Vec::new();
         let mut shown: Option<(u64, u128)> = None;
         while asked.elapsed() < Duration::from_secs(4) {
             if let Ok(shot) = capture(area) {
-                opening.push(difference(&shot, &baseline, &wide));
+                opening.push((asked.elapsed().as_millis(), shot));
             }
             match shown {
                 Some((_, at)) if asked.elapsed().as_millis() > at + 150 => break,
@@ -2368,29 +2434,28 @@ mod probe {
             }
         }
         let (shown_ms, shown_at) = shown.context("the helper never said the layer was shown")?;
-        let worst_open = opening.iter().fold((0.0f32, 0u8, 0u8), |w, d| (w.0.max(d.0), w.1.max(d.1), w.2.max(d.2)));
-        p.line(format!(
-            "  - wallpaper set to the old still, on screen after {:?} ms, system drawing against the file outside the icons mean {:.2} 99th {} largest {}, open answered shown after {shown_ms} ms by the helper and {shown_at} ms by the probe, {} captures during the open against the plain desktop: worst mean {:.2} 99th {} largest {}",
-            landed.map(|d| d.as_millis()),
-            system.0,
-            system.1,
-            system.2,
-            opening.len(),
-            worst_open.0,
-            worst_open.1,
-            worst_open.2
-        ));
-        if worst_open.1 > 8 {
-            p.failed.push(format!("{}: opening the layer changed the screen", run.label));
+        let opened: Vec<(f32, u8, u8)> = opening.iter().map(|(_, shot)| difference(shot, &baseline, &wide)).collect();
+        let worst_open = opened.iter().enumerate().max_by_key(|(_, d)| d.1).map(|(index, d)| (index, *d));
+        let mut line = format!("  - open answered shown after {shown_ms} ms by the helper and {shown_at} ms by the probe, {} captures during the open against the plain desktop", opening.len());
+        if let Some((index, d)) = worst_open {
+            line += &format!(": worst mean {:.2} 99th {} largest {}", d.0, d.1, d.2);
+            if d.1 > 2 {
+                let at = opening[index].0 as i128;
+                line += &format!(", {}", evidence(p, &format!("{}-open", run.name), &opening[index].1, &baseline, &wide, &[("after open was sent", Some(at)), ("after shown", Some(at - shown_at as i128))]));
+            }
+            if d.1 > 8 {
+                p.failed.push(format!("{}: opening the layer changed the screen", run.label));
+            }
         }
+        p.line(line);
         let started = Instant::now();
-        helper.ask_glide(id, run.tables.0, run.tables.1, GLIDE_MS)?;
+        helper.ask_glide(id, run.tables.0, run.tables.1, run.ms)?;
         if run.ending == Ending::AtOnce {
             helper.ask_settle(id, &run.new.0, None)?;
         }
         let mut shots: Vec<(u128, RgbImage)> = Vec::new();
-        let (mut set_at, mut glided, mut settled, mut failed, mut closed_at) = (None, None, None, None, None);
-        let limit = if run.ending == Ending::Never { Duration::from_secs(9) } else { Duration::from_secs(5) };
+        let (mut set_at, mut glided, mut settled, mut failed, mut closed_at, mut full_at) = (None, None, None, None, None, None);
+        let limit = Duration::from_millis(u64::from(run.ms)) + if run.ending == Ending::Never { Duration::from_secs(9) } else { Duration::from_secs(6) };
         while started.elapsed() < limit {
             let at = started.elapsed().as_millis();
             if set_at.is_none() && at >= 150 {
@@ -2401,6 +2466,12 @@ mod probe {
                 }
             }
             if let Ok(shot) = capture(area) {
+                if settled.is_some() && full_at.is_none() {
+                    let d = difference(&shot, &run.new.1, &wide);
+                    if d.1 <= 2 && d.0 < 0.3 {
+                        full_at = Some(at);
+                    }
+                }
                 shots.push((at, shot));
             }
             while let Some(reply) = helper.next(Duration::ZERO) {
@@ -2415,7 +2486,7 @@ mod probe {
             if closed_at.is_none() {
                 let ready = match run.ending {
                     Ending::Never => failed.as_ref().map(|(at, _)| *at),
-                    _ => settled.map(|at| at + 400),
+                    _ => full_at.or(settled.map(|at| at + 1500)).map(|at| at.max(settled.unwrap_or(0) + 400)),
                 };
                 if ready.is_some_and(|ready| started.elapsed().as_millis() >= ready) {
                     if run.ending != Ending::Never {
@@ -2435,76 +2506,124 @@ mod probe {
         pump(Duration::from_millis(300));
         let after = capture(area)?;
         let left = layer::ours_left();
-        let glide_end = glided.map(|g| g.0).unwrap_or(GLIDE_MS as u128 + 200);
+        let marks = |at: u128| -> Vec<(&'static str, Option<i128>)> {
+            vec![
+                ("from the wallpaper set", set_at.map(|set| at as i128 - set as i128)),
+                ("from settled", settled.map(|done| at as i128 - done as i128)),
+                ("from close", closed_at.map(|closed| at as i128 - closed as i128)),
+            ]
+        };
+        let glide_end = glided.map(|g| g.0).unwrap_or(u128::from(run.ms) + 200);
         let moving: Vec<&(u128, RgbImage)> = shots.iter().filter(|(at, _)| *at <= glide_end).collect();
-        let matches: Vec<(u128, f32, f32)> = moving.iter().map(|(at, shot)| {
-            let (s, gap) = best_frame(shot, run.frames, &keep);
-            (*at, s, gap)
-        }).collect();
+        let matches: Vec<(u128, f32, f32)> = moving
+            .iter()
+            .map(|(at, shot)| {
+                let (s, gap) = best_frame(shot, run.frames, &keep);
+                (*at, s, gap)
+            })
+            .collect();
         let lead = 80 + glided.map_or(0, |g| u128::from(g.3));
         let worst_after_lead = matches.iter().filter(|(at, ..)| *at > lead).map(|m| m.2).fold(0.0f32, f32::max);
-        let worst = matches.iter().map(|m| m.2).fold(0.0f32, f32::max);
-        let backwards = matches.windows(2).filter(|pair| pair[1].1 + 0.051 < pair[0].1).count();
+        let step = 1.0 / (run.frames.len().max(2) - 1) as f32;
+        let backwards = matches.windows(2).filter(|pair| pair[1].1 + step * 1.01 < pair[0].1).count();
+        let distinct = {
+            let mut seen: Vec<i32> = matches.iter().map(|m| (m.1 / step).round() as i32).collect();
+            seen.dedup();
+            seen.len()
+        };
         let mut progress = Vec::new();
-        if run.track && kit.subject[0] != kit.subject[1] && run.ending != Ending::Never {
+        if run.track && run.ending != Ending::Never {
             let pattern = template(&run.old.1, kit.subject[0], 40);
             for (_, shot) in &moving {
                 progress.push(tracked(shot, &pattern, kit.subject[0], kit.subject[1]));
             }
         }
         let slipped = progress.windows(2).filter(|pair| pair[1] + 0.03 < pair[0]).count();
-        let (mut worst_cover, mut worst_redrawn) = (0usize, 0usize);
-        for (_, shot) in &shots {
+        let places = {
+            let mut seen: Vec<i32> = progress.iter().map(|t| (t * 48.0).round() as i32).collect();
+            seen.dedup();
+            seen.len()
+        };
+        let mut worst_cover = (0usize, 0usize, 0usize);
+        for (index, (_, shot)) in shots.iter().enumerate() {
             let (s, _) = best_frame(shot, run.frames, &keep);
             let nearest = run.frames.iter().min_by(|x, y| (x.0 - s).abs().total_cmp(&(y.0 - s).abs())).map(|(_, frame)| frame);
             let mut expected = vec![&run.old.1, &run.new.1];
             expected.extend(nearest);
             let (hidden, redrawn) = covered(shot, &baseline, &expected, &mask);
-            worst_cover = worst_cover.max(hidden);
-            worst_redrawn = worst_redrawn.max(redrawn);
+            if hidden > worst_cover.0 {
+                worst_cover.0 = hidden;
+                worst_cover.2 = index;
+            }
+            worst_cover.1 = worst_cover.1.max(redrawn);
         }
         let from_settle = settled.or(failed.as_ref().map(|f| f.0)).unwrap_or(u128::MAX);
-        let held: Vec<(f32, u8, u8)> = shots.iter().filter(|(at, _)| *at >= from_settle).map(|(_, shot)| difference(shot, &run.new.1, &wide)).chain(std::iter::once(difference(&after, &run.new.1, &wide))).collect();
-        let worst_held = held.iter().fold((0.0f32, 0u8, 0u8), |w, d| (w.0.max(d.0), w.1.max(d.1), w.2.max(d.2)));
+        let held: Vec<(usize, (f32, u8, u8))> = shots.iter().enumerate().filter(|(_, (at, _))| *at >= from_settle).map(|(index, (_, shot))| (index, difference(shot, &run.new.1, &wide))).collect();
+        let after_gap = difference(&after, &run.new.1, &wide);
+        let worst_held = held.iter().max_by_key(|(_, d)| d.1).copied();
+        let first_after_settled = held.first().map(|(_, d)| *d);
         let distances: Vec<(f32, f32)> = shots.iter().map(|(_, shot)| (difference(shot, &run.old.1, &keep).0, difference(shot, &run.new.1, &keep).0)).collect();
         let appeared = distances.iter().position(|(_, new)| *new < 1.5);
-        let returned = appeared.map_or(0, |first| distances[first..].iter().filter(|(old, new)| *old + 0.5 < *new && *new > 1.5).count());
+        let returned: Vec<usize> = appeared.map_or(Vec::new(), |first| (first..distances.len()).filter(|index| distances[*index].0 + 0.5 < distances[*index].1 && distances[*index].1 > 1.5).collect());
         p.line(format!(
-            "  - glided {:?}, settled at {settled:?} ms, failure {failed:?}, new wallpaper set at {set_at:?} ms, closed at {closed_at:?} ms, {} captures at {:.1} per second",
+            "  - glided {:?}, settled at {settled:?} ms, first capture equal to the new still at {full_at:?} ms, failure {failed:?}, new wallpaper set at {set_at:?} ms, closed at {closed_at:?} ms, {} captures at {:.1} per second",
             glided.map(|(at, frames, slow, first, uploads)| format!("at {at} ms with {frames} frames, {slow} slow, first moving frame {first} ms after glide was sent, pictures uploaded {uploads}")),
             shots.len(),
             shots.len() as f32 / started.elapsed().as_secs_f32().max(0.001)
         ));
         p.line(format!(
-            "  - captures during the motion matched to the CPU frame: {}, worst mean {worst:.2}, worst after the {lead} ms lead in {worst_after_lead:.2}, steps back in s {backwards}",
-            matches.iter().map(|(at, s, gap)| format!("{at} ms s {s:.2} gap {gap:.1}")).collect::<Vec<_>>().join(", ")
+            "  - {} captures during the motion matched to the CPU frame, {distinct} distinct s, worst mean {:.2}, worst after the {lead} ms lead in {worst_after_lead:.2}, steps back in s {backwards}: {}",
+            matches.len(),
+            matches.iter().map(|m| m.2).fold(0.0f32, f32::max),
+            matches.iter().map(|(at, s, gap)| format!("{at} {s:.3} {gap:.1}")).collect::<Vec<_>>().join(", ")
         ));
         if !progress.is_empty() {
-            p.line(format!("  - subject progress from its place in A to its place in B {:?}, steps back {slipped}", progress.iter().map(|t| (t * 100.0).round() / 100.0).collect::<Vec<_>>()));
+            p.line(format!("  - subject progress from A to B in {places} distinct places, steps back {slipped}: {:?}", progress.iter().map(|t| (t * 100.0).round() / 100.0).collect::<Vec<_>>()));
         }
-        p.line(format!(
-            "  - icon pixels covered by the layer in the worst capture {worst_cover} of {}, icon pixels the desktop drew differently but not covered {worst_redrawn}, from settled to a second after close against the new still: worst mean {:.2} 99th {} largest {}, old picture seen again after the new one {returned} times, windows of ours left {left}",
-            mask.len(),
-            worst_held.0,
-            worst_held.1,
-            worst_held.2
-        ));
-        if let Some(name) = run.strip {
-            if let Some(image) = strip(&shots, 0, glide_end) {
-                let _ = save_png(&p.out.join(format!("{name}.png")), &image);
+        let mut line = format!("  - icon pixels covered by the layer in the worst capture {} of {}, icon pixels the desktop drew differently but not covered {}", worst_cover.0, mask.len(), worst_cover.1);
+        if worst_cover.0 > 0 {
+            let (at, shot) = &shots[worst_cover.2];
+            line += &format!(", {}", evidence(p, &format!("{}-covered", run.name), shot, &baseline, &(0..(width * height) as usize).collect::<Vec<_>>(), &marks(*at)));
+        }
+        p.line(line);
+        let mut line = format!(
+            "  - against the new still: first capture after settled {:?}, after close {:.2} 99th {} largest {}",
+            first_after_settled.map(|d| format!("mean {:.2} 99th {} largest {}", d.0, d.1, d.2)),
+            after_gap.0,
+            after_gap.1,
+            after_gap.2
+        );
+        if let Some((index, d)) = worst_held {
+            line += &format!(", worst from settled to a second after close mean {:.2} 99th {} largest {}", d.0, d.1, d.2);
+            if d.1 > 2 {
+                let (at, shot) = &shots[index];
+                line += &format!(", {}", evidence(p, &format!("{}-handover", run.name), shot, &run.new.1, &wide, &marks(*at)));
+            }
+            if d.1 > 8 {
+                p.failed.push(format!("{}: the hand over to the new wallpaper showed a difference", run.label));
             }
         }
-        if worst_cover * 100 > mask.len().max(1) {
+        p.line(line);
+        let mut line = format!("  - old picture seen again after the new one {} times, windows of ours left {left}", returned.len());
+        if let Some(index) = returned.first() {
+            let (at, shot) = &shots[*index];
+            line += &format!(", {}", evidence(p, &format!("{}-returned", run.name), shot, &run.new.1, &keep, &marks(*at)));
+            p.failed.push(format!("{}: the old picture came back after the new one", run.label));
+        }
+        p.line(line);
+        if run.strip {
+            if let Some(image) = strip(&shots, 0, glide_end) {
+                let _ = save_png(&p.out.join(format!("{}-strip.png", run.name)), &image);
+            }
+        }
+        if worst_cover.0 * 100 > mask.len().max(1) {
             p.failed.push(format!("{}: icons were covered in a capture", run.label));
         }
         if backwards > 0 || slipped > 0 {
             p.failed.push(format!("{}: the motion stepped back", run.label));
         }
-        if returned > 0 {
-            p.failed.push(format!("{}: the old picture came back after the new one", run.label));
-        }
-        if worst_held.1 > 8 {
-            p.failed.push(format!("{}: the hand over to the new wallpaper showed a difference", run.label));
+        if run.track && run.ending != Ending::Never && run.ms >= 1000 && places < 8 {
+            p.failed.push(format!("{}: the subject was seen in only {places} places", run.label));
         }
         if left > 0 {
             p.failed.push(format!("{}: a layer window was left", run.label));
@@ -2518,6 +2637,139 @@ mod probe {
         if run.ending != Ending::Never && settled.is_none() {
             p.failed.push(format!("{}: the helper never answered settled", run.label));
         }
+        if run.ending != Ending::Never && settled.is_some() && first_after_settled.is_some_and(|d| d.1 > 2) {
+            p.failed.push(format!("{}: the first capture after settled was not the new still", run.label));
+        }
+        Ok(())
+    }
+
+    fn wallpaper_window() -> Option<HWND> {
+        match layer::layout().ok()?.0 {
+            layer::Layout::InProgman { wallpaper, .. } | layer::Layout::InWorkerW { wallpaper, .. } => Some(HWND(wallpaper as *mut c_void)),
+            layer::Layout::ProgmanOnly { progman, .. } => Some(HWND(progman as *mut c_void)),
+        }
+    }
+
+    fn window_pixels(window: HWND, width: i32, height: i32) -> Option<RgbImage> {
+        let source = unsafe { GetDC(Some(window)) };
+        if source.is_invalid() {
+            return None;
+        }
+        let memory = unsafe { CreateCompatibleDC(Some(source)) };
+        let bitmap = unsafe { CreateCompatibleBitmap(source, width, height) };
+        let old = unsafe { SelectObject(memory, bitmap.into()) };
+        let copied = unsafe { BitBlt(memory, 0, 0, width, height, Some(source), 0, 0, SRCCOPY) };
+        unsafe { SelectObject(memory, old) };
+        let header = BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: width, biHeight: -height, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() };
+        let mut info = BITMAPINFO { bmiHeader: header, ..Default::default() };
+        let mut data = vec![0u8; width as usize * height as usize * 4];
+        let lines = unsafe { GetDIBits(memory, bitmap, 0, height as u32, Some(data.as_mut_ptr() as *mut c_void), &mut info, DIB_RGB_COLORS) };
+        let _ = unsafe { DeleteObject(bitmap.into()) };
+        let _ = unsafe { DeleteDC(memory) };
+        unsafe { ReleaseDC(Some(window), source) };
+        if copied.is_err() || lines != height {
+            return None;
+        }
+        let rgb = data.as_chunks::<4>().0.iter().flat_map(|pixel| [pixel[2], pixel[1], pixel[0]]).collect();
+        RgbImage::from_raw(width as u32, height as u32, rgb)
+    }
+
+    fn classify(shot: &RgbImage, old: &RgbImage, new: &RgbImage, keep: &[usize]) -> char {
+        let (a, b) = (difference(shot, old, keep).0, difference(shot, new, keep).0);
+        if a < 1.0 && a <= b {
+            'A'
+        } else if b < 1.0 {
+            'B'
+        } else {
+            '~'
+        }
+    }
+
+    fn handover_question(p: &mut Probe, helper: &mut Helper, id: &mut u32, screen: &Screen, kit: &Kit) -> Result<()> {
+        let desktop = platform::current()?;
+        let area = screen_rect(screen);
+        let (width, height) = (kit.size[0], kit.size[1]);
+        let keep = outside(width, height, &kit.icons, 3);
+        let (old, new) = (&kit.stills[0], &kit.stills[1]);
+        p.line("- **what the screen shows when the layer closes after the system wallpaper changed under it**".to_string());
+        for delay in [0u64, 150, 300, 600, 1200, 2500] {
+            desktop.set_wallpaper(screen, &old.0)?;
+            let (ready, _) = equal_until(area, &old.1, &keep, Duration::from_secs(6));
+            *id += 1;
+            helper.open(*id, screen, &old.0, ANSWER)?;
+            pump(Duration::from_millis(200));
+            let window = wallpaper_window();
+            let set = Instant::now();
+            desktop.set_wallpaper(screen, &new.0)?;
+            let mut painted = None;
+            let mut under = String::new();
+            while set.elapsed() < Duration::from_millis(delay) {
+                if let Some(window) = window {
+                    if let Some(shot) = window_pixels(window, width as i32, height as i32) {
+                        let class = classify(&shot, &old.1, &new.1, &keep);
+                        if !under.ends_with(class) {
+                            under.push(class);
+                        }
+                        if class == 'B' && painted.is_none() {
+                            painted = Some(set.elapsed().as_millis());
+                        }
+                    }
+                }
+                pump(Duration::from_millis(10));
+            }
+            let closing = Instant::now();
+            helper.close(*id, ANSWER)?;
+            let mut seen: Vec<(u128, char)> = Vec::new();
+            while closing.elapsed() < Duration::from_millis(600) {
+                if let Ok(shot) = capture(area) {
+                    seen.push((closing.elapsed().as_millis(), classify(&shot, &old.1, &new.1, &keep)));
+                }
+            }
+            let later = Instant::now();
+            let mut settled_on = None;
+            while later.elapsed() < Duration::from_secs(3) {
+                if let Ok(shot) = capture(area) {
+                    if classify(&shot, &old.1, &new.1, &keep) == 'B' {
+                        settled_on = Some(600 + later.elapsed().as_millis());
+                        break;
+                    }
+                }
+                pump(Duration::from_millis(20));
+            }
+            if painted.is_none() {
+                if let Some(window) = window {
+                    let probe = Instant::now();
+                    while probe.elapsed() < Duration::from_secs(2) {
+                        if window_pixels(window, width as i32, height as i32).is_some_and(|shot| classify(&shot, &old.1, &new.1, &keep) == 'B') {
+                            painted = Some(delay as u128 + 600 + probe.elapsed().as_millis());
+                            break;
+                        }
+                        pump(Duration::from_millis(10));
+                    }
+                }
+            }
+            let olds = seen.iter().filter(|(_, class)| *class == 'A').count();
+            p.line(format!(
+                "  - closed {delay} ms after the set call (old still ready {:?} ms): first 600 ms after close {}, the new picture on screen at {settled_on:?} ms after close, the wallpaper window's own pixels went {under} and showed the new picture {painted:?} ms after the set call, old picture captures after close {olds}",
+                ready.map(|d| d.as_millis()),
+                seen.iter().map(|(at, class)| format!("{at}{class}")).collect::<Vec<_>>().join(" ")
+            ));
+        }
+        Ok(())
+    }
+
+    fn shader_time(p: &mut Probe, kit: &Kit) -> Result<()> {
+        let gpu = scooch_live::Gpu::new(false).map_err(anyhow::Error::msg)?;
+        let picture = gpu.picture(&kit.canvas);
+        let glide = gpu.glide(&picture, &kit.pair.0, &kit.pair.1).map_err(anyhow::Error::msg)?;
+        let (width, height) = (kit.size[0], kit.size[1]);
+        let mut lines = Vec::new();
+        for s in [0.0f32, 0.5, 1.0] {
+            let mut times: Vec<u128> = (0..6).filter_map(|_| gpu.time(width, height, &[(scooch_live::Look::Glide(&glide, s), 1.0)]).ok()).map(|d| d.as_millis()).collect();
+            times.sort_unstable();
+            lines.push(format!("s {s}: {times:?} ms"));
+        }
+        p.line(format!("- one frame of the real shader at {width}x{height} on {} ({}), drawn offscreen and waited for: {}", gpu.name, gpu.kind, lines.join(", ")));
         Ok(())
     }
 
@@ -2931,11 +3183,14 @@ mod probe {
         color_check(p, &mut helper, id, &screen, &kit.stills[0], "color at the first scale, the glide still")?;
         id += 1;
         color_check(p, &mut helper, id, &screen, &kit.detail, "scale at the first scale, a fine detail still")?;
+        let slow = 3000;
         let runs = [
-            Pass { label: "glide from A to B, settle sent with the new wallpaper at 150 ms", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, strip: Some("glide-strip") },
-            Pass { label: "cross-fade to a mirrored B", tables: (&kit.tables[0], &kit.tables[2]), track: false, old: &kit.stills[0], new: &kit.stills[2], frames: &kit.mirrored_frames, ending: Ending::During, strip: Some("mirrored-strip") },
-            Pass { label: "glide with settle sent together with the glide", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::AtOnce, strip: None },
-            Pass { label: "glide with no settle, left to the helper's five second rule", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::Never, strip: None },
+            Pass { label: "glide from A to B, settle sent with the new wallpaper at 150 ms", name: "glide", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, ms: slow, strip: true },
+            Pass { label: "cross-fade to a mirrored B", name: "mirrored", tables: (&kit.tables[0], &kit.tables[2]), track: false, old: &kit.stills[0], new: &kit.stills[2], frames: &kit.mirrored_frames, ending: Ending::During, ms: slow, strip: true },
+            Pass { label: "glide with settle sent together with the glide", name: "early", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::AtOnce, ms: slow, strip: false },
+            Pass { label: "glide with no settle, left to the helper's five second rule", name: "unsettled", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::Never, ms: slow, strip: false },
+            Pass { label: "a pair where only the scenery changes", name: "scenery", tables: (&kit.tables[0], &kit.tables[3]), track: false, old: &kit.stills[0], new: &kit.stills[3], frames: &kit.scenic_frames, ending: Ending::During, ms: slow, strip: true },
+            Pass { label: "a 450 ms glide for timing only", name: "quick", tables: (&kit.tables[0], &kit.tables[1]), track: false, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, ms: GLIDE_MS, strip: false },
         ];
         for run in &runs {
             id += 1;
@@ -2944,6 +3199,9 @@ mod probe {
                 p.line(format!("  - stopped with {error:#}"));
             }
             pump(Duration::from_millis(500));
+        }
+        if let Err(error) = handover_question(p, &mut helper, &mut id, &screen, &kit) {
+            p.line(format!("  - stopped with {error:#}"));
         }
         timing(p, &mut helper, &mut id, &screen, &kit)?;
         glides(p, &mut helper, &mut id, &screen, &kit)?;
@@ -2966,7 +3224,7 @@ mod probe {
             p.line(format!("  - `{line}`"));
         }
         id += 1;
-        let after_restart = Pass { label: "glide after the restart", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, strip: Some("restart-strip") };
+        let after_restart = Pass { label: "glide after the restart", name: "restart", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, ms: 3000, strip: true };
         if let Err(error) = glide_run(p, &mut helper, id, &screen, &kit, &after_restart) {
             p.failed.push(format!("the helper could not glide after an Explorer restart {error:#}"));
         }
@@ -2976,6 +3234,9 @@ mod probe {
         }
         drop(helper);
         pump(Duration::from_millis(500));
+        if let Err(error) = shader_time(p, &kit) {
+            p.line(format!("- the shader could not be timed in the probe {error:#}"));
+        }
         let helpers_after = running("scoochw.exe").len();
         let own_after = own_private();
         p.line(format!("- probe private bytes after every helper ran and exited {own_after}, change {} bytes, scoochw processes before {helpers_before} after {helpers_after}", own_after as i64 - own_before as i64));
