@@ -3,11 +3,15 @@ pub mod parse;
 #[cfg(target_os = "linux")]
 pub mod autostart;
 #[cfg(target_os = "linux")]
+pub mod cinnamon;
+#[cfg(target_os = "linux")]
 pub mod gnome;
 #[cfg(target_os = "linux")]
 pub mod gvfs;
 #[cfg(target_os = "linux")]
 pub mod kde;
+#[cfg(target_os = "linux")]
+pub mod mate;
 #[cfg(target_os = "linux")]
 pub mod screens;
 #[cfg(target_os = "linux")]
@@ -23,7 +27,7 @@ pub use system::{bus, decode, desktop, desktop_folder, set_recently, shell, tool
 #[cfg(target_os = "linux")]
 mod system {
     use super::parse::desktop::{self as kinds, Kind, Session};
-    use super::{autostart, gnome, kde, screens, watch, xfce};
+    use super::{autostart, cinnamon, gnome, kde, mate, screens, watch, xfce};
     use crate::platform::{Desktop, Format, Screen, Snapshot, Wake};
     use anyhow::{anyhow, bail, Context, Result};
     use scooch_core::{Rect, RgbImage};
@@ -141,7 +145,8 @@ mod system {
             Kind::Gnome => Box::new(gnome::Gnome { desktop: desktop.to_path_buf(), home, x11: session == Session::X11 }),
             Kind::Kde => Box::new(kde::Kde { desktop: desktop.to_path_buf(), config }),
             Kind::Xfce => Box::new(xfce::Xfce { desktop: desktop.to_path_buf(), home, config, session }),
-            Kind::Cinnamon | Kind::Mate => bail!("Scooch cannot read {} desktop icons yet, so it leaves your wallpaper alone here.", kind.name()),
+            Kind::Cinnamon => Box::new(cinnamon::Cinnamon { desktop: desktop.to_path_buf(), home, config, session }),
+            Kind::Mate => Box::new(mate::Mate { desktop: desktop.to_path_buf(), home, config, session }),
         })
     }
 
