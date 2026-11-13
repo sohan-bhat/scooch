@@ -18,6 +18,7 @@ pub struct State {
     pub on: bool,
     #[serde(default = "fresh_options", deserialize_with = "options_or_scenery")]
     pub options: Options,
+    pub glide: bool,
     pub screens: BTreeMap<String, Entry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
@@ -70,7 +71,7 @@ impl Tally {
 
 impl Default for State {
     fn default() -> Self {
-        Self { version: VERSION, on: false, options: Options::default(), screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new() }
+        Self { version: VERSION, on: false, options: Options::default(), glide: true, screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new() }
     }
 }
 
@@ -199,6 +200,15 @@ impl Store {
 
     pub fn cache(&self) -> PathBuf {
         self.root.join("cache")
+    }
+
+    pub fn tables(&self) -> PathBuf {
+        self.cache().join("tables")
+    }
+
+    pub fn tables_for(&self, output: &Path, key: u64) -> PathBuf {
+        let name = output.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        self.tables().join(format!("{name}.{key:016x}.tables"))
     }
 
     pub fn aside_file(&self) -> PathBuf {
@@ -431,6 +441,16 @@ mod tests {
         assert!(state.on);
         assert_eq!(state.screens["main"].counter, 3);
         assert_eq!(state.options, fresh_options());
+    }
+
+    #[test]
+    fn a_file_without_the_glide_setting_loads_with_glide_on() {
+        let store = Store::at(scratch("glide-old"));
+        fs::write(store.state_file(), br#"{"on":true}"#).unwrap();
+        assert!(store.load().glide);
+        let state = State { on: true, glide: false, ..State::default() };
+        store.save(&state).unwrap();
+        assert_eq!(store.load(), state);
     }
 
     #[test]
