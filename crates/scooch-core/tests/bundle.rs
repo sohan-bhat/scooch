@@ -182,3 +182,24 @@ fn tables_travel_without_the_canvas() {
     let big = Scene { width: w, height: h, icons: layouts::layout("scattered", &photo.analysis, w, h) };
     assert!(state(photo, &big, &on()).tables_to_bytes().len() < 6 * 1024 * 1024);
 }
+
+#[test]
+fn one_pass_gives_the_still_and_its_bundle() {
+    let (w, h) = (640, 400);
+    for photo in photos().iter().step_by(2) {
+        for layout in ["mac", "scattered"] {
+            let scene = Scene { width: w, height: h, icons: layouts::layout(layout, &photo.analysis, w, h) };
+            for options in [on(), Options::default(), Options { pads: 0.0, ..Options::default() }] {
+                let placement = scooch_core::solve(&photo.analysis, &scene, &options, None);
+                let (bundle, still) = scooch_core::still(&photo.image, &photo.analysis, &placement, &scene, &options);
+                let alone = scooch_core::render_with(&photo.image, &photo.analysis, &placement, &scene, &options);
+                assert_eq!(still.as_raw(), alone.as_raw(), "{} {layout} {:?}", photo.name, options.scenery);
+                assert!(bundle == scooch_core::bundle(&photo.image, &photo.analysis, &placement, &scene, &options), "{} {layout} {:?}", photo.name, options.scenery);
+            }
+        }
+    }
+    let empty = Scene { width: 0, height: 0, icons: Vec::new() };
+    let photo = &photos()[0];
+    let (bundle, still) = scooch_core::still(&photo.image, &photo.analysis, &scooch_core::fill(1, 1, &empty), &empty, &on());
+    assert_eq!((bundle.width, still.width()), (0, 0));
+}

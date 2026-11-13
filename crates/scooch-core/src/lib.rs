@@ -161,6 +161,10 @@ pub fn bundle(image: &RgbImage, analysis: &Analysis, placement: &Placement, scen
     bundle::make(image, analysis, placement, scene, options, &paint::materials(analysis))
 }
 
+pub fn still(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Bundle, RgbImage) {
+    render::still(image, analysis, placement, scene, options)
+}
+
 pub fn canvas(image: &RgbImage, width: u32, height: u32) -> Canvas {
     let made = bundle::canvas(image, width, height);
     Canvas { width: made.width(), height: made.height(), pixels: made.into_owned().into_raw() }
