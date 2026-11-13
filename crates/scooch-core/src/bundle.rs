@@ -33,6 +33,7 @@ const CORE_DROP: f32 = 0.15;
 const VOLUME_LIT: f32 = 0.6;
 const VOLUME_DARK: f32 = 0.5;
 const REACH: f32 = 0.38;
+const BEND: f32 = 0.002;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Constants {
@@ -297,14 +298,6 @@ fn probes(count: usize, cell: usize, cells: usize) -> Vec<Probe> {
 }
 
 #[inline(always)]
-fn bilinear(values: &[f32], w: usize, column: &Probe, row: &Probe) -> f32 {
-    let (top, bottom) = (&values[row.a * w..], &values[row.b * w..]);
-    let upper = top[column.a] + (top[column.b] - top[column.a]) * column.t;
-    let lower = bottom[column.a] + (bottom[column.b] - bottom[column.a]) * column.t;
-    upper + (lower - upper) * row.t
-}
-
-#[inline(always)]
 fn bilinear4(values: &[[f32; 4]], w: usize, column: &Probe, row: &Probe) -> [f32; 4] {
     let (p, q, r, s) = (&values[row.a * w + column.a], &values[row.a * w + column.b], &values[row.b * w + column.a], &values[row.b * w + column.b]);
     std::array::from_fn(|k| {
@@ -312,6 +305,22 @@ fn bilinear4(values: &[[f32; 4]], w: usize, column: &Probe, row: &Probe) -> [f32
         let lower = r[k] + (s[k] - r[k]) * column.t;
         upper + (lower - upper) * row.t
     })
+}
+
+#[inline(always)]
+fn lerp4(line: &[[f32; 4]], probe: &Probe) -> [f32; 4] {
+    let (p, q) = (&line[probe.a], &line[probe.b]);
+    std::array::from_fn(|k| p[k] + (q[k] - p[k]) * probe.t)
+}
+
+fn line4(values: &[[f32; 4]], w: usize, row: &Probe) -> Vec<[f32; 4]> {
+    let (top, bottom) = (&values[row.a * w..(row.a + 1) * w], &values[row.b * w..(row.b + 1) * w]);
+    top.iter().zip(bottom).map(|(p, q)| std::array::from_fn(|k| p[k] + (q[k] - p[k]) * row.t)).collect()
+}
+
+fn line1(values: &[f32], w: usize, row: &Probe) -> Vec<f32> {
+    let (top, bottom) = (&values[row.a * w..(row.a + 1) * w], &values[row.b * w..(row.b + 1) * w]);
+    top.iter().zip(bottom).map(|(p, q)| p + (q - p) * row.t).collect()
 }
 
 struct Plane {
@@ -333,12 +342,25 @@ fn plane(x: &Bundle, decode: &[f32; 256]) -> Plane {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Ramp<'a> {
+    p: &'a [f32; 8],
+    q: &'a [f32; 8],
+    t: f32,
+}
+
+impl Ramp<'_> {
+    #[inline(always)]
+    fn at(&self, k: usize) -> f32 {
+        self.p[k] + (self.q[k] - self.p[k]) * self.t
+    }
+}
+
 #[inline(always)]
-fn ramp(table: &[[f32; 8]], value: f32, c: &Constants) -> [f32; 8] {
+fn ramp<'a>(table: &'a [[f32; 8]], value: f32, c: &Constants) -> Ramp<'a> {
     let f = ((value - c.ramp_low) / (c.ramp_high - c.ramp_low) * (RAMP - 1) as f32).clamp(0.0, (RAMP - 1) as f32);
-    let (a, t) = (f as usize, f - f.floor());
-    let (p, q) = (&table[a], &table[(a + 1).min(RAMP - 1)]);
-    std::array::from_fn(|k| p[k] + (q[k] - p[k]) * t)
+    let a = (f as usize).min(RAMP - 1);
+    Ramp { p: &table[a], q: &table[(a + 1).min(RAMP - 1)], t: f - a as f32 }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -396,57 +418,52 @@ impl<F: Fn([f32; 2]) -> f32> Reads<F> {
     }
 }
 
-struct At<'a> {
-    column: &'a Probe,
-    row: &'a Probe,
-    tint_column: &'a Probe,
-    tint_row: &'a Probe,
-    grid: usize,
-    tints: usize,
-}
-
 #[inline(always)]
-fn paint<F: Fn([f32; 2]) -> f32, G: Fn() -> f32>(c: &Constants, plane: &Plane, reads: &mut Reads<F>, at: &At, grain: &mut Grain<G>) -> Paint {
-    let [sky, belong, open, light] = bilinear4(&plane.look, at.grid, at.column, at.row);
+fn paint<F: Fn([f32; 2]) -> f32, G: Fn() -> f32, L: Fn(usize) -> [f32; 4]>(c: &Constants, ramps: &[[f32; 8]], reads: &mut Reads<F>, look: [f32; 4], layer: L, grain: &mut Grain<G>) -> Paint {
+    let [sky, belong, open, light] = look;
     if belong <= 0.0 {
         return Paint::default();
     }
     let light = light * 2.0 - 1.0;
     let d = reads.d;
-    let here = ramp(&plane.ramps, d, c);
-    let layer = |k: usize| bilinear4(&plane.paints[k], at.tints, at.tint_column, at.tint_row);
+    let here = ramp(ramps, d, c);
     let outside = d > EDGE / c.unit;
-    let shade = if d > -EDGE / c.unit { ramp(&plane.ramps, reads.get(0, c.shadow), c) } else { [0.0; 8] };
+    let (land_shadow, cloud_shadow) = if d > -EDGE / c.unit {
+        let shade = ramp(ramps, reads.get(0, c.shadow), c);
+        (shade.at(6), shade.at(7))
+    } else {
+        (0.0, 0.0)
+    };
     let mut land = Paint::default();
-    if sky < 1.0 && !(outside && here[0] <= 0.0 && shade[6] <= 0.0) {
+    if sky < 1.0 && !(outside && here.at(0) <= 0.0 && land_shadow <= 0.0) {
         let fill = layer(LAND);
         if outside {
-            land.over([1.0; 3], here[0] * layer(SHORE)[3]);
-            land.over([0.0; 3], shade[6]);
-        } else if here[4] >= 1.0 {
+            land.over([1.0; 3], here.at(0) * layer(SHORE)[3]);
+            land.over([0.0; 3], land_shadow);
+        } else if here.at(4) >= 1.0 {
             land.over(grain.apply(layer(TOP)), 1.0);
         } else {
             let shore = layer(SHORE);
-            land.over([1.0; 3], here[0] * shore[3]);
-            land.over([0.0; 3], shade[6]);
-            land.over(grain.apply(shore), here[1]);
-            if here[2] > 0.0 {
-                land.over(grain.apply(layer(FOAM)), here[2]);
+            land.over([1.0; 3], here.at(0) * shore[3]);
+            land.over([0.0; 3], land_shadow);
+            land.over(grain.apply(shore), here.at(1));
+            if here.at(2) > 0.0 {
+                land.over(grain.apply(layer(FOAM)), here.at(2));
             }
-            if here[3] > 0.0 {
-                land.over(grain.apply(fill), here[3]);
+            if here.at(3) > 0.0 {
+                land.over(grain.apply(fill), here.at(3));
             }
-            if here[4] > 0.0 {
-                land.over(grain.apply(layer(TOP)), here[4]);
+            if here.at(4) > 0.0 {
+                land.over(grain.apply(layer(TOP)), here.at(4));
             }
         }
         land = land.scaled(fill[3]);
     }
     let mut cloud = Paint::default();
-    if sky > 0.0 && !(here[5] <= 0.0 && shade[7] <= 0.0) {
+    if sky > 0.0 && !(here.at(5) <= 0.0 && cloud_shadow <= 0.0) {
         let core = layer(CORE);
-        cloud.over([0.0; 3], shade[7]);
-        if here[5] > 0.0 {
+        cloud.over([0.0; 3], cloud_shadow);
+        if here.at(5) > 0.0 {
             let (rim, belly) = (rgb(layer(RIM)), rgb(layer(BELLY)));
             let mut tone = mix3(rgb(core), rgb(layer(LIT)), open);
             if light > 0.0 {
@@ -455,12 +472,12 @@ fn paint<F: Fn([f32; 2]) -> f32, G: Fn() -> f32>(c: &Constants, plane: &Plane, r
                 tone = mix3(tone, belly, -light * (c.core_drop + (c.volume_dark - c.core_drop) * open));
             }
             if d > -(c.rim[0].abs() + c.rim[1].abs()) - EDGE / c.unit {
-                tone = mix3(tone, rim, 1.0 - ramp(&plane.ramps, reads.get(1, c.rim), c)[1]);
+                tone = mix3(tone, rim, 1.0 - ramp(ramps, reads.get(1, c.rim), c).at(1));
             }
             if d > -c.belly[1].abs() - EDGE / c.unit {
-                tone = mix3(tone, belly, 1.0 - ramp(&plane.ramps, reads.get(2, c.belly), c)[1]);
+                tone = mix3(tone, belly, 1.0 - ramp(ramps, reads.get(2, c.belly), c).at(1));
             }
-            cloud.over(grain.apply([tone[0], tone[1], tone[2], 1.0]), here[5]);
+            cloud.over(grain.apply([tone[0], tone[1], tone[2], 1.0]), here.at(5));
         }
         cloud = cloud.scaled(core[3]);
     }
@@ -509,13 +526,20 @@ pub fn layers(a: &Bundle, b: &Bundle, s: f32) -> (RgbImage, RgbaImage) {
 }
 
 fn dilate(cells: &[bool], grid: &Grid) -> Vec<bool> {
-    (0..cells.len())
-        .into_par_iter()
-        .map(|cell| {
-            let (i, j) = (cell % grid.w, cell / grid.w);
-            (j.saturating_sub(1)..(j + 2).min(grid.h)).any(|r| (i.saturating_sub(1)..(i + 2).min(grid.w)).any(|q| cells[r * grid.w + q]))
-        })
-        .collect()
+    let mut across = vec![false; cells.len()];
+    across.par_chunks_mut(grid.w).zip(cells.par_chunks(grid.w)).for_each(|(out, row)| {
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = row[i.saturating_sub(1)] || row[i] || row[(i + 1).min(grid.w - 1)];
+        }
+    });
+    let mut out = vec![false; cells.len()];
+    out.par_chunks_mut(grid.w).enumerate().for_each(|(j, line)| {
+        let (up, here, down) = (j.saturating_sub(1), j, (j + 1).min(grid.h - 1));
+        for (i, o) in line.iter_mut().enumerate() {
+            *o = across[up * grid.w + i] || across[here * grid.w + i] || across[down * grid.w + i];
+        }
+    });
+    out
 }
 
 pub fn draw(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8]) -> (RgbImage, RgbaImage) {
@@ -623,6 +647,71 @@ pub fn draw(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8]) -> (RgbImage, RgbaIma
     let tint_columns = probes(w, P, paint_grid.w);
     let tint_rows = probes(h, P, paint_grid.h);
     let u = c.unit;
+    let deep_land = -(TOP_BAND + 2.0 * EDGE / u + 0.01);
+    let deep_cloud = -((c.rim[0].abs() + c.rim[1].abs()).max(c.belly[1].abs()) + 2.0 * EDGE / u + 0.01);
+    let land_band = (-(TOP_BAND - 2.0 * EDGE / u - 0.01), -(LAND_BAND + 2.0 * EDGE / u + 0.01));
+    let core: Vec<u8> = if same {
+        (0..grid.w * grid.h)
+            .into_par_iter()
+            .map(|cell| match (planes[0].look[cell], fields[0][cell]) {
+                (look, f) if look[0] <= 0.0 && f <= deep_land => 1,
+                (look, f) if look[0] <= 0.0 && f >= land_band.0 && f <= land_band.1 => 4,
+                (look, f) if look[0] >= 1.0 && f <= deep_cloud => 2 + (look[3] < 0.5) as u8,
+                _ => 0,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let cores: Vec<[f32; 4]> = (0..core.len())
+        .into_par_iter()
+        .map(|cell| {
+            if core[cell] == 0 {
+                return [0.0; 4];
+            }
+            let plane = &planes[0];
+            let at = |n: usize, cells: usize| {
+                let g = (((n * Q) as f32 + Q as f32 / 2.0) / P as f32 - 0.5).clamp(0.0, (cells - 1) as f32);
+                let a = g as usize;
+                Probe { a, b: (a + 1).min(cells - 1), t: g - a as f32 }
+            };
+            let (tx, ty) = (at(cell % grid.w, paint_grid.w), at(cell / grid.w, paint_grid.h));
+            let layer = |k: usize| bilinear4(&plane.paints[k], paint_grid.w, &tx, &ty);
+            let [_, _, open, light] = plane.look[cell];
+            if core[cell] == 1 || core[cell] == 4 {
+                let top = layer(if core[cell] == 1 { TOP } else { LAND });
+                return [top[0], top[1], top[2], 0.0];
+            }
+            let light = light * 2.0 - 1.0;
+            let (base, rim, belly) = (layer(CORE), rgb(layer(RIM)), rgb(layer(BELLY)));
+            let mut tone = mix3(rgb(base), rgb(layer(LIT)), open);
+            if light > 0.0 {
+                tone = mix3(tone, rim, light * (c.core_lift + (c.volume_lit - c.core_lift) * open));
+            } else {
+                tone = mix3(tone, belly, -light * (c.core_drop + (c.volume_dark - c.core_drop) * open));
+            }
+            [tone[0], tone[1], tone[2], 0.0]
+        })
+        .collect();
+    let core: Vec<u8> = (0..core.len())
+        .into_par_iter()
+        .map(|cell| {
+            let kind = core[cell];
+            if kind == 0 {
+                return 0;
+            }
+            let (i, j) = (cell % grid.w, cell / grid.w);
+            if i == 0 || j == 0 || i + 1 == grid.w || j + 1 == grid.h {
+                return 0;
+            }
+            let bend = |a: usize, b: usize| core[a] == kind && core[b] == kind && (0..3).all(|k| (2.0 * cores[cell][k] - cores[a][k] - cores[b][k]).abs() <= BEND);
+            if bend(cell - 1, cell + 1) && bend(cell - grid.w, cell + grid.w) {
+                kind
+            } else {
+                0
+            }
+        })
+        .collect();
     let out: &mut [u8] = &mut layer;
     out.par_chunks_mut(w * 4).enumerate().for_each(|(y, line)| {
         let row = &rows[y];
@@ -632,38 +721,59 @@ pub fn draw(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8]) -> (RgbImage, RgbaIma
         }
         let tint_row = &tint_rows[y];
         let py = y as f32 + 0.5;
+        let field_lines: Vec<Vec<f32>> = fields.iter().map(|f| line1(f, grid.w, row)).collect();
+        let look_lines: Vec<Vec<[f32; 4]>> = planes.iter().map(|p| line4(&p.look, grid.w, row)).collect();
+        let tint_lines: Vec<Vec<Vec<[f32; 4]>>> = planes.iter().map(|p| p.paints.iter().map(|layer| line4(layer, paint_grid.w, tint_row)).collect()).collect();
+        let core_line = if core.is_empty() { Vec::new() } else { line4(&cores, grid.w, row) };
+        let means_line = line1(&means, grid.w, row);
         for (x, px) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let column = &columns[x];
             if !active[j * grid.w + column.a] {
                 continue;
             }
-            let d = if same { bilinear(fields[0], grid.w, column, row) } else { fields.iter().zip(&shares).map(|(f, (share, _))| bilinear(f, grid.w, column, row) * share).sum::<f32>() };
+            let tint_column = &tint_columns[x];
+            let grain_at = || {
+                let p = &raw[(y * w + x) * 3..(y * w + x) * 3 + 3];
+                let lum = 0.2126 * decode[p[0] as usize] + 0.7152 * decode[p[1] as usize] + 0.0722 * decode[p[2] as usize];
+                let mean = means_line[column.a] + (means_line[column.b] - means_line[column.a]) * column.t;
+                let detail = (lum - mean) * block[j * grid.w + column.a][1];
+                (1.0 + (detail / c.grain_scale).clamp(-1.0, 1.0) * c.grain).powi(3)
+            };
+            if !core.is_empty() {
+                let kind = core[row.a * grid.w + column.a];
+                if kind != 0 && core[row.a * grid.w + column.b] == kind && core[row.b * grid.w + column.a] == kind && core[row.b * grid.w + column.b] == kind {
+                    let v = lerp4(&core_line, column);
+                    let opacity = lerp4(&tint_lines[0][if kind == 1 || kind == 4 { LAND } else { CORE }], tint_column)[3];
+                    let alpha = opacity * lerp4(&look_lines[0], column)[1];
+                    if alpha <= 1e-4 {
+                        continue;
+                    }
+                    let grain = grain_at();
+                    for k in 0..3 {
+                        px[k] = color::encode(encode, (v[k] * grain).min(1.0));
+                    }
+                    px[3] = (alpha.min(1.0) * 255.0).round() as u8;
+                    continue;
+                }
+            }
+            let d = field_lines.iter().zip(&shares).map(|(f, (share, _))| (f[column.a] + (f[column.b] - f[column.a]) * column.t) * share).sum::<f32>();
             if d > c.reach {
                 continue;
             }
             let fx = x as f32 + 0.5;
             let offset = |o: [f32; 2]| {
                 let (gx, gy) = (grid.at(fx + o[0] * u), grid.at(py + o[1] * u));
-                if same {
-                    grid.linear(fields[0], gx, gy)
-                } else {
-                    fields.iter().zip(&shares).map(|(f, (share, _))| grid.linear(f, gx, gy) * share).sum::<f32>()
-                }
+                fields.iter().zip(&shares).map(|(f, (share, _))| grid.linear(f, gx, gy) * share).sum::<f32>()
             };
             let mut reads = Reads { d, at: offset, shadow: None, rim: None, belly: None };
-            let make = || {
-                let p = &raw[(y * w + x) * 3..(y * w + x) * 3 + 3];
-                let lum = 0.2126 * decode[p[0] as usize] + 0.7152 * decode[p[1] as usize] + 0.0722 * decode[p[2] as usize];
-                let detail = (lum - bilinear(&means, grid.w, column, row)) * block[j * grid.w + column.a][1];
-                (1.0 + (detail / c.grain_scale).clamp(-1.0, 1.0) * c.grain).powi(3)
-            };
-            let mut grain = Grain { factor: None, make };
-            let at = At { column, row, tint_column: &tint_columns[x], tint_row, grid: grid.w, tints: paint_grid.w };
-            let total = if same {
-                paint(&a.constants, &planes[0], &mut reads, &at, &mut grain)
-            } else {
-                planes.iter().zip(&shares).fold(Paint::default(), |sum, (plane, (share, x))| sum.plus(paint(&x.constants, plane, &mut reads, &at, &mut grain).scaled(*share)))
-            };
+            let mut grain = Grain { factor: None, make: grain_at };
+            let mut total = Paint::default();
+            for (k, (plane, (share, x))) in planes.iter().zip(&shares).enumerate() {
+                let look = lerp4(&look_lines[k], column);
+                let tints = &tint_lines[k];
+                let part = paint(&x.constants, &plane.ramps, &mut reads, look, |layer| lerp4(&tints[layer], tint_column), &mut grain);
+                total = total.plus(part.scaled(*share));
+            }
             if total.a <= 1e-4 {
                 continue;
             }
@@ -697,8 +807,8 @@ mod tests {
         let c = Constants { unit: 100.0, ramp_low: RAMP_RANGE.0, ramp_high: RAMP_RANGE.1, reach: REACH, shadow: SHADOW_AT, rim: RIM_AT, belly: BELLY_AT, grain: 0.0, grain_scale: 1.0, grain_floor: 0.03, core_lift: 0.0, core_drop: 0.0, volume_lit: 0.0, volume_dark: 0.0 };
         let rows: Vec<[f32; 8]> = (0..RAMP).map(|k| std::array::from_fn(|c| table[((c / 4) * RAMP + k) * 4 + c % 4] as f32 / 255.0)).collect();
         let inside = ramp(&rows, -0.6, &c);
-        assert!(inside[1] > 0.99 && inside[3] > 0.99 && inside[4] > 0.99);
+        assert!(inside.at(1) > 0.99 && inside.at(3) > 0.99 && inside.at(4) > 0.99);
         let outside = ramp(&rows, 0.6, &c);
-        assert!(outside.iter().all(|v| *v < 0.01));
+        assert!((0..8).all(|k| outside.at(k) < 0.01));
     }
 }
