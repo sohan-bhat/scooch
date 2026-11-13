@@ -8,7 +8,7 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        pill: "rounded-pill bg-lamp text-ink shadow-[inset_0_1px_0_rgb(255_235_210/0.35),inset_0_-2px_0_rgb(20_17_14/0.25),0_10px_24px_-12px_rgb(229_89_26/0.7)] hover-fine:bg-lamp-hot hover-fine:-translate-y-0.5 hover-fine:shadow-[inset_0_1px_0_rgb(255_235_210/0.42),inset_0_-2px_0_rgb(20_17_14/0.25),0_16px_30px_-12px_rgb(229_89_26/0.8)] active:translate-y-px active:scale-[0.97] active:bg-lamp active:shadow-[inset_0_2px_0_rgb(20_17_14/0.25)]",
+        pill: "rounded-pill bg-lamp text-ink shadow-[inset_0_1px_0_rgb(255_235_210/0.35),inset_0_-2px_0_rgb(20_17_14/0.25)] hover-fine:bg-lamp-hot hover-fine:-translate-y-0.5 hover-fine:shadow-[inset_0_1px_0_rgb(255_235_210/0.42),inset_0_-2px_0_rgb(20_17_14/0.25)] active:translate-y-px active:scale-[0.97] active:bg-lamp active:shadow-[inset_0_2px_0_rgb(20_17_14/0.25)]",
         quiet: "rounded-field bg-room-3 text-paper shadow-[inset_0_0_0_1px_rgb(243_236_220/0.12)] hover-fine:bg-steel hover-fine:shadow-[inset_0_0_0_1px_rgb(243_236_220/0.22)] active:scale-[0.95] active:bg-room-2",
       },
       size: {
