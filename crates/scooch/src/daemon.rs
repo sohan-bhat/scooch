@@ -194,6 +194,42 @@ pub fn keep(state: &mut State, path: PathBuf) {
     }
 }
 
+pub const ABSENT_FOR: u64 = 24 * 60 * 60;
+pub const ABSENT_TICKS: u32 = 5;
+
+pub fn absence(entry: &mut Entry, present: bool, now: u64) -> bool {
+    if present {
+        (entry.absent_since, entry.absent_ticks) = (None, 0);
+        return false;
+    }
+    let since = *entry.absent_since.get_or_insert(now);
+    entry.absent_ticks = entry.absent_ticks.saturating_add(1);
+    now.saturating_sub(since) > ABSENT_FOR && entry.absent_ticks >= ABSENT_TICKS
+}
+
+pub fn prune(state: &mut State, store: &Store, known: Option<&[String]>, screens: &[Screen], now: u64) -> usize {
+    let Some(listed) = known else { return 0 };
+    let ids: Vec<String> = state.screens.keys().cloned().collect();
+    let mut pruned = 0;
+    for id in ids {
+        let present = listed.contains(&id);
+        if !present && !gone(&id, known, screens) {
+            continue;
+        }
+        let entry = state.screens.get_mut(&id).expect("the id was just listed");
+        if absence(entry, present, now) {
+            state.screens.remove(&id);
+            store.sweep(&id, None, &state.kept);
+            pruned += 1;
+        }
+    }
+    pruned
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|since| since.as_secs()).unwrap_or(0)
+}
+
 pub struct Daemon {
     pub desktop: Arc<dyn Desktop>,
     pub store: Store,
@@ -304,6 +340,8 @@ impl Daemon {
         if let Ok(mut kept) = self.kept.lock() {
             kept.clone_from(&state.kept);
         }
+        let known = self.desktop.known().ok().flatten();
+        prune(state, &self.store, known.as_deref(), &snapshot.screens, unix_now());
         for screen in &snapshot.screens {
             if unplaced(state, &screen.id) {
                 report.outcomes.push((screen.id.clone(), Outcome::Skipped));
@@ -1547,6 +1585,59 @@ pub mod tests {
         let entry = &merged.screens["D@S2"];
         assert_eq!((entry.source.clone(), entry.original.clone(), entry.chosen), (PathBuf::from("/p/new.jpg"), PathBuf::from("/p/old.jpg"), true));
         assert_eq!((entry.output.clone(), entry.counter, entry.icons, entry.fingerprint.clone()), (Some(PathBuf::from("/d/out/D_S2-1.jpg")), 1, 3, None));
+    }
+
+    #[test]
+    fn a_space_is_forgotten_only_after_a_day_and_five_ticks() {
+        let start = 1_000_000;
+        let mut slow = Entry::new(Path::new("/p/a.jpg"));
+        for tick in 0..4 {
+            assert!(!absence(&mut slow, false, start + tick * ABSENT_FOR));
+        }
+        assert!(absence(&mut slow, false, start + 4 * ABSENT_FOR));
+        let mut busy = Entry::new(Path::new("/p/a.jpg"));
+        for tick in 0..20 {
+            assert!(!absence(&mut busy, false, start + tick));
+        }
+        assert!(!absence(&mut busy, false, start + ABSENT_FOR));
+        assert!(absence(&mut busy, false, start + ABSENT_FOR + 1));
+        let mut back = Entry::new(Path::new("/p/a.jpg"));
+        for tick in 0..6 {
+            absence(&mut back, false, start + tick);
+        }
+        assert!(!absence(&mut back, true, start + 2 * ABSENT_FOR));
+        assert_eq!((back.absent_since, back.absent_ticks), (None, 0));
+        assert!(!absence(&mut back, false, start + 3 * ABSENT_FOR));
+        assert_eq!((back.absent_since, back.absent_ticks), (Some(start + 3 * ABSENT_FOR), 1));
+    }
+
+    #[test]
+    fn a_tick_marks_a_missing_space_and_forgets_it_only_when_long_gone() {
+        let (daemon, fake, original) = rig("absent", vec![screen("D@S1", 0.0, 1.0)]);
+        std::fs::create_dir_all(daemon.store.out()).unwrap();
+        let output = daemon.store.output("D@S2", 1, "jpg");
+        std::fs::write(&output, b"x").unwrap();
+        let mut state = daemon.store.load();
+        state.screens.insert("D@S2".into(), Entry { output: Some(output.clone()), ..Entry::new(&original) });
+        daemon.store.save(&state).unwrap();
+        *fake.known.lock().unwrap() = Some(vec!["D@S1".into()]);
+        daemon.tick();
+        let entry = daemon.store.load().screens["D@S2"].clone();
+        assert!(entry.absent_since.is_some() && entry.absent_ticks == 1 && output.exists());
+        *fake.known.lock().unwrap() = Some(vec!["D@S1".into(), "D@S2".into()]);
+        daemon.tick();
+        let entry = daemon.store.load().screens["D@S2"].clone();
+        assert_eq!((entry.absent_since, entry.absent_ticks), (None, 0));
+        *fake.known.lock().unwrap() = None;
+        daemon.tick();
+        assert_eq!(daemon.store.load().screens["D@S2"].absent_ticks, 0);
+        let mut state = daemon.store.load();
+        let entry = state.screens.get_mut("D@S2").unwrap();
+        (entry.absent_since, entry.absent_ticks) = (Some(1), 4);
+        daemon.store.save(&state).unwrap();
+        *fake.known.lock().unwrap() = Some(vec!["D@S1".into()]);
+        daemon.tick();
+        assert!(!daemon.store.load().screens.contains_key("D@S2") && !output.exists());
     }
 
     #[test]

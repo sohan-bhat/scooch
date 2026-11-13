@@ -75,6 +75,14 @@ pub struct Entry {
     pub flip_helps: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub unrestorable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub absent_since: Option<u64>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub absent_ticks: u32,
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 impl Entry {
