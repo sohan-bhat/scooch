@@ -31,7 +31,7 @@ type Props = {
 
 export function Story({ live, beats, canvas, still, section, onReady }: Props) {
   return (
-    <section ref={section} id="story" className="story relative h-[784svh]" aria-label="Scooch in seven steps">
+    <section ref={section} id="story" className="story relative h-[840svh]" aria-label="Scooch in seven steps">
       <div className="stage sticky top-0 h-svh w-full overflow-hidden bg-room">
         <div ref={canvas} className="absolute inset-0 opacity-0">
           {live ? (

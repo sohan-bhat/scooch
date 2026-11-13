@@ -9,16 +9,16 @@ gsap.registerPlugin(ScrollTrigger, SplitText);
 export const EASE = { camera: 'power2.inOut', in: 'power3.out', out: 'power2.in' } as const;
 export const DURATION = { camera: 8.5, textIn: 2.6, textOut: 2, staggerIn: 0.32, staggerOut: 0.14 } as const;
 
-export const TOTAL = 112;
+export const TOTAL = 120;
 
 export const beats = [
   { id: 'hero', start: 0, end: 12, enter: -1, leave: 6.5, rest: 2 },
-  { id: 'problem', start: 12, end: 27, enter: 15.6, leave: 23.4, rest: 21 },
-  { id: 'sees', start: 27, end: 44, enter: 31, leave: 41.4, rest: 38 },
-  { id: 'fix', start: 44, end: 58, enter: 46.4, leave: 55.6, rest: 54 },
-  { id: 'follow', start: 58, end: 84, enter: 59, leave: 81.8, rest: 64.2 },
-  { id: 'rest', start: 84, end: 100, enter: 90, leave: 97.6, rest: 95 },
-  { id: 'end', start: 100, end: TOTAL, enter: 105.2, leave: -1, rest: 111.6 },
+  { id: 'problem', start: 12, end: 30, enter: 19.5, leave: 27.4, rest: 25.2 },
+  { id: 'sees', start: 30, end: 50, enter: 39.5, leave: 47.4, rest: 45 },
+  { id: 'fix', start: 50, end: 64, enter: 52.4, leave: 61.6, rest: 58.4 },
+  { id: 'follow', start: 64, end: 90, enter: 65, leave: 87.8, rest: 85.4 },
+  { id: 'rest', start: 90, end: 106, enter: 99, leave: 103.8, rest: 101.6 },
+  { id: 'end', start: 106, end: TOTAL, enter: 111.4, leave: -1, rest: 119.6 },
 ] as const;
 
 export type Elements = {
@@ -49,52 +49,46 @@ export function buildTimeline(elements: Elements, manifest: DemoManifest): Built
   const timeline = gsap.timeline({ paused: true, defaults: { ease: 'none' } });
   timeline.set({}, {}, TOTAL);
 
-  const camera = [
-    [8, 0, 1],
-    [23.6, 1, 2],
-    [84.2, 2, 3],
-    [98.4, 3, 4],
-  ] as const;
-  for (const [at, from, end] of camera) to(timeline, story, { camera: from }, { camera: end }, at, DURATION.camera, EASE.camera);
+  to(timeline, story, { camera: 0 }, { camera: 2 }, 8, 15.5, EASE.camera);
+  to(timeline, story, { camera: 2 }, { camera: 3 }, 30, 4.4, EASE.camera);
+  to(timeline, story, { camera: 3 }, { camera: 4 }, 34.2, 5.6, EASE.camera);
+  to(timeline, story, { camera: 4 }, { camera: 5 }, 50, 9, EASE.camera);
+  to(timeline, story, { camera: 5 }, { camera: 6 }, 64, 12, EASE.camera);
+  to(timeline, story, { camera: 6 }, { camera: 7 }, 90, 9.4, EASE.camera);
+  to(timeline, story, { camera: 7 }, { camera: 8 }, 105.6, 9.6, EASE.camera);
 
-  to(timeline, story, { push: 0 }, { push: 1 }, 44, 14, 'sine.inOut');
-  to(timeline, story, { push: 1 }, { push: 0 }, 84.2, DURATION.camera, EASE.camera);
+  to(timeline, story, { dof: 0 }, { dof: 1 }, 13, 6, EASE.camera);
+  to(timeline, story, { focus: 0 }, { focus: 1 }, 18.6, 5.2, EASE.camera);
+  to(timeline, story, { dof: 1 }, { dof: 0 }, 30, 3.2, EASE.camera);
 
-  to(timeline, story, { lamp: 1 }, { lamp: 0.7 }, 12, 6, EASE.camera);
-  to(timeline, story, { lamp: 0.7 }, { lamp: 0 }, 85.5, 5.5, EASE.camera);
-  to(timeline, story, { lamp: 0 }, { lamp: 0.55 }, 101, 6, EASE.camera);
+  to(timeline, story, { lamp: 1 }, { lamp: 0.8 }, 12, 6, EASE.camera);
+  to(timeline, story, { lift: 0 }, { lift: 1 }, 34, 4.6, EASE.camera);
+  to(timeline, story, { tubeOff: 0 }, { tubeOff: 1 }, 34.4, 2.6, EASE.out);
+  to(timeline, story, { inside: 0 }, { inside: 1 }, 34.2, 4.2, EASE.camera);
+  to(timeline, story, { sweep: 0 }, { sweep: 1 }, 39.6, 5, EASE.camera);
+  to(timeline, story, { relief: 0 }, { relief: 1 }, 39.8, 4.6, EASE.camera);
 
-  to(timeline, story, { dof: 0 }, { dof: 1 }, 12.5, 6, EASE.camera);
-  to(timeline, story, { focus: 0 }, { focus: 1 }, 13, 6, EASE.camera);
-  to(timeline, story, { dof: 1 }, { dof: 0 }, 84.2, 4, EASE.camera);
+  to(timeline, story, { place: 0 }, { place: 1 }, 52.6, 4.2, EASE.camera);
 
-  to(timeline, story, { sweep: 0 }, { sweep: 1 }, 31.4, 5.2, EASE.camera);
-  to(timeline, story, { sweep: 1 }, { sweep: 0 }, 39.6, 4, EASE.camera);
+  to(timeline, story, { grab: 0 }, { grab: 1 }, 66, 0.9, EASE.in);
+  to(timeline, story, { drag: 0 }, { drag: 1 }, 66.8, 3.6, EASE.camera);
+  to(timeline, story, { grab: 1 }, { grab: 0 }, 70.3, 0.7, EASE.out);
+  to(timeline, story, { place: 1 }, { place: 2 }, 70.7, 3.6, EASE.camera);
+  to(timeline, story, { grab: 0 }, { grab: 1 }, 76.2, 0.9, EASE.in);
+  to(timeline, story, { drag: 1 }, { drag: 0 }, 77, 3.6, EASE.camera);
+  to(timeline, story, { grab: 1 }, { grab: 0 }, 80.5, 0.7, EASE.out);
+  to(timeline, story, { place: 2 }, { place: 1 }, 80.9, 3.6, EASE.camera);
 
-  to(timeline, story, { place: 0 }, { place: 1 }, 44.4, 3.6, EASE.camera);
-
-  const icon = manifest.frames.before.icons[manifest.drag.icon];
-  const grabX = manifest.drag.from[0] + icon[2] * 0.42;
-  const grabY = manifest.drag.from[1] + icon[3] * 0.34;
-  const restX = 0.86;
-  const restY = 0.82;
-  const awayX = grabX + 0.05;
-  const awayY = grabY + 0.07;
-  to(timeline, story, { cursorX: restX, cursorY: restY }, { cursorX: restX, cursorY: restY }, 58, 0.1, 'none');
-  to(timeline, story, { cursorAlpha: 0 }, { cursorAlpha: 1 }, 58.4, 1.2, EASE.in);
-  to(timeline, story, { cursorX: restX, cursorY: restY }, { cursorX: grabX, cursorY: grabY }, 59, 2.6, EASE.camera);
-  to(timeline, story, { grab: 0 }, { grab: 1 }, 61.6, 0.5, EASE.in);
-  to(timeline, story, { drag: 0 }, { drag: 1 }, 62.1, 3.2, EASE.camera);
-  to(timeline, story, { grab: 1 }, { grab: 0 }, 65.4, 0.4, EASE.out);
-  to(timeline, story, { cursorX: grabX, cursorY: grabY }, { cursorX: awayX, cursorY: awayY }, 66, 1.2, EASE.camera);
-  to(timeline, story, { place: 1 }, { place: 2 }, 66.6, 3.4, EASE.camera);
-  to(timeline, story, { cursorX: awayX, cursorY: awayY }, { cursorX: grabX, cursorY: grabY }, 71, 1.8, EASE.camera);
-  to(timeline, story, { grab: 0 }, { grab: 1 }, 72.8, 0.5, EASE.in);
-  to(timeline, story, { drag: 1 }, { drag: 0 }, 73.3, 3.2, EASE.camera);
-  to(timeline, story, { grab: 1 }, { grab: 0 }, 76.6, 0.4, EASE.out);
-  to(timeline, story, { cursorX: grabX, cursorY: grabY }, { cursorX: awayX, cursorY: awayY }, 77.2, 1.2, EASE.camera);
-  to(timeline, story, { place: 2 }, { place: 1 }, 77.8, 3.4, EASE.camera);
-  to(timeline, story, { cursorAlpha: 1 }, { cursorAlpha: 0 }, 78.6, 1.2, EASE.out);
+  to(timeline, story, { relief: 1 }, { relief: 0 }, 89.6, 2.6, EASE.camera);
+  to(timeline, story, { sweep: 1 }, { sweep: 0 }, 89.6, 2.2, EASE.camera);
+  to(timeline, story, { lift: 1 }, { lift: 0 }, 90.4, 4.6, EASE.camera);
+  to(timeline, story, { inside: 1 }, { inside: 0 }, 91, 4.2, EASE.camera);
+  to(timeline, story, { tubeOff: 1 }, { tubeOff: 0 }, 93.6, 0.05, 'none');
+  to(timeline, story, { tubeOn: 1 }, { tubeOn: 0 }, 93.6, 0.05, 'none');
+  to(timeline, story, { tubeOn: 0 }, { tubeOn: 1 }, 93.7, 2.2, EASE.out);
+  to(timeline, story, { lamp: 0.8 }, { lamp: 0 }, 96.6, 0.35, 'power1.in');
+  to(timeline, story, { frost: 0 }, { frost: 1 }, 98.4, 4.2, EASE.camera);
+  to(timeline, story, { lamp: 0 }, { lamp: 0.55 }, 107, 5.5, EASE.camera);
 
   elements.beats.forEach((element, index) => {
     const beat = beats[index];
@@ -117,9 +111,9 @@ export function buildTimeline(elements: Elements, manifest: DemoManifest): Built
   if (elements.navAction) {
     gsap.set(elements.navAction, { autoAlpha: 0, y: -8 });
     to(timeline, elements.navAction, { autoAlpha: 0, y: -8 }, { autoAlpha: 1, y: 0 }, 9, 2, EASE.in);
-    to(timeline, elements.navAction, { autoAlpha: 1, y: 0 }, { autoAlpha: 0, y: -8 }, 102.5, 2, EASE.out);
+    to(timeline, elements.navAction, { autoAlpha: 1, y: 0 }, { autoAlpha: 0, y: -8 }, 112.5, 2, EASE.out);
   }
-  if (elements.skip) to(timeline, elements.skip, { autoAlpha: 1 }, { autoAlpha: 0 }, 107, 3, EASE.out);
+  if (elements.skip) to(timeline, elements.skip, { autoAlpha: 1 }, { autoAlpha: 0 }, 115, 3, EASE.out);
 
   return { timeline, splits };
 }

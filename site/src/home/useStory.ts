@@ -83,6 +83,7 @@ export function useStory(refs: Refs, live: boolean, still: number) {
       const query = new URLSearchParams(window.location.search);
       if (query.has('share')) html.classList.add('share-shot');
       if (query.has('hero')) html.classList.add('hero-shot');
+      runtime.hero = query.has('hero');
       runtime.idle = false;
     }
 
@@ -177,7 +178,7 @@ export function useStory(refs: Refs, live: boolean, still: number) {
 export function introduce(refs: Refs, still: number) {
   const canvas = refs.canvas.current;
   const picture = refs.still.current;
-  runtime.power = 1;
+
   if (canvas) canvas.style.opacity = '1';
   if (still >= 0) {
     let frames = 0;

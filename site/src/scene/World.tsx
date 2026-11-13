@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import {
   Color,
   DirectionalLight,
+  FogExp2,
   Group,
   Matrix4,
   Mesh,
@@ -11,6 +12,7 @@ import {
   Object3D,
   PerspectiveCamera,
   PointLight,
+  Quaternion,
   RectAreaLight,
   SpotLight,
   Vector2,
@@ -21,12 +23,14 @@ import { asset } from '@/lib/base';
 import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
-import { BULB, DESK_TOP, Desk, LAMP, LAPTOP } from './Desk';
+import { STREET, blindsTexture, projector } from './Blinds';
+import { BULB, DESK_TOP, Desk, LAMP, type Screens } from './Desk';
+import { useInside, type Stage } from './Inside';
 import { quality } from './quality';
 import { useRoomMaterial } from './Room';
 import { Rig, type ScreenFrame } from './rig';
-import { measureScreen, useScreen } from './screen/useScreen';
-import { layoutFor, shots } from './shots';
+import { measureScreen, useScreens } from './screen/useScreen';
+import { keys, layoutFor } from './shots';
 import { applyEnvironment, environmentReady, precompile } from './warm';
 
 const SPOT = 4;
@@ -34,6 +38,7 @@ const BULB_GLOW = 7;
 const RECT = 2.4;
 const SCREEN_SPOT = 0.09;
 const INNER = 0.5;
+const STREET_LEVEL = 26;
 const up = new Vector3(0, 1, 0);
 
 function toWorld(local: Vector3, position: readonly [number, number, number], rotation: number) {
@@ -43,9 +48,48 @@ function toWorld(local: Vector3, position: readonly [number, number, number], ro
 export const bulbWorld = toWorld(BULB, LAMP.position, LAMP.rotation);
 const wallCenter = new Vector2(bulbWorld.x + 0.05, bulbWorld.y - 0.2);
 const floorCenter = new Vector2(bulbWorld.x, bulbWorld.z + 0.4);
-const keyboard = toWorld(new Vector3(0.01, 0.05, 0.035), LAPTOP.position, LAPTOP.rotation);
 
-type Built = { mesh: Mesh; frame: Group; screen: ScreenFrame };
+type Glass = { mesh: Mesh; frame: Group; screen: ScreenFrame; center: Vector3; matrix: Matrix4; quaternion: Quaternion };
+type Built = { laptop: Glass; television: Glass };
+
+function glassOf(mesh: Mesh, frame: Group, screen: ScreenFrame): Glass {
+  frame.updateWorldMatrix(true, false);
+  const center = screen.center.clone().applyMatrix4(frame.matrixWorld);
+  const normal = screen.normal.clone().transformDirection(frame.matrixWorld);
+  const upward = screen.up.clone().transformDirection(frame.matrixWorld);
+  const right = new Vector3().crossVectors(upward, normal).normalize();
+  const basis = new Matrix4().makeBasis(right, new Vector3().crossVectors(normal, right), normal);
+  const quaternion = new Quaternion().setFromRotationMatrix(basis);
+  const matrix = new Matrix4().compose(center, quaternion, new Vector3(1, 1, 1));
+  return { mesh, frame, screen, center, matrix, quaternion };
+}
+
+function stageFor(glass: Glass): Stage {
+  const width = glass.screen.width * 0.94;
+  const height = glass.screen.height * 0.93;
+  const normal = new Vector3(0, 0, 1).applyQuaternion(glass.quaternion);
+  const tilt = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), -1.12);
+  return {
+    width,
+    height,
+    glass: { position: glass.center.clone().addScaledVector(normal, 0.006), quaternion: glass.quaternion.clone(), scale: 1 },
+    space: { position: glass.center.clone().addScaledVector(normal, 0.64).addScaledVector(up, 0.16), quaternion: glass.quaternion.clone().multiply(tilt), scale: 2.6 },
+  };
+}
+
+function flicker(t: number) {
+  if (t < 0.15) return 0;
+  if (t < 0.22) return 0.9;
+  if (t < 0.3) return 0.12;
+  if (t < 0.36) return 0.75;
+  if (t < 0.46) return 0.2;
+  return Math.min(0.55 + (t - 0.46) * 1.5, 1);
+}
+
+function ramp(t: number, start: number, length: number) {
+  const x = Math.min(Math.max((t - start) / length, 0), 1);
+  return x * x * (3 - 2 * x);
+}
 
 export function Surroundings() {
   const texture = useLoader(HDRLoader, asset('hdri/studio.hdr'));
@@ -61,50 +105,76 @@ export function Surroundings() {
 
 export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: () => void }) {
   const { camera, size, scene, gl } = useThree();
-  const { material, uniforms, averages } = useScreen(manifest);
+  const screens = useScreens(manifest);
+  const blinds = useMemo(() => blindsTexture(), []);
+  const blindsMatrix = useMemo(() => projector(), []);
   const [built, setBuilt] = useState<Built | null>(null);
+  const [extrasIn, setExtrasIn] = useState(false);
+  const onExtras = useCallback(() => setExtrasIn(true), []);
   const spot = useRef<SpotLight>(null);
-  const rect = useRef<RectAreaLight>(null);
-  const screenSpot = useRef<SpotLight>(null);
-  const screenTarget = useMemo(() => new Object3D(), []);
+  const street = useRef<SpotLight>(null);
+  const laptopRect = useRef<RectAreaLight>(null);
+  const televisionRect = useRef<RectAreaLight>(null);
+  const laptopSpot = useRef<SpotLight>(null);
+  const televisionSpot = useRef<SpotLight>(null);
   const rim = useRef<DirectionalLight>(null);
   const inner = useRef<PointLight>(null);
-  const target = useMemo(() => new Object3D(), []);
+  const targets = useMemo(() => ({ lamp: new Object3D(), street: new Object3D(), laptop: new Object3D(), television: new Object3D() }), []);
   const bulbs = useRef<MeshStandardMaterial[]>([]);
-  const focus = useMemo(() => new Vector3(), []);
-  const scratch = useMemo(() => ({ color: new Color(), white: new Color(1, 1, 1), focusA: new Vector3() }), []);
+  const scratch = useMemo(
+    () => ({ color: new Color(), white: new Color(1, 1, 1), focus: new Vector3(), lampColor: new Color('#ffb46b'), street: tokenColor('rim') }),
+    [],
+  );
   const room = useMemo(() => tokenColor('room'), []);
+  const fog = useMemo(() => new FogExp2(room.getHex(), 0.32), [room]);
   const layout = layoutFor(size.width, size.height);
-  const wall = useRoomMaterial('wall', wallCenter);
-  const floor = useRoomMaterial('floor', floorCenter);
+  const phone = layout === 'phone';
+  const wall = useRoomMaterial('wall', wallCenter, blinds);
+  const floor = useRoomMaterial('floor', floorCenter, blinds);
 
-  const onScreen = useCallback(
-    (mesh: Mesh, frame: Group) => {
+  const onScreens = useCallback(
+    (found: Screens) => {
       const aspect = manifest.screen.width / manifest.screen.height;
-      const { origin, screen } = measureScreen(mesh, frame, aspect);
-      uniforms.uOrigin.value.set(origin.x, origin.y);
-      uniforms.uExtent.value.set(origin.width, origin.height);
-      mesh.material = material;
-      mesh.castShadow = false;
-      setBuilt({ mesh, frame, screen });
+      const laptop = measureScreen(found.laptop.mesh, found.laptop.frame, aspect);
+      screens.lcd.uniforms.uOrigin.value.set(laptop.origin.x, laptop.origin.y);
+      screens.lcd.uniforms.uExtent.value.set(laptop.origin.width, laptop.origin.height);
+      found.laptop.mesh.material = screens.lcd.material;
+      found.laptop.mesh.castShadow = false;
+      const box = found.television.mesh.geometry.boundingBox ?? (found.television.mesh.geometry.computeBoundingBox(), found.television.mesh.geometry.boundingBox!);
+      const glassAspect = (box.max.x - box.min.x) / (box.max.y - box.min.y);
+      const television = measureScreen(found.television.mesh, found.television.frame, glassAspect, [1, 1]);
+      screens.crt.uniforms.uOrigin.value.set(television.origin.x, television.origin.y);
+      screens.crt.uniforms.uExtent.value.set(television.origin.width, television.origin.height);
+      found.television.mesh.material = screens.crt.material;
+      found.television.mesh.castShadow = false;
+      setBuilt({
+        laptop: glassOf(found.laptop.mesh, found.laptop.frame, laptop.screen),
+        television: glassOf(found.television.mesh, found.television.frame, television.screen),
+      });
     },
-    [manifest, material, uniforms],
+    [manifest, screens],
   );
 
+  const stage = useMemo(() => (built ? stageFor(built.television) : null), [built]);
+  const inside = useInside(manifest, screens.photo, screens.saliency, screens.atlas, stage);
+
   const rig = useMemo(() => {
-    if (!built) return null;
-    built.frame.updateWorldMatrix(true, false);
-    return new Rig(shots[layout], new Matrix4().copy(built.frame.matrixWorld), built.screen, size.width / size.height);
-  }, [built, layout, size.width, size.height]);
+    if (!built || !stage) return null;
+    const space = new Matrix4().compose(stage.space.position, stage.space.quaternion, new Vector3(1, 1, 1));
+    return new Rig(keys[layout], { world: new Matrix4(), glass: built.television.matrix, space }, size.width / size.height);
+  }, [built, stage, layout, size.width, size.height]);
 
   useLayoutEffect(() => {
     scene.background = room;
-    target.position.copy(keyboard);
-    scene.add(target);
+    scene.fog = fog;
+    targets.lamp.position.set(LAMP.position[0] + 0.12, DESK_TOP + 0.05, LAMP.position[2] + 0.42);
+    targets.street.position.copy(STREET.target);
+    for (const target of Object.values(targets)) scene.add(target);
     return () => {
-      scene.remove(target);
+      for (const target of Object.values(targets)) scene.remove(target);
+      scene.fog = null;
     };
-  }, [scene, room, target]);
+  }, [scene, room, fog, targets]);
 
   useEffect(() => {
     if (!built) return;
@@ -114,32 +184,37 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       if (mesh.isMesh && mesh.userData.bulb) found.push(mesh.material as MeshStandardMaterial);
     });
     bulbs.current = found;
-    const light = rect.current;
-    if (light) {
-      const world = built.screen.center.clone().applyMatrix4(built.frame.matrixWorld);
-      const normal = built.screen.normal.clone().transformDirection(built.frame.matrixWorld);
-      light.position.copy(world).addScaledVector(normal, 0.004);
-      light.lookAt(world.clone().add(normal));
-      light.width = built.screen.width;
-      light.height = built.screen.height;
+    const placeScreenLight = (glass: Glass, rect: RectAreaLight | null, glow: SpotLight | null, target: Object3D) => {
+      const normal = new Vector3(0, 0, 1).applyQuaternion(glass.quaternion);
+      if (rect) {
+        rect.position.copy(glass.center).addScaledVector(normal, 0.004);
+        rect.lookAt(glass.center.clone().add(normal));
+        rect.width = glass.screen.width;
+        rect.height = glass.screen.height;
+      }
+      if (glow) {
+        glow.position.copy(glass.center).addScaledVector(normal, 0.02);
+        target.position.copy(glass.center).addScaledVector(normal, 1).add(new Vector3(0, -0.45, 0));
+        glow.target = target;
+      }
+    };
+    placeScreenLight(built.laptop, laptopRect.current, laptopSpot.current, targets.laptop);
+    placeScreenLight(built.television, televisionRect.current, televisionSpot.current, targets.television);
+    if (spot.current) {
+      spot.current.target = targets.lamp;
+      spot.current.shadow.needsUpdate = true;
     }
-    const glowLight = screenSpot.current;
-    if (glowLight) {
-      const world = built.screen.center.clone().applyMatrix4(built.frame.matrixWorld);
-      const normal = built.screen.normal.clone().transformDirection(built.frame.matrixWorld);
-      glowLight.position.copy(world).addScaledVector(normal, 0.02);
-      screenTarget.position.copy(world).addScaledVector(normal, 1).add(new Vector3(0, -0.45, 0));
-      scene.add(screenTarget);
-      glowLight.target = screenTarget;
+    if (street.current) {
+      street.current.target = targets.street;
+      street.current.map = blinds;
+      street.current.shadow.needsUpdate = true;
     }
-    const key = spot.current;
-    if (key) {
-      key.target = target;
-      key.shadow.needsUpdate = true;
-    }
+    wall.uniforms.uBlindsMatrix.value.copy(blindsMatrix);
+    floor.uniforms.uBlindsMatrix.value.copy(blindsMatrix);
     gl.shadowMap.autoUpdate = false;
     gl.shadowMap.needsUpdate = true;
-    uniforms.uLamp.value.copy(bulbWorld);
+    screens.crt.uniforms.uLamp.value.copy(bulbWorld);
+    screens.lcd.uniforms.uLamp.value.copy(bulbWorld);
     let frames = 0;
     let handle = 0;
     let cancelled = false;
@@ -164,12 +239,18 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       cancelled = true;
       cancelAnimationFrame(handle);
     };
-  }, [built, scene, camera, target, screenTarget, gl, uniforms, onReady]);
+  }, [built, scene, camera, targets, gl, screens, blinds, blindsMatrix, wall, floor, onReady]);
 
   const shadowFrames = useRef(0);
+  const shadowProps = useRef(false);
+  const readyAt = useRef(-1);
 
   useFrame((state, delta) => {
-    if (!rig) return;
+    if (!rig || !built) return;
+    if (runtime.props && !shadowProps.current) {
+      shadowProps.current = true;
+      shadowFrames.current = 0;
+    }
     if (shadowFrames.current < 24) {
       gl.shadowMap.needsUpdate = true;
       shadowFrames.current += 1;
@@ -177,79 +258,90 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const time = state.clock.elapsedTime;
     const idle = runtime.idle;
     const motion = idle ? 1 : 0;
-    const distance = rig.apply(
-      camera as PerspectiveCamera,
-      story.camera,
-      story.push,
-      time,
-      pointer.x * motion,
-      pointer.y * motion,
-      Math.min(delta, 0.1),
-      size.width,
-      size.height,
-      idle,
-    );
-    void distance;
-    const flicker = idle ? 1 + Math.sin(time * 13.1) * 0.006 + Math.sin(time * 29.7 + 1.1) * 0.004 + Math.sin(time * 7.3) * 0.003 : 1;
-    const power = runtime.power;
-    const lamp = story.lamp * flicker * power;
+    rig.apply(camera as PerspectiveCamera, story.camera, time, pointer.x * motion, pointer.y * motion, Math.min(delta, 0.1), size.width, size.height, idle);
+
+    if (runtime.introAt < 0 && runtime.ready && runtime.still < 0) {
+      if (readyAt.current < 0) readyAt.current = time;
+      if (story.progress > 0.05) runtime.introAt = time - 10;
+      else if (runtime.props || time - readyAt.current > 1.6) runtime.introAt = time + 0.12;
+    }
+    let intro = 1;
+    if (runtime.still >= 0) intro = runtime.hero ? 0 : 1;
+    else if (runtime.introAt < 0) intro = 0;
+    else intro = time - runtime.introAt;
+    const still = runtime.still >= 0;
+    const introLamp = still ? intro : intro >= 1.6 ? 1 : flicker(intro);
+    const introStreet = still ? intro : ramp(intro, 0.5, 1.3);
+    const introTube = still ? intro : ramp(intro, 0.9, 1.0);
+    const introLcd = still ? intro : ramp(intro, 1.3, 0.6);
+
+    const away = 1 - story.inside;
+    const hum = idle ? 1 + Math.sin(time * 13.1) * 0.006 + Math.sin(time * 29.7 + 1.1) * 0.004 + Math.sin(time * 7.3) * 0.003 : 1;
+    const lamp = story.lamp * introLamp * hum * away;
     if (spot.current) spot.current.intensity = SPOT * lamp;
     if (inner.current) inner.current.intensity = INNER * lamp;
     wall.uniforms.uLevel.value = lamp;
     floor.uniforms.uLevel.value = lamp * 0.35;
-    const ambient = Math.min(story.lamp, 1) * power;
-    scene.environmentIntensity = 0.05 + 0.17 * ambient;
-    if (rim.current) rim.current.intensity = 0.12 + 0.2 * ambient;
-    for (const bulb of bulbs.current) bulb.emissiveIntensity = BULB_GLOW * lamp;
+    const streetLevel = story.blinds * away;
+    wall.uniforms.uBlindsLevel.value = streetLevel;
+    floor.uniforms.uBlindsLevel.value = streetLevel * 0.6;
+    wall.uniforms.uFade.value = 0.25 + 0.75 * away;
+    floor.uniforms.uFade.value = 0.25 + 0.75 * away;
+    if (street.current) street.current.intensity = STREET_LEVEL * streetLevel * introStreet;
+    const ambient = Math.min(story.lamp, 1) * introLamp * away;
+    scene.environmentIntensity = (0.05 + 0.17 * ambient) * (0.3 + 0.7 * away);
+    if (rim.current) rim.current.intensity = (0.12 + 0.2 * ambient) * away;
+    for (const bulb of bulbs.current) bulb.emissiveIntensity = BULB_GLOW * story.lamp * introLamp * hum;
+    fog.density = 0.32 + story.inside * 0.9;
 
-    uniforms.uTime.value = time;
-    uniforms.uPlace.value = story.place;
-    uniforms.uSweep.value = story.sweep;
-    uniforms.uLampLevel.value = lamp;
-    uniforms.uPower.value = Math.min(Math.max((power - 0.35) / 0.65, 0), 1);
-
+    const tubeOn = Math.min(story.tubeOn, introTube);
+    const crt = screens.crt.uniforms;
+    crt.uTime.value = time;
+    crt.uPlace.value = story.place;
+    crt.uOn.value = tubeOn;
+    crt.uOff.value = story.tubeOff;
+    crt.uLampLevel.value = lamp;
     const { frames, drag } = manifest;
-    const icons = uniforms.uIcons.value;
-    for (let i = 0; i < manifest.icons.length && i < icons.length; i++) {
+    for (let i = 0; i < manifest.icons.length && i < crt.uIcons.value.length; i++) {
       const id = manifest.icons[i].id;
       const [x, y, w, h] = frames.before.icons[id];
       if (id === drag.icon) {
-        icons[i].set(
-          drag.from[0] + (drag.to[0] - drag.from[0]) * story.drag,
-          drag.from[1] + (drag.to[1] - drag.from[1]) * story.drag,
-          w,
-          h,
-        );
-        uniforms.uGhost.value[i] = story.grab;
+        crt.uIcons.value[i].set(drag.from[0] + (drag.to[0] - drag.from[0]) * story.drag, drag.from[1] + (drag.to[1] - drag.from[1]) * story.drag, w, h);
       } else {
-        icons[i].set(x, y, w, h);
+        crt.uIcons.value[i].set(x, y, w, h);
       }
     }
-    uniforms.uCursor.value.set(
-      story.cursorX + (drag.to[0] - drag.from[0]) * story.drag,
-      story.cursorY + (drag.to[1] - drag.from[1]) * story.drag,
-      story.cursorAlpha,
-    );
 
-    const light = rect.current ?? screenSpot.current;
-    if (light) {
-      const step = Math.min(Math.max(story.place, 0), averages.length - 1);
+    const lcdPower = introLcd * (0.35 + 0.65 * away);
+    const lcd = screens.lcd.uniforms;
+    lcd.uTime.value = time;
+    lcd.uPlace.value = story.frost;
+    lcd.uPower.value = lcdPower;
+    lcd.uLampLevel.value = lamp;
+
+    const lightFor = (averages: Color[], place: number) => {
+      const step = Math.min(Math.max(place, 0), averages.length - 1);
       const index = Math.min(Math.floor(step), averages.length - 2);
-      scratch.color.copy(averages[index]).lerp(averages[index + 1], step - index).lerp(scratch.white, 0.3);
-      const heat = Math.min(Math.max((story.sweep - 0.15) / 0.6, 0), 1);
-      light.color.copy(scratch.color);
-      const base = rect.current ? RECT : SCREEN_SPOT;
-      light.intensity = base * (1 - heat * 0.55) * (1.5 - 0.5 * Math.min(story.lamp, 1)) * uniforms.uPower.value;
+      return scratch.color.copy(averages[index]).lerp(averages[index + 1], step - index).lerp(scratch.white, 0.3);
+    };
+    const tubeLight = tubeOn * (1 - Math.min(story.tubeOff * 1.4, 1));
+    const laptopLight = laptopRect.current ?? laptopSpot.current;
+    if (laptopLight) {
+      laptopLight.color.copy(lightFor(screens.frost, story.frost));
+      laptopLight.intensity = (laptopRect.current ? RECT : SCREEN_SPOT) * (1.5 - 0.5 * Math.min(story.lamp, 1)) * lcdPower;
+    }
+    const televisionLight = televisionRect.current ?? televisionSpot.current;
+    if (televisionLight) {
+      televisionLight.color.copy(lightFor(screens.balloon, story.place));
+      televisionLight.intensity = (televisionRect.current ? RECT * 1.3 : SCREEN_SPOT * 1.4) * (1.5 - 0.5 * Math.min(story.lamp, 1)) * tubeLight * away;
     }
 
-    quality.focus(rig.focusPoint(focus), camera.position, story.focus, keyboard, scratch.focusA, story.dof);
+    scratch.focus.copy(built.laptop.center).lerp(built.television.center, story.focus);
+    quality.focus(scratch.focus, camera.position, 1, scratch.focus, scratch.focus, story.dof);
   });
-
-  const phone = layout === 'phone';
 
   return (
     <>
-      <fogExp2 attach="fog" args={[room, 0.32]} />
       <spotLight
         ref={spot}
         position={bulbWorld}
@@ -267,26 +359,45 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         shadow-camera-near={0.2}
         shadow-camera-far={3}
       />
-      <pointLight ref={inner} position={bulbWorld} color="#ffb46b" intensity={INNER} distance={0.32} decay={2} />
-      <directionalLight ref={rim} position={[1.4, 1.8, -1.6]} color={tokenColor("rim")} intensity={0.3} />
-      {quality.tier === 'full' ? <rectAreaLight ref={rect} intensity={RECT} /> : <spotLight ref={screenSpot} angle={1.1} penumbra={1} decay={2} distance={0} intensity={0} />}
-      <Desk onScreen={onScreen} showProps={!phone} />
-      <ContactShadows
-        position={[-0.05, DESK_TOP + 0.0015, 0.02]}
-        scale={[1.9, 0.92]}
-        resolution={512}
-        blur={2.4}
-        far={0.3}
-        opacity={0.62}
-        frames={1}
-        color="#0a0806"
+      <spotLight
+        ref={street}
+        position={STREET.position}
+        color={scratch.street}
+        angle={STREET.angle}
+        penumbra={0.25}
+        decay={2}
+        distance={0}
+        intensity={0}
+        castShadow
+        shadow-mapSize={phone ? [1024, 1024] : [1536, 1536]}
+        shadow-radius={3}
+        shadow-bias={-0.0004}
+        shadow-normalBias={0.02}
+        shadow-camera-near={1.2}
+        shadow-camera-far={6}
       />
+      <pointLight ref={inner} position={bulbWorld} color="#ffb46b" intensity={INNER} distance={0.32} decay={2} />
+      <directionalLight ref={rim} position={[1.4, 1.8, -1.6]} color={scratch.street} intensity={0.3} />
+      {quality.tier === 'full' ? (
+        <>
+          <rectAreaLight ref={laptopRect} intensity={RECT} />
+          <rectAreaLight ref={televisionRect} intensity={RECT} />
+        </>
+      ) : (
+        <>
+          <spotLight ref={laptopSpot} angle={1.1} penumbra={1} decay={2} distance={0} intensity={0} />
+          <spotLight ref={televisionSpot} angle={1.1} penumbra={1} decay={2} distance={0} intensity={0} />
+        </>
+      )}
+      <Desk onScreens={onScreens} onExtras={onExtras} phone={phone} />
+      <ContactShadows key={extrasIn ? 'extras' : 'bare'} position={[0, DESK_TOP + 0.0015, 0.0]} scale={[2.0, 0.95]} resolution={512} blur={2.4} far={0.3} opacity={0.62} frames={1} color="#0a0806" />
       <mesh position={[0, 1.6, -0.98]} material={wall}>
         <planeGeometry args={[9, 3.2]} />
       </mesh>
       <mesh rotation-x={-Math.PI / 2} position={[0, 0, 0.6]} material={floor}>
         <planeGeometry args={[9, 4]} />
       </mesh>
+      {inside ? <primitive object={inside.group} /> : null}
     </>
   );
 }

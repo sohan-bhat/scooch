@@ -1,5 +1,5 @@
 import { CatmullRomCurve3, MathUtils, Matrix4, PerspectiveCamera, Vector3 } from 'three';
-import type { Shot } from './shots';
+import type { Frame, Key } from './shots';
 
 export type ScreenFrame = {
   center: Vector3;
@@ -25,33 +25,23 @@ export class Rig {
   private pitch = 0;
   readonly count: number;
 
-  constructor(shots: Shot[], frame: Matrix4, screen: ScreenFrame, aspect: number) {
+  constructor(keys: Key[], frames: Record<Frame, Matrix4>, aspect: number) {
     const positions: Vector3[] = [];
     const targets: Vector3[] = [];
     this.fovs = [];
     this.shiftsX = [];
     this.shiftsY = [];
-    for (const shot of shots) {
-      const fov = this.fitFov(shot.fov, aspect);
-      if (shot.screen) {
-        const half = MathUtils.degToRad(fov) / 2;
-        const byHeight = shot.screen.fillHeight ? screen.height / 2 / Math.tan(half) / shot.screen.fillHeight : 0;
-        const byWidth = shot.screen.fillWidth ? screen.width / 2 / (Math.tan(half) * aspect) / shot.screen.fillWidth : 0;
-        const distance = Math.max(byHeight, byWidth);
-        const center = screen.center.clone().addScaledVector(screen.up, shot.screen.lift ?? 0);
-        positions.push(center.clone().addScaledVector(screen.normal, distance).applyMatrix4(frame));
-        targets.push(center.applyMatrix4(frame));
-      } else {
-        positions.push(new Vector3(...shot.position!).applyMatrix4(frame));
-        targets.push(new Vector3(...shot.target!).applyMatrix4(frame));
-      }
-      this.fovs.push(fov);
-      this.shiftsX.push(shot.shiftX);
-      this.shiftsY.push(shot.shiftY);
+    for (const key of keys) {
+      const frame = frames[key.frame];
+      positions.push(new Vector3(...key.position).applyMatrix4(frame));
+      targets.push(new Vector3(...key.target).applyMatrix4(frame));
+      this.fovs.push(this.fitFov(key.fov, aspect));
+      this.shiftsX.push(key.shiftX);
+      this.shiftsY.push(key.shiftY);
     }
     this.positions = new CatmullRomCurve3(positions, false, 'centripetal');
     this.targets = new CatmullRomCurve3(targets, false, 'centripetal');
-    this.count = shots.length;
+    this.count = keys.length;
   }
 
   private fitFov(fov: number, aspect: number) {
@@ -67,22 +57,10 @@ export class Rig {
     return values[i] + (values[i + 1] - values[i]) * f;
   }
 
-  apply(
-    camera: PerspectiveCamera,
-    u: number,
-    push: number,
-    time: number,
-    pointerX: number,
-    pointerY: number,
-    delta: number,
-    width: number,
-    height: number,
-    idle: boolean,
-  ) {
+  apply(camera: PerspectiveCamera, u: number, time: number, pointerX: number, pointerY: number, delta: number, width: number, height: number, idle: boolean) {
     const t = MathUtils.clamp(u / (this.count - 1), 0, 1);
     this.positions.getPoint(t, this.position);
     this.targets.getPoint(t, this.target);
-    this.position.lerp(this.target, push * 0.07);
     const distance = this.position.distanceTo(this.target);
     if (idle) {
       this.position.y += Math.sin(time * 0.52) * 0.0025;
