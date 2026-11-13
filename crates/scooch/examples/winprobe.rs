@@ -733,6 +733,8 @@ mod probe {
         let clip = RECT { left: middle - cell.width as i32, top: spot_screen[0].y - cell.line as i32, right: middle + cell.width as i32, bottom: spot_screen[0].y + tall + cell.line as i32 };
         let dpi = unsafe { GetDpiForWindow(view.list) };
         p.line(format!("- target spot {},{} in list coordinates, capture area {}, pixels judged inside {}, list DPI {dpi}, icon box {}", spot.x, spot.y, show(&rect_of(area)), show(&rect_of(clip)), cell.icon));
+        let focused: Vec<String> = shell::items(&view)?.into_iter().filter(|item| item.unfolded).map(|item| item.name).collect();
+        p.line(format!("- desktop list has keyboard focus {}, unfolded items {focused:?}", shell::list_focused(&view)));
         uncover(p);
         park_cursor();
         let mut measured = Vec::new();
@@ -750,6 +752,8 @@ mod probe {
                 let automation = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown || seen == name).map(|(_, rect)| rect);
                 let pixels = changed_box(&before, &after, (area.left, area.top), clip);
                 let unfolded = shell::items(&view)?.into_iter().find(|item| item.name == shown || item.name == *name).is_some_and(|item| item.unfolded);
+                let state = unsafe { view.folder.GetSelectionState(pidl.0) }.map(|state| format!("{state:#x}")).unwrap_or_default();
+                p.raw(format!("{shown} selection state {state}, list has keyboard focus {}, unfolded {unfolded}", shell::list_focused(&view)));
                 let _ = fs::write(p.out.join(format!("before-{index}.png")), scooch_core::encode_png(&before)?);
                 let _ = fs::write(p.out.join(format!("after-{index}.png")), scooch_core::encode_png(&after)?);
                 place(&view, &pidl, home)?;
