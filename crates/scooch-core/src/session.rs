@@ -3,6 +3,7 @@ use crate::bundle::{self, Bundle, Parts, Scope};
 use crate::pack::fingerprint;
 use rayon::prelude::*;
 use std::borrow::Cow;
+use std::sync::Arc;
 use crate::paint;
 use crate::{look, pads, render, scenery, shape, solver, Analysis, Options, Placement, RgbImage, Scene};
 
@@ -19,8 +20,8 @@ struct Held {
     options: Options,
     scene: Scene,
     parts: Parts,
-    bundle: Bundle,
-    still: RgbImage,
+    bundle: Arc<Bundle>,
+    still: Arc<RgbImage>,
     picture: RgbImage,
     redraw: Option<Vec<bool>>,
     shrunk: bool,
@@ -114,32 +115,57 @@ impl Session {
     }
 
     pub fn still(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Bundle, RgbImage) {
+        let Some(held) = self.advance(image, analysis, placement, scene, options) else { return render::still(image, analysis, placement, scene, options) };
+        let mut bundle = (*held.bundle).clone();
+        if !held.shrunk && bundle.canvas.is_empty() {
+            bundle.canvas = image.as_raw().clone();
+        }
+        (bundle, (*held.still).clone())
+    }
+
+    pub fn still_shared(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Arc<Bundle>, Arc<RgbImage>) {
+        let Some(held) = self.advance(image, analysis, placement, scene, options) else {
+            let (bundle, still) = render::still(image, analysis, placement, scene, options);
+            return (Arc::new(bundle), Arc::new(still));
+        };
+        if !held.shrunk && held.bundle.canvas.is_empty() {
+            Arc::make_mut(&mut held.bundle).canvas = image.as_raw().clone();
+        }
+        (Arc::clone(&held.bundle), Arc::clone(&held.still))
+    }
+
+    fn advance(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> Option<&mut Held> {
         let (sw, sh) = image.dimensions();
         if sw == 0 || sh == 0 || scene.width == 0 || scene.height == 0 {
             self.held = None;
-            return render::still(image, analysis, placement, scene, options);
+            return None;
         }
         let key = (glance(sw, sh, image.as_raw()), print(analysis));
         let held = match self.held.take() {
-            Some(h) if h.image == key.0 && h.source == (sw, sh) && h.scene.width == scene.width && h.scene.height == scene.height => {
+            Some(mut h) if h.image == key.0 && h.source == (sw, sh) && h.scene.width == scene.width && h.scene.height == scene.height => {
                 if h.analysis == key.1 && h.placement == *placement && h.options == *options {
                     shift(h, image, analysis, scene, key)
                 } else {
-                    let mut h = h;
-                    let canvas = RgbImage::from_raw(h.bundle.canvas_width, h.bundle.canvas_height, std::mem::take(&mut h.bundle.canvas)).filter(|_| h.shrunk);
+                    let canvas = reuse(&mut h);
                     build(image, analysis, placement, scene, options, key, canvas)
                 }
             }
             _ => build(image, analysis, placement, scene, options, key, None),
         };
-        let mut bundle = held.bundle.clone();
-        if !held.shrunk {
-            bundle.canvas = image.as_raw().clone();
-        }
-        let out = (bundle, held.still.clone());
         self.held = Some(held);
-        out
+        self.held.as_mut()
     }
+}
+
+fn reuse(h: &mut Held) -> Option<RgbImage> {
+    if !h.shrunk {
+        return None;
+    }
+    let raw = match Arc::get_mut(&mut h.bundle) {
+        Some(bundle) => std::mem::take(&mut bundle.canvas),
+        None => h.bundle.canvas.clone(),
+    };
+    RgbImage::from_raw(h.bundle.canvas_width, h.bundle.canvas_height, raw)
 }
 
 fn build(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options, (image_key, analysis_key): (u64, u64), canvas: Option<RgbImage>) -> Held {
@@ -165,7 +191,7 @@ fn build(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &S
     } else {
         render::finish_plain(picture.clone(), analysis, &parts.framed.placement, scene, options)
     };
-    Held { image: image_key, source: image.dimensions(), analysis: analysis_key, placement: placement.clone(), options: *options, scene: scene.clone(), parts, bundle: out, still, picture, redraw: None, shrunk }
+    Held { image: image_key, source: image.dimensions(), analysis: analysis_key, placement: placement.clone(), options: *options, scene: scene.clone(), parts, bundle: Arc::new(out), still: Arc::new(still), picture, redraw: None, shrunk }
 }
 
 fn shift(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key: (u64, u64)) -> Held {
@@ -180,8 +206,11 @@ fn shift(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key:
     if !was && !now {
         h.parts.repad(analysis, scene, &options);
         let grid = h.parts.framed.grid;
-        h.bundle.pad = h.parts.pad().unwrap_or_else(|| vec![0; grid.w * grid.h * 4]);
-        h.still = render::finish_plain(h.picture.clone(), analysis, &h.parts.framed.placement, scene, &options);
+        let pad = h.parts.pad().unwrap_or_else(|| vec![0; grid.w * grid.h * 4]);
+        if pad != h.bundle.pad {
+            Arc::make_mut(&mut h.bundle).pad = pad;
+        }
+        h.still = Arc::new(render::finish_plain(h.picture.clone(), analysis, &h.parts.framed.placement, scene, &options));
         h.scene = scene.clone();
         h.redraw = None;
         return h;
@@ -190,7 +219,7 @@ fn shift(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key:
         Some(moved) if lean(&mut h, analysis, scene, &moved) => h,
         _ => {
             let placement = h.placement.clone();
-            let canvas = RgbImage::from_raw(h.bundle.canvas_width, h.bundle.canvas_height, std::mem::take(&mut h.bundle.canvas)).filter(|_| h.shrunk);
+            let canvas = reuse(&mut h);
             build(image, analysis, &placement, scene, &options, key, canvas)
         }
     }
@@ -229,29 +258,36 @@ fn lean(h: &mut Held, analysis: &Analysis, scene: &Scene, moved: &[[f64; 4]]) ->
     let (mut far, mut halves) = (vec![false; cells], Vec::new());
     for a in area::merge(field) {
         let before = area::take(&h.bundle.field, w, a);
-        for y in a[1]..a[3] {
-            for i in y * w + a[0]..y * w + a[2] {
-                h.bundle.field[i] = bundle::half(live.field[i]);
-            }
+        let fresh: Vec<f32> = area::take(&live.field, w, a).into_iter().map(bundle::half).collect();
+        if before.iter().zip(&fresh).all(|(p, q)| area::bits(p, q)) {
+            continue;
         }
-        halves.extend(area::mark(&before, &h.bundle.field, w, a, area::bits, &mut far));
+        let out = Arc::make_mut(&mut h.bundle);
+        for y in a[1]..a[3] {
+            out.field[y * w + a[0]..y * w + a[2]].copy_from_slice(&fresh[(y - a[1]) * (a[2] - a[0])..(y - a[1] + 1) * (a[2] - a[0])]);
+        }
+        halves.extend(area::mark(&before, &out.field, w, a, area::bits, &mut far));
     }
     let (mut near, mut boxes) = (vec![false; cells], Vec::new());
     for a in area::merge(look) {
         let before = area::take(h.bundle.look.as_chunks::<4>().0, w, a);
-        for y in a[1]..a[3] {
-            h.bundle.look[(y * w + a[0]) * 4..(y * w + a[2]) * 4].copy_from_slice(&live.look[(y * w + a[0]) * 4..(y * w + a[2]) * 4]);
+        if before == area::take(live.look.as_chunks::<4>().0, w, a) {
+            continue;
         }
-        boxes.extend(area::mark(&before, h.bundle.look.as_chunks::<4>().0, w, a, area::equal, &mut near));
+        let out = Arc::make_mut(&mut h.bundle);
+        for y in a[1]..a[3] {
+            out.look[(y * w + a[0]) * 4..(y * w + a[2]) * 4].copy_from_slice(&live.look[(y * w + a[0]) * 4..(y * w + a[2]) * 4]);
+        }
+        boxes.extend(area::mark(&before, out.look.as_chunks::<4>().0, w, a, area::equal, &mut near));
     }
     if let (Some(pads), Some(calm)) = (parts.pads.as_mut(), parts.calm.as_ref()) {
         let was = pads.any();
         let touched = area::merge(pads.update(calm, &grid, &grounded.lookup, scene, Some(&fixed.belong), moved));
         let before: Vec<Vec<[u8; 4]>> = touched.iter().map(|a| area::take(h.bundle.pad.as_chunks::<4>().0, w, *a)).collect();
         if was != pads.any() {
-            h.bundle.pad = pads.table(calm).unwrap_or_else(|| vec![0; cells * 4]);
-        } else if was {
-            pads.patch(&mut h.bundle.pad, w, &touched);
+            Arc::make_mut(&mut h.bundle).pad = pads.table(calm).unwrap_or_else(|| vec![0; cells * 4]);
+        } else if was && !touched.is_empty() {
+            pads.patch(&mut Arc::make_mut(&mut h.bundle).pad, w, &touched);
         }
         for (a, old) in touched.iter().zip(&before) {
             boxes.extend(area::mark(old, h.bundle.pad.as_chunks::<4>().0, w, *a, |p, q| p[3] == q[3], &mut near));
@@ -280,7 +316,8 @@ fn lean(h: &mut Held, analysis: &Analysis, scene: &Scene, moved: &[[f64; 4]]) ->
     });
     let (shown, layer) = bundle::finish(&h.bundle, &h.bundle, 0.0, work, Some(&scope));
     let (shown, layer) = (shown.as_raw(), layer.as_raw());
-    let still: &mut [u8] = &mut h.still;
+    let still: &mut RgbImage = Arc::make_mut(&mut h.still);
+    let still: &mut [u8] = still;
     still.par_chunks_mut(width * 3).enumerate().for_each(|(y, line)| {
         for (x0, x1) in Scope::ranges(&scope.redraw, w, y, width) {
             for x in x0..x1 {
