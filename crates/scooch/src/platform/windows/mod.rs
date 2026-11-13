@@ -4,6 +4,8 @@ pub mod wakes;
 #[cfg(target_os = "windows")]
 pub mod com;
 #[cfg(target_os = "windows")]
+pub mod layer;
+#[cfg(target_os = "windows")]
 pub mod picture;
 #[cfg(target_os = "windows")]
 pub mod shell;
