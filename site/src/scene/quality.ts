@@ -75,7 +75,7 @@ export function gpuClass(): Probe {
 
 const starts: Record<GpuClass, Step> = {
   high: { dpr: 1.5, dof: true, ao: true, grain: true },
-  mid: { dpr: 1, dof: true, ao: false, grain: true },
+  mid: { dpr: 0.85, dof: false, ao: false, grain: true },
   low: { dpr: 0.7, dof: false, ao: false, grain: true },
 };
 
