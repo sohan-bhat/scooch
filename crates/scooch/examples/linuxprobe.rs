@@ -485,6 +485,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn primary_frame(p: &Probe) -> Option<Rect> {
+        if let Some(screen) = p.linux().ok().and_then(|linux| linux.screens().ok()).and_then(|screens| screens.first().cloned()) {
+            return Some(physical(&screen.frame, screen.scale));
+        }
         let found = screens::read(p.session).ok()?;
         found.iter().find(|found| found.primary).or(found.first()).map(|found| found.screen.frame)
     }
