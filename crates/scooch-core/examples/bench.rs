@@ -28,7 +28,7 @@ fn main() {
     let name = std::env::args().nth(1).unwrap_or_else(|| "fox".into());
     let path = layouts::photos().into_iter().find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy() == name)).expect("photo");
     let photo = scooch_core::open(&path).expect("open");
-    let options = Options::default();
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
     println!("{} {}x{}", name, photo.width(), photo.height());
     let analysis = scooch_core::analyze(&photo);
     println!("analyze          {}", median_ms(15, || scooch_core::analyze(&photo)));

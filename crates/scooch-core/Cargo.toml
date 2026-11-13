@@ -13,4 +13,5 @@ rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-serde_json = "1"
+naga = { version = "30", features = ["wgsl-in", "glsl-in"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }

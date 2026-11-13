@@ -57,6 +57,12 @@ fn identifier(display: u32) -> String {
     named.unwrap_or_else(|| format!("display-{display}"))
 }
 
+pub fn screen_for(marker: MainThreadMarker, id: &str) -> Result<(Retained<NSScreen>, u32)> {
+    let screen = find(marker, id)?;
+    let display = number(&screen).context("macOS gave that screen no display number")?;
+    Ok((screen, display))
+}
+
 fn find(marker: MainThreadMarker, id: &str) -> Result<Retained<NSScreen>> {
     let (display, space) = super::spaces::split(id);
     let screen = NSScreen::screens(marker)

@@ -1,5 +1,6 @@
 pub mod finder;
 pub mod launchd;
+pub mod layer;
 pub mod picture;
 pub mod spaces;
 pub mod store;

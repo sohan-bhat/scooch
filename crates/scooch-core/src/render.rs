@@ -1,6 +1,6 @@
-use crate::table::{self, Curve, STEPS};
 use crate::paint::{self, Materials};
-use crate::{analysis, color, pads, scenery, Analysis, Options, Placement, RgbImage, RgbaImage, Scene};
+use crate::table::{self, Curve, STEPS};
+use crate::{analysis, bundle, color, pads, scenery, Analysis, Options, Placement, RgbImage, RgbaImage, Scene};
 use rayon::prelude::*;
 use std::borrow::Cow;
 
@@ -18,31 +18,36 @@ fn catmull_rom(t: f32) -> [f32; 4] {
     [(-t3 + 2.0 * t2 - t) * 0.5, (3.0 * t3 - 5.0 * t2 + 2.0) * 0.5, (-3.0 * t3 + 4.0 * t2 + t) * 0.5, (t3 - t2) * 0.5]
 }
 
-fn taps(values: &[f32], out: usize, scale: f64, limit: usize) -> Vec<Tap> {
-    let curve = Curve::new(values);
-    (0..out)
-        .map(|i| {
-            let position = curve.at((i as f64 + 0.5) / out as f64) * scale - 0.5;
-            let base = position.floor();
-            let t = (position - base) as f32;
-            let base = base as i64;
-            let at = [0i64, 1, 2, 3].map(|k| (base - 1 + k).clamp(0, limit as i64 - 1) as u32);
-            Tap { at, weight: catmull_rom(t) }
-        })
-        .collect()
+fn map_taps(map: impl Iterator<Item = f64>, scale: f64, limit: usize) -> Vec<Tap> {
+    map.map(|v| {
+        let position = v * scale - 0.5;
+        let base = position.floor();
+        let t = (position - base) as f32;
+        let base = base as i64;
+        let at = [0i64, 1, 2, 3].map(|k| (base - 1 + k).clamp(0, limit as i64 - 1) as u32);
+        Tap { at, weight: catmull_rom(t) }
+    })
+    .collect()
 }
 
-fn worst_ratio(values: &[f32], source: u32, out: u32) -> f64 {
+fn taps(values: &[f32], out: usize, scale: f64, limit: usize) -> Vec<Tap> {
+    let curve = Curve::new(values);
+    map_taps((0..out).map(|i| curve.at((i as f64 + 0.5) / out as f64)), scale, limit)
+}
+
+pub fn worst_ratio(values: &[f32], source: u32, out: u32) -> f64 {
     let step = values.windows(2).map(|p| (p[1] as f64 - p[0] as f64).abs()).fold(0.0f64, f64::max);
     step * STEPS as f64 * source as f64 / out.max(1) as f64
 }
 
-fn shrink(image: &RgbImage, factor: u32) -> RgbImage {
-    let (sw, sh) = image.dimensions();
+pub fn shrink(image: &RgbImage, factor: u32) -> RgbImage {
+    shrink_raw(image.as_raw(), image.width(), image.height(), factor)
+}
+
+pub fn shrink_raw(raw: &[u8], sw: u32, sh: u32, factor: u32) -> RgbImage {
     let (w, h) = (sw.div_ceil(factor), sh.div_ceil(factor));
     let decode = color::decode_table();
     let encode = color::encode_table();
-    let raw = image.as_raw();
     let mut out = vec![0u8; (w * h * 3) as usize];
     out.par_chunks_mut((w * 3) as usize).enumerate().for_each(|(y, row)| {
         let (y0, y1) = (y as u32 * factor, ((y as u32 + 1) * factor).min(sh));
@@ -67,11 +72,10 @@ fn shrink(image: &RgbImage, factor: u32) -> RgbImage {
     RgbImage::from_raw(w, h, out).unwrap_or_else(|| RgbImage::new(w, h))
 }
 
-fn resample(source: &RgbImage, columns: &[Tap], rows: &[Tap], width: usize) -> Vec<u8> {
+fn resample(raw: &[u8], source_width: u32, columns: &[Tap], rows: &[Tap], width: usize) -> Vec<u8> {
     let decode = color::decode_table();
     let encode = color::encode_table();
-    let raw = source.as_raw();
-    let stride = source.width() as usize * 3;
+    let stride = source_width as usize * 3;
     let left = columns.iter().flat_map(|t| t.at).min().unwrap_or(0) as usize;
     let right = columns.iter().flat_map(|t| t.at).max().unwrap_or(0) as usize;
     let places: Vec<[usize; 4]> = columns.iter().map(|t| t.at.map(|a| (a as usize - left) * 3)).collect();
@@ -106,52 +110,75 @@ fn resample(source: &RgbImage, columns: &[Tap], rows: &[Tap], width: usize) -> V
     out
 }
 
+pub fn picture((canvas, cw, ch): (&[u8], u32, u32), (xmap, ymap): (&[f64], &[f64]), ratio: f64, (width, height): (u32, u32)) -> RgbImage {
+    if width == 0 || height == 0 || cw == 0 || ch == 0 {
+        return RgbImage::new(width, height);
+    }
+    let factor = if ratio > SHRINK_FROM { ratio.floor().clamp(1.0, cw.min(ch) as f64) as u32 } else { 1 };
+    let shrunk = (factor > 1).then(|| shrink_raw(canvas, cw, ch, factor));
+    let (source, sw, sh) = match &shrunk {
+        Some(small) => (small.as_raw().as_slice(), small.width(), small.height()),
+        None => (canvas, cw, ch),
+    };
+    let columns = map_taps(xmap.iter().copied(), cw as f64 / factor as f64, sw as usize);
+    let rows = map_taps(ymap.iter().copied(), ch as f64 / factor as f64, sh as usize);
+    let raw = resample(source, sw, &columns, &rows, width as usize);
+    RgbImage::from_raw(width, height, raw).unwrap_or_else(|| RgbImage::new(width, height))
+}
+
+fn plain(image: &RgbImage, placement: &Placement, width: u32, height: u32) -> RgbImage {
+    let (sw, sh) = image.dimensions();
+    let placement: Cow<Placement> = if table::usable(&placement.fx) && table::usable(&placement.fy) { Cow::Borrowed(placement) } else { Cow::Owned(table::fill(sw, sh, width, height)) };
+    let ratio = worst_ratio(&placement.fx, sw, width).max(worst_ratio(&placement.fy, sh, height));
+    let factor = if ratio > SHRINK_FROM { ratio.floor().clamp(1.0, sw.min(sh) as f64) as u32 } else { 1 };
+    let shrunk = (factor > 1).then(|| shrink(image, factor));
+    let source = shrunk.as_ref().unwrap_or(image);
+    let columns = taps(&placement.fx, width as usize, sw as f64 / factor as f64, source.width() as usize);
+    let rows = taps(&placement.fy, height as usize, sh as f64 / factor as f64, source.height() as usize);
+    let raw = resample(source.as_raw(), source.width(), &columns, &rows, width as usize);
+    RgbImage::from_raw(width, height, raw).unwrap_or_else(|| RgbImage::new(width, height))
+}
+
 pub fn layers(image: &RgbImage, given: Option<&Analysis>, placement: &Placement, scene: &Scene, options: &Options, materials: Option<&Materials>) -> (RgbImage, RgbaImage) {
     let (width, height) = (scene.width, scene.height);
     let (sw, sh) = image.dimensions();
     if width == 0 || height == 0 || sw == 0 || sh == 0 {
         return (RgbImage::new(width, height), RgbaImage::new(width, height));
     }
-    let placement: Cow<Placement> = if table::usable(&placement.fx) && table::usable(&placement.fy) { Cow::Borrowed(placement) } else { Cow::Owned(table::fill(sw, sh, width, height)) };
-    let ratio = worst_ratio(&placement.fx, sw, width).max(worst_ratio(&placement.fy, sh, height));
-    let factor = if ratio > SHRINK_FROM { ratio.floor().clamp(1.0, sw.min(sh) as f64) as u32 } else { 1 };
-    let shrunk = (factor > 1).then(|| shrink(image, factor));
-    let source = shrunk.as_ref().unwrap_or(image);
-    let scale_x = sw as f64 / factor as f64;
-    let scale_y = sh as f64 / factor as f64;
-    let columns = taps(&placement.fx, width as usize, scale_x, source.width() as usize);
-    let rows = taps(&placement.fy, height as usize, scale_y, source.height() as usize);
-    let scenery_on = scenery::active(scene, options);
-    let (raw, found) = match (scenery_on || pads::wanted(scene, options), given) {
-        (false, _) => (resample(source, &columns, &rows, width as usize), None),
-        (true, Some(given)) => (resample(source, &columns, &rows, width as usize), Some(Cow::Borrowed(given))),
-        (true, None) => {
-            let (raw, made) = rayon::join(|| resample(source, &columns, &rows, width as usize), || analysis::analyze(image));
-            (raw, Some(Cow::Owned(made)))
-        }
-    };
-    let base = RgbImage::from_raw(width, height, raw).unwrap_or_else(|| RgbImage::new(width, height));
-    if !scenery_on {
+    if !scenery::active(scene, options) {
+        let placement: Cow<Placement> = if table::usable(&placement.fx) && table::usable(&placement.fy) { Cow::Borrowed(placement) } else { Cow::Owned(table::fill(sw, sh, width, height)) };
+        let (base, found) = match (pads::wanted(scene, options), given) {
+            (false, _) => (plain(image, &placement, width, height), None),
+            (true, Some(given)) => (plain(image, &placement, width, height), Some(Cow::Borrowed(given))),
+            (true, None) => {
+                let (base, made) = rayon::join(|| plain(image, &placement, width, height), || analysis::analyze(image));
+                (base, Some(Cow::Owned(made)))
+            }
+        };
         return (pads::apply(base, found.as_deref(), &placement, scene, options), RgbaImage::new(width, height));
     }
     let made;
-    let materials = match (materials, found.as_deref()) {
-        (Some(given), _) => given,
-        (None, Some(found)) if !found.palette.is_empty() => {
-            made = paint::materials(found);
-            &made
-        }
-        _ => {
-            made = paint::from_palette(&analysis::palette_of(image));
+    let found = match given {
+        Some(found) => found,
+        None => {
+            made = analysis::analyze(image);
             &made
         }
     };
-    let layer = scenery::layer(&base, found.as_deref(), &placement, scene, options, materials);
-    (base, layer)
+    let own;
+    let materials = match materials {
+        Some(given) => given,
+        None => {
+            own = paint::materials(found);
+            &own
+        }
+    };
+    let (state, canvas) = bundle::still(image, found, placement, scene, options, materials);
+    bundle::draw(&state, &state, 0.0, canvas.as_raw())
 }
 
-pub fn render(image: &RgbImage, given: Option<&Analysis>, placement: &Placement, scene: &Scene, options: &Options, materials: Option<&Materials>) -> RgbImage {
-    let (mut picture, layer) = layers(image, given, placement, scene, options, materials);
+pub fn render(image: &RgbImage, given: Option<&Analysis>, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
+    let (mut picture, layer) = layers(image, given, placement, scene, options, None);
     paint::composite(&mut picture, &layer);
     picture
 }
@@ -177,7 +204,7 @@ mod tests {
     fn a_matching_screen_copies_the_source() {
         let image = checker(64, 40);
         let scene = Scene { width: 64, height: 40, icons: Vec::new() };
-        let out = render(&image, None, &table::fill(64, 40, 64, 40), &scene, &Options::default(), None);
+        let out = render(&image, None, &table::fill(64, 40, 64, 40), &scene, &Options::default());
         assert_eq!(out.as_raw(), image.as_raw());
     }
 
@@ -185,7 +212,7 @@ mod tests {
     fn a_large_source_is_shrunk_first() {
         let image = RgbImage::from_pixel(400, 300, image::Rgb([200, 30, 90]));
         let scene = Scene { width: 40, height: 30, icons: Vec::new() };
-        let out = render(&image, None, &table::fill(400, 300, 40, 30), &scene, &Options::default(), None);
+        let out = render(&image, None, &table::fill(400, 300, 40, 30), &scene, &Options::default());
         assert_eq!(out.dimensions(), (40, 30));
         assert!(out.pixels().all(|p| p.0 == [200, 30, 90]));
         let shrunk = shrink(&image, 3);
@@ -200,7 +227,7 @@ mod tests {
         let mut placement = table::fill(32, 16, 32, 16);
         placement.fx = table::line(1.0, 0.0);
         placement.mirrored = true;
-        let out = render(&image, None, &placement, &scene, &Options::default(), None);
+        let out = render(&image, None, &placement, &scene, &Options::default());
         for y in 0..16 {
             for x in 0..32 {
                 assert_eq!(out.get_pixel(x, y), image.get_pixel(31 - x, y));
@@ -214,8 +241,8 @@ mod tests {
         let scene = Scene { width: 30, height: 20, icons: Vec::new() };
         let mut broken = table::fill(30, 20, 30, 20);
         broken.fx = vec![f32::NAN; 3];
-        let out = render(&image, None, &broken, &scene, &Options::default(), None);
+        let out = render(&image, None, &broken, &scene, &Options::default());
         assert_eq!(out.as_raw(), image.as_raw());
-        assert_eq!(render(&image, None, &broken, &Scene { width: 0, height: 9, icons: Vec::new() }, &Options::default(), None).dimensions(), (0, 9));
+        assert_eq!(render(&image, None, &broken, &Scene { width: 0, height: 9, icons: Vec::new() }, &Options::default()).dimensions(), (0, 9));
     }
 }

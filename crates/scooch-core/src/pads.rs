@@ -1,4 +1,5 @@
 use crate::table::{self, Curve};
+use crate::shape::Grid;
 use crate::{blur, color, scenery, solver, Analysis, Options, Placement, RgbImage, Scene};
 use rayon::prelude::*;
 
@@ -28,7 +29,7 @@ pub fn amount(options: &Options) -> f32 {
 }
 
 pub fn wanted(scene: &Scene, options: &Options) -> bool {
-    !scenery::active(scene, options) && amount(options) > 0.0 && scene.width > 0 && scene.height > 0 && !solver::screen_rects(scene).is_empty()
+    amount(options) > 0.0 && scene.width > 0 && scene.height > 0 && !solver::screen_rects(scene).is_empty()
 }
 
 #[derive(Clone, Copy)]
@@ -73,9 +74,7 @@ impl Gate {
         if bw == 0 || bh == 0 || found.busy.len() != bw * bh || found.saliency.len() != bw * bh || width == 0 || height == 0 {
             return None;
         }
-        let ground = found.busy.iter().map(|b| smoothstep(GATE_FROM, GATE_AT, *b)).collect();
-        let keep: Vec<f32> = found.saliency.iter().map(|s| smoothstep(PROTECT_FROM, PROTECT_AT, *s)).collect();
-        let free = widen(&keep, bw, bh, PROTECT_REACH).into_iter().map(|k| 1.0 - k).collect();
+        let (ground, free) = gates(found)?;
         Some(Self { cells: bw, rows: bh, ground, free, xc: Curve::new(&placement.fx), yc: Curve::new(&placement.fy), width, height })
     }
 
@@ -354,6 +353,120 @@ fn blend(mut base: RgbImage, padded: &[[usize; 4]], region: &Area, weight: &[f32
     base
 }
 
+pub struct Lookup {
+    pub ax: Vec<f32>,
+    pub ay: Vec<f32>,
+    pub aw: usize,
+    pub ah: usize,
+}
+
+impl Lookup {
+    pub fn sample(&self, values: &[f32], i: usize, j: usize) -> f32 {
+        let gx = self.ax[i].clamp(0.0, (self.aw - 1) as f32);
+        let gy = self.ay[j].clamp(0.0, (self.ah - 1) as f32);
+        let (x0, y0) = (gx as usize, gy as usize);
+        let (x1, y1) = ((x0 + 1).min(self.aw - 1), (y0 + 1).min(self.ah - 1));
+        let (tx, ty) = (gx - x0 as f32, gy - y0 as f32);
+        let top = values[y0 * self.aw + x0] + (values[y0 * self.aw + x1] - values[y0 * self.aw + x0]) * tx;
+        let bottom = values[y1 * self.aw + x0] + (values[y1 * self.aw + x1] - values[y1 * self.aw + x0]) * tx;
+        top + (bottom - top) * ty
+    }
+
+    pub fn plane(&self, values: &[f32], grid: &Grid) -> Vec<f32> {
+        (0..grid.w * grid.h).into_par_iter().map(|c| self.sample(values, c % grid.w, c / grid.w)).collect()
+    }
+}
+
+pub fn gates(found: &Analysis) -> Option<(Vec<f32>, Vec<f32>)> {
+    let (bw, bh) = (found.width as usize, found.height as usize);
+    if bw == 0 || bh == 0 || found.busy.len() != bw * bh || found.saliency.len() != bw * bh {
+        return None;
+    }
+    let ground = found.busy.iter().map(|b| smoothstep(GATE_FROM, GATE_AT, *b)).collect();
+    let keep: Vec<f32> = found.saliency.iter().map(|s| smoothstep(PROTECT_FROM, PROTECT_AT, *s)).collect();
+    let free = widen(&keep, bw, bh, PROTECT_REACH).into_iter().map(|k| 1.0 - k).collect();
+    Some((ground, free))
+}
+
+pub fn maps(small: &[[f32; 3]], grid: &Grid, found: &Analysis, lookup: &Lookup, scene: &Scene, options: &Options, belong: Option<&[f32]>) -> Option<Vec<u8>> {
+    let amount = amount(options);
+    let rects = solver::screen_rects(scene);
+    let (width, height) = (scene.width as usize, scene.height as usize);
+    if amount <= 0.0 || rects.is_empty() || width == 0 || height == 0 {
+        return None;
+    }
+    let (ground, free) = gates(found)?;
+    let feather = FEATHER * median(&mut rects.iter().map(|r| r[3] - r[1]).collect::<Vec<_>>());
+    let pad = REACH * feather;
+    let grown: Vec<[f64; 4]> = rects
+        .iter()
+        .map(|r| {
+            let (gx, gy) = (GROW * (r[2] - r[0]), GROW * (r[3] - r[1]));
+            [r[0] - gx, r[1] - gy, r[2] + gx, r[3] + gy]
+        })
+        .collect();
+    let padded: Vec<[usize; 4]> = grown
+        .iter()
+        .map(|g| {
+            [
+                ((g[0] - pad).floor().max(0.0) as usize) / Q,
+                ((g[1] - pad).floor().max(0.0) as usize) / Q,
+                (((g[2] + pad).ceil().max(0.0) as usize).min(width)).div_ceil(Q),
+                (((g[3] + pad).ceil().max(0.0) as usize).min(height)).div_ceil(Q),
+            ]
+        })
+        .filter(|b| b[2] > b[0] && b[3] > b[1])
+        .collect();
+    let open = lookup.plane(&free, grid);
+    let rough = lookup.plane(&ground, grid);
+    let mut mask = vec![0.0f32; grid.w * grid.h];
+    mask.par_chunks_mut(grid.w).enumerate().for_each(|(qy, line)| {
+        let py = (qy * Q) as f64 + Q as f64 / 2.0;
+        for g in &grown {
+            if py < g[1] - Q as f64 || py > g[3] + Q as f64 {
+                continue;
+            }
+            let radius = ROUND * (g[2] - g[0]).min(g[3] - g[1]);
+            let (qx0, qx1) = quarter_span(g[0] - Q as f64, g[2] + Q as f64, grid.w);
+            for (qx, cell) in line.iter_mut().enumerate().take(qx1).skip(qx0) {
+                let d = rounded_box((qx * Q) as f64 + Q as f64 / 2.0, py, g, radius);
+                *cell = cell.max((0.5 - d / Q as f64).clamp(0.0, 1.0) as f32);
+            }
+        }
+    });
+    let mask = blur::gaussian_boxes(&mask, grid.w, grid.h, (feather / Q as f64) as f32);
+    let mut weight = vec![0.0f32; grid.w * grid.h];
+    for b in &padded {
+        for qy in b[1]..b[3].min(grid.h) {
+            for qx in b[0]..b[2].min(grid.w) {
+                let c = qy * grid.w + qx;
+                weight[c] = mask[c] * rough[c] * open[c] * amount * belong.map_or(1.0, |b| 1.0 - b[c]);
+            }
+        }
+    }
+    if !weight.iter().any(|w| *w > 0.0) {
+        return None;
+    }
+    let sigma = (CALM * width as f64 / Q as f64) as f32;
+    let planes: Vec<Vec<f32>> = (0..4)
+        .into_par_iter()
+        .map(|k| {
+            let plane: Vec<f32> = if k == 3 { open.clone() } else { small.iter().zip(&open).map(|(c, o)| c[k] * o).collect() };
+            blur::gaussian_boxes(&plane, grid.w, grid.h, sigma)
+        })
+        .collect();
+    let encode = color::encode_table();
+    Some(
+        (0..grid.w * grid.h)
+            .flat_map(|c| {
+                let share = planes[3][c];
+                let calm = |k: usize| if share > 1e-4 { planes[k][c] / share } else { small[c][k] };
+                [color::encode(encode, calm(0)), color::encode(encode, calm(1)), color::encode(encode, calm(2)), (weight[c].clamp(0.0, 1.0) * 255.0).round() as u8]
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,9 +515,7 @@ mod tests {
         let out = run(&image, &scene, &Options { pads: 0.0, ..Options::default() });
         assert_eq!(out.as_raw(), image.as_raw());
         assert!(!wanted(&scene, &Options { pads: 0.0, ..Options::default() }));
-        let plain = Options { scenery: crate::Scenery::Off, ..Options::default() };
-        assert!(!wanted(&Scene { icons: Vec::new(), ..scene.clone() }, &plain));
-        assert!(wanted(&scene, &plain));
-        assert!(!wanted(&scene, &Options::default()));
+        assert!(!wanted(&Scene { icons: Vec::new(), ..scene.clone() }, &Options::default()));
+        assert!(wanted(&scene, &Options::default()));
     }
 }

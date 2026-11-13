@@ -11,7 +11,11 @@ fn main() -> std::process::ExitCode {
 #[cfg(target_os = "macos")]
 mod probe {
     use anyhow::{Context, Result};
-    use scooch::platform::macos::{finder, launchd, spaces, store};
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
+    use scooch::platform::macos::layer;
+    use scooch::platform::macos::{finder, launchd, picture, spaces, store};
+    use scooch_live::{Gpu, Pattern, Renderer, Target};
     use scooch::platform::{self, Screen};
     use scooch_core::{Rect, RgbImage};
     use std::ffi::c_void;
@@ -104,11 +108,42 @@ mod probe {
         fn CGPreflightPostEventAccess() -> bool;
         fn CGPreflightScreenCaptureAccess() -> bool;
         fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> *const c_void;
+        fn CGDisplayCreateImage(display: u32) -> *const c_void;
+        fn CGWindowListCreateImage(bounds: Frame, option: u32, window: u32, image: u32) -> *const c_void;
+        fn CGImageGetWidth(image: *const c_void) -> usize;
+        fn CGImageGetHeight(image: *const c_void) -> usize;
+        fn CGImageGetBytesPerRow(image: *const c_void) -> usize;
+        fn CGImageGetBitsPerPixel(image: *const c_void) -> usize;
+        fn CGImageGetDataProvider(image: *const c_void) -> *const c_void;
+        fn CGDataProviderCopyData(provider: *const c_void) -> *const c_void;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
         fn CFRelease(object: *const c_void);
+        fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
+        fn CFDataGetLength(data: *const c_void) -> isize;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFRunLoopDefaultMode: *const c_void;
+        fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, after_source: u8) -> i32;
+    }
+
+    extern "C" {
+        static mach_task_self_: u32;
+        fn mach_port_names(task: u32, names: *mut *mut u32, count: *mut u32, types: *mut *mut u32, types_count: *mut u32) -> i32;
+        fn vm_deallocate(task: u32, address: usize, size: usize) -> i32;
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Frame {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
     }
 
     struct Ran {
@@ -152,6 +187,7 @@ mod probe {
         runs: u32,
         limits: Vec<String>,
         stand: Option<Child>,
+        gpu: Option<Gpu>,
         finder: bool,
     }
 
@@ -245,6 +281,12 @@ mod probe {
 
     pub fn main() -> ExitCode {
         START.get_or_init(Instant::now);
+        if std::env::args().nth(1).as_deref() == Some("pace") {
+            return pace(PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "macpace".into())));
+        }
+        if std::env::args().nth(1).as_deref() == Some("helper") {
+            return helper();
+        }
         let out = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "macprobe".into()));
         let home = std::env::temp_dir().join(format!("scooch-probe-{}", std::process::id()));
         if fs::create_dir_all(&out).is_err() || fs::create_dir_all(&home).is_err() {
@@ -276,6 +318,7 @@ mod probe {
             runs: 0,
             limits: Vec::new(),
             stand: None,
+            gpu: None,
             finder: true,
         };
         probe.section("1 Session facts", facts);
@@ -288,6 +331,7 @@ mod probe {
         }
         probe.section("2 Permission", permission);
         probe.section("3 Icons", icons);
+        probe.section("3b Live layer", live);
         probe.section("4 First run", first_run);
         probe.section("5 Move to new wallpaper", moves);
         probe.section("6 Idle", idle);
@@ -341,6 +385,8 @@ mod probe {
         let manager = p.tool("/bin/launchctl", &["managername"]);
         p.line(format!("- user {}, console owner {}, launchd session {}", user.out.trim(), console.out.trim(), manager.out.trim()));
         p.line(format!("- SCOOCH_HOME {}, scooch binary {} exists {}", p.home.display(), p.bin.display(), p.bin.is_file()));
+        let sizes: Vec<String> = [p.bin.clone(), p.bin.with_file_name("scoochw"), std::env::current_exe().unwrap_or_default()].iter().map(|path| format!("{} {:.2} MB", path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(), fs::metadata(path).map_or(0, |meta| meta.len()) as f64 / 1_048_576.0)).collect();
+        p.line(format!("- program sizes {sizes:?}"));
         p.line(format!("- Desktop folder {} exists {}", p.desktop.display(), p.desktop.is_dir()));
         let displays = p.tool("/usr/sbin/system_profiler", &["SPDisplaysDataType"]);
         for line in displays.out.lines().map(str::trim).filter(|line| line.starts_with("Resolution") || line.starts_with("UI Looks like") || line.starts_with("Display Type") || line.starts_with("Main Display") || line.ends_with(':') && !line.starts_with("Graphics")) {
@@ -1172,6 +1218,594 @@ mod probe {
         state(p)["screens"].as_object().map(|screens| screens.iter().map(|(id, entry)| format!("{id} output {}", entry["output"].as_str().unwrap_or("none"))).collect()).unwrap_or_default()
     }
 
+    struct Shot {
+        width: usize,
+        height: usize,
+        rgb: Vec<u8>,
+    }
+
+    impl Shot {
+        fn at(&self, x: usize, y: usize) -> [u8; 3] {
+            let index = (y.min(self.height.saturating_sub(1)) * self.width + x.min(self.width.saturating_sub(1))) * 3;
+            [self.rgb[index], self.rgb[index + 1], self.rgb[index + 2]]
+        }
+
+        fn image(&self) -> RgbImage {
+            RgbImage::from_raw(self.width as u32, self.height as u32, self.rgb.clone()).unwrap_or_default()
+        }
+    }
+
+    fn unpack(image: *const c_void) -> Option<Shot> {
+        if image.is_null() {
+            return None;
+        }
+        let shot = unsafe {
+            let (width, height, row, bits) = (CGImageGetWidth(image), CGImageGetHeight(image), CGImageGetBytesPerRow(image), CGImageGetBitsPerPixel(image));
+            let data = CGDataProviderCopyData(CGImageGetDataProvider(image));
+            let shot = if data.is_null() || bits != 32 {
+                None
+            } else {
+                let bytes = std::slice::from_raw_parts(CFDataGetBytePtr(data), CFDataGetLength(data).max(0) as usize);
+                let mut rgb = Vec::with_capacity(width * height * 3);
+                for y in 0..height {
+                    for x in 0..width {
+                        let at = y * row + x * 4;
+                        rgb.extend_from_slice(&[bytes[at + 2], bytes[at + 1], bytes[at]]);
+                    }
+                }
+                Some(Shot { width, height, rgb })
+            };
+            if !data.is_null() {
+                CFRelease(data);
+            }
+            CFRelease(image);
+            shot
+        };
+        shot
+    }
+
+    static SLOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    fn shot_file(arguments: &[&str]) -> Option<Shot> {
+        let file = std::env::temp_dir().join(format!("scooch-shot-{}.png", std::process::id()));
+        let done = Command::new("/usr/sbin/screencapture").args(arguments).arg(&file).stdout(Stdio::null()).stderr(Stdio::null()).status().ok()?.success();
+        let image = done.then(|| scooch_core::open(&file).ok()).flatten();
+        let _ = fs::remove_file(&file);
+        let image = image?;
+        Some(Shot { width: image.width() as usize, height: image.height() as usize, rgb: image.into_raw() })
+    }
+
+    fn grab(display: u32) -> Option<Shot> {
+        if let Some(shot) = unpack(unsafe { CGDisplayCreateImage(display) }) {
+            return Some(shot);
+        }
+        SLOW.store(true, std::sync::atomic::Ordering::SeqCst);
+        shot_file(&["-x", "-C", "-D", "1", "-t", "png"]).or_else(|| shot_file(&["-x", "-D", "1", "-t", "png"]))
+    }
+
+    fn grab_window(number: i64) -> Option<Shot> {
+        let null = Frame { x: f64::INFINITY, y: f64::INFINITY, w: 0.0, h: 0.0 };
+        if let Some(shot) = unpack(unsafe { CGWindowListCreateImage(null, 8, number as u32, 1) }) {
+            return Some(shot);
+        }
+        SLOW.store(true, std::sync::atomic::Ordering::SeqCst);
+        shot_file(&["-x", "-o", &format!("-l{number}"), "-t", "png"])
+    }
+
+    fn picture_window(screen: &Screen) -> Option<layer::Seen> {
+        let (desktop, _) = layer::levels();
+        let mut found: Vec<layer::Seen> = layer::listing().into_iter().filter(|window| window.layer < desktop && layer::is_picture(window) && window.bounds.x < screen.frame.x + screen.frame.w && screen.frame.x < window.bounds.x + window.bounds.w && window.bounds.w >= screen.frame.w * 0.9).collect();
+        found.sort_by_key(|window| std::cmp::Reverse(window.layer));
+        found.into_iter().next()
+    }
+
+    fn magenta(pixel: [u8; 3]) -> bool {
+        pixel[0] > 180 && pixel[1] < 100 && pixel[2] > 180
+    }
+
+    fn bar_at(shot: &Shot, row: usize) -> Option<f32> {
+        let hits: Vec<usize> = (0..shot.width).filter(|x| magenta(shot.at(*x, row))).collect();
+        (!hits.is_empty()).then(|| hits.iter().sum::<usize>() as f32 / hits.len() as f32)
+    }
+
+    fn near(pixel: [u8; 3], color: [u8; 3]) -> bool {
+        (0..3).map(|channel| (pixel[channel] as i32 - color[channel] as i32).abs()).sum::<i32>() < 60
+    }
+
+    fn rgba(image: &RgbImage, width: u32, height: u32) -> Vec<u8> {
+        let fitted = if image.width() == width && image.height() == height {
+            image.clone()
+        } else {
+            let scene = scooch_core::Scene { width, height, icons: Vec::new() };
+            let placement = scooch_core::fill(image.width(), image.height(), &scene);
+            scooch_core::render(image, &placement, &scene, &scooch_core::Options::default())
+        };
+        fitted.pixels().flat_map(|pixel| [pixel.0[0], pixel.0[1], pixel.0[2], 255]).collect()
+    }
+
+    fn stats(values: &[f64]) -> String {
+        if values.is_empty() {
+            return "none".into();
+        }
+        let mut sorted = values.to_vec();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let pick = |share: f64| sorted[((sorted.len() - 1) as f64 * share).round() as usize];
+        format!("{} values, median {:.2} ms, p99 {:.2} ms, max {:.2} ms", sorted.len(), pick(0.5), pick(0.99), sorted[sorted.len() - 1])
+    }
+
+    fn over(values: &[f64], period: f64) -> usize {
+        values.iter().filter(|value| **value > period * 1.5).count()
+    }
+
+    fn ports() -> Option<u32> {
+        unsafe {
+            let task = mach_task_self_;
+            let (mut names, mut count, mut types, mut type_count) = (std::ptr::null_mut(), 0u32, std::ptr::null_mut(), 0u32);
+            if mach_port_names(task, &mut names, &mut count, &mut types, &mut type_count) != 0 {
+                return None;
+            }
+            vm_deallocate(task, names as usize, count as usize * 4);
+            vm_deallocate(task, types as usize, type_count as usize * 4);
+            Some(count)
+        }
+    }
+
+    fn ours() -> Vec<layer::Seen> {
+        let pid = std::process::id() as i64;
+        layer::every_window().into_iter().filter(|window| window.pid == pid).collect()
+    }
+
+    fn accessory(marker: MainThreadMarker) {
+        NSApplication::sharedApplication(marker).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    }
+
+    fn table(p: &mut Probe, screen: &Screen) {
+        let (desktop, icons) = layer::levels();
+        p.line(format!("- desktop level {desktop}, desktop icon level {icons}"));
+        p.line("- on-screen windows from the bottom up to just above the icons, owner, layer, number, name, bounds".to_string());
+        let mut seen: Vec<layer::Seen> = layer::listing().into_iter().filter(|window| window.layer <= icons + 5).collect();
+        seen.sort_by_key(|window| window.layer);
+        for window in seen {
+            let here = window.bounds.x < screen.frame.x + screen.frame.w && screen.frame.x < window.bounds.x + window.bounds.w;
+            p.line(format!("  - `{}` layer {} ({:+} from desktop) number {} name `{}` bounds {} on this screen {here}", window.owner, window.layer, window.layer - desktop, window.number, window.name, show(&window.bounds)));
+        }
+    }
+
+    struct Run {
+        frames: Vec<Instant>,
+        arrivals: Vec<f64>,
+        outputs: Vec<f64>,
+        callbacks: usize,
+        rate: f64,
+        hidden: usize,
+    }
+
+    fn animate(renderer: Renderer, display: u32, cross: f64, hold: f64, park: Option<f32>) -> std::thread::JoinHandle<(Renderer, Run)> {
+        std::thread::spawn(move || {
+            let mut renderer = renderer;
+            let pace = layer::Pace::start(display);
+            let rate = pace.as_ref().map_or(0.0, |pace| pace.rate);
+            let begin = Instant::now();
+            let mut frames = Vec::new();
+            let mut hidden = 0;
+            loop {
+                let t = begin.elapsed().as_secs_f64();
+                let bar = if t < cross {
+                    Some((t / cross) as f32)
+                } else if t < cross + hold {
+                    park
+                } else {
+                    break;
+                };
+                match layer::present(|| renderer.frame(bar)) {
+                    Ok(()) => frames.push(Instant::now()),
+                    Err(error) if error.contains("occluded") => {
+                        hidden += 1;
+                        std::thread::sleep(Duration::from_millis(4));
+                    }
+                    Err(_) => break,
+                }
+            }
+            let paced = pace.map(|pace| pace.stop());
+            let millis = |values: Vec<f64>| values.into_iter().map(|seconds| seconds * 1000.0).collect::<Vec<f64>>();
+            let (arrivals, outputs, callbacks) = paced.map_or((Vec::new(), Vec::new(), 0), |paced| (millis(paced.arrivals), millis(paced.outputs), paced.callbacks));
+            (renderer, Run { frames, arrivals, outputs, callbacks, rate, hidden })
+        })
+    }
+
+    struct Look {
+        at: f64,
+        bar: Option<f32>,
+        changed: Vec<f32>,
+        covered: Vec<f32>,
+        through: usize,
+    }
+
+    fn intervals(frames: &[Instant]) -> Vec<f64> {
+        frames.windows(2).map(|pair| (pair[1] - pair[0]).as_secs_f64() * 1000.0).collect()
+    }
+
+    fn report_run(p: &mut Probe, run: &Run) {
+        let period = if run.rate > 0.0 { 1000.0 / run.rate } else { 16.67 };
+        let presents = intervals(&run.frames);
+        p.line(format!("- display link nominal rate {:.2} Hz, {} callbacks, arrival intervals {}, longer than 1.5 periods {}", run.rate, run.callbacks, stats(&run.arrivals), over(&run.arrivals, period)));
+        p.line(format!("- display link output times {}, longer than 1.5 periods {}", stats(&run.outputs), over(&run.outputs, period)));
+        p.line(format!("- frames presented {}, skipped while macOS called the window occluded {}, intervals {}, longer than 1.5 periods {}", run.frames.len(), run.hidden, stats(&presents), over(&presents, period)));
+    }
+
+    fn cycles(p: &mut Probe, marker: MainThreadMarker, screen: &Screen, shared: bool) -> Result<()> {
+        let pid = std::process::id() as i32;
+        let pattern = |layer: &layer::Layer| Pattern { width: layer.pixels.0, height: layer.pixels.1, rgba: GRAY.iter().copied().chain([255]).cycle().take(layer.pixels.0 as usize * layer.pixels.1 as usize * 4).collect() };
+        let before = (ours().len(), ports(), threads(pid).len(), rusage(pid));
+        let mut opens = Vec::new();
+        let mut shown = Vec::new();
+        let mut stages = [0usize; 2];
+        let mut first: Vec<String> = Vec::new();
+        for index in 0..20 {
+            let started = Instant::now();
+            let layer = layer::open(marker, screen)?;
+            shown.push(started.elapsed().as_secs_f64() * 1000.0);
+            let gpu = match (&p.gpu, shared) {
+                (Some(gpu), true) => gpu.clone(),
+                _ => Gpu::new(false).map_err(anyhow::Error::msg)?,
+            };
+            let mut renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &pattern(&layer)).map_err(anyhow::Error::msg)?;
+            layer.commit();
+            layer::present(|| renderer.frame(Some(0.2))).map_err(anyhow::Error::msg)?;
+            opens.push(started.elapsed().as_secs_f64() * 1000.0);
+            layer::present(|| renderer.frame(Some(0.5))).map_err(anyhow::Error::msg)?;
+            layer::present(|| renderer.frame(Some(0.8))).map_err(anyhow::Error::msg)?;
+            let traces = layer.traces();
+            let open_held = traces.held();
+            drop(renderer);
+            drop(gpu);
+            let rendered_held = traces.held();
+            drop(layer);
+            let dropped = traces.held();
+            let windows_dropped = ours().len();
+            layer::spin(0.05);
+            let spun = traces.held();
+            for (slot, held) in [dropped, spun].iter().enumerate() {
+                if held[0].is_some() {
+                    stages[slot] += 1;
+                }
+            }
+            if index == 0 {
+                first = vec![
+                    format!("open {open_held:?}"),
+                    format!("renderer dropped {rendered_held:?}"),
+                    format!("layer dropped {dropped:?} with our windows {windows_dropped}"),
+                    format!("run loop spun {spun:?} with our windows {}", ours().len()),
+                ];
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        let after = (ours().len(), ports(), threads(pid).len(), rusage(pid));
+        let memory = |usage: Option<Usage>| usage.map(|usage| (usage.resident as f64 / 1_048_576.0, usage.footprint as f64 / 1_048_576.0));
+        p.line(format!(
+            "- twenty opens with {} device: our windows {} then {}, Mach ports {:?} then {:?}, threads {} then {}, resident and footprint MB {:?} then {:?}",
+            if shared { "one shared" } else { "a fresh" },
+            before.0,
+            after.0,
+            before.1,
+            after.1,
+            before.2,
+            after.2,
+            memory(before.3),
+            memory(after.3)
+        ));
+        p.line(format!("- open to visible {}, open to first frame {}", stats(&shown), stats(&opens)));
+        p.line(format!("- references still held on the window, view and Metal layer in the first cycle, beyond the probe's own {first:?}"));
+        p.line(format!("- of twenty windows, still alive after the layer dropped {}, after the run loop spun {}", stages[0], stages[1]));
+        Ok(())
+    }
+
+    fn live(p: &mut Probe) -> Result<()> {
+        let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
+        accessory(marker);
+        let desktop = platform::current()?;
+        let screen = desktop.screens()?.into_iter().next().context("no screen shows a desktop")?;
+        let recorded = desktop.wallpaper(&screen).ok().flatten();
+        p.line(format!("- screen `{}` {} scale {}, wallpaper recorded {recorded:?}", screen.id, show(&screen.frame), screen.scale));
+        table(p, &screen);
+        let (level, icons) = layer::levels();
+        let chosen = layer::choose(&layer::listing(), &screen.frame, level, std::process::id() as i64);
+        p.line(format!("- chosen level {chosen:?}, the desktop level, above the picture window and {} below the icon level", icons - level));
+        let widgets: Vec<String> = layer::listing().into_iter().filter(|window| ["Widget", "NotificationCenter", "chronod"].iter().any(|word| window.owner.contains(word))).map(|window| format!("{} layer {}", window.owner, window.layer)).collect();
+        p.line(format!("- widget windows {widgets:?}"));
+        let (_, display) = picture::screen_for(marker, &screen.id)?;
+        let baseline = grab(display).context("CGDisplayCreateImage gave nothing")?;
+        let timed = Instant::now();
+        let _ = grab(display);
+        let grab_ms = timed.elapsed().as_secs_f64() * 1000.0;
+        let cross = (grab_ms * 12.0 / 1000.0).clamp(0.5, 4.0);
+        p.line(format!("- one screen capture takes {grab_ms:.0} ms here, so the bar crosses in {cross:.2} s to be caught several times on the way"));
+        let _ = scooch_core::encode_png(&baseline.image()).map(|bytes| fs::write(p.out.join("live-before.png"), bytes));
+        let paper = picture_window(&screen).context("no wallpaper window was found for this screen")?;
+        let field = grab_window(paper.number).context("the wallpaper window could not be captured")?;
+        p.line(format!("- field taken from the wallpaper window `{}` number {} layer {}, {}x{}", paper.owner, paper.number, paper.layer, field.width, field.height));
+        let named: Vec<(String, Rect)> = finder::named(&finder::view()).unwrap_or_default().into_iter().filter(|(name, _)| name.starts_with("scooch")).collect();
+        let scale = screen.scale;
+        let field_color = field.at(field.width / 2, field.height * 3 / 4);
+        let masks: Vec<(String, Vec<(usize, usize)>)> = named
+            .iter()
+            .map(|(name, rect)| {
+                let mut ink = Vec::new();
+                for y in ((rect.y - screen.frame.y) * scale) as usize..((rect.y - screen.frame.y + rect.h) * scale) as usize {
+                    for x in ((rect.x - screen.frame.x) * scale) as usize..((rect.x - screen.frame.x + rect.w) * scale) as usize {
+                        if !near(baseline.at(x, y), field.at(x, y)) {
+                            ink.push((x, y));
+                        }
+                    }
+                }
+                (name.clone(), ink)
+            })
+            .collect();
+        p.line(format!("- icon ink pixels {:?}", masks.iter().map(|(name, ink)| format!("{name} {}", ink.len())).collect::<Vec<_>>()));
+        let cyan = picture_file(p, "probe-cyan.jpg", &RgbImage::from_raw(64, 64, [40u8, 200, 220].repeat(64 * 64)).unwrap_or_default())?;
+        let opened = Instant::now();
+        let layer = layer::open(marker, &screen)?;
+        let (width, height) = layer.pixels;
+        let gpu = Gpu::new(false).map_err(anyhow::Error::msg)?;
+        let device_ready = opened.elapsed();
+        let renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &Pattern { width, height, rgba: rgba(&field.image(), width, height) }).map_err(anyhow::Error::msg)?;
+        layer.commit();
+        p.gpu = Some(gpu.clone());
+        p.line(format!("- layer number {} at level {}, {}x{} pixels, adapter {}, device ready after {} ms", layer.number(), layer.level, width, height, gpu.name, device_ready.as_millis()));
+        let row = (height as f32 * 0.55) as usize;
+        let samples: Vec<(usize, usize)> = [(0.1, 0.7), (0.5, 0.7), (0.7, 0.7), (0.9, 0.7), (0.55, 0.45), (0.85, 0.45)].iter().map(|(x, y)| ((width as f32 * x) as usize, (height as f32 * y) as usize)).collect();
+        let set_after = opened.elapsed().as_secs_f64() * 1000.0 + cross * 1000.0 + 400.0;
+        let worker = animate(renderer, layer.display, cross, 4.0, Some(0.3));
+        let mut looks: Vec<Look> = Vec::new();
+        let mut set_at: Option<Instant> = None;
+        let mut system_shows: Option<f64> = None;
+        let mut saved = 0;
+        while !worker.is_finished() {
+            let at = opened.elapsed().as_secs_f64() * 1000.0;
+            let Some(shot) = grab(display) else { continue };
+            let bar = bar_at(&shot, row);
+            let share = |test: &dyn Fn(usize, usize) -> bool| -> Vec<f32> { masks.iter().map(|(_, ink)| ink.iter().filter(|(x, y)| test(*x, *y)).count() as f32 / ink.len().max(1) as f32).collect() };
+            let changed = share(&|x, y| !near(shot.at(x, y), baseline.at(x, y)));
+            let covered = share(&|x, y| near(shot.at(x, y), field.at(x, y)) || magenta(shot.at(x, y)));
+            let through = samples.iter().filter(|(x, y)| near(shot.at(*x, *y), [40, 200, 220])).count();
+            if (saved == 0 && at > 250.0) || (saved == 1 && set_at.is_some_and(|set| set.elapsed().as_millis() > 1500)) {
+                let _ = scooch_core::encode_png(&shot.image()).map(|bytes| fs::write(p.out.join(format!("live-during-{saved}.png")), bytes));
+                saved += 1;
+            }
+            looks.push(Look { at, bar, changed, covered, through });
+            if set_at.is_none() && at > set_after {
+                desktop.set_wallpaper(&screen, &cyan)?;
+                set_at = Some(Instant::now());
+            }
+            if let (Some(set), None) = (set_at, system_shows) {
+                let shown = picture_window(&screen).and_then(|window| grab_window(window.number)).is_some_and(|window| near(window.at(window.width / 2, window.height * 3 / 4), [40, 200, 220]));
+                if shown {
+                    system_shows = Some(set.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+        }
+        let (renderer, run) = worker.join().map_err(|_| anyhow::anyhow!("the render thread panicked"))?;
+        drop(renderer);
+        let traces = layer.traces();
+        layer.close();
+        let closed = Instant::now();
+        layer::spin(0.4);
+        let after = grab(display);
+        let leftover = ours();
+        let held = traces.held();
+        let first = run.frames.first().map(|frame| (*frame - opened).as_secs_f64() * 1000.0);
+        let last = run.frames.last().map(|frame| (*frame - opened).as_secs_f64() * 1000.0);
+        p.line(format!("- cold open to first presented frame {:?} ms, last frame at {:?} ms, captures used the screencapture tool as a fallback {}", first.map(|value| value.round()), last.map(|value| value.round()), SLOW.load(std::sync::atomic::Ordering::SeqCst)));
+        report_run(p, &run);
+        let period = if run.rate > 0.0 { 1000.0 / run.rate } else { 1000.0 / 60.0 };
+        let crossing: Vec<(f64, f32)> = looks.iter().filter(|look| first.is_some_and(|first| look.at >= first && look.at <= first + cross * 1000.0)).filter_map(|look| look.bar.map(|bar| (look.at, bar))).collect();
+        let steady = crossing.windows(2).all(|pair| pair[1].1 >= pair[0].1 - 2.0);
+        p.line(format!("- {} captures in all, {} during the {:.0} ms crossing, bar centres in pixels {:?}, increasing {steady}", looks.len(), crossing.len(), cross * 1000.0, crossing.iter().map(|(at, bar)| format!("{:.0} ms {:.0}", at, bar)).collect::<Vec<_>>()));
+        let inside: Vec<&Look> = looks.iter().filter(|look| first.zip(last).is_some_and(|(first, last)| look.at >= first && look.at <= last)).collect();
+        let settled_from = first.map(|first| first + 4.0 * period);
+        let bare_times: Vec<f64> = inside.iter().filter(|look| look.bar.is_none()).map(|look| look.at).collect();
+        let bare = bare_times.iter().filter(|at| settled_from.is_some_and(|from| **at > from)).count();
+        p.line(format!("- captures started between the first and last pattern frame {}, without the layer {} at {:?} ms, of which started more than four refreshes ({:.0} ms) after the first frame was queued {bare}", inside.len(), bare_times.len(), bare_times.iter().map(|at| at.round()).collect::<Vec<_>>(), 4.0 * period));
+        let worst = |pick: fn(&Look) -> &Vec<f32>| -> Vec<String> { masks.iter().enumerate().map(|(index, (name, _))| format!("{name} {:.3}", looks.iter().map(|look| pick(look).get(index).copied().unwrap_or_default()).fold(0.0f32, f32::max))).collect() };
+        p.line(format!("- largest share of icon ink that changed in any capture, edge and shadow pixels blend with whatever lies below so they move with the bar {:?}", worst(|look| &look.changed)));
+        p.line(format!("- largest share of icon ink showing only what the layer drew, as it would if the layer covered the icon {:?}", worst(|look| &look.covered)));
+        let marked: Vec<String> = looks.iter().filter(|look| look.covered.iter().any(|share| *share > 0.5)).map(|look| format!("{:.0} ms {:?}", look.at, look.covered.iter().map(|share| (share * 1000.0).round() / 1000.0).collect::<Vec<_>>())).collect();
+        p.line(format!("- captures where the layer covered more than half of an icon's ink {} {:?}", marked.len(), marked.iter().take(6).collect::<Vec<_>>()));
+        let through = looks.iter().filter(|look| look.through > 0 && first.zip(last).is_some_and(|(first, last)| look.at >= first && look.at <= last)).count();
+        p.line(format!("- wallpaper set {:?} ms after open, the system's own window showed it {:?} ms after the set, captures where the new picture showed through or above the layer {through}", set_at.map(|set| (set - opened).as_millis()), system_shows.map(|value| value.round())));
+        let after_bar = after.as_ref().and_then(|shot| bar_at(shot, row));
+        let after_cyan = after.as_ref().map(|shot| samples.iter().filter(|(x, y)| near(shot.at(*x, *y), [40, 200, 220])).count());
+        if let Some(shot) = &after {
+            let _ = scooch_core::encode_png(&shot.image()).map(|bytes| fs::write(p.out.join("live-after.png"), bytes));
+        }
+        p.line(format!("- after close at +{} ms: bar on screen {after_bar:?}, field samples showing the new picture {after_cyan:?} of {}, windows of ours {}, window, view and Metal layer still alive {held:?}", closed.elapsed().as_millis(), samples.len(), leftover.len()));
+        if !steady || crossing.len() < 2 || bare > 0 || through > 0 || after_bar.is_some() || !leftover.is_empty() || after_cyan != Some(samples.len()) {
+            p.fail("the live layer did not sit cleanly under the icons and go");
+        }
+        if !marked.is_empty() {
+            p.fail("the layer covered an icon");
+        }
+        cycles(p, marker, &screen, true)?;
+        cycles(p, marker, &screen, false)?;
+        if let Err(error) = helpers(p) {
+            p.fail(format!("the helper process could not be measured {error:#}"));
+        }
+        let _ = field_color;
+        if let Some(recorded) = recorded.filter(|path| path.is_file()) {
+            let _ = desktop.set_wallpaper(&screen, &recorded);
+        }
+        Ok(())
+    }
+
+    fn spin(seconds: f64) {
+        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, 0) };
+    }
+
+    fn memory(pid: i32) -> String {
+        rusage(pid).map_or("unread".into(), |usage| format!("footprint {:.1} MB resident {:.1} MB", usage.footprint as f64 / 1_048_576.0, usage.resident as f64 / 1_048_576.0))
+    }
+
+    fn front() -> String {
+        NSWorkspace::sharedWorkspace().frontmostApplication().and_then(|application| application.bundleIdentifier()).map(|name| name.to_string()).unwrap_or_default()
+    }
+
+    fn helper() -> ExitCode {
+        let pid = std::process::id() as i32;
+        let started = Instant::now();
+        let say = |stage: &str, extra: String| {
+            println!("stage {stage} at {} ms, {}{extra}", started.elapsed().as_millis(), memory(pid));
+            let _ = std::io::stdout().flush();
+        };
+        say("start", String::new());
+        let result = (|| -> Result<()> {
+            let marker = MainThreadMarker::new().context("not on the main thread")?;
+            let before = front();
+            let application = NSApplication::sharedApplication(marker);
+            application.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            application.finishLaunching();
+            say("app", String::new());
+            let gpu = Gpu::new(false).map_err(anyhow::Error::msg)?;
+            say("device", format!(", {}", gpu.name));
+            let screen = platform::current()?.screens()?.into_iter().next().context("no screen")?;
+            let layer = layer::open(marker, &screen)?;
+            let (width, height) = layer.pixels;
+            let mut renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &Pattern { width, height, rgba: GRAY.iter().copied().chain([255]).cycle().take(width as usize * height as usize * 4).collect() }).map_err(anyhow::Error::msg)?;
+            layer.commit();
+            layer::present(|| renderer.frame(Some(0.0))).map_err(anyhow::Error::msg)?;
+            say("frame", String::new());
+            for index in 1..30 {
+                layer::present(|| renderer.frame(Some(index as f32 / 30.0))).map_err(anyhow::Error::msg)?;
+            }
+            spin(0.3);
+            let me = NSRunningApplication::currentApplication();
+            say("shown", format!(", front app before {before} after {}, this helper active {}, policy {:?}", front(), me.isActive(), me.activationPolicy()));
+            drop(renderer);
+            let traces = layer.traces();
+            drop(layer);
+            layer::spin(0.3);
+            say("closed", format!(", window, view and Metal layer still alive {:?}, windows of ours {}", traces.held(), ours().len()));
+            drop(gpu);
+            spin(0.5);
+            say("dropped", String::new());
+            let calm = rusage(pid);
+            spin(5.0);
+            let later = rusage(pid);
+            let woke = calm.zip(later).map(|(calm, later)| (later.idle_wakeups.saturating_sub(calm.idle_wakeups), later.interrupt_wakeups.saturating_sub(calm.interrupt_wakeups)));
+            say("idle", format!(", idle and interrupt wakeups over the last 5 s {woke:?}"));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            println!("stage failed {error:#}");
+        }
+        ExitCode::SUCCESS
+    }
+
+    fn helpers(p: &mut Probe) -> Result<()> {
+        use std::io::BufRead as _;
+        let exe = std::env::current_exe()?;
+        for round in ["first", "second"] {
+            let spawned = Instant::now();
+            let mut child = Command::new(&exe).arg("helper").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+            let pid = child.id();
+            let lines: Vec<(u128, String)> = std::io::BufReader::new(child.stdout.take().context("no helper output")?).lines().map_while(|line| line.ok()).map(|line| (spawned.elapsed().as_millis(), line)).collect();
+            let status = child.wait()?;
+            p.line(format!("- {round} helper process {pid} exited {:?} after {} ms", status.code(), spawned.elapsed().as_millis()));
+            for (at, line) in &lines {
+                p.line(format!("  - +{at} ms from spawn: {line}"));
+            }
+            let logged = p.tool("/usr/bin/log", &["show", "--last", "60s", "--info", "--debug", "--style", "ndjson", "--predicate", &format!("processIdentifier == {pid}")]);
+            let launch: Vec<String> = logged.out.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok()).filter(|entry| entry["senderImagePath"].as_str().is_some_and(|path| path.contains("launch_measurement"))).map(|entry| format!("{} {}", entry["timestamp"].as_str().unwrap_or(""), entry["eventMessage"].as_str().unwrap_or("").chars().take(100).collect::<String>())).collect();
+            p.line(format!("  - launch measurement log lines {launch:?}"));
+        }
+        Ok(())
+    }
+
+    fn space_layer(p: &mut Probe) -> Result<()> {
+        let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
+        accessory(marker);
+        let screen = platform::current()?.screens()?.into_iter().next().context("no screen")?;
+        let layer = layer::open(marker, &screen)?;
+        let gpu = match &p.gpu {
+            Some(gpu) => gpu.clone(),
+            None => Gpu::new(false).map_err(anyhow::Error::msg)?,
+        };
+        let (width, height) = layer.pixels;
+        let mut renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &Pattern { width, height, rgba: GRAY.iter().copied().chain([255]).cycle().take(width as usize * height as usize * 4).collect() }).map_err(anyhow::Error::msg)?;
+        layer.commit();
+        layer::present(|| renderer.frame(Some(0.5))).map_err(anyhow::Error::msg)?;
+        let number = layer.number();
+        let showing = || layer::listing().iter().any(|window| window.number == number);
+        let one = showing();
+        switch(p, 124);
+        let two = showing();
+        switch(p, 123);
+        let back = showing();
+        drop(renderer);
+        layer.close();
+        p.line(format!("- the layer on the first Space is listed on screen there {one}, on the second Space {two}, back on the first {back}"));
+        if !one || two || !back {
+            p.fail("the layer did not stay on its own Space");
+        }
+        Ok(())
+    }
+
+    fn pace(out: PathBuf) -> ExitCode {
+        let _ = fs::create_dir_all(&out);
+        let mut lines = vec!["# Scooch layer pacing on this Mac".to_string(), String::new()];
+        let result = (|| -> Result<()> {
+            let marker = MainThreadMarker::new().context("not on the main thread")?;
+            accessory(marker);
+            let desktop = platform::current()?;
+            let screen = desktop.screens()?.into_iter().next().context("no screen shows a desktop")?;
+            let source = picture::reported(marker, &screen.id).ok().flatten().filter(|path| path.is_file()).unwrap_or_else(|| PathBuf::from(store::DEFAULT_DESKTOP));
+            let picture = desktop.decode(&source)?;
+            lines.push(format!("- screen `{}` {} scale {}, field from {}", screen.id, show(&screen.frame), screen.scale, source.display()));
+            let pid = std::process::id() as i32;
+            lines.push(format!("- before any device {}", memory(pid)));
+            let made = Instant::now();
+            let gpu = Gpu::new(false).map_err(anyhow::Error::msg)?;
+            lines.push(format!("- device {} ready after {} ms, {}", gpu.name, made.elapsed().as_millis(), memory(pid)));
+            let mut field: Option<Vec<u8>> = None;
+            for index in 0..5 {
+                let started = Instant::now();
+                let layer = layer::open(marker, &screen)?;
+                let shown = started.elapsed().as_millis();
+                let (width, height) = layer.pixels;
+                let rgba = field.get_or_insert_with(|| rgba(&picture, width, height)).clone();
+                let renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &Pattern { width, height, rgba }).map_err(anyhow::Error::msg)?;
+                layer.commit();
+                let (renderer, run) = animate(renderer, layer.display, 0.5, 0.6, None).join().map_err(|_| anyhow::anyhow!("the render thread panicked"))?;
+                drop(renderer);
+                let traces = layer.traces();
+                layer.close();
+                let lifetime = started.elapsed().as_millis();
+                layer::spin(0.1);
+                let first = run.frames.first().map(|frame| (*frame - started).as_millis());
+                let period = if run.rate > 0.0 { 1000.0 / run.rate } else { 16.67 };
+                let presents = intervals(&run.frames);
+                lines.push(format!("- open {} level {}, {}x{}, open to visible {shown} ms, open to first frame {first:?} ms, window open for {lifetime} ms, window, view and Metal layer alive after close {:?}, windows of ours {}", index + 1, layer::levels().0, width, height, traces.held(), ours().len()));
+                lines.push(format!("  - display link {:.2} Hz, {} callbacks, arrival intervals {}, longer than 1.5 periods {}", run.rate, run.callbacks, stats(&run.arrivals), over(&run.arrivals, period)));
+                lines.push(format!("  - display link output times {}, longer than 1.5 periods {}", stats(&run.outputs), over(&run.outputs, period)));
+                lines.push(format!("  - frames {}, skipped while occluded {}, intervals {}, longer than 1.5 periods {}", run.frames.len(), run.hidden, stats(&presents), over(&presents, period)));
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            lines.push(format!("- with the device after five opens {}", memory(pid)));
+            drop(gpu);
+            spin(0.5);
+            lines.push(format!("- after the device was dropped {}", memory(pid)));
+            lines.push(format!("- windows of ours left {}", ours().len()));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            lines.push(format!("- **stopped** {error:#}"));
+        }
+        for line in &lines {
+            println!("{line}");
+        }
+        let _ = fs::write(out.join("report.md"), lines.join("\n") + "\n");
+        ExitCode::SUCCESS
+    }
+
     fn spaces_check(p: &mut Probe) -> Result<()> {
         let before = spaces::window_server().map(|monitors| monitors.iter().map(|monitor| monitor.spaces.len()).sum::<usize>());
         let ui = p.osa("tell application \"System Events\" to get UI elements enabled");
@@ -1199,6 +1833,9 @@ mod probe {
             return Ok(());
         }
         switch(p, 123);
+        if let Err(error) = space_layer(p) {
+            p.fail(format!("the layer could not be checked on Spaces {error:#}"));
+        }
         let subject = p.subject.clone().context("no test picture")?;
         let _ = place(p, PROBES[0].0, (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5));
         let second_id = spaces::join(&display, second.as_deref());
