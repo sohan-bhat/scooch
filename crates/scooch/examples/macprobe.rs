@@ -86,6 +86,7 @@ mod probe {
         fn CGEventPost(tap: u32, event: *mut c_void);
         fn CGPreflightPostEventAccess() -> bool;
         fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> *const c_void;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -134,6 +135,7 @@ mod probe {
         runs: u32,
         limits: Vec<String>,
         wrapped: bool,
+        finder: bool,
     }
 
     impl Probe {
@@ -257,6 +259,7 @@ mod probe {
             runs: 0,
             limits: Vec::new(),
             wrapped: false,
+            finder: true,
         };
         probe.section("1 Session facts", facts);
         if !probe.runner {
@@ -623,7 +626,36 @@ mod probe {
     }
 
     fn asking(p: &Probe) -> bool {
-        problem(p).as_deref() == Some(finder::ASKING)
+        problem(p).is_some_and(|problem| problem == finder::ASKING || problem == finder::DENIED)
+    }
+
+    fn windows() -> Vec<(String, i64, String)> {
+        let list = unsafe { CGWindowListCopyWindowInfo(1, 0) };
+        if list.is_null() {
+            return Vec::new();
+        }
+        let parsed = store::convert(unsafe { &*(list as *const objc2::runtime::AnyObject) });
+        unsafe { CFRelease(list) };
+        parsed
+            .items()
+            .unwrap_or(&[])
+            .iter()
+            .map(|window| {
+                let owner = window.get("kCGWindowOwnerName").and_then(store::Plist::text).unwrap_or_default().to_string();
+                let layer = window.get("kCGWindowLayer").and_then(store::Plist::number).unwrap_or_default() as i64;
+                let name = window.get("kCGWindowName").and_then(store::Plist::text).unwrap_or_default().to_string();
+                (owner, layer, name)
+            })
+            .collect()
+    }
+
+    fn prompt_owners(p: &mut Probe) -> Vec<String> {
+        let common = ["Finder", "Dock", "Window Server", "WindowServer", "SystemUIServer", "Control Center", "Window Manager", "Spotlight", "Notification Center", "TextInputMenuAgent"];
+        let shown: Vec<(String, i64, String)> = windows().into_iter().filter(|(owner, _, _)| !common.contains(&owner.as_str())).collect();
+        p.line(format!("- windows on screen besides the desktop ones {shown:?}"));
+        let mut owners: Vec<String> = shown.into_iter().map(|(owner, _, _)| owner).collect();
+        owners.dedup();
+        owners
     }
 
     fn wait_render(p: &Probe, limit: Duration, source: Option<&Path>) -> Option<Duration> {
@@ -637,7 +669,7 @@ mod probe {
             if done {
                 return Some(started.elapsed());
             }
-            if state["problem"].as_str() == Some(finder::ASKING) {
+            if state["problem"].as_str().is_some_and(|problem| problem == finder::ASKING || problem == finder::DENIED) {
                 return None;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -676,18 +708,39 @@ mod probe {
         Ok(started.elapsed())
     }
 
+    fn dismiss_prompt(p: &mut Probe) -> Option<u128> {
+        if let Some(answers) = finder_answers(p) {
+            p.line(format!("- Finder answers Apple Events in {answers} ms"));
+            return Some(answers);
+        }
+        let owners = prompt_owners(p);
+        for owner in owners.iter().filter(|owner| ["UserNotificationCenter", "tccd", "universalAccessAuthWarn", "CoreServicesUIAgent"].contains(&owner.as_str())) {
+            let ended = p.tool("/usr/bin/killall", &[owner]);
+            p.line(format!("- closed the unanswered consent window by quitting {owner} {}, which answers nothing", if ended.ok() { "ok".to_string() } else { ended.text() }));
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        let answers = finder_answers(p);
+        p.line(format!("- Finder answers Apple Events again {answers:?} ms"));
+        if answers.is_none() {
+            p.limit("an unanswered Finder consent window blocks Apple Events to Finder for every app on the runner until someone answers it");
+        }
+        answers
+    }
+
     fn need_wrapped(p: &mut Probe, what: &str) -> Result<Option<Duration>> {
         if !asking(p) {
             return Ok(None);
         }
         p.limit("on a hosted runner the login item daemon waits for the Finder automation prompt that nobody can click, and the runner image pre-grants Finder automation only to bash, osascript and its own agents");
         let job = daemon_pid(p);
+        let _ = p.tool("/bin/launchctl", &["bootout", &target()]);
+        let _ = wait_until(Duration::from_secs(10), || !launchd::loaded());
+        let _ = prompt_owners(p);
+        p.finder = dismiss_prompt(p).is_some();
         let started = Instant::now();
         start_wrapped(p)?;
         let pid = scooch_pid(p);
         p.line(format!("- {what}: swapped the login item job {job:?} for the same label and plist path started through /bin/bash, scooch now runs as {pid:?}"));
-        let answers = finder_answers(p);
-        p.line(format!("- Finder answers Apple Events again after the swap {answers:?} ms"));
         Ok(Some(started.elapsed()))
     }
 
@@ -794,6 +847,11 @@ mod probe {
         let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
         let calm = (screen.frame.x + screen.frame.w * 0.85, screen.frame.y + screen.frame.h * 0.25);
         let name = PROBES[0].0;
+        if dismiss_prompt(p).is_none() {
+            p.finder = false;
+            p.line("- the moves need Apple Events to Finder, which the open consent window blocks, so they were skipped".to_string());
+            return Ok(());
+        }
         let mut times = Vec::new();
         let mut sources = std::collections::BTreeMap::<String, usize>::new();
         for round in 0..5 {
