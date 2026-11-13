@@ -1,6 +1,6 @@
 use crate::daemon;
 use crate::platform::{self, Desktop, Screen};
-use crate::state::{self, same, Entry, State, Store};
+use crate::state::{self, same, Entry, State, Store, Tally};
 use crate::{poke, scene};
 use anyhow::{anyhow, bail, Context, Result};
 use scooch_core::{Options, Rect, RgbImage, Scene};
@@ -21,8 +21,6 @@ const PICTURE_KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp",
 pub const FLIP_HINT: &str = "Icons still cover part of the picture. Run scooch flip to let Scooch flip it.";
 pub const FLIP_ON: &str = "Scooch may now flip your picture when that clears your icons.";
 pub const FLIP_OFF: &str = "Scooch now keeps your picture the way round it is.";
-pub const OFF_BACK: &str = "Scooch is off. Your wallpaper is back.";
-pub const OFF_LOST: &str = "Scooch is off. Your old wallpaper was not a picture file and cannot be put back by an app, so pick it again in your system settings.";
 pub const GUIDE: &str = "Your wallpaper is not a picture file, so pick a picture for Scooch to move.";
 pub const NO_SCREEN: &str = "No screen was found, so connect one and try again.";
 pub const NO_PICTURE: &str = "Scooch needs a picture file as your wallpaper, so pick one in your system settings or run scooch use with a picture.";
@@ -111,13 +109,16 @@ fn print(lines: &[String]) {
 pub fn describe(state: &State, running: bool, connected: Option<&[String]>) -> Vec<String> {
     if state.restoring && !state.on {
         let mut lines = vec![restoring_line(state.screens.len())];
+        lines.extend(tally_lines(&state.tally));
         if !running {
             lines.push(NO_RESTORER.into());
         }
         return lines;
     }
     if !state.on {
-        return vec!["Scooch is off. Run scooch to turn it on.".into()];
+        let mut lines = vec!["Scooch is off. Run scooch to turn it on.".to_string()];
+        lines.extend(tally_lines(&state.tally));
+        return lines;
     }
     let mut lines = vec![if running { "Scooch is on.".to_string() } else { "Scooch is on but not running. Run scooch to start it again.".to_string() }];
     let shown: Vec<&Entry> = state.screens.iter().filter(|(id, _)| connected.is_none_or(|ids| ids.contains(id))).map(|(_, entry)| entry).collect();
@@ -250,7 +251,8 @@ pub fn off() -> Result<()> {
     let desktop = desktop()?;
     desktop.screens()?;
     stop(&store)?;
-    match wind_down(desktop.as_ref(), &store)? {
+    let off = wind_down(desktop.as_ref(), &store)?;
+    match off {
         Off::Unreadable => {
             desktop.autostart(None)?;
             if let Some(line) = store.aside_line() {
@@ -258,17 +260,13 @@ pub fn off() -> Result<()> {
             }
             println!("{UNREADABLE_OFF}");
         }
-        Off::Done { lost } => {
+        Off::Done(tally) => {
             desktop.autostart(None)?;
-            println!("{}", off_line(!lost));
+            println!("{}", closing(&tally));
         }
-        Off::GaveUp(left) => {
-            desktop.autostart(None)?;
-            println!("{}", off_gave_up_line(left));
-        }
-        Off::Pending(left) => {
+        Off::Pending(tally) => {
             begin(desktop.as_ref(), &store)?;
-            println!("{}", off_pending_line(left));
+            println!("{}", closing(&tally));
         }
     }
     Ok(())
@@ -277,9 +275,8 @@ pub fn off() -> Result<()> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Off {
     Unreadable,
-    Done { lost: bool },
-    Pending(usize),
-    GaveUp(usize),
+    Done(Tally),
+    Pending(Tally),
 }
 
 pub fn wind_down(desktop: &dyn Desktop, store: &Store) -> Result<Off> {
@@ -293,23 +290,31 @@ pub fn wind_down(desktop: &dyn Desktop, store: &Store) -> Result<Off> {
         return Ok(Off::Unreadable);
     }
     let was_restoring = state.restoring;
-    let settled = daemon::settle_screens(&mut state, desktop, store, &screens, known.as_deref())?;
-    let off = match (state.screens.len(), was_restoring) {
-        (0, _) => Off::Done { lost: settled.lost },
-        (left, true) => Off::GaveUp(left),
-        (left, false) => Off::Pending(left),
-    };
+    let mut tally = daemon::settle_screens(&mut state, desktop, store, &screens, known.as_deref(), true);
+    let left = state.screens.len();
     state.on = false;
     state.problem = None;
-    if let Off::Pending(_) = off {
+    let off = if left > 0 && !was_restoring {
         state.restoring = true;
+        state.tally = Tally { pending: 0, ..tally };
+        tally.pending = left;
         let _ = std::fs::remove_dir_all(store.cache());
+        Off::Pending(tally)
     } else {
+        tally.pending = 0;
+        tally.abandoned = left;
+        let mut unreached: Vec<PathBuf> = state.screens.values().filter_map(|entry| entry.output.clone()).collect();
+        unreached.extend(state.screens.keys().flat_map(|id| store.outputs_of(id)));
+        for path in unreached {
+            daemon::keep(&mut state, path);
+        }
         state.screens.clear();
         state.restoring = false;
         state.picture = None;
-        store.forget_pictures();
-    }
+        state.tally = tally;
+        store.forget_pictures(&state.kept);
+        Off::Done(tally)
+    };
     if store.root.exists() {
         store.save(&state)?;
     }
@@ -322,27 +327,58 @@ pub fn wake_up(state: &mut State) -> bool {
     }
     state.restoring = false;
     state.on = true;
+    state.tally = Tally::default();
     true
 }
 
-pub fn off_pending_line(left: usize) -> String {
-    format!("Scooch is off. Your wallpaper is back here, and {left} more switch back the next time those desktops or screens show.")
+pub fn plain_sentence(count: usize) -> String {
+    format!("{count} of your old wallpapers were not picture files and cannot be put back by an app, so pick them again in your system settings.")
 }
 
-pub fn off_gave_up_line(left: usize) -> String {
-    format!("Scooch is off. {left} desktops or screens it could not reach still point at a removed picture, so pick a wallpaper there.")
+pub fn stuck_sentence(count: usize) -> String {
+    format!("{count} desktops still show Scooch's picture because the original file is gone, so pick a wallpaper there.")
+}
+
+pub fn closing(tally: &Tally) -> String {
+    let mut parts = vec!["Scooch is off.".to_string()];
+    let nothing_else = tally.plain == 0 && tally.stuck == 0 && tally.pending == 0 && tally.abandoned == 0 && tally.strays == 0;
+    if tally.back > 0 || nothing_else {
+        parts.push("Your wallpaper is back.".into());
+    }
+    if tally.plain > 0 {
+        parts.push(plain_sentence(tally.plain));
+    }
+    if tally.stuck > 0 {
+        parts.push(stuck_sentence(tally.stuck));
+    }
+    if tally.pending > 0 {
+        parts.push(format!("{} more switch back the next time those desktops or screens show.", tally.pending));
+    }
+    if tally.abandoned > 0 {
+        parts.push(format!("{} desktops or screens it could not reach still show Scooch's picture, so pick a wallpaper there.", tally.abandoned));
+    }
+    if tally.strays > 0 {
+        parts.push(daemon::ORPHAN.into());
+    }
+    parts.join(" ")
 }
 
 pub fn restoring_line(left: usize) -> String {
     format!("Scooch is off. {left} desktops or screens switch back the next time they show.")
 }
 
-pub fn off_line(back: bool) -> &'static str {
-    if back {
-        OFF_BACK
-    } else {
-        OFF_LOST
+fn tally_lines(tally: &Tally) -> Vec<String> {
+    let mut lines = Vec::new();
+    if tally.plain > 0 {
+        lines.push(plain_sentence(tally.plain));
     }
+    if tally.stuck > 0 {
+        lines.push(stuck_sentence(tally.stuck));
+    }
+    if tally.strays > 0 {
+        lines.push(daemon::ORPHAN.into());
+    }
+    lines
 }
 
 fn stop(store: &Store) -> Result<()> {
@@ -510,6 +546,7 @@ pub fn recorded(desktop: &dyn Desktop, store: &Store, screen: &Screen, chosen: O
 pub fn record(state: &mut State, desktop: &dyn Desktop, store: &Store) -> Result<bool> {
     state.screens.clear();
     state.picture = None;
+    state.tally = Tally::default();
     for screen in desktop.screens()? {
         if let Some(entry) = recorded(desktop, store, &screen, None)? {
             state.screens.insert(screen.id.clone(), entry);
@@ -537,6 +574,7 @@ pub fn choose_picture(state: &mut State, desktop: &dyn Desktop, store: &Store, i
     let screens = desktop.screens()?;
     if !wake_up(state) && !state.on {
         state.screens.clear();
+        state.tally = Tally::default();
     }
     for entry in state.screens.values_mut() {
         (entry.source, entry.placement, entry.fingerprint, entry.chosen) = (image.to_path_buf(), None, None, true);
@@ -800,6 +838,14 @@ mod tests {
         output
     }
 
+    fn tally(back: usize, plain: usize, stuck: usize, pending: usize, abandoned: usize) -> Tally {
+        Tally { back, plain, stuck, pending, abandoned, strays: 0 }
+    }
+
+    fn off_of(fake: &crate::daemon::tests::Fake, store: &Store) -> Off {
+        wind_down(fake, store).unwrap()
+    }
+
     fn turned_on(fake: &crate::daemon::tests::Fake, store: &Store, chosen: &Path) {
         let mut state = State::default();
         choose_picture(&mut state, fake, store, chosen).unwrap();
@@ -812,10 +858,10 @@ mod tests {
         let (fake, store, default, chosen) = desk("offmoving");
         turned_on(&fake, &store, &chosen);
         shown_output(&fake, &store);
-        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Done { lost: false });
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(1, 0, 0, 0, 0)));
         assert_eq!(fake.showing("main"), default);
         assert_eq!(fake.wallpaper(&crate::daemon::tests::screen("main", 0.0, 1.0)).unwrap(), None);
-        assert_eq!(off_line(true), "Scooch is off. Your wallpaper is back.");
+        assert_eq!(closing(&tally(1, 0, 0, 0, 0)), "Scooch is off. Your wallpaper is back.");
         let state = store.load();
         assert!(!state.on && !state.restoring && state.screens.is_empty() && state.picture.is_none());
         assert!(!store.out().exists());
@@ -827,9 +873,8 @@ mod tests {
         fake.lost.lock().unwrap().push(default);
         turned_on(&fake, &store, &chosen);
         shown_output(&fake, &store);
-        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Done { lost: true });
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(0, 1, 0, 0, 0)));
         assert_eq!(fake.showing("main"), chosen);
-        assert_eq!(off_line(false), "Scooch is off. Your old wallpaper was not a picture file and cannot be put back by an app, so pick it again in your system settings.");
     }
 
     #[test]
@@ -838,7 +883,7 @@ mod tests {
         turned_on(&fake, &store, &chosen);
         let mine = crate::daemon::tests::picture(chosen.parent().unwrap(), "mine.png");
         fake.show("main", &mine);
-        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Done { lost: false });
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(1, 0, 0, 0, 0)));
         assert_eq!(fake.showing("main"), mine);
     }
 
@@ -850,12 +895,12 @@ mod tests {
         turned_on(&fake, &store, &chosen);
         shown_output(&fake, &store);
         std::fs::remove_file(&gone).unwrap();
-        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Done { lost: false });
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(0, 1, 0, 0, 0)));
         assert_eq!(fake.showing("main"), chosen);
     }
 
     #[test]
-    fn off_keeps_a_screen_pending_when_nothing_is_left_to_show() {
+    fn off_leaves_scoochs_picture_up_when_nothing_else_is_left() {
         let (fake, store, _, chosen) = desk("offnothing");
         let gone = crate::daemon::tests::picture(chosen.parent().unwrap(), "gone.png");
         fake.show("main", &gone);
@@ -864,10 +909,11 @@ mod tests {
         let output = shown_output(&fake, &store);
         std::fs::remove_file(&gone).unwrap();
         std::fs::remove_file(&lone).unwrap();
-        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Pending(1));
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(0, 0, 1, 0, 0)));
         assert!(output.exists());
-        assert!(store.load().restoring);
-        assert_eq!(off_pending_line(1), "Scooch is off. Your wallpaper is back here, and 1 more switch back the next time those desktops or screens show.");
+        assert_eq!(fake.showing("main"), output);
+        let state = store.load();
+        assert!(!state.restoring && state.screens.is_empty() && state.kept == vec![output]);
     }
 
     fn pair(name: &str) -> (std::sync::Arc<crate::daemon::tests::Fake>, Store, PathBuf, PathBuf) {
@@ -895,7 +941,7 @@ mod tests {
     fn off_with_a_screen_unplugged_finishes_when_it_comes_back() {
         let (fake, store, left, right) = pair("unplugged");
         fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
-        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Pending(1));
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(1, 0, 0, 1, 0)));
         assert_eq!(fake.showing("L"), left);
         let state = store.load();
         assert!(state.restoring && !state.on && state.screens.contains_key("R") && !state.screens.contains_key("L"));
@@ -914,18 +960,19 @@ mod tests {
     fn off_twice_gives_up_on_screens_it_cannot_reach() {
         let (fake, store, _, _) = pair("twice");
         fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
-        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Pending(1));
-        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::GaveUp(1));
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(1, 0, 0, 1, 0)));
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(0, 0, 0, 0, 1)));
         let state = store.load();
-        assert!(!state.restoring && state.screens.is_empty() && !store.out().exists());
-        assert_eq!(off_gave_up_line(1), "Scooch is off. 1 desktops or screens it could not reach still point at a removed picture, so pick a wallpaper there.");
+        assert!(!state.restoring && state.screens.is_empty());
+        assert!(store.output("R", 1, "jpg").exists() && !store.output("L", 1, "jpg").exists());
+        assert_eq!(closing(&tally(0, 0, 0, 0, 1)), "Scooch is off. 1 desktops or screens it could not reach still show Scooch's picture, so pick a wallpaper there.");
     }
 
     #[test]
     fn turning_on_while_restoring_keeps_the_originals() {
         let (fake, store, left, right) = pair("resume");
         fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
-        wind_down(fake.as_ref(), &store).unwrap();
+        off_of(&fake, &store);
         let mut state = store.load();
         assert!(wake_up(&mut state));
         assert!(state.on && !state.restoring);
@@ -950,7 +997,7 @@ mod tests {
         std::fs::write(store.output("main@S9", 1, "jpg"), b"x").unwrap();
         fake.connect(vec![crate::daemon::tests::screen("main@S1", 0.0, 1.0)]);
         *fake.known.lock().unwrap() = Some(vec!["main@S1".into(), "main@S2".into()]);
-        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Done { lost: false });
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(0, 0, 0, 0, 0)));
         assert!(store.load().screens.is_empty() && !store.out().exists());
     }
 
@@ -1044,11 +1091,195 @@ mod tests {
     fn off_after_an_unreadable_record_deletes_nothing() {
         let (fake, store, _, _) = pair("unreadableoff");
         std::fs::write(store.state_file(), b"{ broken").unwrap();
-        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Unreadable);
+        assert_eq!(off_of(&fake, &store), Off::Unreadable);
         assert!(store.output("L", 1, "jpg").exists() && store.output("R", 1, "jpg").exists());
         assert!(store.aside_file().is_file());
         assert!(!store.load().on);
         assert!(!UNREADABLE_OFF.contains(['—', ';', '(']) && !UNREADABLE_OFF.contains(": "));
+    }
+
+    #[test]
+    fn the_closing_line_tells_every_mix_apart() {
+        let plain = "2 of your old wallpapers were not picture files and cannot be put back by an app, so pick them again in your system settings.";
+        let stuck = "2 desktops still show Scooch's picture because the original file is gone, so pick a wallpaper there.";
+        let pending = "2 more switch back the next time those desktops or screens show.";
+        for mix in 0..16_usize {
+            let count = |bit: usize| if mix & (1 << bit) == 0 { 0 } else { 2 };
+            let counts = tally(count(0), count(1), count(2), count(3), 0);
+            let mut expected = vec!["Scooch is off."];
+            if counts.back > 0 || mix == 0 {
+                expected.push("Your wallpaper is back.");
+            }
+            for (number, sentence) in [(counts.plain, plain), (counts.stuck, stuck), (counts.pending, pending)] {
+                if number > 0 {
+                    expected.push(sentence);
+                }
+            }
+            let line = closing(&counts);
+            assert_eq!(line, expected.join(" "));
+            assert!(!line.contains(['\u{2014}', '\u{2013}', ';', '(', ')']) && !line.contains(": "), "{line}");
+        }
+        assert_eq!(closing(&tally(3, 0, 0, 0, 0)), "Scooch is off. Your wallpaper is back.");
+        assert_eq!(closing(&Tally { strays: 1, ..Tally::default() }), format!("Scooch is off. {}", daemon::ORPHAN));
+    }
+
+    fn screens(ids: &[&str]) -> Vec<Screen> {
+        ids.iter().zip([0.0, 160.0, 320.0]).map(|(id, x)| crate::daemon::tests::screen(id, x, 1.0)).collect()
+    }
+
+    fn trio(name: &str) -> (std::sync::Arc<crate::daemon::tests::Fake>, Store, Vec<PathBuf>) {
+        let folder = crate::state::scratch(name);
+        let originals: Vec<PathBuf> = ["a.png", "b.png", "c.png"].iter().map(|file| crate::daemon::tests::picture(&folder, file)).collect();
+        let fake = crate::daemon::tests::Fake::new(screens(&["A", "B", "C"]), &originals[0]);
+        fake.show("B", &originals[1]);
+        fake.show("C", &originals[2]);
+        let store = Store::at(folder.join("data"));
+        let mut state = State::default();
+        assert!(record(&mut state, fake.as_ref(), &store).unwrap());
+        state.on = true;
+        store.save(&state).unwrap();
+        std::fs::create_dir_all(store.out()).unwrap();
+        for id in ["A", "B", "C"] {
+            let output = store.output(id, 1, "jpg");
+            std::fs::write(&output, b"x").unwrap();
+            fake.show(id, &output);
+        }
+        (fake, store, originals)
+    }
+
+    fn ids(state: &State) -> Vec<String> {
+        state.screens.keys().cloned().collect()
+    }
+
+    #[test]
+    fn off_where_the_second_of_three_fails_puts_back_the_rest() {
+        let (fake, store, originals) = trio("secondfails");
+        fake.refuse.lock().unwrap().push("B".into());
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(2, 0, 0, 1, 0)));
+        assert_eq!((fake.showing("A"), fake.showing("C")), (originals[0].clone(), originals[2].clone()));
+        assert_eq!(fake.showing("B"), store.output("B", 1, "jpg"));
+        let state = store.load();
+        assert!(state.restoring && ids(&state) == ["B"]);
+        assert!(store.output("B", 1, "jpg").exists() && !store.output("A", 1, "jpg").exists());
+        assert_eq!(closing(&tally(2, 0, 0, 1, 0)), "Scooch is off. Your wallpaper is back. 1 more switch back the next time those desktops or screens show.");
+    }
+
+    #[test]
+    fn a_restoring_tick_where_the_second_of_three_fails_saves_the_rest() {
+        let (fake, store, originals) = trio("secondfailstick");
+        fake.connect(Vec::new());
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(0, 0, 0, 3, 0)));
+        fake.connect(screens(&["A", "B", "C"]));
+        fake.refuse.lock().unwrap().push("B".into());
+        let daemon = crate::daemon::Daemon::new(fake.clone(), store.clone());
+        assert!(!daemon.tick().unload);
+        assert_eq!((fake.showing("A"), fake.showing("C")), (originals[0].clone(), originals[2].clone()));
+        let state = store.load();
+        assert!(state.restoring && ids(&state) == ["B"] && state.tally.back == 2);
+        fake.refuse.lock().unwrap().clear();
+        assert!(daemon.tick().unload);
+        assert_eq!(fake.showing("B"), originals[1]);
+        assert_eq!(store.load().tally.back, 3);
+    }
+
+    #[test]
+    fn the_restoring_daemon_keeps_its_counts_for_status() {
+        let (fake, store, _, right) = pair("restorecounts");
+        fake.connect(screens(&["L"]));
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(1, 0, 0, 1, 0)));
+        std::fs::remove_file(&right).unwrap();
+        fake.connect(screens(&["L", "R"]));
+        assert!(crate::daemon::Daemon::new(fake.clone(), store.clone()).tick().unload);
+        let output = store.output("R", 1, "jpg");
+        assert_eq!(fake.showing("R"), output);
+        assert!(output.exists());
+        let state = store.load();
+        assert_eq!(state.tally, Tally { back: 1, stuck: 1, ..Tally::default() });
+        assert_eq!(describe(&state, false, None), vec!["Scooch is off. Run scooch to turn it on.".to_string(), stuck_sentence(1)]);
+    }
+
+    fn spaces(name: &str) -> (std::sync::Arc<crate::daemon::tests::Fake>, Store, PathBuf) {
+        let folder = crate::state::scratch(name);
+        let first = crate::daemon::tests::picture(&folder, "first.png");
+        let fake = crate::daemon::tests::Fake::new(screens(&["D@S1"]), &first);
+        let store = Store::at(folder.join("data"));
+        std::fs::create_dir_all(store.out()).unwrap();
+        (fake, store, first)
+    }
+
+    #[test]
+    fn the_restoring_daemon_never_drops_a_space_from_one_read() {
+        let (fake, store, first) = spaces("onereadgone");
+        let second = crate::daemon::tests::picture(first.parent().unwrap(), "second.png");
+        let mut state = State { on: true, ..State::default() };
+        state.screens.insert("D@S1".into(), Entry::new(&first));
+        state.screens.insert("D@S2".into(), Entry::new(&second));
+        store.save(&state).unwrap();
+        let shown = store.output("D@S1", 1, "jpg");
+        std::fs::write(&shown, b"x").unwrap();
+        fake.show("D@S1", &shown);
+        std::fs::write(store.output("D@S2", 1, "jpg"), b"x").unwrap();
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(1, 0, 0, 1, 0)));
+        *fake.known.lock().unwrap() = Some(vec!["D@S1".into()]);
+        let daemon = crate::daemon::Daemon::new(fake.clone(), store.clone());
+        for _ in 0..3 {
+            assert!(!daemon.tick().unload);
+        }
+        let state = store.load();
+        assert!(state.restoring && ids(&state) == ["D@S2"] && store.output("D@S2", 1, "jpg").exists());
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(0, 0, 0, 0, 0)));
+        assert!(store.load().screens.is_empty() && !store.out().exists());
+    }
+
+    #[test]
+    fn turning_on_during_a_restoring_tick_keeps_the_daemon_and_its_files() {
+        let (fake, store, left, right) = pair("wakeduring");
+        fake.connect(screens(&["L"]));
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(1, 0, 0, 1, 0)));
+        fake.connect(screens(&["L", "R"]));
+        let waking = store.clone();
+        fake.during(move || {
+            let mut state = waking.load();
+            assert!(wake_up(&mut state));
+            waking.save(&state).unwrap();
+        });
+        let daemon = crate::daemon::Daemon::new(fake.clone(), store.clone());
+        let report = daemon.tick();
+        assert!(!report.unload && !report.exit);
+        let state = store.load();
+        assert!(state.on && !state.restoring && store.out().exists());
+        assert!(!daemon.tick().exit);
+        let state = store.load();
+        assert_eq!((state.screens["L"].original.clone(), state.screens["R"].original.clone()), (left, right));
+    }
+
+    #[test]
+    fn off_finds_an_entry_made_under_a_bare_id() {
+        let (fake, store, first) = spaces("offrelink");
+        let output = store.output("D", 1, "jpg");
+        std::fs::write(&output, b"x").unwrap();
+        let mut state = State { on: true, ..State::default() };
+        state.screens.insert("D".into(), Entry { output: Some(output.clone()), ..Entry::new(&first) });
+        store.save(&state).unwrap();
+        fake.show("D@S1", &output);
+        *fake.known.lock().unwrap() = Some(vec!["D@S1".into()]);
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(1, 0, 0, 0, 0)));
+        assert_eq!(fake.showing("D@S1"), first);
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn off_leaves_its_own_picture_alone_where_it_has_no_record() {
+        let (fake, store, _) = spaces("offstray");
+        store.save(&State { on: true, ..State::default() }).unwrap();
+        let stray = store.output("X", 2, "jpg");
+        std::fs::write(&stray, b"x").unwrap();
+        fake.show("D@S1", &stray);
+        let counts = Tally { strays: 1, ..Tally::default() };
+        assert_eq!(off_of(&fake, &store), Off::Done(counts));
+        assert!(stray.exists());
+        assert_eq!(fake.showing("D@S1"), stray);
+        assert!(!closing(&counts).contains("is back"));
     }
 
     #[test]

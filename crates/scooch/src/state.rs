@@ -23,11 +23,39 @@ pub struct State {
     pub restoring: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub picture: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Tally::is_empty")]
+    pub tally: Tally,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tally {
+    pub back: usize,
+    pub plain: usize,
+    pub stuck: usize,
+    pub pending: usize,
+    pub abandoned: usize,
+    pub strays: usize,
+}
+
+impl Tally {
+    pub fn is_empty(&self) -> bool {
+        *self == Tally::default()
+    }
+
+    pub fn add(&mut self, other: &Tally) {
+        self.back += other.back;
+        self.plain += other.plain;
+        self.stuck += other.stuck;
+        self.strays = self.strays.max(other.strays);
+    }
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { version: VERSION, on: false, options: Options::default(), screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None }
+        Self { version: VERSION, on: false, options: Options::default(), screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new() }
     }
 }
 
@@ -62,8 +90,16 @@ impl Entry {
 pub const PROGRAM: &str = env!("CARGO_PKG_VERSION");
 
 impl Store {
-    pub fn forget_pictures(&self) {
-        let _ = fs::remove_dir_all(self.out());
+    pub fn forget_pictures(&self, keep: &[PathBuf]) {
+        if let Ok(entries) = fs::read_dir(self.out()) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !keep.iter().any(|kept| same(kept, &path)) {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+        let _ = fs::remove_dir(self.out());
         let _ = fs::remove_dir_all(self.cache());
     }
 
@@ -186,12 +222,19 @@ impl Store {
         self.out().join(format!("{}-{counter}.{extension}", file_safe(screen)))
     }
 
-    pub fn sweep(&self, screen: &str, keep: Option<&Path>) {
+    pub fn outputs_of(&self, screen: &str) -> Vec<PathBuf> {
+        let prefix = format!("{}-", file_safe(screen));
+        let Ok(entries) = fs::read_dir(self.out()) else { return Vec::new() };
+        entries.flatten().filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix)).map(|entry| entry.path()).collect()
+    }
+
+    pub fn sweep(&self, screen: &str, keep: Option<&Path>, kept: &[PathBuf]) {
         let prefix = format!("{}-", file_safe(screen));
         let Ok(entries) = fs::read_dir(self.out()) else { return };
         for entry in entries.flatten() {
             let path = entry.path();
-            if Some(path.as_path()) != keep && entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let spared = keep.is_some_and(|keep| same(keep, &path)) || kept.iter().any(|kept| same(kept, &path));
+            if !spared && entry.file_name().to_string_lossy().starts_with(&prefix) {
                 let _ = fs::remove_file(path);
             }
         }
@@ -325,7 +368,7 @@ mod tests {
         fs::create_dir_all(store.cache()).unwrap();
         fs::write(store.output("main", 1, "jpg"), b"x").unwrap();
         fs::write(store.cache().join("1.rgb"), b"x").unwrap();
-        store.forget_pictures();
+        store.forget_pictures(&[]);
         assert!(!store.out().exists() && !store.cache().exists());
         assert!(store.load().on);
     }
@@ -416,9 +459,9 @@ mod tests {
         for path in [&old, &new, &other] {
             fs::write(path, b"x").unwrap();
         }
-        store.sweep("main", Some(&new));
+        store.sweep("main", Some(&new), &[]);
         assert!(!old.exists() && new.exists() && other.exists());
-        store.sweep("main", None);
+        store.sweep("main", None, &[]);
         assert!(!new.exists() && other.exists());
     }
 
