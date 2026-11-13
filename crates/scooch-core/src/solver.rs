@@ -2,7 +2,7 @@ use crate::analysis::quantile;
 use crate::sat::{Place, Sat};
 use crate::table::{self, Curve, STEPS};
 use crate::warp::{self, Pchip, Plan, BINS};
-use crate::{Analysis, Options, Placement, Scene, TABLE};
+use crate::{Analysis, Options, Placement, Scene, Scenery, TABLE};
 use rayon::prelude::*;
 
 const ZOOM_STEP: f64 = 0.05;
@@ -605,13 +605,13 @@ fn choices(field: &Field, boxes: &[Footprint], frame: &Frame, settings: &Setting
     out
 }
 
-fn fresh(field: &Field, boxes: &[Footprint], settings: &Settings, fallback: &Placement) -> Placement {
+fn fresh(field: &Field, boxes: &[Footprint], bare: &[Footprint], settings: &Settings, fallback: &Placement) -> Placement {
     let Some(frames) = stage_one(field, boxes, settings) else { return fallback.clone() };
     let mut all: Vec<Choice> = frames.par_iter().flat_map(|frame| choices(field, boxes, frame, settings)).collect();
     all.sort_by(ranks_before);
-    let limit = hidden_saliency(field, boxes, fallback);
+    let limits = [hidden_saliency(field, boxes, fallback), hidden_saliency(field, bare, fallback)];
     all.into_iter()
-        .find(|c| table::usable(&c.placement.fx) && table::usable(&c.placement.fy) && hidden_saliency(field, boxes, &c.placement) <= limit)
+        .find(|c| table::usable(&c.placement.fx) && table::usable(&c.placement.fy) && hidden_saliency(field, boxes, &c.placement) <= limits[0] && hidden_saliency(field, bare, &c.placement) <= limits[1])
         .map_or_else(|| fallback.clone(), |c| c.placement)
 }
 
@@ -627,12 +627,13 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
     let (sw, sh) = source_size(analysis);
     let fallback = table::fill(sw, sh, scene.width, scene.height);
     let Some(field) = Field::new(analysis, scene) else { return fallback };
-    let boxes = footprints(scene);
-    if boxes.is_empty() {
+    let bare = footprints(scene);
+    if bare.is_empty() {
         return fallback;
     }
+    let boxes = if options.scenery == Scenery::Off { bare.clone() } else { footprints(&Scene { icons: crate::scenery::footprints(scene), ..scene.clone() }) };
     let settings = settings(options);
-    let new = fresh(&field, &boxes, &settings, &fallback);
+    let new = fresh(&field, &boxes, &bare, &settings, &fallback);
     let Some(old) = previous.filter(|p| fits(&field, p, &settings)) else { return new };
     if *old == new {
         return new;
@@ -711,7 +712,7 @@ mod tests {
     fn the_border_skips_sides_on_the_image_edge() {
         let (w, h) = (40usize, 20usize);
         let saliency = vec![1.0f32; w * h];
-        let analysis = Analysis { width: w as u32, height: h as u32, saliency, busy: vec![0.0; w * h], subject: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, flat: false, source_width: 400, source_height: 200 };
+        let analysis = Analysis { width: w as u32, height: h as u32, saliency, busy: vec![0.0; w * h], subject: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, flat: false, source_width: 400, source_height: 200, palette: Vec::new() };
         let field = Field::new(&analysis, &Scene { width: 400, height: 200, icons: Vec::new() }).unwrap();
         assert_eq!(field.border(&field.middle), 0.0);
         let inside = Frame { z: 2.0, x0: 0.25, y0: 0.25, cw: 0.5, ch: 0.5, mirrored: false };

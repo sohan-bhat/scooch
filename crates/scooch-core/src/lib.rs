@@ -2,13 +2,18 @@ mod analysis;
 mod blur;
 mod color;
 mod pads;
+mod paint;
 mod render;
 mod sat;
+mod scenery;
+mod shape;
 mod solver;
 mod table;
 mod warp;
 
-pub use image::{GrayImage, RgbImage};
+pub use image::{GrayImage, RgbImage, RgbaImage};
+pub use paint::Materials;
+pub use shape::FIELD_STEP as SCENERY_FIELD_STEP;
 use serde::{Deserialize, Serialize};
 
 pub const TABLE: usize = 257;
@@ -28,6 +33,16 @@ pub struct Scene {
     pub icons: Vec<Rect>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scenery {
+    #[default]
+    Auto,
+    Islands,
+    Clouds,
+    Off,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Options {
@@ -35,6 +50,7 @@ pub struct Options {
     pub max_zoom: f32,
     pub mirror: bool,
     pub pads: f32,
+    pub scenery: Scenery,
 }
 
 fn one() -> f32 {
@@ -43,7 +59,7 @@ fn one() -> f32 {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { strength: 1.0, max_zoom: 1.3, mirror: false, pads: 0.7 }
+        Self { strength: 1.0, max_zoom: 1.3, mirror: false, pads: 0.7, scenery: Scenery::Auto }
     }
 }
 
@@ -60,6 +76,8 @@ pub struct Analysis {
     pub source_width: u32,
     #[serde(default)]
     pub source_height: u32,
+    #[serde(default)]
+    pub palette: Vec<[f32; 4]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -87,11 +105,37 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
 }
 
 pub fn render(image: &RgbImage, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
-    render::render(image, None, placement, scene, options)
+    render::render(image, None, placement, scene, options, None)
 }
 
 pub fn render_with(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
-    render::render(image, Some(analysis), placement, scene, options)
+    render::render(image, Some(analysis), placement, scene, options, None)
+}
+
+pub fn render_painted(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> RgbImage {
+    render::render(image, Some(analysis), placement, scene, options, Some(materials))
+}
+
+pub struct Layers {
+    pub picture: RgbImage,
+    pub scenery: RgbaImage,
+}
+
+pub fn render_layers(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> Layers {
+    let (picture, scenery) = render::layers(image, Some(analysis), placement, scene, options, None);
+    Layers { picture, scenery }
+}
+
+pub fn composite(picture: &mut RgbImage, scenery: &RgbaImage) {
+    paint::composite(picture, scenery)
+}
+
+pub fn materials(analysis: &Analysis) -> Materials {
+    paint::materials(analysis)
+}
+
+pub fn scenery_field(scene: &Scene, width: u32, height: u32) -> GrayImage {
+    shape::field_image(scene, width, height)
 }
 
 pub fn pads_active(analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> bool {
@@ -104,6 +148,10 @@ pub fn fill(image_width: u32, image_height: u32, scene: &Scene) -> Placement {
 
 pub fn hidden_share(analysis: &Analysis, scene: &Scene, placement: &Placement) -> f32 {
     solver::hidden_share(analysis, scene, placement)
+}
+
+pub fn scenery_footprints(scene: &Scene) -> Vec<Rect> {
+    scenery::footprints(scene)
 }
 
 pub fn saliency_image(analysis: &Analysis) -> GrayImage {

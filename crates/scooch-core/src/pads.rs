@@ -1,5 +1,5 @@
 use crate::table::{self, Curve};
-use crate::{blur, color, solver, Analysis, Options, Placement, RgbImage, Scene};
+use crate::{blur, color, scenery, solver, Analysis, Options, Placement, RgbImage, Scene};
 use rayon::prelude::*;
 
 const GROW: f64 = 0.10;
@@ -28,7 +28,7 @@ pub fn amount(options: &Options) -> f32 {
 }
 
 pub fn wanted(scene: &Scene, options: &Options) -> bool {
-    amount(options) > 0.0 && scene.width > 0 && scene.height > 0 && !solver::screen_rects(scene).is_empty()
+    !scenery::active(scene, options) && amount(options) > 0.0 && scene.width > 0 && scene.height > 0 && !solver::screen_rects(scene).is_empty()
 }
 
 #[derive(Clone, Copy)]
@@ -112,6 +112,9 @@ impl Gate {
 }
 
 pub fn active(found: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> bool {
+    if scenery::active(scene, options) {
+        return true;
+    }
     let rects = solver::screen_rects(scene);
     if !wanted(scene, options) || rects.is_empty() {
         return false;
@@ -399,7 +402,9 @@ mod tests {
         let out = run(&image, &scene, &Options { pads: 0.0, ..Options::default() });
         assert_eq!(out.as_raw(), image.as_raw());
         assert!(!wanted(&scene, &Options { pads: 0.0, ..Options::default() }));
-        assert!(!wanted(&Scene { icons: Vec::new(), ..scene.clone() }, &Options::default()));
-        assert!(wanted(&scene, &Options::default()));
+        let plain = Options { scenery: crate::Scenery::Off, ..Options::default() };
+        assert!(!wanted(&Scene { icons: Vec::new(), ..scene.clone() }, &plain));
+        assert!(wanted(&scene, &plain));
+        assert!(!wanted(&scene, &Options::default()));
     }
 }

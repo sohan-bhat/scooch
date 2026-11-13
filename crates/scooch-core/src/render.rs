@@ -1,5 +1,6 @@
 use crate::table::{self, Curve, STEPS};
-use crate::{analysis, color, pads, Analysis, Options, Placement, RgbImage, Scene};
+use crate::paint::{self, Materials};
+use crate::{analysis, color, pads, scenery, Analysis, Options, Placement, RgbImage, RgbaImage, Scene};
 use rayon::prelude::*;
 use std::borrow::Cow;
 
@@ -105,11 +106,11 @@ fn resample(source: &RgbImage, columns: &[Tap], rows: &[Tap], width: usize) -> V
     out
 }
 
-pub fn render(image: &RgbImage, given: Option<&Analysis>, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
+pub fn layers(image: &RgbImage, given: Option<&Analysis>, placement: &Placement, scene: &Scene, options: &Options, materials: Option<&Materials>) -> (RgbImage, RgbaImage) {
     let (width, height) = (scene.width, scene.height);
     let (sw, sh) = image.dimensions();
     if width == 0 || height == 0 || sw == 0 || sh == 0 {
-        return RgbImage::new(width, height);
+        return (RgbImage::new(width, height), RgbaImage::new(width, height));
     }
     let placement: Cow<Placement> = if table::usable(&placement.fx) && table::usable(&placement.fy) { Cow::Borrowed(placement) } else { Cow::Owned(table::fill(sw, sh, width, height)) };
     let ratio = worst_ratio(&placement.fx, sw, width).max(worst_ratio(&placement.fy, sh, height));
@@ -120,7 +121,8 @@ pub fn render(image: &RgbImage, given: Option<&Analysis>, placement: &Placement,
     let scale_y = sh as f64 / factor as f64;
     let columns = taps(&placement.fx, width as usize, scale_x, source.width() as usize);
     let rows = taps(&placement.fy, height as usize, scale_y, source.height() as usize);
-    let (raw, found) = match (pads::wanted(scene, options), given) {
+    let scenery_on = scenery::active(scene, options);
+    let (raw, found) = match (scenery_on || pads::wanted(scene, options), given) {
         (false, _) => (resample(source, &columns, &rows, width as usize), None),
         (true, Some(given)) => (resample(source, &columns, &rows, width as usize), Some(Cow::Borrowed(given))),
         (true, None) => {
@@ -129,7 +131,29 @@ pub fn render(image: &RgbImage, given: Option<&Analysis>, placement: &Placement,
         }
     };
     let base = RgbImage::from_raw(width, height, raw).unwrap_or_else(|| RgbImage::new(width, height));
-    pads::apply(base, found.as_deref(), &placement, scene, options)
+    if !scenery_on {
+        return (pads::apply(base, found.as_deref(), &placement, scene, options), RgbaImage::new(width, height));
+    }
+    let made;
+    let materials = match (materials, found.as_deref()) {
+        (Some(given), _) => given,
+        (None, Some(found)) if !found.palette.is_empty() => {
+            made = paint::materials(found);
+            &made
+        }
+        _ => {
+            made = paint::from_palette(&analysis::palette_of(image));
+            &made
+        }
+    };
+    let layer = scenery::layer(&base, found.as_deref(), &placement, scene, options, materials);
+    (base, layer)
+}
+
+pub fn render(image: &RgbImage, given: Option<&Analysis>, placement: &Placement, scene: &Scene, options: &Options, materials: Option<&Materials>) -> RgbImage {
+    let (mut picture, layer) = layers(image, given, placement, scene, options, materials);
+    paint::composite(&mut picture, &layer);
+    picture
 }
 
 #[cfg(test)]
@@ -153,7 +177,7 @@ mod tests {
     fn a_matching_screen_copies_the_source() {
         let image = checker(64, 40);
         let scene = Scene { width: 64, height: 40, icons: Vec::new() };
-        let out = render(&image, None, &table::fill(64, 40, 64, 40), &scene, &Options::default());
+        let out = render(&image, None, &table::fill(64, 40, 64, 40), &scene, &Options::default(), None);
         assert_eq!(out.as_raw(), image.as_raw());
     }
 
@@ -161,7 +185,7 @@ mod tests {
     fn a_large_source_is_shrunk_first() {
         let image = RgbImage::from_pixel(400, 300, image::Rgb([200, 30, 90]));
         let scene = Scene { width: 40, height: 30, icons: Vec::new() };
-        let out = render(&image, None, &table::fill(400, 300, 40, 30), &scene, &Options::default());
+        let out = render(&image, None, &table::fill(400, 300, 40, 30), &scene, &Options::default(), None);
         assert_eq!(out.dimensions(), (40, 30));
         assert!(out.pixels().all(|p| p.0 == [200, 30, 90]));
         let shrunk = shrink(&image, 3);
@@ -176,7 +200,7 @@ mod tests {
         let mut placement = table::fill(32, 16, 32, 16);
         placement.fx = table::line(1.0, 0.0);
         placement.mirrored = true;
-        let out = render(&image, None, &placement, &scene, &Options::default());
+        let out = render(&image, None, &placement, &scene, &Options::default(), None);
         for y in 0..16 {
             for x in 0..32 {
                 assert_eq!(out.get_pixel(x, y), image.get_pixel(31 - x, y));
@@ -190,8 +214,8 @@ mod tests {
         let scene = Scene { width: 30, height: 20, icons: Vec::new() };
         let mut broken = table::fill(30, 20, 30, 20);
         broken.fx = vec![f32::NAN; 3];
-        let out = render(&image, None, &broken, &scene, &Options::default());
+        let out = render(&image, None, &broken, &scene, &Options::default(), None);
         assert_eq!(out.as_raw(), image.as_raw());
-        assert_eq!(render(&image, None, &broken, &Scene { width: 0, height: 9, icons: Vec::new() }, &Options::default()).dimensions(), (0, 9));
+        assert_eq!(render(&image, None, &broken, &Scene { width: 0, height: 9, icons: Vec::new() }, &Options::default(), None).dimensions(), (0, 9));
     }
 }

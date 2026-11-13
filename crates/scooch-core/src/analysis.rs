@@ -26,6 +26,8 @@ const BUSY_SIGMA: f32 = 3.0;
 const BUSY_SCALE: f32 = 0.06;
 const SUBJECT_REACH: f64 = 1.5;
 const FLAT_SHARE: f64 = 1e-4;
+const PALETTE: usize = 5;
+const PALETTE_ROUNDS: usize = 8;
 const CENTER: Rect = Rect { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
 
 pub fn grid_size(source_width: u32, source_height: u32) -> (usize, usize) {
@@ -303,11 +305,60 @@ fn subject(weights: &[f32], width: usize, height: usize) -> Option<Rect> {
     Some(Rect { x: x0 as f32, y: y0 as f32, w: (x1 - x0) as f32, h: (y1 - y0) as f32 })
 }
 
+fn palette(lab: &[Vec<f32>; 3]) -> Vec<[f32; 4]> {
+    let n = lab[0].len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|a, b| lab[0][*a].total_cmp(&lab[0][*b]).then(a.cmp(b)));
+    let mut centers: Vec<[f32; 3]> = (0..PALETTE)
+        .map(|k| {
+            let i = order[((2 * k + 1) * n / (2 * PALETTE)).min(n - 1)];
+            [lab[0][i], lab[1][i], lab[2][i]]
+        })
+        .collect();
+    let mut counts = vec![0usize; PALETTE];
+    for _ in 0..PALETTE_ROUNDS {
+        let mut sums = [[0.0f64; 3]; PALETTE];
+        counts.iter_mut().for_each(|c| *c = 0);
+        for p in (0..n).map(|i| [lab[0][i], lab[1][i], lab[2][i]]) {
+            let nearest = (0..PALETTE)
+                .min_by(|a, b| {
+                    let da: f32 = (0..3).map(|k| (p[k] - centers[*a][k]).powi(2)).sum();
+                    let db: f32 = (0..3).map(|k| (p[k] - centers[*b][k]).powi(2)).sum();
+                    da.total_cmp(&db)
+                })
+                .unwrap_or(0);
+            counts[nearest] += 1;
+            for k in 0..3 {
+                sums[nearest][k] += p[k] as f64;
+            }
+        }
+        for (c, (sum, count)) in centers.iter_mut().zip(sums.iter().zip(&counts)) {
+            if *count > 0 {
+                *c = sum.map(|v| (v / *count as f64) as f32);
+            }
+        }
+    }
+    let mut out: Vec<[f32; 4]> = centers.iter().zip(&counts).map(|(c, count)| [c[0], c[1], c[2], *count as f32 / n as f32]).collect();
+    out.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    out
+}
+
+pub fn palette_of(image: &RgbImage) -> Vec<[f32; 4]> {
+    let (width, height) = grid_size(image.width(), image.height());
+    if width == 0 {
+        return Vec::new();
+    }
+    palette(&lab_planes(image, width, height))
+}
+
 pub fn analyze(image: &RgbImage) -> Analysis {
     let (sw, sh) = image.dimensions();
     let (width, height) = grid_size(sw, sh);
     if width == 0 {
-        return Analysis { width: 0, height: 0, saliency: Vec::new(), busy: Vec::new(), subject: CENTER, flat: true, source_width: sw, source_height: sh };
+        return Analysis { width: 0, height: 0, saliency: Vec::new(), busy: Vec::new(), subject: CENTER, flat: true, source_width: sw, source_height: sh, palette: Vec::new() };
     }
     let lab = lab_planes(image, width, height);
     let (contrast, busy) = rayon::join(|| contrast(&lab, width, height), || busy_from_lightness(&lab[0], width, height));
@@ -325,6 +376,7 @@ pub fn analyze(image: &RgbImage) -> Analysis {
         flat: found.is_none(),
         source_width: sw,
         source_height: sh,
+        palette: palette(&lab),
     }
 }
 
