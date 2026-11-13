@@ -14,7 +14,7 @@ use ::windows::Win32::System::Com::{CoCreateInstance, IServiceProvider, CLSCTX_A
 use ::windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
 use ::windows::Win32::UI::Shell::Common::STRRET;
 use ::windows::Win32::UI::Shell::{
-    IEnumIDList, IFolderView2, IShellBrowser, IShellFolder, IShellView, IShellWindows, ShellWindows, StrRetToStrW, CSIDL_DESKTOP, FOLDERVIEWMODE, SHGDN_NORMAL, SID_STopLevelBrowser, SVGIO_ALLVIEW, SVSI_FOCUSED, SVSI_SELECT, SWC_DESKTOP,
+    IEnumIDList, IFolderView2, IShellBrowser, IShellFolder, IShellView, IShellWindows, ShellWindows, StrRetToStrW, CSIDL_DESKTOP, FOLDERVIEWMODE, SHGDN_NORMAL, SID_STopLevelBrowser, SVGIO_ALLVIEW, SVSI_FOCUSED, SWC_DESKTOP,
     SWFO_NEEDDISPATCH,
 };
 use ::windows::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
@@ -118,7 +118,7 @@ pub fn items(view: &View) -> Result<Vec<Item>> {
     let folder: IShellFolder = unsafe { view.folder.GetFolder() }?;
     let pidls = pidls(view)?;
     let focused = list_focused(view);
-    let open = (SVSI_FOCUSED.0 | SVSI_SELECT.0) as u32;
+    let open = SVSI_FOCUSED.0 as u32;
     let mut names = Vec::with_capacity(pidls.len());
     let mut points = Vec::with_capacity(pidls.len());
     let mut unfolded = Vec::with_capacity(pidls.len());
