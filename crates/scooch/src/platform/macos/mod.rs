@@ -14,19 +14,12 @@ use objc2_foundation::{ns_string, NSProcessInfo};
 use scooch_core::RgbImage;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 const GALLERY: [&str; 2] = ["/System/Library/Desktop Pictures", "/Library/Desktop Pictures"];
 const CONSENT_HINT: &str = "If macOS asks to let scooch control Finder, choose Allow.";
-static LAST_SET: AtomicU64 = AtomicU64::new(0);
-const OWN_ECHO: Duration = Duration::from_secs(1);
-
-fn now_millis() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
-}
-
 pub fn real_home() -> Option<PathBuf> {
     use std::ffi::CStr;
     use std::os::unix::ffi::OsStrExt;
@@ -39,10 +32,6 @@ pub fn real_home() -> Option<PathBuf> {
     }
     let home = unsafe { CStr::from_ptr(record.pw_dir) };
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(home.to_bytes()))).filter(|path| path.is_absolute())
-}
-
-pub fn set_recently() -> bool {
-    now_millis().saturating_sub(LAST_SET.load(Ordering::SeqCst)) < OWN_ECHO.as_millis() as u64
 }
 
 pub fn on_main<T: Send>(work: impl FnOnce(MainThreadMarker) -> T + Send) -> T {
@@ -96,9 +85,11 @@ impl Desktop for Mac {
     fn set_wallpaper(&self, screen: &Screen, path: &Path) -> Result<()> {
         let id = screen.id.clone();
         let path = path.to_path_buf();
-        let result = on_main(move |marker| picture::set_wallpaper(marker, &id, &path));
-        LAST_SET.store(now_millis(), Ordering::SeqCst);
-        result
+        on_main(move |marker| picture::set_wallpaper(marker, &id, &path))
+    }
+
+    fn read_lag(&self) -> Duration {
+        Duration::ZERO
     }
 
     fn run(&self, wake: Wake) -> Result<()> {

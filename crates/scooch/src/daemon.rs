@@ -11,7 +11,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const QUIET: Duration = Duration::from_millis(250);
 pub const LIMIT: Duration = Duration::from_secs(2);
 pub const QUALITY: u8 = 95;
-pub const GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 struct Pending {
@@ -59,6 +58,7 @@ pub enum Outcome {
     Kept,
     Rendered,
     Skipped,
+    Interrupted,
 }
 
 #[derive(Debug, Default)]
@@ -109,7 +109,8 @@ pub fn stamp() -> String {
 
 impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
-        Self { desktop, store, grace: GRACE, recent: Mutex::new(HashMap::new()) }
+        let grace = desktop.read_lag();
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()) }
     }
 
     fn settling(&self, screen: &str) -> bool {
@@ -148,7 +149,10 @@ impl Daemon {
         for screen in &snapshot.screens {
             let outcome = self.screen(state, screen, &snapshot.icons, &options);
             match outcome {
-                Ok(outcome) => report.outcomes.push((screen.id.clone(), outcome)),
+                Ok(outcome) => {
+                    report.retry |= outcome == Outcome::Interrupted;
+                    report.outcomes.push((screen.id.clone(), outcome));
+                }
                 Err(error) => {
                     report.outcomes.push((screen.id.clone(), Outcome::Skipped));
                     report.problem.get_or_insert(error.to_string());
@@ -191,13 +195,15 @@ impl Daemon {
             self.show(screen, &shown)?;
             return Ok(Outcome::Reapplied);
         }
-        let outcome = self.place(entry, screen, &scene, options, current.as_deref().filter(|_| !settling))?;
-        entry.fingerprint = Some(fingerprint);
-        entry.chosen = false;
+        let outcome = self.place(entry, screen, &scene, options, current.as_deref().filter(|_| !settling), current.as_deref())?;
+        if outcome != Outcome::Interrupted {
+            entry.fingerprint = Some(fingerprint);
+            entry.chosen = false;
+        }
         Ok(outcome)
     }
 
-    fn place(&self, entry: &mut Entry, screen: &Screen, scene: &Scene, options: &Options, current: Option<&Path>) -> Result<Outcome> {
+    fn place(&self, entry: &mut Entry, screen: &Screen, scene: &Scene, options: &Options, current: Option<&Path>, seen: Option<&Path>) -> Result<Outcome> {
         let source = entry.source.clone();
         let mut image: Option<RgbImage> = None;
         let mut clock = Instant::now();
@@ -224,8 +230,8 @@ impl Daemon {
             if current.is_some_and(|path| same(path, &source)) {
                 entry.output = None;
                 self.store.sweep(&screen.id, None);
-            } else if !copied {
-                self.plain(entry, screen, current)?;
+            } else if !copied && !self.plain(entry, screen, current, seen)? {
+                return Ok(Outcome::Interrupted);
             }
             return Ok(Outcome::Plain);
         }
@@ -245,30 +251,37 @@ impl Daemon {
         let bytes = encode(&picture, format, self.desktop.profile().as_deref())?;
         drop(picture);
         lap("encode", &mut clock);
-        entry.placement = Some(placement);
         if let (true, Some(output)) = (showing_output, &output) {
             if std::fs::read(output).is_ok_and(|old| old == bytes) {
+                entry.placement = Some(placement);
                 return Ok(Outcome::Kept);
             }
         }
-        self.publish(entry, screen, current, format.extension(), |path| write_atomic(path, &bytes))?;
+        if !self.publish(entry, screen, current, seen, format.extension(), |path| write_atomic(path, &bytes))? {
+            return Ok(Outcome::Interrupted);
+        }
+        entry.placement = Some(placement);
         lap("set", &mut clock);
         Ok(Outcome::Rendered)
     }
 
-    fn plain(&self, entry: &mut Entry, screen: &Screen, current: Option<&Path>) -> Result<()> {
+    fn plain(&self, entry: &mut Entry, screen: &Screen, current: Option<&Path>, seen: Option<&Path>) -> Result<bool> {
         let source = entry.source.clone();
         let extension = source.extension().map_or("jpg".to_string(), |extension| extension.to_string_lossy().to_ascii_lowercase());
-        self.publish(entry, screen, current, &extension, |path| {
+        self.publish(entry, screen, current, seen, &extension, |path| {
             let bytes = std::fs::read(&source).with_context(|| format!("Scooch could not read {}, so check that the picture is still there.", source.display()))?;
             write_atomic(path, &bytes)
         })
     }
 
-    fn publish(&self, entry: &mut Entry, screen: &Screen, current: Option<&Path>, extension: &str, write: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    fn publish(&self, entry: &mut Entry, screen: &Screen, current: Option<&Path>, seen: Option<&Path>, extension: &str, write: impl FnOnce(&Path) -> Result<()>) -> Result<bool> {
         let (counter, path) = self.fresh_name(&screen.id, entry.counter, extension, current);
         std::fs::create_dir_all(self.store.out()).with_context(|| format!("Scooch could not make {}, so check the disk.", self.store.out().display()))?;
         write(&path)?;
+        if self.picked_meanwhile(screen, seen)? {
+            let _ = std::fs::remove_file(&path);
+            return Ok(false);
+        }
         if let Err(error) = self.show(screen, &path) {
             let _ = std::fs::remove_file(&path);
             return Err(error);
@@ -276,7 +289,12 @@ impl Daemon {
         self.store.sweep(&screen.id, Some(&path));
         entry.counter = counter;
         entry.output = Some(path);
-        Ok(())
+        Ok(true)
+    }
+
+    fn picked_meanwhile(&self, screen: &Screen, seen: Option<&Path>) -> Result<bool> {
+        let now = self.desktop.wallpaper(screen)?;
+        Ok(now.is_some_and(|now| now.is_file() && !self.store.owns(&now) && !seen.is_some_and(|seen| same(&now, seen))))
     }
 
     fn fresh_name(&self, screen: &str, counter: u64, extension: &str, current: Option<&Path>) -> (u64, PathBuf) {
@@ -531,12 +549,13 @@ pub mod tests {
         pub lost: Mutex<Vec<PathBuf>>,
         pub gallery: Mutex<Vec<PathBuf>>,
         pub broken: Mutex<Option<String>>,
+        pub mid_render: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens, icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None) })
+            Arc::new(Self { screens, icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None) })
         }
 
         pub fn showing(&self, screen: &str) -> PathBuf {
@@ -614,6 +633,9 @@ pub mod tests {
 
         fn decode(&self, path: &Path) -> Result<RgbImage> {
             self.decodes.fetch_add(1, Ordering::SeqCst);
+            if let Some(work) = self.mid_render.lock().unwrap().take() {
+                work();
+            }
             Ok(scooch_core::open(path)?)
         }
     }
@@ -1049,6 +1071,32 @@ pub mod tests {
         assert_eq!(daemon.store.load().screens["main"].fingerprint, before.fingerprint);
         assert_eq!(fake.showing("main"), showing);
         assert_eq!(fake.sets.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_pick_made_during_a_render_is_never_overwritten() {
+        let (daemon, fake, original) = rig("midpick", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        let chosen = picture(original.parent().unwrap(), "chosen.png");
+        let (picker, picked) = (fake.clone(), chosen.clone());
+        *fake.mid_render.lock().unwrap() = Some(Box::new(move || picker.show("main", &picked)));
+        let report = daemon.tick();
+        assert!(report.retry);
+        assert_eq!(report.outcomes[0].1, Outcome::Interrupted);
+        assert_eq!(fake.showing("main"), chosen);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), 0);
+        assert!(std::fs::read_dir(daemon.store.out()).map_or(0, |files| files.count()) == 0);
+        assert_eq!(daemon.store.load().screens["main"].fingerprint, None);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let entry = daemon.store.load().screens["main"].clone();
+        assert_eq!((entry.source, entry.original), (chosen.clone(), chosen));
+    }
+
+    #[test]
+    fn the_settling_grace_follows_the_adapter() {
+        let folder = scratch("grace");
+        let fake = Fake::new(vec![screen("main", 0.0, 1.0)], &folder.join("x.png"));
+        assert_eq!(Daemon::new(fake, Store::at(&folder)).grace, Duration::from_secs(2));
     }
 
     #[test]

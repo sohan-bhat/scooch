@@ -67,6 +67,9 @@ pub trait Desktop: Send + Sync {
     fn profile(&self) -> Option<Vec<u8>> {
         None
     }
+    fn read_lag(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(2)
+    }
 }
 
 pub fn folder_and_children(root: &Path) -> Vec<PathBuf> {
