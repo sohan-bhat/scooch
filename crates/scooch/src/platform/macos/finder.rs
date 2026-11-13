@@ -237,6 +237,9 @@ fn names() -> Result<Vec<String>> {
 }
 
 fn fetch(property_code: u32) -> Result<Option<Retained<NSAppleEventDescriptor>>> {
+    if WAITING.load(Ordering::SeqCst) {
+        bail!("{ASKING}");
+    }
     match send(property_code) {
         Err(status @ (WOULD_ASK | TIMED_OUT)) => match consent() {
             Consent::Granted => send(property_code).or_else(failure),
@@ -426,6 +429,14 @@ mod tests {
         flag.store(false, Ordering::SeqCst);
         assert!(start_asking(&flag));
         assert!(!ASKING.contains(['\u{2014}', '\u{2013}', ';', '(', ')']) && !ASKING.contains(": "));
+    }
+
+    #[test]
+    fn while_macos_asks_the_daemon_sends_finder_nothing() {
+        WAITING.store(true, Ordering::SeqCst);
+        let answered = fetch(code(b"dpos"));
+        WAITING.store(false, Ordering::SeqCst);
+        assert_eq!(answered.unwrap_err().to_string(), ASKING);
     }
 
     fn close(a: f32, b: f32) -> bool {
