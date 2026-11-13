@@ -52,6 +52,10 @@ fn replace_outdated(store: &Store) -> Result<()> {
 
 pub fn start() -> Result<()> {
     let store = Store::open();
+    store.load();
+    if let Some(line) = store.aside_line() {
+        println!("{line}");
+    }
     replace_outdated(&store)?;
     let mut state = store.load();
     if state.on && store.watcher().is_some() {
@@ -79,6 +83,10 @@ pub fn start() -> Result<()> {
 
 pub fn status() -> Result<()> {
     let store = Store::open();
+    store.load();
+    if let Some(line) = store.aside_line() {
+        println!("{line}");
+    }
     match desktop() {
         Ok(desktop) => print_status(desktop.as_ref(), &store),
         Err(_) => print(&describe(&store.load(), store.watcher().is_some(), None)),

@@ -895,6 +895,15 @@ pub mod tests {
     }
 
     #[test]
+    fn a_tick_never_writes_over_an_unreadable_state_file() {
+        let (daemon, fake, _) = rig("unreadable-state", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        std::fs::write(daemon.store.state_file(), b"{ broken").unwrap();
+        daemon.tick();
+        assert_eq!(std::fs::read(daemon.store.aside_file()).unwrap(), b"{ broken");
+    }
+
+    #[test]
     fn adoption_ignores_outputs_and_fresh_sources() {
         let folder = scratch("adoptable");
         let picture = folder.join("a.jpg");

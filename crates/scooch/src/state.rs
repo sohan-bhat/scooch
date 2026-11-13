@@ -123,12 +123,28 @@ impl Store {
         self.root.join("cache")
     }
 
+    pub fn aside_file(&self) -> PathBuf {
+        self.root.join("state.unreadable.json")
+    }
+
     pub fn read(&self) -> Option<Vec<u8>> {
-        fs::read(self.state_file()).ok()
+        let bytes = fs::read(self.state_file()).ok()?;
+        if serde_json::from_slice::<State>(&bytes).is_ok() {
+            return Some(bytes);
+        }
+        if fs::rename(self.state_file(), self.aside_file()).is_err() {
+            let _ = write_atomic(&self.aside_file(), &bytes);
+            let _ = fs::remove_file(self.state_file());
+        }
+        None
     }
 
     pub fn load(&self) -> State {
         parse(self.read().as_deref())
+    }
+
+    pub fn aside_line(&self) -> Option<String> {
+        self.aside_file().is_file().then(|| format!("Scooch could not read its saved settings, so it started fresh and kept them at {}.", self.aside_file().display()))
     }
 
     pub fn save(&self, state: &State) -> Result<()> {
@@ -209,7 +225,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 pub fn write_parts(path: &Path, parts: &[&[u8]]) -> Result<()> {
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let partial = path.with_file_name(format!(".{name}.{}.part", std::process::id()));
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let partial = path.with_file_name(format!(".{name}.{}.{serial}.part", std::process::id()));
     let written = fs::File::create(&partial).and_then(|mut file| parts.iter().try_for_each(|part| file.write_all(part))).and_then(|()| fs::rename(&partial, path));
     if written.is_err() {
         let _ = fs::remove_file(&partial);
@@ -288,10 +306,30 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_file_loads_as_off() {
+    fn a_broken_file_is_moved_aside_and_never_overwritten() {
         let store = Store::at(scratch("broken"));
         fs::write(store.state_file(), b"{ not json").unwrap();
         assert!(!store.load().on);
+        assert_eq!(fs::read(store.aside_file()).unwrap(), b"{ not json");
+        assert!(!store.state_file().exists());
+        store.save(&State { on: true, ..State::default() }).unwrap();
+        assert_eq!(fs::read(store.aside_file()).unwrap(), b"{ not json");
+        let line = store.aside_line().unwrap();
+        assert!(line.contains("state.unreadable.json") && line.ends_with('.') && !line.contains(": "), "{line}");
+        assert!(Store::at(scratch("fine")).aside_line().is_none());
+    }
+
+    #[test]
+    fn writes_from_many_threads_never_share_a_temporary_file() {
+        let folder = scratch("many");
+        let target = folder.join("state.json");
+        let writers: Vec<_> = (0..16).map(|index| {
+            let target = target.clone();
+            std::thread::spawn(move || (0..20).all(|round| write_atomic(&target, format!("{index}-{round}").as_bytes()).is_ok()))
+        }).collect();
+        assert!(writers.into_iter().all(|writer| writer.join().unwrap()));
+        let names: Vec<_> = fs::read_dir(&folder).unwrap().flatten().map(|entry| entry.file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("state.json")]);
     }
 
     #[test]
@@ -319,10 +357,12 @@ mod tests {
         let folder = scratch("failed");
         let target = folder.join("state.json");
         fs::write(&target, b"old").unwrap();
-        let blocked = folder.join(format!(".state.json.{}.part", std::process::id()));
-        fs::create_dir(&blocked).unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("inside"), b"old").unwrap();
         assert!(write_atomic(&target, b"new").is_err());
-        assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert_eq!(fs::read(target.join("inside")).unwrap(), b"old");
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
     }
 
     #[test]
