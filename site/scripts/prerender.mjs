@@ -23,7 +23,7 @@ try {
   const wide = '(min-width: 768px) and (orientation: landscape) and (min-aspect-ratio: 1601/1000)';
   const square = '(min-width: 768px) and (orientation: landscape) and (max-aspect-ratio: 16/10)';
   const tall = '(max-width: 767px), (orientation: portrait)';
-  const images = [...new Set(Object.values(manifest.frames).map((frame) => frame.frame).concat(manifest.frames.before.saliency, 'atlas.png'))];
+  const images = [manifest.photo.file, manifest.frames.before.saliency, 'atlas.png'];
   const scene = [
     `<link rel="preload" as="image" href="/scooch/stills/hero-desktop.webp" media="${wide}" fetchpriority="high" />`,
     `<link rel="preload" as="image" href="/scooch/stills/hero-square.webp" media="${square}" fetchpriority="high" />`,
