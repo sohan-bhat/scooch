@@ -29,14 +29,12 @@ fn row(name: &str, photo: &RgbImage, analysis: &Analysis, layout: &str) -> Vec<R
     let scenery = scooch_core::render_with(photo, analysis, &on_placement, &scene, &on);
     let spent = started.elapsed().as_secs_f64() * 1000.0;
     let hidden = |p| scooch_core::hidden_share(analysis, &scene, p);
-    let land = Scene { icons: scooch_core::scenery_footprints(&scene), ..scene.clone() };
     println!(
-        "{name:16} {layout:9} hidden {:.3} | off {:.3} zoom {:.2} | scenery {:.3} land {:.3} zoom {:.2} shift [{:+.3} {:+.3}] {spent:.0} ms",
+        "{name:16} {layout:9} hidden {:.3} | off {:.3} zoom {:.2} | scenery {:.3} zoom {:.2} shift [{:+.3} {:+.3}] {spent:.0} ms",
         hidden(&fill),
         hidden(&off_placement),
         off_placement.zoom,
         hidden(&on_placement),
-        scooch_core::hidden_share(analysis, &land, &on_placement),
         on_placement.zoom,
         on_placement.shift[0],
         on_placement.shift[1]
