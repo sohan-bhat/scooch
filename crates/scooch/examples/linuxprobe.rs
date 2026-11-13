@@ -464,6 +464,18 @@ mod probe {
         done().then(|| started.elapsed())
     }
 
+    fn factor(p: &Probe) -> f32 {
+        p.linux().ok().and_then(|linux| linux.screens().ok()).and_then(|screens| screens.first().map(|screen| screen.scale)).filter(|scale| *scale > 0.0).unwrap_or(1.0)
+    }
+
+    fn physical(rect: &Rect, factor: f32) -> Rect {
+        Rect { x: rect.x * factor, y: rect.y * factor, w: rect.w * factor, h: rect.h * factor }
+    }
+
+    fn grown(rect: &Rect, by: f32) -> Rect {
+        Rect { x: rect.x - by, y: rect.y - by, w: rect.w + 2.0 * by, h: rect.h + 2.0 * by }
+    }
+
     fn primary_frame(p: &Probe) -> Option<Rect> {
         let found = screens::read(p.session).ok()?;
         found.iter().find(|found| found.primary).or(found.first()).map(|found| found.screen.frame)
@@ -472,6 +484,8 @@ mod probe {
     fn read(p: &mut Probe) -> Result<()> {
         let linux = p.linux().ok();
         let frame = primary_frame(p).context("no screen")?;
+        let scale = factor(p);
+        p.line(format!("- adapter scale {scale}, rectangles below are in screen pixels"));
         for (name, folder) in PROBES {
             let path = p.desktop.join(name);
             let before = maybe_icons(&linux);
@@ -485,9 +499,10 @@ mod probe {
             std::thread::sleep(SETTLE);
             let after = maybe_icons(&linux);
             let shot = capture(p.session, &frame).ok();
-            let adapter = new_rect(&before, &after);
+            let adapter = new_rect(&before, &after).map(|rect| physical(&rect, scale));
+            let focus = adapter.map(|rect| grown(&rect, 80.0));
             let pixels = match (&quiet_a, &quiet_b, &shot) {
-                (Some(a), Some(b), Some(c)) => changed_box(a, b, c, (frame.x as i32, frame.y as i32)),
+                (Some(a), Some(b), Some(c)) => changed_box(a, b, c, (frame.x as i32, frame.y as i32), focus),
                 _ => None,
             };
             let index = p.measures.len();
@@ -571,13 +586,20 @@ mod probe {
         RgbImage::from_raw(right - left, bottom - top, bytes)
     }
 
-    fn changed_box(quiet_a: &RgbImage, before: &RgbImage, after: &RgbImage, origin: (i32, i32)) -> Option<Rect> {
+    fn changed_box(quiet_a: &RgbImage, before: &RgbImage, after: &RgbImage, origin: (i32, i32), focus: Option<Rect>) -> Option<Rect> {
         if before.dimensions() != after.dimensions() || quiet_a.dimensions() != before.dimensions() {
             return None;
         }
         let differs = |a: &[u8], b: &[u8]| a.iter().zip(b).any(|(x, y)| x.abs_diff(*y) > 10);
+        let inside = |x: u32, y: u32| focus.is_none_or(|rect| {
+            let (gx, gy) = (origin.0 as f32 + x as f32, origin.1 as f32 + y as f32);
+            gx >= rect.x && gx < rect.x + rect.w && gy >= rect.y && gy < rect.y + rect.h
+        });
         let (mut left, mut top, mut right, mut bottom) = (u32::MAX, u32::MAX, 0u32, 0u32);
         for (x, y, pixel) in after.enumerate_pixels() {
+            if !inside(x, y) {
+                continue;
+            }
             let old = before.get_pixel(x, y);
             if differs(&pixel.0, &old.0) && !differs(&quiet_a.get_pixel(x, y).0, &old.0) {
                 (left, top, right, bottom) = (left.min(x), top.min(y), right.max(x), bottom.max(y));
@@ -757,7 +779,8 @@ mod probe {
             let monitors = gnome::geometry()?;
             let prefs = gnome::prefs();
             let grid = monitors.iter().find_map(|monitor| ding::Grid::new(monitor, prefs.size, gnome::mode(p.session == Session::X11))).context("no DING grid")?;
-            let (x, y) = grid.stored(4 + i64::from(round % 3), 1 + i64::from(round % 4));
+            let column = if round % 2 == 0 { 6 } else { 0 };
+            let (x, y) = grid.stored(column, 3 + i64::from(round % 3));
             gvfs::set(&path.clone().into_os_string(), ding::POSITION_KEY, Some(&format!("{x},{y}")))?;
             return Ok(format!("wrote {x},{y} to {name}"));
         }
@@ -765,12 +788,14 @@ mod probe {
             bail!("no way to move an icon without a person on this session");
         }
         let linux = p.linux()?;
-        let now_rects = icons(&linux);
+        let scale = factor(p);
+        let now_rects: Vec<Rect> = icons(&linux).iter().map(|rect| physical(rect, scale)).collect();
         let from = p.measures.iter().find(|measure| measure.name == name).and_then(|measure| measure.adapter).context("no adapter rect for the probe icon")?;
         let current = now_rects.iter().min_by(|a, b| (a.x - from.x).abs().max((a.y - from.y).abs()).total_cmp(&(b.x - from.x).abs().max((b.y - from.y).abs()))).copied().unwrap_or(from);
         let start = ((current.x + current.w / 2.0) as i16, (current.y + current.h / 3.0) as i16);
-        let shift = if round % 2 == 0 { 3.0 } else { -3.0 };
-        let end = ((start.0 as f32 + shift * current.w) as i16, (start.1 as f32 + current.h * if round % 3 == 0 { 1.0 } else { 0.0 }) as i16);
+        let width = primary_frame(p).map_or(1920.0, |frame| frame.w);
+        let target_x = if (start.0 as f32) < width / 3.0 { start.0 as f32 + 700.0 * scale } else { 60.0 * scale };
+        let end = (target_x as i16, start.1);
         drag(start, end)?;
         if let Some(measure) = p.measures.iter_mut().find(|measure| measure.name == name) {
             measure.adapter = Some(Rect { x: current.x + end.0 as f32 - start.0 as f32, y: current.y + end.1 as f32 - start.1 as f32, ..current });
@@ -810,20 +835,24 @@ mod probe {
         Ok(())
     }
 
-    fn detailed(width: u32, height: u32) -> RgbImage {
+    fn photo(width: u32, height: u32) -> RgbImage {
+        let (w, h) = (width.max(1) as f32, height.max(1) as f32);
+        let (cx, cy, radius) = (0.07 * w, 0.42 * h, 0.13 * h);
         let mut bytes = Vec::with_capacity(width as usize * height as usize * 3);
         for y in 0..height {
             for x in 0..width {
-                let fine = if (x + y) % 2 == 0 { 40i32 } else { -40 };
-                let stripe = if (x / 3 + y / 5) % 2 == 0 { 30i32 } else { -30 };
-                let r = (x * 255 / width.max(1)) as i32 + fine;
-                let g = (y * 255 / height.max(1)) as i32 - fine;
-                let b = 128 + stripe + if (x % 17 == 0) || (y % 13 == 0) { 90 } else { 0 };
-                bytes.extend_from_slice(&[r.clamp(0, 255) as u8, g.clamp(0, 255) as u8, b.clamp(0, 255) as u8]);
+                let (fx, fy) = (x as f32, y as f32);
+                let sky = [30.0 + 50.0 * fy / h, 60.0 + 70.0 * fy / h, 140.0 - 60.0 * fy / h + 20.0 * (fx / w)];
+                let distance = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() / radius;
+                let glow = (1.0 - distance).clamp(0.0, 1.0).powf(0.6);
+                let subject = [250.0, 196.0, 110.0];
+                let pixel: Vec<u8> = sky.iter().zip(subject).map(|(base, lit)| (base + (lit - base) * glow).round().clamp(0.0, 255.0) as u8).collect();
+                bytes.extend_from_slice(&pixel);
             }
         }
         RgbImage::from_raw(width, height, bytes).unwrap_or_default()
     }
+
 
     fn jpeg(picture: &RgbImage) -> Result<Vec<u8>> {
         let mut out = Vec::new();
@@ -879,13 +908,17 @@ mod probe {
             p.recorded.push((key, value));
         }
         let (width, height) = ((screen.frame.w * screen.scale) as u32, (screen.frame.h * screen.scale) as u32);
-        let source = detailed(width, height);
+        let source = photo(width, height);
         let jpeg_path = p.home.join("probe-picture.jpg");
         let png_path = p.home.join("probe-picture.png");
         fs::write(&jpeg_path, jpeg(&source)?)?;
         fs::write(&png_path, scooch_core::encode_png(&source)?)?;
         p.pictures = vec![jpeg_path.clone(), png_path.clone()];
-        let skip = icons(&linux);
+        let scale = factor(p);
+        let skip: Vec<Rect> = icons(&linux).iter().map(|rect| grown(&physical(rect, scale), 8.0)).collect();
+        let physical_frame = primary_frame(p).unwrap_or(screen.frame);
+        let mut bands = vec![Rect { x: 0.0, y: 0.0, w: width as f32, h: 64.0 * scale }, Rect { x: 0.0, y: height as f32 - 64.0 * scale, w: width as f32, h: 64.0 * scale }];
+        bands.extend(skip.iter().map(|rect| Rect { x: rect.x - physical_frame.x, y: rect.y - physical_frame.y, ..*rect }));
         for (kind, path) in [("JPEG", jpeg_path), ("PNG", png_path)] {
             let file = scooch_core::open(&path)?;
             let started = Instant::now();
@@ -894,11 +927,10 @@ mod probe {
             std::thread::sleep(Duration::from_secs(2));
             let back = linux.wallpaper(&screen);
             p.line(format!("  - read back {:?}, same path {}", back.as_ref().map_err(|error| error.to_string()), back.as_ref().is_ok_and(|back| back.as_deref() == Some(path.as_path()))));
-            match capture(p.session, &screen.frame) {
+            match capture(p.session, &physical_frame) {
                 Ok(shot) => {
                     let _ = fs::write(p.out.join(format!("wallpaper-{}.png", kind.to_lowercase())), scooch_core::encode_png(&shot)?);
-                    let local: Vec<Rect> = skip.iter().map(|rect| Rect { x: rect.x - screen.frame.x, y: rect.y - screen.frame.y, ..*rect }).collect();
-                    p.line(format!("  - screen against the picture, icons left out, PSNR {:?}, file against the picture PSNR {:?}", psnr(&shot, &file, &local), psnr(&file, &source, &[])));
+                    p.line(format!("  - screen {}x{} against the picture {}x{}, icons and panels left out, PSNR {:?}, file against the picture PSNR {:?}, file {} bytes", shot.width(), shot.height(), file.width(), file.height(), psnr(&shot, &file, &bands), psnr(&file, &source, &[]), fs::metadata(&path).map_or(0, |meta| meta.len())));
                 }
                 Err(error) => p.line(format!("  - capture failed {error:#}")),
             }
@@ -915,7 +947,23 @@ mod probe {
                 let result = linux.set_wallpaper(screen, &path);
                 p.line(format!("- restored to {} {:?}", path.display(), result.map_err(|error| error.to_string())));
             }
-            None => p.line("- no original picture was recorded".to_string()),
+            None => {
+                let desktop = match p.kind {
+                    Some(Kind::Gnome) => "gnome",
+                    Some(Kind::Kde) => "kde",
+                    Some(Kind::Xfce) => "xfce",
+                    Some(Kind::Cinnamon) => "cinnamon",
+                    Some(Kind::Mate) => "mate",
+                    None => "",
+                };
+                let store: Box<dyn record::Settings> = match p.kind {
+                    Some(Kind::Xfce) => Box::new(Xfconf),
+                    Some(Kind::Kde) => Box::new(Plasma),
+                    _ => Box::new(Gsettings),
+                };
+                let result = record::restore(store.as_ref(), &record::file(&p.home), desktop);
+                p.line(format!("- no original picture was recorded, restored the record directly {:?}", result.map_err(|error| error.to_string())));
+            }
         }
         std::thread::sleep(Duration::from_secs(1));
         for (store, key) in keys(p, screen) {
@@ -964,11 +1012,13 @@ mod probe {
         let mut times = Vec::new();
         for round in 1..=5 {
             let before = linux.wallpaper(&screen).ok().flatten();
+            let rects_before = icons(&linux);
             let moved = Instant::now();
             let detail = move_icon(p, round).unwrap_or_else(|error| format!("failed {error:#}"));
             let changed = wait_until(Duration::from_secs(10), || linux.wallpaper(&screen).ok().flatten() != before);
             let latency = changed.map(|_| moved.elapsed().as_millis());
-            p.line(format!("- move {round} {detail}, new wallpaper after {latency:?} ms"));
+            let moved_icons = icons(&linux) != rects_before;
+            p.line(format!("- move {round} {detail}, icons moved by the adapter's reading {moved_icons}, new wallpaper after {latency:?} ms"));
             times.extend(latency);
             std::thread::sleep(Duration::from_millis(800));
         }
