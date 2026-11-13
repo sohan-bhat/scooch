@@ -1,6 +1,6 @@
 import { useTexture } from '@react-three/drei';
 import { useMemo } from 'react';
-import { Color, Group, LinearMipmapLinearFilter, Matrix4, Mesh, SRGBColorSpace, Texture, Vector3 } from 'three';
+import { ClampToEdgeWrapping, Color, DataTexture, FloatType, Group, LinearMipmapLinearFilter, Matrix4, Mesh, NearestFilter, RedFormat, SRGBColorSpace, Texture, Vector3 } from 'three';
 import { asset } from '@/lib/base';
 import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
@@ -18,17 +18,32 @@ function prepareTexture(texture: Texture, srgb: boolean, anisotropy: number) {
   texture.needsUpdate = true;
 }
 
+function tablesTexture(manifest: DemoManifest) {
+  const rows = manifest.order.flatMap((id) => [manifest.tables[id].fx, manifest.tables[id].fy]);
+  const width = rows[0].length;
+  const data = new Float32Array(width * rows.length);
+  rows.forEach((row, index) => data.set(row, index * width));
+  const texture = new DataTexture(data, width, rows.length, RedFormat, FloatType);
+  texture.minFilter = NearestFilter;
+  texture.magFilter = NearestFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return texture;
+}
+
 function useScreenTextures(manifest: DemoManifest) {
-  const { frames } = manifest;
   const textures = useTexture([
-    asset(`demo/${frames.before.frame}`),
-    asset(`demo/${frames.fixed.frame}`),
-    asset(`demo/${frames.moved.frame}`),
-    asset(`demo/${frames.before.saliency}`),
+    asset(`demo/${manifest.photo.file}`),
+    asset(`demo/${manifest.frames.before.saliency}`),
     asset('demo/atlas.png'),
   ]);
-  const [frameA, frameB, frameC, saliency, atlas] = textures;
-  for (const texture of [frameA, frameB, frameC, atlas]) prepareTexture(texture, true, 8);
+  const [photo, saliency, atlas] = textures;
+  if (!photo.userData.prepared) {
+    photo.wrapS = ClampToEdgeWrapping;
+    photo.wrapT = ClampToEdgeWrapping;
+  }
+  prepareTexture(photo, true, 8);
+  prepareTexture(atlas, true, 8);
   prepareTexture(saliency, false, 1);
   return textures;
 }
@@ -39,14 +54,14 @@ export function ScreenTextures({ manifest }: { manifest: DemoManifest }) {
 }
 
 export function useScreen(manifest: DemoManifest) {
-  const { frames } = manifest;
-  const [frameA, frameB, frameC, saliency, atlas] = useScreenTextures(manifest);
+  const { frames, order } = manifest;
+  const [photo, saliency, atlas] = useScreenTextures(manifest);
 
   return useMemo(() => {
     const { material, uniforms } = createScreenMaterial();
-    uniforms.uFrameA.value = frameA;
-    uniforms.uFrameB.value = frameB;
-    uniforms.uFrameC.value = frameC;
+    uniforms.uPhoto.value = photo;
+    uniforms.uTables.value = tablesTexture(manifest);
+    uniforms.uStates.value = order.length;
     uniforms.uSaliency.value = saliency;
     uniforms.uAtlas.value = atlas;
     uniforms.uAspect.value = manifest.screen.width / manifest.screen.height;
@@ -55,11 +70,12 @@ export function useScreen(manifest: DemoManifest) {
     uniforms.uGlow.value = tokenColor('pad');
     uniforms.uHot.value = tokenColor('paper');
     uniforms.uRim.value = tokenColor('rim');
-    const averages = [frames.before.average, frames.fixed.average, frames.moved.average].map(
-      ([r, g, b]) => new Color().setRGB(r, g, b, SRGBColorSpace),
-    );
+    const averages = order.map((id) => {
+      const [r, g, b] = frames[id].average;
+      return new Color().setRGB(r, g, b, SRGBColorSpace);
+    });
     return { material, uniforms, averages };
-  }, [frameA, frameB, frameC, saliency, atlas, manifest, frames]);
+  }, [photo, saliency, atlas, manifest, frames, order]);
 }
 
 export function measureScreen(mesh: Mesh, frame: Group, aspect: number) {

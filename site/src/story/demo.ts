@@ -15,7 +15,10 @@ export type DemoFrame = {
 export type DemoManifest = {
   screen: { width: number; height: number };
   icons: { id: string; label: string; glyph: string }[];
-  frames: { before: DemoFrame; fixed: DemoFrame; moved: DemoFrame };
+  photo: { file: string; width: number; height: number };
+  order: string[];
+  tables: Record<string, { fx: number[]; fy: number[] }>;
+  frames: Record<string, DemoFrame> & { before: DemoFrame; fixed: DemoFrame; moved: DemoFrame };
   drag: { icon: string; from: [number, number]; to: [number, number] };
 };
 

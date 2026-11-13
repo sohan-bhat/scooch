@@ -28,13 +28,12 @@ precision highp float;
 #define ICON_SLOTS ${ICON_SLOTS}
 #define GRID ${ATLAS_GRID}.0
 
-uniform sampler2D uFrameA;
-uniform sampler2D uFrameB;
-uniform sampler2D uFrameC;
+uniform sampler2D uPhoto;
+uniform highp sampler2D uTables;
 uniform sampler2D uSaliency;
 uniform sampler2D uAtlas;
-uniform float uMixAB;
-uniform float uMixBC;
+uniform float uPlace;
+uniform float uStates;
 uniform float uSweep;
 uniform float uPower;
 uniform float uTime;
@@ -85,11 +84,27 @@ float fbm(vec2 p) {
   return sum;
 }
 
-vec3 wallpaper(vec2 uv) {
-  vec3 a = texture(uFrameA, uv).rgb;
-  vec3 b = texture(uFrameB, uv).rgb;
-  vec3 c = texture(uFrameC, uv).rgb;
-  return mix(mix(a, b, uMixAB), c, uMixBC);
+float lookup(int row, float at) {
+  float k = clamp(at, 0.0, 1.0) * 256.0;
+  int i = int(min(floor(k), 255.0));
+  float a = texelFetch(uTables, ivec2(i, row), 0).r;
+  float b = texelFetch(uTables, ivec2(i + 1, row), 0).r;
+  return mix(a, b, k - float(i));
+}
+
+vec2 place(vec2 uv) {
+  float clamped = clamp(uPlace, 0.0, uStates - 1.0);
+  float from = min(floor(clamped), uStates - 2.0);
+  float t = clamped - from;
+  int a = int(from) * 2;
+  int b = a + 2;
+  vec2 start = vec2(lookup(a, uv.x), lookup(a + 1, uv.y));
+  vec2 end = vec2(lookup(b, uv.x), lookup(b + 1, uv.y));
+  return mix(start, end, t);
+}
+
+vec3 picture(vec2 uv) {
+  return texture(uPhoto, place(clamp(uv, 0.0, 1.0))).rgb;
 }
 
 vec3 heatmap(vec3 photo, float s, float soft) {
@@ -140,7 +155,7 @@ void main() {
     rim = exp(-abs(behind) * 110.0) * (0.5 + 0.4 * fbm(paper * 30.0)) + exp(-max(behind, 0.0) * 24.0) * step(0.0, behind) * 0.14;
   }
 
-  vec3 photo = wallpaper(uv);
+  vec3 photo = picture(uv);
   vec3 color = photo * (1.0 - wet * 0.5);
   color = mix(color, heatmap(photo, saliency, saliencySoft), reveal);
 
@@ -210,13 +225,12 @@ void main() {
 `;
 
 export type ScreenUniforms = {
-  uFrameA: { value: Texture | null };
-  uFrameB: { value: Texture | null };
-  uFrameC: { value: Texture | null };
+  uPhoto: { value: Texture | null };
+  uTables: { value: Texture | null };
   uSaliency: { value: Texture | null };
   uAtlas: { value: Texture | null };
-  uMixAB: { value: number };
-  uMixBC: { value: number };
+  uPlace: { value: number };
+  uStates: { value: number };
   uSweep: { value: number };
   uPower: { value: number };
   uTime: { value: number };
@@ -240,13 +254,12 @@ export type ScreenUniforms = {
 
 export function createScreenMaterial() {
   const uniforms: ScreenUniforms = {
-    uFrameA: { value: null },
-    uFrameB: { value: null },
-    uFrameC: { value: null },
+    uPhoto: { value: null },
+    uTables: { value: null },
     uSaliency: { value: null },
     uAtlas: { value: null },
-    uMixAB: { value: 0 },
-    uMixBC: { value: 0 },
+    uPlace: { value: 0 },
+    uStates: { value: 3 },
     uSweep: { value: 0 },
     uPower: { value: 1 },
     uTime: { value: 0 },
