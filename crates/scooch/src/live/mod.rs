@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub const HELPER: &str = "--live-helper";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 const QUIT_WAIT: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -20,18 +20,14 @@ pub struct Hints {
     pub present: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TestPattern {
-    pub cycle_ms: u32,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Command {
     Hello { version: u32 },
-    Warm { #[serde(default)] hints: Hints },
-    Open { id: u32, screen: String, rect: Rect, #[serde(default = "one")] scale: f32, #[serde(default)] picture: Option<PathBuf> },
-    Play { id: u32, pattern: TestPattern, ms: u32 },
+    Warm { #[serde(default)] hints: Hints, #[serde(default)] picture: Option<PathBuf>, #[serde(default)] size: Option<[u32; 2]> },
+    Open { id: u32, screen: String, rect: Rect, #[serde(default = "one")] scale: f32, #[serde(default)] still: Option<PathBuf> },
+    Glide { id: u32, a: PathBuf, b: PathBuf, ms: u32 },
+    Settle { id: u32, still: PathBuf, #[serde(default)] ms: Option<u32> },
     Close { id: u32 },
     Quit,
 }
@@ -44,11 +40,27 @@ fn one() -> f32 {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Reply {
     Hello { version: u32, pid: u32 },
-    Ready { adapter: String, ms: u64 },
+    Ready { adapter: String, ms: u64, #[serde(default)] uploads: u32 },
     Shown { id: u32, ms: u64 },
-    Played { id: u32, frames: u32, slow_frames: u32 },
+    Glided { id: u32, frames: u32, slow_frames: u32, first_frame_ms: u64, #[serde(default)] uploads: u32 },
+    Settled { id: u32 },
     Closed { id: u32 },
     Failed { #[serde(default)] id: Option<u32>, why: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ready {
+    pub adapter: String,
+    pub ms: u64,
+    pub uploads: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Glided {
+    pub frames: u32,
+    pub slow_frames: u32,
+    pub first_frame_ms: u64,
+    pub uploads: u32,
 }
 
 pub fn line<T: Serialize>(message: &T) -> String {
@@ -140,16 +152,16 @@ impl Helper {
         }
     }
 
-    pub fn warm(&mut self, hints: Hints, timeout: Duration) -> Result<(String, u64)> {
-        self.send(&Command::Warm { hints })?;
+    pub fn warm(&mut self, hints: Hints, picture: Option<&Path>, size: Option<[u32; 2]>, timeout: Duration) -> Result<Ready> {
+        self.send(&Command::Warm { hints, picture: picture.map(Path::to_path_buf), size })?;
         self.expect(timeout, |reply| match reply {
-            Reply::Ready { adapter, ms } => Some(Ok((adapter.clone(), *ms))),
+            Reply::Ready { adapter, ms, uploads } => Some(Ok(Ready { adapter: adapter.clone(), ms: *ms, uploads: *uploads })),
             other => Self::failure(other, None).map(Err),
         })
     }
 
-    pub fn ask_open(&mut self, id: u32, screen: &Screen, picture: Option<&Path>) -> Result<()> {
-        self.send(&Command::Open { id, screen: screen.id.clone(), rect: screen.frame, scale: screen.scale, picture: picture.map(Path::to_path_buf) })
+    pub fn ask_open(&mut self, id: u32, screen: &Screen, still: &Path) -> Result<()> {
+        self.send(&Command::Open { id, screen: screen.id.clone(), rect: screen.frame, scale: screen.scale, still: Some(still.to_path_buf()) })
     }
 
     pub fn shown(&mut self, id: u32, timeout: Duration) -> Result<u64> {
@@ -159,25 +171,31 @@ impl Helper {
         })
     }
 
-    pub fn open(&mut self, id: u32, screen: &Screen, picture: Option<&Path>, timeout: Duration) -> Result<u64> {
-        self.ask_open(id, screen, picture)?;
+    pub fn open(&mut self, id: u32, screen: &Screen, still: &Path, timeout: Duration) -> Result<u64> {
+        self.ask_open(id, screen, still)?;
         self.shown(id, timeout)
     }
 
-    pub fn ask_play(&mut self, id: u32, pattern: TestPattern, ms: u32) -> Result<()> {
-        self.send(&Command::Play { id, pattern, ms })
+    pub fn ask_glide(&mut self, id: u32, a: &Path, b: &Path, ms: u32) -> Result<()> {
+        self.send(&Command::Glide { id, a: a.to_path_buf(), b: b.to_path_buf(), ms })
     }
 
-    pub fn played(&mut self, id: u32, timeout: Duration) -> Result<(u32, u32)> {
+    pub fn glided(&mut self, id: u32, timeout: Duration) -> Result<Glided> {
         self.expect(timeout, |reply| match reply {
-            Reply::Played { id: played, frames, slow_frames } if *played == id => Some(Ok((*frames, *slow_frames))),
+            Reply::Glided { id: glided, frames, slow_frames, first_frame_ms, uploads } if *glided == id => Some(Ok(Glided { frames: *frames, slow_frames: *slow_frames, first_frame_ms: *first_frame_ms, uploads: *uploads })),
             other => Self::failure(other, Some(id)).map(Err),
         })
     }
 
-    pub fn play(&mut self, id: u32, pattern: TestPattern, ms: u32, timeout: Duration) -> Result<(u32, u32)> {
-        self.ask_play(id, pattern, ms)?;
-        self.played(id, Duration::from_millis(u64::from(ms)) + timeout)
+    pub fn ask_settle(&mut self, id: u32, still: &Path, ms: Option<u32>) -> Result<()> {
+        self.send(&Command::Settle { id, still: still.to_path_buf(), ms })
+    }
+
+    pub fn settled(&mut self, id: u32, timeout: Duration) -> Result<()> {
+        self.expect(timeout, |reply| match reply {
+            Reply::Settled { id: settled } if *settled == id => Some(Ok(())),
+            other => Self::failure(other, Some(id)).map(Err),
+        })
     }
 
     pub fn close(&mut self, id: u32, timeout: Duration) -> Result<()> {
@@ -263,9 +281,10 @@ mod tests {
     fn commands_and_replies_read_back_the_same() {
         let commands = [
             Command::Hello { version: VERSION },
-            Command::Warm { hints: Hints { present: Some("bare".into()) } },
-            Command::Open { id: 3, screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5, picture: Some(PathBuf::from("a.png")) },
-            Command::Play { id: 3, pattern: TestPattern { cycle_ms: 500 }, ms: 400 },
+            Command::Warm { hints: Hints { present: Some("bare".into()) }, picture: Some(PathBuf::from("p.jpg")), size: Some([1024, 768]) },
+            Command::Open { id: 3, screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5, still: Some(PathBuf::from("a.png")) },
+            Command::Glide { id: 3, a: PathBuf::from("a.tables"), b: PathBuf::from("b.tables"), ms: 450 },
+            Command::Settle { id: 3, still: PathBuf::from("b.png"), ms: None },
             Command::Close { id: 3 },
             Command::Quit,
         ];
@@ -274,9 +293,10 @@ mod tests {
         }
         let replies = [
             Reply::Hello { version: VERSION, pid: 9 },
-            Reply::Ready { adapter: "gpu".into(), ms: 12 },
+            Reply::Ready { adapter: "gpu".into(), ms: 12, uploads: 1 },
             Reply::Shown { id: 3, ms: 40 },
-            Reply::Played { id: 3, frames: 24, slow_frames: 1 },
+            Reply::Glided { id: 3, frames: 24, slow_frames: 1, first_frame_ms: 30, uploads: 1 },
+            Reply::Settled { id: 3 },
             Reply::Closed { id: 3 },
             Reply::Failed { id: None, why: "no".into() },
         ];
@@ -288,8 +308,10 @@ mod tests {
     #[test]
     fn a_bare_open_line_takes_the_defaults() {
         let read: Command = serde_json::from_str(r#"{"kind":"open","id":1,"screen":"s","rect":{"x":0,"y":0,"w":10,"h":10}}"#).unwrap();
-        assert_eq!(read, Command::Open { id: 1, screen: "s".into(), rect: Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 }, scale: 1.0, picture: None });
+        assert_eq!(read, Command::Open { id: 1, screen: "s".into(), rect: Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 }, scale: 1.0, still: None });
         let warm: Command = serde_json::from_str(r#"{"kind":"warm"}"#).unwrap();
-        assert_eq!(warm, Command::Warm { hints: Hints::default() });
+        assert_eq!(warm, Command::Warm { hints: Hints::default(), picture: None, size: None });
+        let settle: Command = serde_json::from_str(r#"{"kind":"settle","id":2,"still":"b.png"}"#).unwrap();
+        assert_eq!(settle, Command::Settle { id: 2, still: PathBuf::from("b.png"), ms: None });
     }
 }
