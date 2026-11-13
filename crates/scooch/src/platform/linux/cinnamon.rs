@@ -30,6 +30,14 @@ pub struct Window {
     pub primary: bool,
 }
 
+pub fn background_list() -> Option<Vec<gvariant::Dict>> {
+    gsetting(BACKGROUND, nemo::LIST_KEY).map(|text| gvariant::dicts(&text))
+}
+
+pub fn background_mode() -> String {
+    gsetting(BACKGROUND, nemo::MODE_KEY).and_then(|text| gvariant::string(&text)).unwrap_or_default()
+}
+
 fn flag(schema: &str, key: &str, default: bool) -> bool {
     gsetting(schema, key).and_then(|text| gvariant::boolean(&text)).unwrap_or(default)
 }
@@ -132,12 +140,24 @@ impl Shell for Cinnamon {
         Ok(found)
     }
 
-    fn wallpaper(&self, _screen: &Screen) -> Result<Option<PathBuf>> {
-        let picture = gsetting(BACKGROUND, "picture-uri").and_then(|text| gvariant::string(&text)).and_then(|uri| gio::location(&uri));
+    fn wallpaper(&self, screen: &Screen) -> Result<Option<PathBuf>> {
+        let listed = background_list().filter(|list| !list.is_empty()).map(|list| nemo::listed_picture(&list, &background_mode(), &screen.id));
+        let uri = match listed {
+            Some(uri) => uri,
+            None => gsetting(BACKGROUND, "picture-uri").and_then(|text| gvariant::string(&text)),
+        };
+        let picture = uri.and_then(|uri| gio::location(&uri));
         Ok(picture.filter(|path| !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("xml"))))
     }
 
-    fn set_wallpaper(&self, _screen: &Screen, path: &Path) -> Result<()> {
+    fn set_wallpaper(&self, screen: &Screen, path: &Path) -> Result<()> {
+        if let Some(list) = background_list() {
+            let (mode, connector) = (background_mode(), screen.id.clone());
+            let key = format!("{BACKGROUND} {}", nemo::LIST_KEY);
+            let wanted = vec![(key.clone(), gvariant::write_dicts(&nemo::with_picture(&list, &mode, &connector, &gio::path_uri(path))))];
+            settings::write(&Gsettings, "cinnamon", &wanted, std::slice::from_ref(&key), path, move |text| nemo::listed_picture(&gvariant::dicts(text), &mode, &connector).and_then(|uri| gio::location(&uri)))?;
+            return Ok(());
+        }
         let wanted = vec![(format!("{BACKGROUND} picture-uri"), gvariant::quote(&gio::path_uri(path))), (format!("{BACKGROUND} picture-options"), "'zoom'".to_string())];
         let pictures = vec![format!("{BACKGROUND} picture-uri")];
         settings::write(&Gsettings, "cinnamon", &wanted, &pictures, path, |text| gvariant::string(text).and_then(|uri| gio::location(&uri)))?;

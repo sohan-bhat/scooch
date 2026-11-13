@@ -1,4 +1,5 @@
 use super::geometry::Insets;
+use super::gvariant::{get, put, quote, string, Dict};
 use super::keyfile::{find, Group};
 use scooch_core::Rect;
 
@@ -197,6 +198,42 @@ pub fn canvas(window: Rect, margins: [f64; 4]) -> Rect {
     super::geometry::subtract(&window, margins)
 }
 
+pub const LIST_KEY: &str = "picture-uri-list";
+pub const MODE_KEY: &str = "background-mode";
+
+pub fn entry_for(list: &[Dict], mode: &str, connector: &str) -> Option<usize> {
+    if list.is_empty() {
+        return None;
+    }
+    if mode == "independent" {
+        if let Some(at) = list.iter().position(|dict| get(dict, "connector").and_then(string).as_deref() == Some(connector)) {
+            return Some(at);
+        }
+        if let Some(at) = list.iter().position(|dict| get(dict, "index").map(|value| value.trim_start_matches("int32").trim()) == Some("0")) {
+            return Some(at);
+        }
+    }
+    Some(0)
+}
+
+pub fn listed_picture(list: &[Dict], mode: &str, connector: &str) -> Option<String> {
+    let at = entry_for(list, mode, connector)?;
+    get(&list[at], "picture-uri").and_then(string).filter(|uri| !uri.is_empty())
+}
+
+pub fn with_picture(list: &[Dict], mode: &str, connector: &str, uri: &str) -> Vec<Dict> {
+    let mut out = list.to_vec();
+    match entry_for(&out, mode, connector) {
+        Some(at) => {
+            put(&mut out[at], "picture-uri", quote(uri));
+            put(&mut out[at], "picture-options", quote("zoom"));
+            out[at].retain(|(key, _)| key != "slideshow");
+        }
+        None => out.push(vec![("picture-uri".to_string(), quote(uri)), ("picture-options".to_string(), quote("zoom"))]),
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +314,20 @@ mod tests {
     fn margins_come_off_the_window() {
         let window = Rect { x: 1920.0, y: 0.0, w: 1280.0, h: 1024.0 };
         assert_eq!(canvas(window, [NON_PRIMARY_MARGIN; 4]), Rect { x: 1945.0, y: 25.0, w: 1230.0, h: 974.0 });
+    }
+
+    #[test]
+    fn the_background_list_changes_only_the_shown_entry() {
+        let list = super::super::gvariant::dicts("[{'connector': <'DP-1'>, 'index': <0>, 'picture-uri': <'file:///a.jpg'>, 'picture-options': <'zoom'>}, {'connector': <'HDMI-1'>, 'index': <1>, 'picture-uri': <'file:///b.jpg'>, 'slideshow': <true>}]");
+        assert_eq!(listed_picture(&list, "independent", "HDMI-1").as_deref(), Some("file:///b.jpg"));
+        assert_eq!(listed_picture(&list, "independent", "eDP-1").as_deref(), Some("file:///a.jpg"));
+        assert_eq!(listed_picture(&list, "mirror", "HDMI-1").as_deref(), Some("file:///a.jpg"));
+        let changed = with_picture(&list, "independent", "HDMI-1", "file:///out.jpg");
+        assert_eq!(listed_picture(&changed, "independent", "HDMI-1").as_deref(), Some("file:///out.jpg"));
+        assert_eq!(listed_picture(&changed, "independent", "DP-1").as_deref(), Some("file:///a.jpg"));
+        assert_eq!(get(&changed[1], "slideshow"), None);
+        let fresh = with_picture(&[], "mirror", "screen", "file:///out.jpg");
+        assert_eq!(super::super::gvariant::write_dicts(&fresh), "[{'picture-uri': <'file:///out.jpg'>, 'picture-options': <'zoom'>}]");
+        assert_eq!(listed_picture(&[], "mirror", "screen"), None);
     }
 }
