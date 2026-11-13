@@ -1,7 +1,7 @@
 #[path = "support/layouts.rs"]
 mod layouts;
 
-use scooch_core::{Analysis, Bundle, Options, Rect, RgbImage, Scene, Scenery};
+use scooch_core::{Analysis, Bundle, Options, Rect, RgbImage, Scene, Scenery, TablesError};
 use std::sync::OnceLock;
 
 struct Photo {
@@ -148,4 +148,37 @@ fn only_one_canvas_and_one_direction_can_glide() {
     assert!(mirror.mirrored() && !scooch_core::compatible(&a, &mirror));
     let crossed = scooch_core::frame(&a, &mirror, 0.5);
     assert_eq!(crossed.dimensions(), (w, h));
+}
+
+#[test]
+fn tables_travel_without_the_canvas() {
+    let (w, h) = (960, 600);
+    for photo in photos().iter().step_by(6) {
+        let scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &photo.analysis, w, h) };
+        let bundle = state(photo, &scene, &on());
+        let bytes = bundle.tables_to_bytes();
+        let canvas = scooch_core::canvas(&photo.image, w, h);
+        assert_eq!((canvas.width, canvas.height), (bundle.canvas_width, bundle.canvas_height));
+        assert_eq!(canvas.pixels, bundle.canvas);
+        let back = Bundle::tables_from_bytes(&bytes, canvas.clone()).expect("round trip");
+        let (_, worst) = difference(&scooch_core::frame(&back, &back, 0.0), &scooch_core::frame(&bundle, &bundle, 0.0));
+        assert!(worst <= 1, "{} worst {worst}", photo.name);
+        let mut touched = canvas.clone();
+        touched.pixels[17] ^= 1;
+        assert_eq!(Bundle::tables_from_bytes(&bytes, touched), Err(TablesError::Canvas));
+        let other = photos().iter().find(|p| p.name != photo.name).expect("photo");
+        assert!(Bundle::tables_from_bytes(&bytes, scooch_core::canvas(&other.image, w, h)).is_err());
+        for cut in [0, 3, 4, 11, 40, 100, bytes.len() / 2, bytes.len() - 9, bytes.len() - 1] {
+            assert!(Bundle::tables_from_bytes(&bytes[..cut], canvas.clone()).is_err(), "cut {cut}");
+        }
+        for at in [0, 5, 9, 30, 70, bytes.len() / 3, bytes.len() - 3] {
+            let mut broken = bytes.clone();
+            broken[at] ^= 0x41;
+            assert!(Bundle::tables_from_bytes(&broken, canvas.clone()).is_err(), "byte {at}");
+        }
+    }
+    let photo = &photos()[2];
+    let (w, h) = (2880, 1800);
+    let big = Scene { width: w, height: h, icons: layouts::layout("scattered", &photo.analysis, w, h) };
+    assert!(state(photo, &big, &on()).tables_to_bytes().len() < 6 * 1024 * 1024);
 }
