@@ -1,7 +1,7 @@
 use super::parse::desktop::Session;
 use super::parse::wakes::{self, Spot};
 use super::screens::{self, Shared};
-use super::{set_recently, Signal, Watches};
+use super::{pointer, set_recently, Signal, Watches};
 use crate::platform::Wake;
 use anyhow::{anyhow, Result};
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
@@ -34,6 +34,10 @@ pub fn run(wake: Wake, watches: Watches, desktop: &Path, session: Session) -> Re
         let name = signal_name(&signal);
         let wake = tagged(&wake, name);
         keep(name, gave_up.clone(), move || listen(&signal, &wake));
+    }
+    if watches.pointer && session == Session::X11 {
+        let pointer_wake = tagged(&wake, "pointer");
+        keep("pointer", gave_up.clone(), move || pointer::watch(&pointer_wake, true));
     }
     let screen_wake = tagged(&wake, "screens");
     keep("screens", gave_up.clone(), move || screens::watch_once(session, &screen_wake));

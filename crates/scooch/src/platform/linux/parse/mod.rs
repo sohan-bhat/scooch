@@ -11,4 +11,5 @@ pub mod nemo;
 pub mod record;
 pub mod wakes;
 pub mod xfce;
+pub mod xinput;
 pub mod yaml;

@@ -156,7 +156,7 @@ impl Shell for Kde {
     }
 
     fn watches(&self) -> Watches {
-        Watches { files: vec![FileWatch { folder: self.config.clone(), matches: wakes::kde_file, wallpaper: true }], signals: Vec::new() }
+        Watches { files: vec![FileWatch { folder: self.config.clone(), matches: wakes::kde_file, wallpaper: true }], signals: Vec::new(), pointer: self.session == Session::X11 }
     }
 
     fn per_screen(&self) -> bool {

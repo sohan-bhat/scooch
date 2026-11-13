@@ -90,6 +90,7 @@ impl Shell for Mate {
         Watches {
             files: vec![FileWatch { folder: self.config.join("caja"), matches: wakes::desktop_metadata, wallpaper: false }],
             signals: vec![Signal::Metadata(wakes::desktop_in_home(&self.desktop, &self.home)), Signal::Dconf(&wakes::MATE_KEYS)],
+            pointer: false,
         }
     }
 

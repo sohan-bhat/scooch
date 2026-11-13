@@ -13,6 +13,8 @@ pub mod kde;
 #[cfg(target_os = "linux")]
 pub mod mate;
 #[cfg(target_os = "linux")]
+pub mod pointer;
+#[cfg(target_os = "linux")]
 pub mod screens;
 #[cfg(target_os = "linux")]
 pub mod settings;
@@ -65,6 +67,7 @@ mod system {
     pub struct Watches {
         pub files: Vec<FileWatch>,
         pub signals: Vec<Signal>,
+        pub pointer: bool,
     }
 
     pub trait Shell: Send + Sync {

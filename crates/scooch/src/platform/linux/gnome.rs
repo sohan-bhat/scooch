@@ -200,7 +200,7 @@ impl Shell for Gnome {
 
     fn watches(&self) -> Watches {
         let desktop_in_home = wakes::desktop_in_home(&self.desktop, &self.home);
-        Watches { files: Vec::new(), signals: vec![Signal::Metadata(desktop_in_home), Signal::Dconf(&wakes::GNOME_KEYS), Signal::Ding] }
+        Watches { files: Vec::new(), signals: vec![Signal::Metadata(desktop_in_home), Signal::Dconf(&wakes::GNOME_KEYS), Signal::Ding], pointer: false }
     }
 
     fn per_screen(&self) -> bool {

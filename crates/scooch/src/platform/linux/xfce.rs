@@ -156,7 +156,7 @@ impl Shell for Xfce {
     }
 
     fn watches(&self) -> Watches {
-        Watches { files: vec![FileWatch { folder: self.folder(), matches: wakes::xfce_file, wallpaper: false }], signals: vec![Signal::Xfconf] }
+        Watches { files: vec![FileWatch { folder: self.folder(), matches: wakes::xfce_file, wallpaper: false }], signals: vec![Signal::Xfconf], pointer: false }
     }
 
     fn per_screen(&self) -> bool {

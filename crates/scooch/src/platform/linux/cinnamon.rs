@@ -148,6 +148,7 @@ impl Shell for Cinnamon {
         Watches {
             files: vec![FileWatch { folder: self.config.join("nemo"), matches: wakes::desktop_metadata, wallpaper: false }],
             signals: vec![Signal::Metadata(wakes::desktop_in_home(&self.desktop, &self.home)), Signal::Dconf(&wakes::CINNAMON_KEYS)],
+            pointer: false,
         }
     }
 
