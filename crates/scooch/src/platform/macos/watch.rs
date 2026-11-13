@@ -2,9 +2,11 @@ use super::sys::{self, Ref, StreamContext};
 use super::Wake;
 use anyhow::{bail, Context, Result};
 use block2::RcBlock;
-use objc2::MainThreadMarker;
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2::{msg_send, MainThreadMarker};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification, NSEvent, NSEventMask, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification, NSEvent, NSEventMask, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWorkspaceApplicationKey, NSWorkspaceDidLaunchApplicationNotification,
     NSWorkspaceDidMountNotification, NSWorkspaceDidUnmountNotification, NSWorkspaceDidWakeNotification,
 };
 use objc2_foundation::{NSArray, NSNotification, NSNotificationCenter, NSNotificationName, NSString};
@@ -12,14 +14,13 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, NonNull};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 type Shared = Arc<dyn Fn() + Send + Sync>;
 
 const STREAM_LATENCY: f64 = 0.05;
-const DRAG: f64 = 3.0;
 const FINDER: &str = "com.apple.finder";
+const LAYOUT: &str = ".DS_Store";
 const INDEX: &str = "Library/Application Support/com.apple.wallpaper/Store/Index.plist";
 
 struct Folder {
@@ -64,6 +65,7 @@ pub fn run(wake: Wake) -> Result<()> {
         observe(&workspace, NSWorkspaceDidWakeNotification, tag("wake"));
         observe(&workspace, NSWorkspaceDidMountNotification, tag("mount"));
         observe(&workspace, NSWorkspaceDidUnmountNotification, tag("unmount"));
+        on_finder_launch(&workspace, tag("finder"));
         observe(&NSNotificationCenter::defaultCenter(), NSApplicationDidChangeScreenParametersNotification, tag("screens"));
     }
     wallpaper_file(tag("wallpaper"), &home.join(INDEX));
@@ -72,9 +74,18 @@ pub fn run(wake: Wake) -> Result<()> {
 }
 
 pub fn desktop_change(path: &Path, flags: u32, desktop: &Path) -> bool {
-    let direct = path.parent() == Some(desktop);
-    let hidden = path.file_name().is_none_or(|name| name.as_bytes().first() == Some(&b'.'));
-    direct && !hidden && flags & (sys::ITEM_CREATED | sys::ITEM_REMOVED | sys::ITEM_RENAMED) != 0
+    if path.parent() != Some(desktop) {
+        return false;
+    }
+    let Some(name) = path.file_name() else { return false };
+    if name == LAYOUT {
+        return true;
+    }
+    name.as_bytes().first() != Some(&b'.') && flags & (sys::ITEM_CREATED | sys::ITEM_REMOVED | sys::ITEM_RENAMED) != 0
+}
+
+pub fn finder_launched(bundle: Option<&str>) -> bool {
+    bundle == Some(FINDER)
 }
 
 fn desktop_files(wake: Shared, desktop: &Path) -> Result<()> {
@@ -109,38 +120,29 @@ extern "C" fn changed(_stream: Ref, info: *mut c_void, count: usize, paths: *con
 }
 
 fn mouse(wake: Shared) {
-    let pressed = Arc::new(AtomicU64::new(u64::MAX));
-    let down = pressed.clone();
-    let on_down = RcBlock::new(move |event: NonNull<NSEvent>| {
-        let at = unsafe { event.as_ref() }.locationInWindow();
-        down.store(pack(at.x, at.y), Ordering::Relaxed);
-    });
     let traced = crate::daemon::trace();
-    let on_up = RcBlock::new(move |event: NonNull<NSEvent>| {
-        let at = unsafe { event.as_ref() }.locationInWindow();
-        let moved = dragged(pressed.swap(u64::MAX, Ordering::Relaxed), at.x, at.y);
+    let on_up = RcBlock::new(move |_: NonNull<NSEvent>| {
+        let front = finder_in_front();
         if traced {
-            eprintln!("{} mouse up, dragged {moved}, Finder in front {}", crate::daemon::stamp(), finder_in_front());
+            eprintln!("{} mouse up, Finder in front {front}", crate::daemon::stamp());
         }
-        if moved && finder_in_front() {
+        if front {
             wake();
         }
     });
-    std::mem::forget(NSEvent::addGlobalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseDown, &on_down));
     std::mem::forget(NSEvent::addGlobalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseUp, &on_up));
 }
 
-pub fn pack(x: f64, y: f64) -> u64 {
-    (u64::from((x as f32).to_bits()) << 32) | u64::from((y as f32).to_bits())
-}
-
-pub fn dragged(down: u64, x: f64, y: f64) -> bool {
-    if down == u64::MAX {
-        return false;
-    }
-    let from_x = f32::from_bits((down >> 32) as u32) as f64;
-    let from_y = f32::from_bits(down as u32) as f64;
-    (x - from_x).hypot(y - from_y) > DRAG
+unsafe fn on_finder_launch(center: &NSNotificationCenter, wake: Shared) {
+    let block = RcBlock::new(move |note: NonNull<NSNotification>| {
+        let note = unsafe { note.as_ref() };
+        let application: Option<Retained<AnyObject>> = note.userInfo().and_then(|info| unsafe { msg_send![&*info, objectForKey: NSWorkspaceApplicationKey] });
+        let bundle = application.as_deref().and_then(|object| object.downcast_ref::<NSRunningApplication>()).and_then(|application| application.bundleIdentifier()).map(|name| name.to_string());
+        if finder_launched(bundle.as_deref()) {
+            wake();
+        }
+    });
+    std::mem::forget(unsafe { center.addObserverForName_object_queue_usingBlock(Some(NSWorkspaceDidLaunchApplicationNotification), None, None, &block) });
 }
 
 fn finder_in_front() -> bool {
@@ -225,16 +227,21 @@ mod tests {
 
     #[test]
     fn hidden_files_and_nested_files_do_not_wake() {
-        assert!(!desktop_change(&desktop().join(".DS_Store"), sys::ITEM_CREATED | IS_FILE, &desktop()));
+        assert!(!desktop_change(&desktop().join(".localized"), sys::ITEM_CREATED | IS_FILE, &desktop()));
         assert!(!desktop_change(&desktop().join("project/build.o"), sys::ITEM_CREATED | IS_FILE, &desktop()));
+        assert!(!desktop_change(&desktop().join("project/.DS_Store"), MODIFIED | IS_FILE, &desktop()));
     }
 
     #[test]
-    fn a_drag_is_more_than_three_points() {
-        let down = pack(100.0, 200.0);
-        assert!(!dragged(down, 102.0, 201.5));
-        assert!(dragged(down, 104.0, 200.0));
-        assert!(dragged(down, 100.0, 196.5));
-        assert!(!dragged(u64::MAX, 500.0, 500.0));
+    fn a_rearranged_desktop_wakes_through_its_layout_file() {
+        assert!(desktop_change(&desktop().join(".DS_Store"), MODIFIED | INODE | IS_FILE, &desktop()));
+        assert!(desktop_change(&desktop().join(".DS_Store"), sys::ITEM_RENAMED | IS_FILE, &desktop()));
+    }
+
+    #[test]
+    fn only_finder_launching_wakes() {
+        assert!(finder_launched(Some("com.apple.finder")));
+        assert!(!finder_launched(Some("com.apple.Safari")));
+        assert!(!finder_launched(None));
     }
 }
