@@ -1,3 +1,33 @@
+//! Saliency, placement solver and renderer for Scooch.
+//!
+//! A [`Bundle`] is one state of one screen as plain tables. [`frame`] blends two bundles and is the
+//! reference for `shaders/frame.wgsl` and `shaders/frame.glsl`, which read the same tables. A pixel
+//! position `p` is the pixel center in output pixels from the top left, and every grid is sampled at
+//! `p / cell / grid size` in normalized coordinates, so grid texel `i` sits at output pixel `cell * (i + 0.5)`.
+//!
+//! | Texture | Size | Format | Filter | Wrap |
+//! |---|---|---|---|---|
+//! | `canvas` | `canvas_width` x `canvas_height`, long side at most twice the output's and at most 8192 | RGBA8 sRGB with mipmaps, alpha 1 | linear, mipmap linear | clamp to edge |
+//! | `map_a`, `map_b` | `max(width, height)` x 2, row 0 `xmap`, row 1 `ymap`, padded with the last value | R32F, canvas coordinate from 0 to 1 | none, read with texel fetch | clamp to edge |
+//! | `field_a`, `field_b` | `grid_width` x `grid_height`, a quarter of the output | R16F, distance in icon units, negative inside | linear | clamp to edge |
+//! | `look_a`, `look_b` | `grid_width` x `grid_height` | RGBA8 unorm: sky, belong, open, light with 0.5 for none | linear | clamp to edge |
+//! | `pad_a`, `pad_b` | `grid_width` x `grid_height` | RGBA8 sRGB: calm color, alpha is the pad weight | linear | clamp to edge |
+//! | `paints_a`, `paints_b` | `paint_width` x `paint_height` x 8 layers, a sixteenth of the output | RGBA8 sRGB array: shore (alpha ripples), foam, land (alpha land opacity), top, core (alpha cloud opacity), lit, rim, belly | linear | clamp to edge |
+//! | `ramps_a`, `ramps_b` | 512 x 2 | RGBA8 unorm: row 0 ripples, shore, foam, land; row 1 top, cloud body, land shadow, cloud shadow | linear | clamp to edge |
+//!
+//! | Uniform | Meaning |
+//! |---|---|
+//! | `size` | output width and height in pixels |
+//! | `grid`, `paint` (`paint_grid` in GLSL) | `grid_width`, `grid_height` and `paint_width`, `paint_height` |
+//! | `s` | eased time from bundle A to bundle B |
+//! | `unit` | icon height in output pixels, the unit of the field and the offsets |
+//! | `ramp_low`, `ramp_high` | field range the ramps cover, in units |
+//! | `reach` | field value past which nothing is painted |
+//! | `shadow`, `rim`, `belly` (`shadow_at`, `rim_at`, `belly_at` in GLSL) | offsets in units at which the field is read again |
+//! | `grain` (`grain_amount` in GLSL), `grain_scale`, `grain_floor` | grain strength, the detail that gives full grain, the floor of the slope |
+//! | `grain_lod` | canvas mip level of a four pixel block, `log2(4 * canvas_width / width)` |
+//! | `core_lift`, `core_drop`, `volume_lit`, `volume_dark` | how far light moves the cloud body toward rim or belly, inside the shade and in the open |
+
 mod analysis;
 mod blur;
 mod bundle;
@@ -13,7 +43,7 @@ mod solver;
 mod table;
 mod warp;
 
-pub use bundle::{Bundle, Constants};
+pub use bundle::{Bundle, Constants, RAMP};
 pub use image::{GrayImage, RgbImage, RgbaImage};
 pub use paint::Materials;
 pub use shape::FIELD_STEP as SCENERY_FIELD_STEP;
