@@ -30,7 +30,8 @@ mod probe {
     use ::windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, FILETIME, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use ::windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW, MapWindowPoints, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
-        BI_RGB, DIB_RGB_COLORS, HDC, HMONITOR, LOGFONTW, MONITORINFO, SRCCOPY,
+        BI_RGB, DIB_RGB_COLORS, HDC, HMONITOR, LOGFONTW, MONITORINFO, SRCCOPY, ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH,
+        ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE,
     };
     use ::windows::core::Interface;
     use ::windows::Win32::System::Com::{CoCreateInstance, IServiceProvider, CLSCTX_ALL, CLSCTX_INPROC_SERVER};
@@ -38,8 +39,8 @@ mod probe {
     use ::windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First, Thread32Next, PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32};
     use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use ::windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
-    use ::windows::Win32::System::Registry::{RegCloseKey, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_BINARY, RRF_RT_REG_DWORD};
-    use ::windows::Win32::System::Threading::GetProcessTimes;
+    use ::windows::Win32::System::Registry::{RegCloseKey, RegDeleteKeyValueW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_BINARY, REG_DWORD, RRF_RT_REG_DWORD};
+    use ::windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, TerminateProcess, PROCESS_TERMINATE};
     use ::windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK, TreeScope_Children};
     use ::windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow, SystemParametersInfoForDpi, MDT_EFFECTIVE_DPI};
     use ::windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -55,7 +56,7 @@ mod probe {
         SHCNRF_NewDelivery, SHCNRF_ShellLevel, SVSI_POSITIONITEM,
     };
     use ::windows::Win32::UI::WindowsAndMessaging::{
-        PostMessageW, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER, WM_COMMAND,
+        GetShellWindow, PostMessageW, SYSTEM_PARAMETERS_INFO_ACTION, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER, WM_COMMAND,
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW, GetClientRect, GetSystemMetrics, GetWindowThreadProcessId, MsgWaitForMultipleObjects, PeekMessageW, RegisterClassExW,
         SetCursorPos, SystemParametersInfoW, TranslateMessage, EVENT_MAX, EVENT_MIN, MSG, PM_REMOVE, QS_ALLINPUT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
         SPI_GETICONTITLELOGFONT, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_SETTINGCHANGE, WNDCLASSEXW,
@@ -218,6 +219,7 @@ mod probe {
         probe.section("5 Wallpaper", wallpaper);
         probe.section("5b Solid color and slideshow", modes);
         probe.section("6 End to end", end_to_end);
+        probe.section("8 Display scaling", scaling);
         probe.section("7 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -474,7 +476,9 @@ mod probe {
                 for screen in screens {
                     let shown = desktop.wallpaper(&screen);
                     p.line(format!("- adapter screen `{}` at {} shows {:?}", screen.id, show(&screen.frame), shown.as_ref().map_err(|error| error.to_string())));
-                    p.wallpapers.push((screen, shown.ok().flatten()));
+                    if !p.wallpapers.iter().any(|(known, _)| known.id == screen.id) {
+                        p.wallpapers.push((screen, shown.ok().flatten()));
+                    }
                 }
             }
             Err(error) => p.line(format!("- adapter screens failed with {error:#}")),
@@ -491,7 +495,7 @@ mod probe {
                 p.line(format!("- view mode and icon size {:?}", shell::mode(&view).map(|(mode, icon)| (mode.0, icon))));
                 p.line(format!("- spacing {:?}", shell::spacing(&view).map(|point| (point.x, point.y))));
                 p.line(format!("- folder flags {:?}", unsafe { view.folder.GetCurrentFolderFlags() }.map(|flags| format!("{flags:#x}"))));
-                let font = shell::Font::open();
+                let font = shell::Font::open(&view);
                 p.line(format!("- icon title font line height {:?}", font.as_ref().map(|font| font.line).map_err(|error| error.to_string())));
                 let dpi = unsafe { GetDpiForWindow(view.list) };
                 let mut logical = LOGFONTW::default();
@@ -566,8 +570,10 @@ mod probe {
     fn read(p: &mut Probe) -> Result<()> {
         let view = shell::view()?;
         let flags = unsafe { view.folder.GetCurrentFolderFlags() }?;
-        p.flags = Some(flags);
-        p.mode = shell::mode(&view).ok();
+        p.flags.get_or_insert(flags);
+        if p.mode.is_none() {
+            p.mode = shell::mode(&view).ok();
+        }
         let mask = (FWF_AUTOARRANGE.0 | FWF_SNAPTOGRID.0) as u32;
         let set = unsafe { view.folder.SetCurrentFolderFlags(mask, 0) };
         p.line(format!("- folder flags were {flags:#x}, turning auto arrange and snap off gave {:?} and now {:?}", set, unsafe { view.folder.GetCurrentFolderFlags() }.map(|flags| format!("{flags:#x}"))));
@@ -586,7 +592,7 @@ mod probe {
             let kinds: Vec<String> = notes.iter().filter(|note| note.1 == source).map(|note| format!("{:#x} at +{} ms", note.2, note.0.saturating_sub(base))).collect();
             p.line(format!("- notifications on the desktop {source} {}", if kinds.is_empty() { "none".into() } else { kinds.join(" ") }));
         }
-        let font = shell::Font::open()?;
+        let font = shell::Font::open(&view)?;
         let cell = shell::cell(&view, font.line)?;
         p.line(format!("- cell width {} icon {} line {} wrap {}", cell.width, cell.icon, cell.line, cell.wrap(&SPACING)));
         let items = shell::items(&view)?;
@@ -707,7 +713,7 @@ mod probe {
 
     fn geometry(p: &mut Probe) -> Result<()> {
         let view = shell::view()?;
-        let font = shell::Font::open()?;
+        let font = shell::Font::open(&view)?;
         let cell = shell::cell(&view, font.line)?;
         let wrap = cell.wrap(&SPACING).round() as i32;
         let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
@@ -1033,7 +1039,7 @@ mod probe {
         let hook = whole_hook(view.list).context("could not hook the desktop thread")?;
         let spot = p.target.unwrap_or(target(&view)?);
         let (name, folder) = PROBES[0];
-        let font = shell::Font::open()?;
+        let font = shell::Font::open(&view)?;
         let cell = shell::cell(&view, font.line)?;
         let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
         park_cursor();
@@ -1477,6 +1483,217 @@ mod probe {
         found
     }
 
+    fn explorer_ready(old: u32) -> bool {
+        let shell = unsafe { GetShellWindow() };
+        if shell.is_invalid() {
+            return false;
+        }
+        let mut process = 0u32;
+        unsafe { GetWindowThreadProcessId(shell, Some(&mut process)) };
+        process != 0 && process != old && shell::view().is_ok_and(|view| shell::visible(&view))
+    }
+
+    fn restart_explorer(p: &mut Probe) -> Result<u128> {
+        let shell = unsafe { GetShellWindow() };
+        if shell.is_invalid() {
+            bail!("no shell window to restart");
+        }
+        let mut process = 0u32;
+        unsafe { GetWindowThreadProcessId(shell, Some(&mut process)) };
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, false, process) }?;
+        let ended = unsafe { TerminateProcess(handle, 1) };
+        let _ = unsafe { CloseHandle(handle) };
+        ended?;
+        let started = Instant::now();
+        let mut back = wait_until(Duration::from_secs(15), || explorer_ready(process));
+        if back.is_none() {
+            p.line("- Explorer did not come back by itself, so the probe starts it".to_string());
+            let _ = Command::new("explorer.exe").spawn();
+            back = wait_until(Duration::from_secs(20), || explorer_ready(process));
+        }
+        let took = back.map(|_| started.elapsed().as_millis()).context("Explorer did not come back")?;
+        p.line(format!("- Explorer process {process} ended and a new desktop was ready after {took} ms"));
+        pump(Duration::from_secs(2));
+        uncover(p);
+        Ok(took)
+    }
+
+    fn reattach(p: &mut Probe, trace: &Path, read: &mut u64, screen: &Screen) -> Result<()> {
+        let desktop = platform::current()?;
+        let _ = new_lines(trace, read);
+        restart_explorer(p)?;
+        let attached = wait_until(Duration::from_secs(20), || fs::read_to_string(trace).is_ok_and(|text| text.get(*read as usize..).is_some_and(|fresh| fresh.contains(" wake explorer"))));
+        p.line(format!("- daemon attached to the new desktop after {:?} ms", attached.map(|time| time.as_millis())));
+        if attached.is_none() {
+            p.failed.push("the daemon did not attach after Explorer restarted".into());
+        }
+        for line in new_lines(trace, read) {
+            p.line(format!("  - daemon `{}`", line.chars().take(160).collect::<String>()));
+        }
+        let view = shell::view()?;
+        let font = shell::Font::open(&view)?;
+        let cell = shell::cell(&view, font.line)?;
+        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
+        let shown = shown_name(PROBES[0].0, PROBES[0].1);
+        let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect).context("no UI Automation rect for the probe item after the restart")?;
+        let from = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + cell.icon / 2.0) as i32 };
+        let center = POINT { x: (screen.frame.x + screen.frame.w / 2.0) as i32, y: (screen.frame.y + screen.frame.h / 2.0) as i32 };
+        let to = if (from.x - center.x).abs() < 60 && (from.y - center.y).abs() < 60 {
+            POINT { x: (screen.frame.x + screen.frame.w * 0.8) as i32, y: (screen.frame.y + screen.frame.h * 0.2) as i32 }
+        } else {
+            center
+        };
+        let before = desktop.wallpaper(screen)?.unwrap_or_default();
+        let sent = drag_to(from, to);
+        let dropped = Instant::now();
+        let changed = wait_until(Duration::from_secs(10), || desktop.wallpaper(screen).ok().flatten().is_some_and(|now| now != before));
+        let latency = changed.map(|_| dropped.elapsed().as_millis());
+        pump(Duration::from_millis(300));
+        let wakes: Vec<String> = new_lines(trace, read).into_iter().filter(|line| line.contains(" wake ") || line.contains(" set ")).collect();
+        p.line(format!("- drag after the restart from {},{} to {},{} sent {sent}, new wallpaper after {:?} ms", from.x, from.y, to.x, to.y, latency));
+        for line in &wakes {
+            p.line(format!("  - daemon `{}`", line.chars().take(160).collect::<String>()));
+        }
+        if !wakes.iter().any(|line| line.contains(" wake ")) {
+            p.failed.push("the drag after the Explorer restart woke nothing".into());
+        }
+        if latency.is_none() {
+            p.failed.push("the drag after the Explorer restart brought no new wallpaper".into());
+        }
+        park_cursor();
+        Ok(())
+    }
+
+    fn override_dpi() -> (i32, ::windows::core::Result<()>) {
+        let mut relative = 0i32;
+        let read = unsafe { SystemParametersInfoW(SYSTEM_PARAMETERS_INFO_ACTION(0x009E), 0, Some(&mut relative as *mut i32 as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) };
+        (relative, read)
+    }
+
+    fn set_override(relative: i32) -> ::windows::core::Result<()> {
+        unsafe { SystemParametersInfoW(SYSTEM_PARAMETERS_INFO_ACTION(0x009F), relative as u32, None, SPIF_UPDATEINIFILE) }
+    }
+
+    fn primary_dpi() -> u32 {
+        display_monitors().first().map_or(0, |(_, dpi)| *dpi)
+    }
+
+    fn list_dpi() -> u32 {
+        shell::view().map_or(0, |view| unsafe { GetDpiForWindow(view.list) })
+    }
+
+    fn try_override(p: &mut Probe, relative: i32, wanted: u32) -> bool {
+        let result = set_override(relative);
+        pump(Duration::from_secs(3));
+        let (monitor, list) = (primary_dpi(), list_dpi());
+        p.line(format!("- SystemParametersInfo 0x009F with step {relative} gave {result:?}, monitor DPI {monitor}, desktop list DPI {list}, wanted {wanted}"));
+        monitor == wanted && list == wanted
+    }
+
+    fn current_mode() -> Option<(u32, u32)> {
+        let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+        unsafe { EnumDisplaySettingsW(PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut mode) }.as_bool().then_some((mode.dmPelsWidth, mode.dmPelsHeight))
+    }
+
+    fn largest_mode() -> Option<DEVMODEW> {
+        let mut best: Option<DEVMODEW> = None;
+        for index in 0..512u32 {
+            let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+            if !unsafe { EnumDisplaySettingsW(PCWSTR::null(), ENUM_DISPLAY_SETTINGS_MODE(index), &mut mode) }.as_bool() {
+                break;
+            }
+            if best.as_ref().is_none_or(|known| mode.dmPelsWidth * mode.dmPelsHeight > known.dmPelsWidth * known.dmPelsHeight) {
+                best = Some(mode);
+            }
+        }
+        best
+    }
+
+    fn desktop_dword(name: PCWSTR) -> Option<u32> {
+        let mut value = 0u32;
+        let mut size = size_of::<u32>() as u32;
+        let read = unsafe { RegGetValueW(HKEY_CURRENT_USER, w!(r"Control Panel\Desktop"), name, RRF_RT_REG_DWORD, None, Some(&mut value as *mut u32 as *mut c_void), Some(&mut size)) };
+        (read == ERROR_SUCCESS).then_some(value)
+    }
+
+    fn set_desktop_dword(name: PCWSTR, value: Option<u32>) -> String {
+        let result = match value {
+            Some(value) => unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, w!(r"Control Panel\Desktop"), name, REG_DWORD.0, Some(&value as *const u32 as *const c_void), size_of::<u32>() as u32) },
+            None => unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, w!(r"Control Panel\Desktop"), name) },
+        };
+        format!("{result:?}")
+    }
+
+    fn scaled_sections(p: &mut Probe) {
+        let dpi = list_dpi();
+        p.line(format!("- the desktop now runs at {dpi} DPI, so sections 1, 2 and 3 run again"));
+        p.section(&format!("1 Session facts at {dpi} DPI"), facts);
+        p.section(&format!("2 Read at {dpi} DPI"), read);
+        p.section(&format!("3 Geometry truth at {dpi} DPI"), geometry);
+        p.line(String::new());
+        p.line("## 8 Display scaling, putting it back".to_string());
+        p.line(String::new());
+    }
+
+    fn scaling(p: &mut Probe) -> Result<()> {
+        let (relative, read) = override_dpi();
+        let start = current_mode();
+        p.line(format!("- monitor DPI {}, desktop list DPI {}, system DPI {}, logical DPI override step {relative} read {read:?}, display mode {start:?}", primary_dpi(), list_dpi(), unsafe { GetDpiForSystem() }));
+        let mut scaled = try_override(p, relative + 2, 144);
+        let mut resized = false;
+        if !scaled {
+            if let (Some(mode), Some((width, height))) = (largest_mode(), start) {
+                if mode.dmPelsWidth * mode.dmPelsHeight > width * height {
+                    let mut wanted = mode;
+                    wanted.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
+                    let changed = unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), Some(&wanted), None, CDS_TYPE(0), None) };
+                    pump(Duration::from_secs(3));
+                    resized = changed == DISP_CHANGE_SUCCESSFUL;
+                    p.line(format!("- changing the display to {}x{} gave {:?}, mode now {:?}", mode.dmPelsWidth, mode.dmPelsHeight, changed.0, current_mode()));
+                    if resized {
+                        scaled = try_override(p, relative + 2, 144);
+                    }
+                }
+            }
+        }
+        if !scaled {
+            scaled = try_override(p, relative + 1, 120);
+        }
+        if scaled {
+            scaled_sections(p);
+        }
+        let back = set_override(relative);
+        pump(Duration::from_secs(2));
+        p.line(format!("- override put back to step {relative} {back:?}, monitor DPI {}, desktop list DPI {}", primary_dpi(), list_dpi()));
+        if resized {
+            let reset = unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE(0), None) };
+            pump(Duration::from_secs(3));
+            p.line(format!("- display mode reset {:?}, mode now {:?}", reset.0, current_mode()));
+        }
+        if scaled {
+            return Ok(());
+        }
+        let pixels = desktop_dword(w!("LogPixels"));
+        let scaling_flag = desktop_dword(w!("Win8DpiScaling"));
+        p.line(format!("- LogPixels was {pixels:?} and Win8DpiScaling {scaling_flag:?}"));
+        let wrote = (set_desktop_dword(w!("LogPixels"), Some(144)), set_desktop_dword(w!("Win8DpiScaling"), Some(1)));
+        p.line(format!("- wrote LogPixels 144 and Win8DpiScaling 1 {wrote:?}"));
+        let restarted = restart_explorer(p);
+        p.line(format!("- after an Explorer restart {restarted:?}, monitor DPI {}, desktop list DPI {}, system DPI {}", primary_dpi(), list_dpi(), unsafe { GetDpiForSystem() }));
+        let took = list_dpi() == 144;
+        if took {
+            scaled_sections(p);
+        }
+        let restored = (set_desktop_dword(w!("LogPixels"), pixels), set_desktop_dword(w!("Win8DpiScaling"), scaling_flag));
+        p.line(format!("- put LogPixels and Win8DpiScaling back {restored:?}"));
+        let again = restart_explorer(p);
+        p.line(format!("- after restarting Explorer again {again:?}, desktop list DPI {}", list_dpi()));
+        if !took {
+            p.line("- no method changed the display scale on this runner".to_string());
+        }
+        Ok(())
+    }
+
     fn new_lines(path: &Path, read: &mut u64) -> Vec<String> {
         let Ok(bytes) = fs::read(path) else { return Vec::new() };
         let start = (*read as usize).min(bytes.len());
@@ -1554,7 +1771,7 @@ mod probe {
         let view = shell::view()?;
         let (name, folder) = PROBES[0];
         let shown = shown_name(name, folder);
-        let font = shell::Font::open()?;
+        let font = shell::Font::open(&view)?;
         let cell = shell::cell(&view, font.line)?;
         let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
         let subject = POINT { x: (screen.frame.x + screen.frame.w / 2.0) as i32, y: (screen.frame.y + screen.frame.h / 2.0) as i32 };
@@ -1607,6 +1824,7 @@ mod probe {
         }
         p.line(format!("- working set and private bytes {:?}", held));
         p.line(format!("- threads {:?}", threads(process)));
+        reattach(p, &trace, &mut read, &screen)?;
         let stopped = scooch::poke::stop(0);
         let mut code = None;
         if let Some(child) = p.daemon.as_mut() {
