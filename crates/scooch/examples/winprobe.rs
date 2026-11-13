@@ -1789,7 +1789,7 @@ mod probe {
         fn look(&self, shot: &RgbImage, at: u128) -> Look {
             let raw = shot.as_raw();
             let mut columns = Vec::new();
-            for x in 200.min(self.width)..self.width {
+            for x in 0..self.width {
                 let at = (self.row * self.width + x) * 3;
                 if raw.get(at..at + 3).is_some_and(|pixel| pixel[0] > 200 && pixel[1] < 70 && pixel[2] > 200) {
                     columns.push(x);
