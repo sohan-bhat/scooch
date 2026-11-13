@@ -1946,7 +1946,7 @@ mod probe {
         let left = layer::ours_left();
         let after = capture(area).ok().map(|shot| mean_gap(&shot, field));
         if let Some(shot) = kept {
-            let _ = fs::write(p.out.join(format!("layer-{}.png", method.name().split_whitespace().next().unwrap_or("x").to_lowercase())), scooch_core::encode_png(&shot)?);
+            let _ = fs::write(p.out.join(format!("layer-{method:?}.png")), scooch_core::encode_png(&shot)?);
         }
         p.line(format!(
             "  - opened in {open_ms} ms, first frame after {first:?} ms on {adapter}, {presents} presents at {rate:.1} per second, present error {error:?}"
@@ -1975,8 +1975,11 @@ mod probe {
         for line in layer::tree() {
             p.line(format!("  - `{line}`"));
         }
-        let (layout, sent) = layer::layout()?;
-        p.line(format!("- layout {}, message 0x052C sent {sent}", layout.describe()));
+        let (layout, notes) = layer::layout()?;
+        for note in notes {
+            p.line(format!("- {note}"));
+        }
+        p.line(format!("- layout {}", layout.describe()));
         p.line("- Progman and WorkerW windows after".to_string());
         for line in layer::tree() {
             p.line(format!("  - `{line}`"));
@@ -2078,7 +2081,7 @@ mod probe {
         let baseline = capture(area)?;
         let sight = Sight::new(baseline, &field, (area.left, area.top));
         p.line("- **after an Explorer restart**".to_string());
-        p.line(format!("- layout now {}", layer::layout().map(|(layout, sent)| format!("{}, 0x052C sent {sent}", layout.describe())).unwrap_or_else(|error| error.to_string())));
+        p.line(format!("- layout now {}", layer::layout().map(|(layout, notes)| format!("{}, {}", layout.describe(), notes.join(", "))).unwrap_or_else(|error| error.to_string())));
         match rung(p, &screen, method, &field, &sight, false) {
             Ok(verdict) if works(&verdict) => p.line("  - shows the pattern under the icons after the restart".to_string()),
             Ok(_) => p.failed.push("the layer did not show under the icons after an Explorer restart".into()),
