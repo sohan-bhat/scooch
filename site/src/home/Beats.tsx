@@ -3,7 +3,7 @@ import content from '@/content.json';
 import { cn } from '@/lib/utils';
 
 export const place: Record<string, string> = {
-  hero: 'wide:left-0 wide:top-[47%] wide:-translate-y-1/2 wide:w-[min(45vw,40rem)]',
+  hero: 'wide:left-0 wide:top-[19vh] wide:w-[min(40vw,36rem)]',
   problem: 'wide:right-0 wide:top-1/2 wide:-translate-y-1/2 wide:w-[min(32vw,30rem)]',
   sees: 'wide:left-0 wide:top-1/2 wide:-translate-y-1/2 wide:w-[min(31vw,30rem)]',
   fix: 'wide:left-0 wide:top-1/2 wide:-translate-y-1/2 wide:w-[min(31vw,30rem)]',

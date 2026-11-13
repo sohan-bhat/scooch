@@ -39,8 +39,8 @@ float sweepFront(vec2 uv) {
 }
 
 float relief(vec2 uv) {
-  float s = textureLod(uSaliency, place(clamp(uv, 0.0, 1.0)), 1.6).r;
-  return smoothstep(0.08, 0.9, s) * sweepFront(uv);
+  float s = textureLod(uSaliency, place(clamp(uv, 0.0, 1.0)), 0.5).r;
+  return smoothstep(0.32, 0.85, s) * sweepFront(uv);
 }
 
 void main() {
@@ -55,7 +55,7 @@ void main() {
   vec3 n = normalize(vec3(-hx * height / (2.0 * e * uSize.x), hy * height / (2.0 * e * uSize.y), 1.0));
   vUv = uv;
   vHeight = h;
-  vNormal = normalize(mat3(modelMatrix) * n);
+  vNormal = n;
   vec4 world = modelMatrix * vec4(displaced, 1.0);
   vWorld = world.xyz;
   gl_Position = projectionMatrix * viewMatrix * world;
@@ -105,7 +105,8 @@ void main() {
   }
 
   vec3 n = normalize(vNormal);
-  float light = 0.72 + 0.42 * max(dot(n, normalize(uKey)), 0.0);
+  float light = 0.8 + 0.3 * max(dot(n, normalize(uKey)), 0.0);
+  float steep = 1.0 - clamp(n.z, 0.0, 1.0);
   float level = clamp(vHeight, 0.0, 1.0);
   float lines = abs(fract(level * 7.0) - 0.5);
   float width = fwidth(level * 7.0) * 1.3;
@@ -115,6 +116,9 @@ void main() {
   vec3 color = photo * light;
   color *= mix(1.0, 0.58, uRelief * (1.0 - smoothstep(0.04, 0.3, level)));
   color *= 1.0 - base * 0.35 * uRelief;
+  float wall = smoothstep(0.12, 0.55, steep) * smoothstep(0.02, 0.12, level);
+  vec3 ember = mix(uHeat * 0.75, uGlow, smoothstep(0.2, 0.9, level));
+  color = mix(color, ember * (0.65 + 0.35 * light), wall * uRelief);
   color += uHeat * base * 0.12 * uRelief;
   color += mix(uHeat, uGlow, 0.65) * contour * 0.3 * uRelief;
   if (uSweep > 0.001 && uSweep < 0.999) {

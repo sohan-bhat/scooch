@@ -312,7 +312,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       }
     }
 
-    const lcdPower = introLcd * (0.35 + 0.65 * away);
+    const lcdPower = introLcd * away * away;
     const lcd = screens.lcd.uniforms;
     lcd.uTime.value = time;
     lcd.uPlace.value = story.frost;
