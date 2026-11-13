@@ -20,7 +20,7 @@ const models = [
     id: 'classic_laptop',
     resolution: '4k',
     file: 'laptop.glb',
-    textures: { color: 2048, normal: 1024, arm: 1024 },
+    textures: { color: 2048, normal: 512, arm: 1024 },
     pivots: ['classic_laptop_screen'],
     lite: true,
   },
@@ -36,7 +36,7 @@ const models = [
     id: 'desk_lamp_arm_01',
     resolution: '2k',
     file: 'lamp.glb',
-    textures: { color: 1024, normal: 512, arm: 1024 },
+    textures: { color: 1024, normal: 512, arm: 512 },
     lite: true,
   },
   {
