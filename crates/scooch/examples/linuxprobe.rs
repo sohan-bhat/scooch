@@ -647,7 +647,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         let current = match p.kind {
             Some(Kind::Gnome) => ding::INSETS,
-            Some(Kind::Kde) => kde_rules::INSETS,
+            Some(Kind::Kde) => if kde::plasma6() { kde_rules::INSETS_6 } else { kde_rules::INSETS },
             Some(Kind::Xfce) => if xfce::version().is_some_and(|version| version >= (4, 19)) { xfce_rules::INSETS_4_20 } else { xfce_rules::INSETS },
             Some(Kind::Cinnamon) => nemo::INSETS,
             Some(Kind::Mate) => caja::INSETS,
@@ -1014,7 +1014,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 vec![(Box::new(Xfconf) as Box<dyn record::Settings>, format!("{prefix}/last-image")), (Box::new(Xfconf), format!("{prefix}/image-style"))]
             }
             Some(Kind::Kde) => kde::state().ok().and_then(|state| kde::containment(&state, screen).and_then(|desktop| desktop.id.parse::<i64>().ok())).map(|id| vec![(Box::new(Plasma) as Box<dyn record::Settings>, kde_rules::record_key(id))]).unwrap_or_default(),
-            Some(Kind::Cinnamon) => ["org.cinnamon.desktop.background picture-uri", "org.cinnamon.desktop.background picture-options"].iter().map(|key| (Box::new(Gsettings) as Box<dyn record::Settings>, key.to_string())).collect(),
+            Some(Kind::Cinnamon) => {
+                let listed = cinnamon::background_list().is_some();
+                ["org.cinnamon.desktop.background picture-uri", "org.cinnamon.desktop.background picture-options", "org.cinnamon.desktop.background picture-uri-list", "org.cinnamon.desktop.background background-mode"]
+                    .iter()
+                    .take(if listed { 4 } else { 2 })
+                    .map(|key| (Box::new(Gsettings) as Box<dyn record::Settings>, key.to_string()))
+                    .collect()
+            }
             Some(Kind::Mate) => ["org.mate.background picture-filename", "org.mate.background picture-options"].iter().map(|key| (Box::new(Gsettings) as Box<dyn record::Settings>, key.to_string())).collect(),
             _ => Vec::new(),
         }
@@ -1139,6 +1146,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let home = p.home.clone();
         let first = wait_until(Duration::from_secs(60), || rendered(&home));
         p.line(format!("- first render after {:?} ms", first.map(|time| time.as_millis())));
+        std::thread::sleep(Duration::from_secs(2));
         let mut times = Vec::new();
         let frame = primary_frame(p).unwrap_or(screen.frame);
         for round in 1..=5 {
@@ -1272,6 +1280,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             p.line(format!("- set `{}` to {} {:?}", screen.id, path.display(), set.map_err(|error| error.to_string())));
             pictures.push((screen.clone(), path));
         }
+        let _ = fs::remove_file(record::file(&p.home));
+        p.line("- the probe set those pictures the way a person would, so no record of them is kept".to_string());
         std::thread::sleep(Duration::from_secs(2));
         for (screen, path) in &pictures {
             let frame = physical(&screen.frame, scale);
