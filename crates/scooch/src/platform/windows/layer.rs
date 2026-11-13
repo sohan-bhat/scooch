@@ -1,6 +1,7 @@
 use super::com;
 use crate::platform::Screen;
 use anyhow::{anyhow, bail, Context, Result};
+pub use scooch_live::Gpu;
 use scooch_live::{Pattern, Renderer, Target};
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -389,9 +390,9 @@ trait Presenter {
     fn adapter(&self) -> String;
 }
 
-struct Gpu(Renderer);
+struct Wgpu(Renderer);
 
-impl Presenter for Gpu {
+impl Presenter for Wgpu {
     fn present(&mut self, bar: Option<f32>) -> Result<()> {
         self.0.frame(bar).map_err(|error| anyhow!(error))
     }
@@ -491,29 +492,24 @@ impl Presenter for Blit {
     }
 }
 
-fn presenter(method: Method, window: isize, pattern: &Pattern) -> Result<Box<dyn Presenter>> {
+fn presenter(method: Method, window: isize, pattern: &Pattern, gpu: Option<&Gpu>) -> Result<Box<dyn Presenter>> {
     let (width, height) = (pattern.width as i32, pattern.height as i32);
     Ok(match method {
         Method::Hwnd | Method::Visual | Method::VisualNoRedirection => {
             let instance = unsafe { GetModuleHandleW(PCWSTR::null()) }?;
             let target = Target::Window { window, instance: instance.0 as isize, composition: method != Method::Hwnd };
-            Box::new(Gpu(Renderer::new(target, pattern).map_err(|error| anyhow!(error))?))
+            let renderer = match gpu {
+                Some(gpu) => Renderer::on(gpu, target, pattern),
+                None => Renderer::new(target, pattern),
+            };
+            Box::new(Wgpu(renderer.map_err(|error| anyhow!(error))?))
         }
         Method::Copy => Box::new(Blit::new(hwnd(window), width, height, bgra(pattern))?),
         Method::Gdi => Box::new(Gdi { window: hwnd(window), width, height, base: bgra(pattern), frame: Vec::new() }),
     })
 }
 
-fn render_thread(method: Method, window: isize, pattern: Pattern, cycle: Duration, stop: Arc<AtomicBool>, stats: Arc<Mutex<Stats>>, ready: mpsc::Sender<Result<()>>) {
-    let opened = Instant::now();
-    let mut presenter = match presenter(method, window, &pattern) {
-        Ok(presenter) => presenter,
-        Err(error) => {
-            let _ = ready.send(Err(error));
-            return;
-        }
-    };
-    drop(pattern);
+fn render_thread(mut presenter: Box<dyn Presenter>, opened: Instant, cycle: Duration, stop: Arc<AtomicBool>, stats: Arc<Mutex<Stats>>, ready: mpsc::Sender<Result<()>>) {
     if let Err(error) = presenter.present(Some(0.0)) {
         let _ = ready.send(Err(error));
         return;
@@ -546,6 +542,10 @@ pub fn repairs() -> u32 {
 }
 
 pub fn open(screen: &Screen, method: Method, pattern: Pattern, cycle: Duration) -> Result<Layer> {
+    open_on(screen, method, pattern, cycle, None)
+}
+
+pub fn open_on(screen: &Screen, method: Method, pattern: Pattern, cycle: Duration, gpu: Option<Gpu>) -> Result<Layer> {
     com::aware();
     let (layout, notes) = layout()?;
     let area = frame_in_parent(screen, hwnd(layout.parent()));
@@ -570,7 +570,15 @@ pub fn open(screen: &Screen, method: Method, pattern: Pattern, cycle: Duration) 
     let (render_stop, render_stats) = (stop.clone(), stats.clone());
     let (render_done, render_finished) = mpsc::channel();
     let render_thread = std::thread::Builder::new().name("scooch-layer-render".into()).spawn(move || {
-        render_thread(method, window, pattern, cycle, render_stop, render_stats, render_ready);
+        let opened = Instant::now();
+        let made = presenter(method, window, &pattern, gpu.as_ref());
+        drop(pattern);
+        match made {
+            Ok(made) => render_thread(made, opened, cycle, render_stop, render_stats, render_ready),
+            Err(error) => {
+                let _ = render_ready.send(Err(error));
+            }
+        }
         let _ = render_done.send(());
     });
     let mut layer = Layer { window, layout, notes, stats, stop, window_thread: Some((window_thread, window_finished)), render_thread: render_thread.ok().map(|handle| (handle, render_finished)) };

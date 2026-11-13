@@ -16,6 +16,16 @@ pub struct Pattern {
     pub rgba: Vec<u8>,
 }
 
+#[derive(Clone)]
+pub struct Gpu {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    composition: bool,
+    pub name: String,
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -28,16 +38,32 @@ pub struct Renderer {
     pub adapter: String,
 }
 
-fn instance(target: &Target) -> wgpu::Instance {
-    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-    descriptor.backends = if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::METAL };
-    #[cfg(windows)]
-    if let Target::Window { composition: true, .. } = target {
-        descriptor.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
+fn composition(target: &Target) -> bool {
+    matches!(target, Target::Window { composition: true, .. })
+}
+
+impl Gpu {
+    pub fn new(composition: bool) -> Result<Self, String> {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::METAL };
+        #[cfg(windows)]
+        if composition {
+            descriptor.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
+        }
+        let instance = wgpu::Instance::new(descriptor);
+        let mut options = wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::LowPower, ..Default::default() };
+        let adapter = match pollster::block_on(instance.request_adapter(&options)) {
+            Ok(adapter) => adapter,
+            Err(_) => {
+                options.force_fallback_adapter = true;
+                pollster::block_on(instance.request_adapter(&options)).map_err(|error| format!("request adapter {error}"))?
+            }
+        };
+        let info = adapter.get_info();
+        let name = format!("{} {:?} {:?}", info.name, info.device_type, info.backend);
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|error| format!("request device {error}"))?;
+        Ok(Self { instance, adapter, device, queue, composition, name })
     }
-    #[cfg(not(windows))]
-    let _ = target;
-    wgpu::Instance::new(descriptor)
 }
 
 fn surface_target(target: &Target) -> Result<wgpu::SurfaceTargetUnsafe, String> {
@@ -59,19 +85,19 @@ fn surface_target(target: &Target) -> Result<wgpu::SurfaceTargetUnsafe, String> 
 
 impl Renderer {
     pub fn new(target: Target, pattern: &Pattern) -> Result<Self, String> {
-        let instance = instance(&target);
+        let gpu = Gpu::new(composition(&target))?;
+        Self::on(&gpu, target, pattern)
+    }
+
+    pub fn on(gpu: &Gpu, target: Target, pattern: &Pattern) -> Result<Self, String> {
+        if gpu.composition != composition(&target) {
+            return Err("the device was made for another presentation system".into());
+        }
+        let Gpu { instance, adapter, device, queue, name, .. } = gpu.clone();
         let surface = unsafe { instance.create_surface_unsafe(surface_target(&target)?) }.map_err(|error| format!("create surface {error}"))?;
-        let mut options = wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::LowPower, compatible_surface: Some(&surface), ..Default::default() };
-        let adapter = match pollster::block_on(instance.request_adapter(&options)) {
-            Ok(adapter) => adapter,
-            Err(_) => {
-                options.force_fallback_adapter = true;
-                pollster::block_on(instance.request_adapter(&options)).map_err(|error| format!("request adapter {error}"))?
-            }
-        };
-        let info = adapter.get_info();
-        let name = format!("{} {:?} {:?}", info.name, info.device_type, info.backend);
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|error| format!("request device {error}"))?;
+        if !adapter.is_surface_supported(&surface) {
+            return Err(format!("{name} cannot present to this surface"));
+        }
         let capabilities = surface.get_capabilities(&adapter);
         let format = capabilities.formats.iter().copied().find(|format| !format.is_srgb()).or(capabilities.formats.first().copied()).ok_or("the surface offers no format")?;
         let mut config = surface.get_default_config(&adapter, pattern.width, pattern.height).ok_or("the surface has no default configuration")?;
@@ -178,5 +204,11 @@ impl Renderer {
         self.queue.submit([encoder.finish()]);
         self.queue.present(texture);
         Ok(())
+    }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(1)) });
     }
 }
