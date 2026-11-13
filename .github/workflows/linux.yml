@@ -132,7 +132,7 @@ jobs:
           SCRIPT: ${{ matrix.script || matrix.desktop }}
         run: |
           if [ -n "$IMAGE" ]; then
-            docker run --rm -v "$PWD:/work" -w /work -e SCOOCH_SCALE -e SCOOCH_MONITORS -e PACKAGES -e EXTRAS -e HOST_UID="$(id -u)" "$IMAGE" bash .github/linux/container.sh "$SCRIPT"
+            docker run --rm --cap-add SYS_NICE -v "$PWD:/work" -w /work -e SCOOCH_SCALE -e SCOOCH_MONITORS -e PACKAGES -e EXTRAS -e HOST_UID="$(id -u)" "$IMAGE" bash .github/linux/container.sh "$SCRIPT"
           else
             XDG_RUNTIME_DIR="$(mktemp -d)"
             chmod 700 "$XDG_RUNTIME_DIR"
