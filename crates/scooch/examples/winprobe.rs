@@ -11,7 +11,7 @@ fn main() -> std::process::ExitCode {
 #[cfg(windows)]
 mod probe {
     use anyhow::{anyhow, bail, Context, Result};
-    use scooch::platform::windows::layout::{self, Cell, Label, Spacing, SPACING};
+    use scooch::platform::windows::layout::{self, Cell, Label, SPACING};
     use scooch::platform::windows::{com, picture, shell, startup, wakes};
     use scooch::platform::{self, Screen};
     use scooch_core::{Rect, RgbImage};
@@ -44,7 +44,7 @@ mod probe {
     use ::windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow, SystemParametersInfoForDpi, MDT_EFFECTIVE_DPI};
     use ::windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK,
-        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_SHIFT,
+        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_CONTROL, VK_SHIFT,
     };
     use ::windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use ::windows::Win32::UI::Shell::{
@@ -56,7 +56,7 @@ mod probe {
     };
     use ::windows::Win32::UI::WindowsAndMessaging::{
         PostMessageW, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER, WM_COMMAND,
-        FindWindowW, GetForegroundWindow, IsWindowVisible, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW, GetClientRect, GetSystemMetrics, GetWindowThreadProcessId, MsgWaitForMultipleObjects, PeekMessageW, RegisterClassExW,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW, GetClientRect, GetSystemMetrics, GetWindowThreadProcessId, MsgWaitForMultipleObjects, PeekMessageW, RegisterClassExW,
         SetCursorPos, SystemParametersInfoW, TranslateMessage, EVENT_MAX, EVENT_MIN, MSG, PM_REMOVE, QS_ALLINPUT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
         SPI_GETICONTITLELOGFONT, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_SETTINGCHANGE, WNDCLASSEXW,
     };
@@ -66,6 +66,7 @@ mod probe {
     const FOLDER_NOTE: u32 = WM_APP + 12;
     const SETTLE: Duration = Duration::from_millis(1500);
     const FILE_WAIT: Duration = Duration::from_secs(5);
+    const SPARE: f32 = 10.0;
     const PROBES: [(&str, bool); 7] = [
         ("scooch-probe-a.txt", false),
         ("scooch-probe-twentyeight.txt", false),
@@ -136,6 +137,7 @@ mod probe {
         desktop: PathBuf,
         window: HWND,
         notifications: Vec<u32>,
+        failed: Vec<String>,
         made: Vec<PathBuf>,
         flags: Option<u32>,
         mode: Option<(FOLDERVIEWMODE, i32)>,
@@ -169,6 +171,7 @@ mod probe {
             let started = Instant::now();
             if let Err(error) = check(self) {
                 self.line(format!("- **check failed** {error:#}"));
+                self.failed.push(format!("{title} stopped with {error:#}"));
             }
             self.line(format!("- took {} ms", started.elapsed().as_millis()));
             self.save();
@@ -197,6 +200,7 @@ mod probe {
             desktop,
             window: HWND::default(),
             notifications: Vec::new(),
+            failed: Vec::new(),
             made: Vec::new(),
             flags: None,
             mode: None,
@@ -215,8 +219,22 @@ mod probe {
         probe.section("5b Solid color and slideshow", modes);
         probe.section("6 End to end", end_to_end);
         probe.section("7 Cleanup", cleanup);
+        probe.line(String::new());
+        probe.line("## Result".to_string());
+        probe.line(String::new());
+        let failed = probe.failed.clone();
+        if failed.is_empty() {
+            probe.line("- every required measurement came back".to_string());
+        }
+        for failure in &failed {
+            probe.line(format!("- **failed** {failure}"));
+        }
         probe.save();
-        ExitCode::SUCCESS
+        if failed.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }
     }
 
     fn setup(p: &mut Probe) -> Result<()> {
@@ -762,46 +780,55 @@ mod probe {
         rect.map_or(RECT::default(), |rect| RECT { left: rect.x as i32, top: rect.y as i32, right: (rect.x + rect.w) as i32, bottom: (rect.y + rect.h) as i32 })
     }
 
-    fn union(a: Option<Rect>, b: Option<Rect>) -> Option<Rect> {
-        match (a, b) {
-            (Some(a), Some(b)) => layout::union(&[a, b]),
-            (one, other) => one.or(other),
-        }
-    }
-
     fn solve(p: &mut Probe, measured: &[Measure], cell: &Cell) {
-        let mut above = f32::MIN;
-        let mut tail = f32::MIN;
-        let mut sides = f32::MIN;
-        let mut offsets = Vec::new();
-        let mut fits = Vec::new();
+        let mut negative = Vec::new();
+        p.line(String::new());
         for measure in measured {
-            let Some(truth) = union(measure.automation, measure.pixels) else { continue };
-            let lines = layout::lines(cell, measure.label);
-            above = above.max(measure.at.1 - truth.y);
-            tail = tail.max(truth.y + truth.h - (measure.at.1 + cell.icon + lines * cell.line));
-            let anchor = measure.at.0 + cell.icon / 2.0;
-            let half = (anchor - truth.x).max(truth.x + truth.w - anchor);
-            let content = cell.icon.max(measure.label.width.min(cell.wrap(&SPACING)));
-            sides = sides.max(2.0 * half - content);
-            offsets.push(format!("{} {:.1}", measure.name, truth.x + truth.w / 2.0 - measure.at.0));
-            let edges = margins(&measure.adapter, &truth);
-            fits.push((measure.name.clone(), edges.iter().all(|edge| *edge >= 0.0 && *edge < 8.0)));
+            let Some(drawn) = measure.pixels else {
+                p.line(format!("- {} has no drawn pixels to judge", measure.name));
+                p.failed.push(format!("{} has no drawn pixels", measure.name));
+                continue;
+            };
+            let edges = margins(&measure.adapter, &drawn);
+            let verdict = if edges.iter().any(|edge| *edge < 0.0) {
+                negative.push((measure, drawn));
+                "misses drawn pixels"
+            } else if edges.iter().any(|edge| *edge > SPARE) {
+                "spares more than 10 px"
+            } else {
+                "fits, every edge between 0 and 10 px"
+            };
+            p.line(format!("- {} {verdict} {edges:?}", measure.name));
+            if verdict != "fits, every edge between 0 and 10 px" {
+                p.failed.push(format!("{} {verdict}", measure.name));
+            }
         }
-        if above == f32::MIN {
-            p.line("- no measurement to solve from".to_string());
+        if negative.is_empty() {
+            p.line(format!("- no rectangle misses a drawn pixel, so the constants stay `{SPACING:?}`"));
             return;
         }
-        p.line(String::new());
-        p.line(format!("- truth center minus reported x, expected {} under the current reading, {}", cell.icon / 2.0, offsets.join(", ")));
-        for (name, fit) in &fits {
-            p.line(format!("- {name} {}", if *fit { "fits, every edge inside 0 to 8 px" } else { "does not fit the 0 to 8 px rule" }));
+        let mut above = f32::MIN;
+        let mut tail = f32::MIN;
+        let mut one_line = f32::MIN;
+        let mut wrapped = f32::MIN;
+        for (measure, drawn) in &negative {
+            let lines = layout::lines(cell, measure.label);
+            above = above.max(measure.at.1 - drawn.y);
+            tail = tail.max(drawn.y + drawn.h - (measure.at.1 + cell.icon + lines * cell.line));
+            let anchor = measure.at.0 + cell.icon / 2.0;
+            let width = 2.0 * (anchor - drawn.x).max(drawn.x + drawn.w - anchor);
+            if lines > 1.0 {
+                wrapped = wrapped.max(width);
+            } else {
+                one_line = one_line.max(width - cell.icon.max(measure.label.width.min(cell.cap(&SPACING))));
+            }
         }
-        let solved = Spacing { inset: SPACING.inset, above: above.ceil().max(0.0), gap: SPACING.gap, below: (tail.ceil() - SPACING.gap).max(0.0), sides: sides.ceil().max(0.0) };
-        p.line(format!("- needed above {above:.1}, below the label lines {tail:.1}, both sides together {sides:.1}"));
         p.line(format!(
-            "- corrected constants `Spacing {{ inset: {:.0}, above: {:.0}, gap: {:.0}, below: {:.0}, sides: {:.0} }}` against the current `{:?}`",
-            solved.inset, solved.above, solved.gap, solved.below, solved.sides, SPACING
+            "- corrected constants from the misses, top at least {:.0} px above the reported point, {:.0} px below the label lines, {:.0} px of sides on one line, {:.0} px wide when wrapped",
+            above.ceil(),
+            tail.ceil(),
+            one_line.ceil(),
+            wrapped.ceil()
         ));
     }
 
@@ -1083,26 +1110,6 @@ mod probe {
             let sent = chord(&[VK_CONTROL, VK_SHIFT, VIRTUAL_KEY(0x33)]);
             pump(Duration::from_millis(600));
             Ok(format!("sent {sent}, view size {before:?} then {:?}", shell::mode(&view).map(|mode| mode.1).ok()))
-        }));
-        actions.push(act(p, "make icons small through the desktop menu", |_| {
-            let before = shell::mode(&view).map(|mode| mode.1).ok();
-            let mut sent = click(empty_spot(), true);
-            pump(Duration::from_millis(900));
-            let front = class_name(unsafe { GetForegroundWindow() });
-            let menu = unsafe { FindWindowW(w!("#32768"), PCWSTR::null()) }.ok().filter(|menu| unsafe { IsWindowVisible(*menu) }.as_bool());
-            if menu.is_some() {
-                for code in [VIRTUAL_KEY(0x56), VK_DOWN, VK_DOWN, VK_RETURN] {
-                    sent &= chord(&[code]);
-                    pump(Duration::from_millis(400));
-                }
-                pump(Duration::from_millis(600));
-            }
-            let after = shell::mode(&view).map(|mode| mode.1).ok();
-            for _ in 0..3 {
-                chord(&[VK_ESCAPE]);
-                pump(Duration::from_millis(150));
-            }
-            Ok(format!("sent {sent}, front window `{front}`, classic menu open {}, view size {before:?} then {after:?}", menu.is_some()))
         }));
         let _ = unsafe { view.folder.SetViewModeAndIconSize(original.0, original.1) };
         pump(Duration::from_millis(600));
@@ -1470,6 +1477,13 @@ mod probe {
         found
     }
 
+    fn new_lines(path: &Path, read: &mut u64) -> Vec<String> {
+        let Ok(bytes) = fs::read(path) else { return Vec::new() };
+        let start = (*read as usize).min(bytes.len());
+        *read = bytes.len() as u64;
+        String::from_utf8_lossy(&bytes[start..]).lines().map(str::to_string).collect()
+    }
+
     fn rendered(home: &Path) -> bool {
         let Ok(bytes) = fs::read(home.join("state.json")) else { return false };
         let Ok(state) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false };
@@ -1522,6 +1536,9 @@ mod probe {
         fs::write(&picture, jpeg(&subject_picture(screen.frame.w as u32, screen.frame.h as u32))?)?;
         desktop.set_wallpaper(&screen, &picture)?;
         p.line(format!("- wallpaper set to a picture with one bright subject in the middle {}", picture.display()));
+        let _ = click(empty_spot(), false);
+        park_cursor();
+        pump(Duration::from_millis(600));
         fs::write(p.home.join("state.json"), br#"{"version":1,"on":true}"#)?;
         let log = fs::File::create(p.out.join("scoochw.log"))?;
         let child = Command::new(&twin).arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn()?;
@@ -1531,6 +1548,9 @@ mod probe {
         let home = p.home.clone();
         let first = wait_until(Duration::from_secs(60), || rendered(&home));
         p.line(format!("- first render after {:?} ms", first.map(|time| time.as_millis())));
+        if first.is_none() {
+            p.failed.push("the daemon never rendered".into());
+        }
         let view = shell::view()?;
         let (name, folder) = PROBES[0];
         let shown = shown_name(name, folder);
@@ -1540,6 +1560,8 @@ mod probe {
         let subject = POINT { x: (screen.frame.x + screen.frame.w / 2.0) as i32, y: (screen.frame.y + screen.frame.h / 2.0) as i32 };
         let calm = POINT { x: (screen.frame.x + screen.frame.w * 0.8) as i32, y: (screen.frame.y + screen.frame.h * 0.2) as i32 };
         let mut times = Vec::new();
+        let trace = p.out.join("scoochw.log");
+        let mut read = fs::metadata(&trace).map_or(0, |meta| meta.len());
         for round in 0..6 {
             let before = desktop.wallpaper(&screen)?.unwrap_or_default();
             let Some(rect) = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect) else {
@@ -1552,8 +1574,20 @@ mod probe {
             let dropped = Instant::now();
             let changed = wait_until(Duration::from_secs(10), || desktop.wallpaper(&screen).ok().flatten().is_some_and(|now| now != before));
             let latency = changed.map(|_| dropped.elapsed().as_millis());
-            p.line(format!("- drag {} from {},{} to {},{} sent {sent}, new wallpaper after {:?} ms", round + 1, from.x, from.y, to.x, to.y, latency));
-            times.extend(latency);
+            pump(Duration::from_millis(300));
+            let landed = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| (rect.x + rect.w / 2.0, rect.y));
+            let wakes = new_lines(&trace, &mut read).into_iter().filter(|line| line.contains(" wake ") || line.contains(" set ")).collect::<Vec<_>>();
+            p.line(format!("- drag {} from {},{} to {},{} sent {sent}, item now at {:?}, new wallpaper after {:?} ms", round + 1, from.x, from.y, to.x, to.y, landed, latency));
+            for line in &wakes {
+                p.line(format!("  - daemon `{}`", line.chars().take(160).collect::<String>()));
+            }
+            if !wakes.iter().any(|line| line.contains(" wake ")) {
+                p.failed.push(format!("drag {} woke nothing", round + 1));
+            }
+            match latency {
+                Some(_) => times.extend(latency),
+                None => p.failed.push(format!("drag {} brought no new wallpaper", round + 1)),
+            }
             park_cursor();
             pump(Duration::from_millis(800));
         }
