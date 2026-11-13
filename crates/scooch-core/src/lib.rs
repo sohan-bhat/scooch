@@ -33,6 +33,7 @@ mod blur;
 mod bundle;
 mod color;
 mod look;
+mod pack;
 mod pads;
 mod paint;
 mod render;
@@ -44,6 +45,7 @@ mod table;
 mod warp;
 
 pub use bundle::{Bundle, Constants, RAMP};
+pub use pack::{Canvas, TablesError};
 pub use image::{GrayImage, RgbImage, RgbaImage};
 pub use paint::Materials;
 pub use shape::FIELD_STEP as SCENERY_FIELD_STEP;
@@ -157,6 +159,11 @@ pub fn render_painted(image: &RgbImage, analysis: &Analysis, placement: &Placeme
 
 pub fn bundle(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> Bundle {
     bundle::make(image, analysis, placement, scene, options, &paint::materials(analysis))
+}
+
+pub fn canvas(image: &RgbImage, width: u32, height: u32) -> Canvas {
+    let made = bundle::canvas(image, width, height);
+    Canvas { width: made.width(), height: made.height(), pixels: made.into_owned().into_raw() }
 }
 
 pub fn frame(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {

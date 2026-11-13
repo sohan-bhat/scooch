@@ -135,7 +135,7 @@ fn ramps(u: f32) -> Vec<u8> {
     out
 }
 
-fn canvas(image: &RgbImage, width: u32, height: u32) -> Cow<'_, RgbImage> {
+pub fn canvas(image: &RgbImage, width: u32, height: u32) -> Cow<'_, RgbImage> {
     let cap = (2 * width.max(height)).clamp(1, CANVAS_MOST);
     let long = image.width().max(image.height());
     if long <= cap {
