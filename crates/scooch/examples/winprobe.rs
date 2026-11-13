@@ -601,8 +601,9 @@ mod probe {
         p.line("| item | position | label | adapter rect |".to_string());
         p.line("|---|---|---|---|".to_string());
         for (item, rect) in items.iter().zip(&rects) {
-            let label = font.measure(&item.name, cell.wrap(&SPACING).round() as i32);
-            p.line(format!("| {} | {},{} | {}x{} | {} |", item.name, item.at.x, item.at.y, label.width, label.height, show(rect)));
+            let label = font.measure(&item.name, cell.wrap(&SPACING).round() as i32, item.unfolded);
+            let open = if item.unfolded { " unfolded" } else { "" };
+            p.line(format!("| {} | {},{} | {}x{}{open} | {} |", item.name, item.at.x, item.at.y, label.width, label.height, show(rect)));
         }
         Ok(())
     }
@@ -748,11 +749,12 @@ mod probe {
                 let shown = shown_name(name, *folder);
                 let automation = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown || seen == name).map(|(_, rect)| rect);
                 let pixels = changed_box(&before, &after, (area.left, area.top), clip);
+                let unfolded = shell::items(&view)?.into_iter().find(|item| item.name == shown || item.name == *name).is_some_and(|item| item.unfolded);
                 let _ = fs::write(p.out.join(format!("before-{index}.png")), scooch_core::encode_png(&before)?);
                 let _ = fs::write(p.out.join(format!("after-{index}.png")), scooch_core::encode_png(&after)?);
                 place(&view, &pidl, home)?;
                 pump(Duration::from_millis(400));
-                let label = font.measure(&shown, wrap);
+                let label = font.measure(&shown, wrap, unfolded);
                 let at = (at.x as f32, at.y as f32);
                 Ok(Measure { name: shown, at, label, adapter: layout::item_rect(at, &cell, label, &SPACING), automation, pixels })
             })();
@@ -774,12 +776,13 @@ mod probe {
         for measure in &measured {
             let to = |truth: &Option<Rect>| truth.map_or("none".to_string(), |truth| format!("{:?}", margins(&measure.adapter, &truth)));
             p.line(format!(
-                "| {} | {:.0},{:.0} | {:.0}x{:.0} | {} | {} | {} | {} | {} |",
+                "| {} | {:.0},{:.0} | {:.0}x{:.0}{} | {} | {} | {} | {} | {} |",
                 measure.name,
                 measure.at.0,
                 measure.at.1,
                 measure.label.width,
                 measure.label.height,
+                if measure.label.unfolded { " unfolded" } else { "" },
                 show(&measure.adapter),
                 measure.automation.as_ref().map_or("none".into(), show),
                 measure.pixels.as_ref().map_or("none".into(), show),
