@@ -938,6 +938,7 @@ mod probe {
         p.line(format!("- each round first moves {name} to a calm spot without timing it and pokes the daemon, then times one move onto the subject, with the scenery setting `{}`", state(p)["options"]["scenery"].as_str().unwrap_or("missing")));
         let mut times = Vec::new();
         let mut sources = std::collections::BTreeMap::<String, usize>::new();
+        let first_line = daemon_log(p).lines().count();
         for round in 0..5 {
             away(p, name, calm);
             let before = desktop.wallpaper(&screen).ok().flatten();
@@ -956,7 +957,7 @@ mod probe {
         }
         times.sort_unstable();
         p.line(format!("- Apple Event moves that brought a new wallpaper {} of 5, times {times:?} ms, median {:?}", times.len(), times.get(times.len() / 2)));
-        p.line(format!("- wake sources during the Apple Event moves {sources:?}"));
+        p.line(format!("- wake sources during the Apple Event moves {sources:?}, render laps {:?} ms", render_laps(p, first_line)));
         if times.is_empty() {
             p.fail("no Apple Event move brought a new wallpaper");
         }
@@ -986,6 +987,10 @@ mod probe {
 
     fn tick_lines(p: &Probe, from: usize) -> Vec<String> {
         new_lines(&daemon_log(p), from).into_iter().filter(|line| line.contains(" tick ")).map(|line| line.chars().take(200).collect()).collect()
+    }
+
+    fn render_laps(p: &Probe, from: usize) -> Vec<u64> {
+        new_lines(&daemon_log(p), from).iter().filter(|line| line.contains(" tick ") && line.contains("Rendered")).filter_map(|line| line.split(", ").find_map(|lap| lap.trim().strip_prefix("render ")).and_then(|millis| millis.trim().parse().ok())).collect()
     }
 
     fn icon_rect(name: &str) -> Option<Rect> {
@@ -1064,16 +1069,17 @@ mod probe {
         let current = shown();
         let matched = current.as_deref().and_then(|file| matches_file(&off_shot, file, &icons, &screen));
         p.line(format!("- share of sample points away from the icons where the scenery off capture matches the wallpaper file {current:?} {matched:?}"));
+        let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
         let back = position(p, name).unwrap_or(to);
         let before = shown();
         let seen = daemon_log(p).lines().count();
-        drag(back, from);
+        drag(back, subject);
         let dropped = Instant::now();
         let off_time = wait_until(Duration::from_secs(12), || shown() != before).map(|_| dropped.elapsed().as_millis());
         std::thread::sleep(Duration::from_millis(600));
-        p.line(format!("- scenery off, CGEvent drag back to {:.0},{:.0}: new wallpaper after {off_time:?} ms", from.0, from.1));
+        p.line(format!("- scenery off, CGEvent drag onto the subject at {:.0},{:.0}: new wallpaper after {off_time:?} ms", subject.0, subject.1));
         p.line(format!("  - daemon ticks {:?}", tick_lines(p, seen)));
-        let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
+        let seen = daemon_log(p).lines().count();
         let mut times = Vec::new();
         for _ in 0..5 {
             away(p, name, from);
@@ -1084,7 +1090,7 @@ mod probe {
             std::thread::sleep(Duration::from_millis(400));
         }
         times.sort_unstable();
-        p.line(format!("- scenery off, Apple Event moves onto the subject that brought a new wallpaper {} of 5, times {times:?} ms, median {:?}, to set beside the scenery on moves in section 5", times.len(), times.get(times.len() / 2)));
+        p.line(format!("- scenery off, Apple Event moves onto the subject that brought a new wallpaper {} of 5, times {times:?} ms, median {:?}, render laps {:?} ms, to set beside the scenery on moves in section 5", times.len(), times.get(times.len() / 2), render_laps(p, seen)));
         let ran = p.scooch(&["scenery"], LIMIT);
         p.line(format!("- scooch scenery said {:?} and the setting is back to `{}`", ran.text(), setting(p)));
         if on_time.is_none() || off_switch.is_none() || off_time.is_none() {
@@ -1634,7 +1640,7 @@ mod probe {
         let timed = Instant::now();
         let _ = grab(display);
         let grab_ms = timed.elapsed().as_secs_f64() * 1000.0;
-        let cross = (grab_ms * 12.0 / 1000.0).clamp(0.5, 4.0);
+        let cross = (grab_ms * 30.0 / 1000.0).clamp(0.5, 4.0);
         p.line(format!("- one screen capture takes {grab_ms:.0} ms here, so the bar crosses in {cross:.2} s to be caught several times on the way"));
         let _ = scooch_core::encode_png(&baseline.image()).map(|bytes| fs::write(p.out.join("live-before.png"), bytes));
         let paper = picture_window(&screen).context("no wallpaper window was found for this screen")?;
