@@ -78,6 +78,7 @@ pub trait Desktop: Send + Sync {
     fn in_use(&self, _folder: &Path) -> Result<Option<Vec<PathBuf>>> {
         Ok(None)
     }
+    fn watching(&self, _wake: Wake) {}
 }
 
 pub const AGREE: Duration = Duration::from_millis(500);

@@ -904,6 +904,11 @@ pub fn gave_up(state: &State) -> Result<()> {
     Ok(())
 }
 
+pub fn prime(desktop: &dyn Desktop, signal: &Arc<Signal>) {
+    let consent = signal.clone();
+    desktop.watching(Box::new(move || consent.wake()));
+}
+
 pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     let signal = Arc::new(Signal::default());
     let stop = Arc::new(Stop::default());
@@ -923,6 +928,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     if let Err(error) = store.mark(Some(crate::state::PROGRAM)) {
         eprintln!("{error}");
     }
+    prime(desktop.as_ref(), &signal);
     let daemon = Daemon::new(desktop.clone(), store.clone());
     let worker = signal.clone();
     let tracing = trace();
@@ -995,12 +1001,13 @@ pub mod tests {
         pub crash_after_set: Mutex<bool>,
         pub lag: Mutex<usize>,
         pub stale: Mutex<HashMap<String, (PathBuf, usize)>>,
+        pub watched: Mutex<Option<Wake>>,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -1100,6 +1107,10 @@ pub mod tests {
                 panic!("the process was killed right after the set");
             }
             Ok(())
+        }
+
+        fn watching(&self, wake: Wake) {
+            *self.watched.lock().unwrap() = Some(wake);
         }
 
         fn in_use(&self, folder: &Path) -> Result<Option<Vec<PathBuf>>> {
@@ -1993,6 +2004,22 @@ pub mod tests {
         assert_eq!(gave_up(&State { on: true, ..State::default() }).unwrap_err().to_string(), ALREADY);
         assert!(gave_up(&State { restoring: true, ..State::default() }).is_err());
         assert!(gave_up(&State::default()).is_ok());
+    }
+
+    #[test]
+    fn an_answer_to_a_consent_question_wakes_the_daemon() {
+        let fake = Fake::new(vec![screen("main", 0.0, 1.0)], Path::new("/p/a.jpg"));
+        let signal = Arc::new(Signal::default());
+        prime(fake.as_ref(), &signal);
+        let wake = fake.watched.lock().unwrap().take().expect("the daemon handed the adapter a wake before ticking");
+        wake();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let waiting = signal.clone();
+        std::thread::spawn(move || {
+            waiting.settle(Duration::ZERO, Duration::ZERO);
+            let _ = sender.send(());
+        });
+        assert!(receiver.recv_timeout(Duration::from_secs(2)).is_ok());
     }
 
     #[test]

@@ -57,8 +57,6 @@ pub fn run(wake: Wake) -> Result<()> {
     };
     let application = NSApplication::sharedApplication(marker);
     application.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    let answered = tag("consent");
-    super::finder::ask_in_background(move || answered());
     desktop_files(tag("desktop"), &home.join("Desktop"))?;
     mouse(tag("drag"));
     let workspace = NSWorkspace::sharedWorkspace().notificationCenter();

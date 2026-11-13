@@ -128,6 +128,10 @@ impl Desktop for Mac {
         Ok(store::in_use(folder))
     }
 
+    fn watching(&self, wake: Wake) {
+        finder::ask_in_background(wake);
+    }
+
     fn run(&self, wake: Wake) -> Result<()> {
         RUNNING.store(true, Ordering::SeqCst);
         let result = watch::run(wake);
