@@ -58,6 +58,12 @@ const models = [
 
 const environment = { id: 'studio_small_08', resolution: '1k', file: 'studio.hdr', width: 512 };
 
+const variants = [
+  { name: 'full', folder: out, scale: 1 },
+  { name: 'lite', folder: joinPath(out, 'lite'), scale: 0.5 },
+];
+const only = process.argv.find((arg) => arg.startsWith('--variant='))?.slice(10);
+
 async function exists(path) {
   return stat(path).then(() => true, () => false);
 }
@@ -121,7 +127,7 @@ const color = { isUASTC: false, qualityLevel: 210, compressionLevel: 3, isSetKTX
 const data = { isUASTC: false, qualityLevel: 190, compressionLevel: 3, isSetKTX2SRGBTransferFunc: false, isPerceptual: false, generateMipmap: true, imageDecoder };
 const normal = { isUASTC: true, needSupercompression: true, enableRDO: true, rdoQualityLevel: 2.5, isSetKTX2SRGBTransferFunc: false, isPerceptual: false, generateMipmap: true, imageDecoder };
 
-async function buildModel(io, model) {
+async function buildModel(io, model, variant) {
   const document = await io.read(await fetchModel(model));
   if (model.keep) keepOnly(document, model.keep);
   if (model.pivots) addPivots(document, model.pivots);
@@ -130,9 +136,9 @@ async function buildModel(io, model) {
   if (model.merge) steps.push(flatten(), join());
   steps.push(
     weld(),
-    resized(/baseColor/, model.textures.color),
-    resized(/normal/, model.textures.normal),
-    resized(/metallicRoughness|occlusion/, model.textures.arm),
+    resized(/baseColor/, model.textures.color * variant.scale),
+    resized(/normal/, model.textures.normal * variant.scale),
+    resized(/metallicRoughness|occlusion/, model.textures.arm * variant.scale),
     ktx2({ ...color, slots: /baseColor/ }),
     ktx2({ ...data, slots: /metallicRoughness|occlusion/ }),
     ktx2({ ...normal, slots: /normal/ }),
@@ -140,7 +146,7 @@ async function buildModel(io, model) {
   );
   await document.transform(...steps);
   const bytes = await io.writeBinary(document);
-  await writeFile(joinPath(out, model.file), bytes);
+  await writeFile(joinPath(variant.folder, model.file), bytes);
   return bytes.byteLength;
 }
 
@@ -227,15 +233,18 @@ async function buildEnvironment() {
 }
 
 await MeshoptEncoder.ready;
-await mkdir(out, { recursive: true });
 const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({ 'meshopt.encoder': MeshoptEncoder });
-let total = 0;
-for (const model of models) {
-  const size = await buildModel(io, model);
-  total += size;
-  console.log(model.file, (size / 1e6).toFixed(2), 'MB');
+for (const variant of variants.filter((candidate) => !only || candidate.name === only)) {
+  await mkdir(variant.folder, { recursive: true });
+  let total = 0;
+  for (const model of models) {
+    const size = await buildModel(io, model, variant);
+    total += size;
+    console.log(variant.name, model.file, (size / 1e6).toFixed(2), 'MB');
+  }
+  console.log(variant.name, 'total', (total / 1e6).toFixed(2), 'MB');
 }
-const environmentSize = await buildEnvironment();
-total += environmentSize;
-console.log(environment.file, (environmentSize / 1e6).toFixed(2), 'MB');
-console.log('total', (total / 1e6).toFixed(2), 'MB');
+if (!only) {
+  const environmentSize = await buildEnvironment();
+  console.log(environment.file, (environmentSize / 1e6).toFixed(2), 'MB');
+}
