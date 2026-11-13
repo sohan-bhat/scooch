@@ -41,11 +41,13 @@ One background process does this. It is event driven with no timer and no window
 
 ## Status
 
-| System | Status |
+| System | Tested on |
 |---|---|
-| macOS 14 and 15 | Tested on a real Mac |
-| Windows 10 and 11 | Written, not yet run on Windows |
-| Linux with GNOME, KDE Plasma, Xfce, Cinnamon or MATE | Written, not yet run on Linux |
+| macOS | A real Mac on macOS 15.5, one display |
+| Windows | Windows 11 on a GitHub runner, one display at 100% scaling |
+| Linux | Real sessions on Ubuntu 24.04 of GNOME 46 with Desktop Icons NG, KDE Plasma 5.27, Xfce 4.18, Cinnamon 6.0 and MATE 1.26 |
+
+Not yet tested: several monitors, several macOS Spaces, Windows 10, Windows display scaling, Plasma 6 and Xfce 4.20.
 
 ## Limits
 
@@ -53,7 +55,8 @@ One background process does this. It is event driven with no timer and no window
 - The wallpaper must be a picture file. A slideshow, a video wallpaper or a plain color is left alone until a picture is picked with `scooch use`.
 - macOS asks once for permission to read icon positions from Finder. Colors outside sRGB lose a little saturation in the rendered picture.
 - GNOME, Cinnamon and MATE use one picture for every monitor, so it is arranged for the main one.
-- On KDE an icon move can take up to 10 seconds to arrive, because Plasma saves icon positions on a timer.
+- On Linux a moved icon reaches Scooch when the desktop saves its positions, which takes 1 to 3 seconds and up to 10 on KDE.
+- On Windows a change of icon size, or icons moved by another program, is not noticed until the next drag or click on the desktop.
 
 ## Build
 

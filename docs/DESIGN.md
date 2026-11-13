@@ -96,7 +96,7 @@ autostart(exe or none)        -> add or remove the login item
 | System | Icons from | Wallpaper through | Changes arrive from |
 |---|---|---|---|
 | macOS | Finder, by Apple Events | NSWorkspace | Desktop folder events, mouse up over the desktop, the wallpaper store, screen and space changes |
-| Windows | The shell's IFolderView | IDesktopWallpaper | Shell change notifications, WinEvents from the desktop list, setting and display messages |
+| Windows | The shell's IFolderView, read on one single threaded apartment thread | IDesktopWallpaper, as PNG | Shell change notifications, capture end on the desktop thread, create through hide on the icon list, setting and display messages |
 | GNOME | Desktop Icons NG positions in gvfs metadata | gsettings | The gvfs metadata signal, the dconf signal, the Desktop folder |
 | KDE Plasma | Folder view positions in the applet config | Plasma scripting | The config folder, the Desktop folder |
 | Xfce | The xfdesktop positions file | xfconf | The positions folder, the xfconf signal, the Desktop folder |
@@ -128,6 +128,10 @@ A restore ends one of three ways, and the closing line counts each. The original
 **Never the wrong picture.** Right before setting an image the daemon reads the wallpaper again. If the user picked a new picture while the render ran, the render is dropped. A stop signal lets the running tick finish and save.
 
 Measured on macOS at rest, the daemon uses 0.01 s of CPU over two minutes, has no idle wakeups and holds about 5 to 7 MB. A moved icon becomes a new wallpaper in about half a second, of which 250 ms is the quiet period.
+
+Measured on Windows 11, a dragged icon becomes a new wallpaper in 317 to 435 ms, and a quiet minute uses 0 ms of CPU with 6 MB of private memory. Windows re-encodes a JPEG wallpaper and keeps a PNG exactly, so outputs are PNG there. No event reports a change of icon size or a move made by another program, so those wait for the next drag or click on the desktop.
+
+Measured on Linux, a quiet minute uses 0 to 10 ms of CPU and about 20 MB resident. Scooch's own share of a move is 0.3 to 0.7 s. The rest of the 2 to 4 s from drop to new wallpaper is the desktop saving its positions.
 
 ## Command
 
