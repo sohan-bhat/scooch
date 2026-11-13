@@ -1,6 +1,7 @@
 #![cfg(any(windows, target_os = "macos"))]
 
 use std::num::NonZeroIsize;
+use std::sync::{Arc, Mutex};
 
 const SHADER: &str = include_str!("pattern.wgsl");
 const BAR_HALF_WIDTH: f32 = 20.0;
@@ -23,7 +24,15 @@ pub struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     composition: bool,
+    pipelines: Arc<Mutex<Vec<Pipeline>>>,
     pub name: String,
+}
+
+#[derive(Clone)]
+struct Pipeline {
+    format: wgpu::TextureFormat,
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
 }
 
 pub struct Renderer {
@@ -62,7 +71,56 @@ impl Gpu {
         let info = adapter.get_info();
         let name = format!("{} {:?} {:?}", info.name, info.device_type, info.backend);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|error| format!("request device {error}"))?;
-        Ok(Self { instance, adapter, device, queue, composition, name })
+        let gpu = Self { instance, adapter, device, queue, composition, pipelines: Arc::new(Mutex::new(Vec::new())), name };
+        gpu.pipeline(wgpu::TextureFormat::Bgra8Unorm);
+        Ok(gpu)
+    }
+
+    fn pipeline(&self, format: wgpu::TextureFormat) -> Pipeline {
+        if let Some(found) = self.pipelines.lock().ok().and_then(|pipelines| pipelines.iter().find(|pipeline| pipeline.format == format).cloned()) {
+            return found;
+        }
+        let device = &self.device;
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pattern"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+            ],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("pattern"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("pattern"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("pattern"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState { module: &module, entry_point: Some("vertex"), compilation_options: wgpu::PipelineCompilationOptions::default(), buffers: &[] },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fragment"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let made = Pipeline { format, layout, pipeline };
+        if let Ok(mut pipelines) = self.pipelines.lock() {
+            pipelines.push(made.clone());
+        }
+        made
     }
 }
 
@@ -125,46 +183,12 @@ impl Renderer {
             size,
         );
         let uniform = device.create_buffer(&wgpu::BufferDescriptor { label: Some("frame"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("pattern"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
-                    count: None,
-                },
-            ],
-        });
+        let Pipeline { layout, pipeline, .. } = gpu.pipeline(format);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("pattern"),
             layout: &layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) }],
-        });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("pattern"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("pattern"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("pattern"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState { module: &module, entry_point: Some("vertex"), compilation_options: wgpu::PipelineCompilationOptions::default(), buffers: &[] },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fragment"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
-            }),
-            multiview_mask: None,
-            cache: None,
         });
         Ok(Self { device, queue, surface, pipeline, bind, uniform, width: pattern.width, height: pattern.height, adapter: name })
     }
