@@ -58,6 +58,7 @@ mod running {
     const LONGEST: u32 = 10_000;
     const LEAD_IN: Duration = Duration::from_millis(80);
     const SETTLE: u32 = 100;
+    const FLUSH: usize = 2;
 
     pub trait Platform: 'static {
         type Layer;
@@ -297,7 +298,7 @@ mod running {
                     }
                 }
             }
-            let frame: Option<Vec<(Shown, f32)>> = if let Some(moving) = motion.as_mut() {
+            let frame: Option<(Vec<(Shown, f32)>, bool)> = if let Some(moving) = motion.as_mut() {
                 let elapsed = moving.started.elapsed();
                 let t = (elapsed.as_secs_f32() / moving.length.as_secs_f32()).min(1.0);
                 let s = ease(t);
@@ -308,10 +309,12 @@ mod running {
                         layers.clear();
                     }
                     layers.push((Shown::Glide(moving.glide.clone(), s), if layers.is_empty() { 1.0 } else { lead }));
+                } else if t >= 1.0 {
+                    layers = vec![(Shown::Glide(moving.glide.clone(), 1.0), 1.0)];
                 } else {
                     layers.push((Shown::Glide(moving.glide.clone(), 1.0), s));
                 }
-                Some(layers)
+                Some((layers, t >= 1.0))
             } else if let Some(settle) = settling.as_mut() {
                 if let Some(still) = settle.still.clone() {
                     if settle.started.is_none() {
@@ -320,16 +323,20 @@ mod running {
                     }
                     let started = settle.started.unwrap_or_else(Instant::now);
                     let u = (started.elapsed().as_secs_f32() / settle.length.as_secs_f32()).min(1.0);
-                    let mut layers = settle.from.clone();
-                    layers.push((Shown::Still(still), u));
-                    Some(layers)
+                    if u >= 1.0 {
+                        Some((vec![(Shown::Still(still), 1.0)], true))
+                    } else {
+                        let mut layers = settle.from.clone();
+                        layers.push((Shown::Still(still), u));
+                        Some((layers, false))
+                    }
                 } else {
                     None
                 }
             } else {
                 None
             };
-            let Some(layers) = frame else { continue };
+            let Some((layers, last)) = frame else { continue };
             let presented = P::frame(|| screen.show(&looks(&layers)));
             let now = Instant::now();
             if let Err(why) = presented {
@@ -347,19 +354,21 @@ mod running {
                 }
                 moving.last = Some(now);
                 moving.frames += 1;
-                if moving.started.elapsed() >= moving.length {
-                    shown = vec![(Shown::Glide(moving.glide.clone(), 1.0), 1.0)];
+                if last {
+                    shown = layers;
                     tell(Event::Glided { id, frames: moving.frames, slow: moving.slow, first: moving.first.unwrap_or(0) });
                     motion = None;
                 }
-            } else if let Some(settle) = settling.as_ref() {
-                if let (Some(still), Some(started)) = (&settle.still, settle.started) {
-                    if started.elapsed() >= settle.length {
-                        shown = vec![(Shown::Still(still.clone()), 1.0)];
-                        tell(Event::Settled { id });
-                        settling = None;
+            } else if last {
+                for _ in 0..FLUSH {
+                    if let Err(why) = P::frame(|| screen.show(&looks(&layers))) {
+                        tell(Event::Broke { id, why });
+                        break;
                     }
                 }
+                shown = layers;
+                tell(Event::Settled { id });
+                settling = None;
             }
         }
         drop(screen);
@@ -388,7 +397,8 @@ mod running {
             if device.is_some() && picture.is_none() {
                 if answer {
                     let adapter = device.map(|gpu| gpu.name).unwrap_or_default();
-                    self.tell(Reply::Ready { adapter, ms: 0, uploads: self.uploads });
+                    let kind = self.gpu.as_ref().map_or("", |(gpu, _)| gpu.kind).to_string();
+                    self.tell(Reply::Ready { adapter, ms: 0, uploads: self.uploads, kind });
                 }
                 return;
             }
@@ -551,7 +561,8 @@ mod running {
                     Some(why) => self.fail(None, why.clone()),
                     None => {
                         let adapter = self.gpu.as_ref().map(|(gpu, _)| gpu.name.clone()).unwrap_or_default();
-                        self.tell(Reply::Ready { adapter, ms, uploads: self.uploads });
+                        let kind = self.gpu.as_ref().map_or("", |(gpu, _)| gpu.kind).to_string();
+                        self.tell(Reply::Ready { adapter, ms, uploads: self.uploads, kind });
                     }
                 }
             }
