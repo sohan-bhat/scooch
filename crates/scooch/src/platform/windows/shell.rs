@@ -81,7 +81,8 @@ pub fn spacing(view: &View) -> Result<POINT> {
 pub fn cell(view: &View, line: i32) -> Result<Cell> {
     let (_, icon) = mode(view)?;
     let spacing = spacing(view)?;
-    Ok(Cell { width: spacing.x as f32, icon: icon as f32, line: line as f32 })
+    let dpi = unsafe { GetDpiForWindow(view.list) };
+    Ok(Cell { width: spacing.x as f32, icon: layout::scaled(icon as f32, dpi), line: line as f32 })
 }
 
 pub fn pidls(view: &View) -> Result<Vec<Pidl>> {

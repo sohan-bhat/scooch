@@ -43,12 +43,15 @@ pub fn lines(cell: &Cell, label: Label) -> f32 {
     (label.height / cell.line.max(1.0)).round().clamp(1.0, 2.0)
 }
 
+pub fn scaled(size: f32, dpi: u32) -> f32 {
+    if dpi == 0 {
+        return size;
+    }
+    (size * dpi as f32 / 96.0).round()
+}
+
 pub fn item_rect(at: (f32, f32), cell: &Cell, label: Label, spacing: &Spacing) -> Rect {
-    let width = if lines(cell, label) > 1.0 {
-        cell.wrap(spacing).max(cell.icon + spacing.sides)
-    } else {
-        cell.icon.max(label.width.min(cell.cap(spacing))) + spacing.sides
-    };
+    let width = cell.icon.max(label.width.min(cell.cap(spacing))) + spacing.sides;
     let left = at.0 + cell.icon / 2.0 - width / 2.0;
     let top = at.1 - spacing.above;
     let height = spacing.above + cell.icon + spacing.gap + lines(cell, label) * cell.line + spacing.below;
@@ -133,10 +136,6 @@ mod tests {
         outer.x <= inner.x && outer.y <= inner.y && outer.x + outer.w >= inner.x + inner.w && outer.y + outer.h >= inner.y + inner.h
     }
 
-    fn spare(outer: &Rect, inner: &Rect) -> f32 {
-        [inner.x - outer.x, inner.y - outer.y, outer.x + outer.w - inner.x - inner.w, outer.y + outer.h - inner.y - inner.h].into_iter().fold(0.0, f32::max)
-    }
-
     #[test]
     fn a_short_label_sits_under_the_icon_box() {
         let rect = item_rect((100.0, 200.0), &cell(), Label { width: 30.0, height: 15.0 }, &SPACING);
@@ -153,30 +152,74 @@ mod tests {
     }
 
     #[test]
-    fn a_wrapped_label_takes_the_cell_width_minus_four() {
-        let rect = item_rect((0.0, 0.0), &cell(), Label { width: 59.0, height: 60.0 }, &SPACING);
-        assert_eq!(rect.w, 74.0);
-        assert_eq!(rect.x, 24.0 - 37.0);
+    fn a_wrapped_label_is_as_wide_as_its_widest_line() {
+        let rect = item_rect((0.0, 0.0), &cell(), Label { width: 72.0, height: 45.0 }, &SPACING);
+        assert_eq!(rect.w, 68.0 + 6.0);
         assert_eq!(rect.y + rect.h, 48.0 + 6.0 + 30.0 + 4.0);
+        let narrow = item_rect((0.0, 0.0), &cell(), Label { width: 52.0, height: 30.0 }, &SPACING);
+        assert_eq!(narrow.w, 58.0);
     }
 
     #[test]
-    fn the_rect_holds_what_explorer_drew_on_the_runner() {
-        let at = (512.0, 256.0);
+    fn icon_sizes_follow_the_desktop_dpi() {
+        assert_eq!(scaled(48.0, 96), 48.0);
+        assert_eq!(scaled(48.0, 144), 72.0);
+        assert_eq!(scaled(48.0, 120), 60.0);
+        assert_eq!(scaled(32.0, 0), 32.0);
+    }
+
+    fn judged(rect: &Rect, drawn: &Rect, at: (f32, f32), icon: f32) -> [f32; 4] {
+        let left = drawn.x.min(at.0);
+        let right = (drawn.x + drawn.w).max(at.0 + icon);
+        [left - rect.x, drawn.y - rect.y, rect.x + rect.w - right, rect.y + rect.h - drawn.y - drawn.h]
+    }
+
+    fn check(cell: Cell, at: (f32, f32), rows: &[(Label, Rect, f32)], limit: f32) {
+        let icon_box = Rect { x: at.0, y: at.1 + 3.0, w: cell.icon, h: cell.icon };
+        for (label, drawn, bounds_height) in rows {
+            let rect = item_rect(at, &cell, *label, &SPACING);
+            let bounds = Rect { x: at.0, y: at.1 + 3.0, w: cell.icon, h: *bounds_height };
+            assert!(contains(&rect, drawn) && contains(&rect, &icon_box) && contains(&rect, &bounds), "{rect:?} {drawn:?}");
+            let edges = judged(&rect, drawn, at, cell.icon);
+            assert!(edges.iter().all(|edge| (0.0..=limit).contains(edge)), "{rect:?} {drawn:?} {edges:?}");
+        }
+    }
+
+    #[test]
+    fn the_rect_holds_what_explorer_drew_on_windows_11() {
         let rows = [
             (Label { width: 85.0, height: 15.0 }, Rect { x: 502.0, y: 263.0, w: 69.0, h: 64.0 }, 70.0),
-            (Label { width: 59.0, height: 60.0 }, Rect { x: 501.0, y: 263.0, w: 71.0, h: 79.0 }, 85.0),
+            (Label { width: 72.0, height: 45.0 }, Rect { x: 501.0, y: 263.0, w: 71.0, h: 79.0 }, 85.0),
             (Label { width: 110.0, height: 15.0 }, Rect { x: 502.0, y: 267.0, w: 69.0, h: 60.0 }, 70.0),
             (Label { width: 11.0, height: 15.0 }, Rect { x: 519.0, y: 263.0, w: 34.0, h: 61.0 }, 70.0),
             (Label { width: 60.0, height: 15.0 }, Rect { x: 507.0, y: 263.0, w: 59.0, h: 61.0 }, 70.0),
         ];
-        let icon_box = Rect { x: 512.0, y: 259.0, w: 48.0, h: 48.0 };
-        for (label, drawn, bounds_height) in rows {
-            let rect = item_rect(at, &cell(), label, &SPACING);
-            let bounds = Rect { x: 512.0, y: 259.0, w: 48.0, h: bounds_height };
-            assert!(contains(&rect, &drawn) && contains(&rect, &icon_box) && contains(&rect, &bounds), "{rect:?} {drawn:?}");
-            assert!(spare(&rect, &drawn) <= 10.0, "{rect:?} {drawn:?} {}", spare(&rect, &drawn));
-        }
+        check(cell(), (512.0, 256.0), &rows, 10.0);
+    }
+
+    #[test]
+    fn the_rect_holds_what_explorer_drew_on_server_2022() {
+        let rows = [
+            (Label { width: 142.0, height: 15.0 }, Rect { x: 501.0, y: 264.0, w: 70.0, h: 63.0 }, 70.0),
+            (Label { width: 72.0, height: 45.0 }, Rect { x: 500.0, y: 264.0, w: 72.0, h: 78.0 }, 85.0),
+            (Label { width: 110.0, height: 15.0 }, Rect { x: 501.0, y: 266.0, w: 70.0, h: 61.0 }, 70.0),
+            (Label { width: 11.0, height: 15.0 }, Rect { x: 520.0, y: 264.0, w: 32.0, h: 60.0 }, 70.0),
+            (Label { width: 60.0, height: 15.0 }, Rect { x: 506.0, y: 264.0, w: 60.0, h: 60.0 }, 70.0),
+        ];
+        check(cell(), (512.0, 256.0), &rows, 10.0);
+    }
+
+    #[test]
+    fn the_rect_holds_what_explorer_drew_at_150_percent() {
+        let large = Cell { width: 112.0, icon: scaled(48.0, 144), line: 25.0 };
+        let rows = [
+            (Label { width: 211.0, height: 25.0 }, Rect { x: 944.0, y: 369.0, w: 103.0, h: 95.0 }, 104.0),
+            (Label { width: 89.0, height: 100.0 }, Rect { x: 952.0, y: 369.0, w: 87.0, h: 120.0 }, 129.0),
+            (Label { width: 165.0, height: 25.0 }, Rect { x: 950.0, y: 372.0, w: 92.0, h: 92.0 }, 104.0),
+            (Label { width: 16.0, height: 25.0 }, Rect { x: 972.0, y: 369.0, w: 48.0, h: 91.0 }, 104.0),
+            (Label { width: 90.0, height: 25.0 }, Rect { x: 951.0, y: 369.0, w: 90.0, h: 91.0 }, 104.0),
+        ];
+        check(large, (960.0, 360.0), &rows, 15.0);
     }
 
     #[test]
