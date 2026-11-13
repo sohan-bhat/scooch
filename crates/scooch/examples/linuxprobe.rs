@@ -1083,7 +1083,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         for round in 1..=5 {
             let before = linux.wallpaper(&screen).ok().flatten();
             let rects_before = icons(&linux);
-            let seen = subject_on_screen(p, &linux);
+            let seen = subject_on_screen(p, &linux).or_else(|| {
+                std::thread::sleep(Duration::from_millis(1500));
+                subject_on_screen(p, &linux)
+            });
             let target = seen.unwrap_or((frame.x + SUBJECT.0 * frame.w, frame.y + SUBJECT.1 * frame.h));
             let moved = Instant::now();
             let detail = move_icon(p, target).unwrap_or_else(|error| format!("failed {error:#}"));
