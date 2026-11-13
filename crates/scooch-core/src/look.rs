@@ -1,4 +1,5 @@
 use crate::paint::{self, Materials, CORE, LAND, LAYERS, SHORE};
+use crate::area::{self, Area};
 use crate::shape::{self, smoothstep, Base, Grid, FAR};
 use crate::{blur, color, scenery, table, Analysis, Options, Placement, Scene, Scenery};
 use rayon::prelude::*;
@@ -39,7 +40,6 @@ pub struct Scenic {
     pub look: Vec<u8>,
     pub paints: Vec<u8>,
     pub paint_grid: Grid,
-    pub belong: Vec<f32>,
 }
 
 pub fn belonging(saliency: f32, busy: f32) -> f32 {
@@ -128,12 +128,181 @@ pub fn none(grid: Grid, width: usize, height: usize) -> Scenic {
         look: vec![0; grid.w * grid.h * 4],
         paints: vec![0; paint_grid.w * paint_grid.h * 4 * LAYERS],
         paint_grid,
-        belong: vec![0.0; grid.w * grid.h],
     }
 }
 
-pub fn build(base: &Base, input: &Sampled, options: &Options, materials: &Materials, width: usize, height: usize) -> Scenic {
-    let (grid, u) = (input.grid, base.u);
+pub struct Fixed {
+    pub sky: Vec<f32>,
+    pub belong: Vec<f32>,
+    pub paints: Vec<u8>,
+    pub paint_grid: Grid,
+    grid: Grid,
+    u: f32,
+    billows: shape::Billows,
+}
+
+pub struct Live {
+    calmer: Vec<f32>,
+    puffs: shape::Puffs,
+    clouds: Vec<f32>,
+    mixed: Vec<f32>,
+    shade: Vec<f32>,
+    open: Vec<f32>,
+    billows: Vec<f32>,
+    light: Vec<f32>,
+    lit: Vec<f32>,
+    pub look: Vec<u8>,
+    pub field: Vec<f32>,
+}
+
+impl Live {
+    pub fn bytes(&self) -> usize {
+        let floats = [&self.calmer, &self.clouds, &self.mixed, &self.shade, &self.open, &self.billows, &self.light, &self.lit, &self.field].iter().map(|v| v.len()).sum::<usize>();
+        floats * 4 + self.look.len() + self.puffs.bytes()
+    }
+}
+
+impl Fixed {
+    pub fn bytes(&self) -> usize {
+        (self.sky.len() + self.belong.len()) * 4 + self.paints.len() + self.billows.bytes()
+    }
+
+    pub fn u(&self) -> f32 {
+        self.u
+    }
+
+    fn spread(&self, k: f32) -> f32 {
+        k * self.u / self.grid.cell as f32
+    }
+
+    fn mix_into(&self, base: &Base, clouds: &[f32], area: Area, out: &mut [f32]) {
+        let w = self.grid.w;
+        for y in area[1]..area[3] {
+            for i in y * w + area[0]..y * w + area[2] {
+                let (l, c, s) = (base.d[i], clouds[i], self.sky[i]);
+                out[i] = l + (c - l) * s;
+            }
+        }
+    }
+
+    fn light_into(&self, mixed: &[f32], billows: &[f32], area: Area, out: &mut [f32]) {
+        let (grid, u) = (self.grid, self.u);
+        out.par_chunks_mut(grid.w).enumerate().skip(area[1]).take(area[3] - area[1]).for_each(|(y, row)| {
+            for (x, cell) in row.iter_mut().enumerate().take(area[2]).skip(area[0]) {
+                let i = y * grid.w + x;
+                let band = smoothstep(-VOLUME * u, 0.0, mixed[i]);
+                *cell = if self.sky[i] > 0.0 && mixed[i] < FAR * u * 0.5 { band * slope(mixed, &grid, i) + (1.0 - band) * slope(billows, &grid, i) } else { 0.0 };
+            }
+        });
+    }
+
+    fn look_into(&self, open: &[f32], lit: &[f32], area: Area, look: &mut [u8]) {
+        let (w, u) = (self.grid.w, self.u);
+        let cells = look.as_chunks_mut::<4>().0;
+        for y in area[1]..area[3] {
+            for i in y * w + area[0]..y * w + area[2] {
+                let shown = smoothstep(0.0, OPEN_RAMP * u, open[i]);
+                cells[i] = [byte(self.sky[i]), byte(self.belong[i]), byte(shown), byte(0.5 + 0.5 * lit[i])];
+            }
+        }
+    }
+
+    fn field_into(&self, mixed: &[f32], area: Area, out: &mut [f32]) {
+        let (w, u) = (self.grid.w, self.u);
+        for y in area[1]..area[3] {
+            for i in y * w + area[0]..y * w + area[2] {
+                out[i] = (mixed[i] / u).clamp(HOLD.0, HOLD.1);
+            }
+        }
+    }
+}
+
+pub fn live(base: &Base, fixed: &Fixed) -> Live {
+    let (grid, u) = (base.grid, base.u);
+    let (cells, all) = (grid.w * grid.h, shape::whole(&grid));
+    let calmer: Vec<f32> = base.d.iter().zip(&base.meanders).map(|(d, m)| shape::calmer(*d, *m)).collect();
+    let puffs = shape::puffs(base, &calmer);
+    let mut clouds = vec![0.0f32; cells];
+    shape::clouds_into(base, &calmer, &puffs, |i| fixed.sky[i] > 0.0, all, &mut clouds);
+    let mut mixed = vec![0.0f32; cells];
+    fixed.mix_into(base, &clouds, all, &mut mixed);
+    let mut shade = vec![0.0f32; cells];
+    shape::shade_into(&base.icons, &grid, u, all, &mut shade);
+    let mut open = vec![0.0f32; cells];
+    blur::fixed_into(&shade, &mut open, grid.w, grid.h, fixed.spread(OPEN_SPREAD), all);
+    let mut billows = vec![0.0f32; cells];
+    shape::billows_into(&fixed.billows, &grid, u, |i| fixed.sky[i] > 0.0 && base.d[i] < FAR * u * 0.5, all, &mut billows);
+    let mut light = vec![0.0f32; cells];
+    fixed.light_into(&mixed, &billows, all, &mut light);
+    let mut lit = vec![0.0f32; cells];
+    blur::fixed_into(&light, &mut lit, grid.w, grid.h, fixed.spread(LIGHT_SPREAD), all);
+    let mut look = vec![0u8; cells * 4];
+    fixed.look_into(&open, &lit, all, &mut look);
+    let mut field = vec![0.0f32; cells];
+    fixed.field_into(&mixed, all, &mut field);
+    Live { calmer, puffs, clouds, mixed, shade, open, billows, light, lit, look, field }
+}
+
+fn refresh(values: &mut [f32], w: usize, areas: &[Area], compute: impl Fn(Area, &mut [f32])) -> Vec<Area> {
+    let mut out = Vec::new();
+    for a in areas {
+        let before = area::take(values, w, *a);
+        compute(*a, values);
+        out.extend(area::moved(&before, values, w, *a, area::bits));
+    }
+    out
+}
+
+pub fn relive(base: &Base, fixed: &Fixed, live: &mut Live, changed: &[Area], owned: &[Area], icons: &[[f32; 4]]) -> (Vec<Area>, Vec<Area>) {
+    let (grid, u) = (base.grid, base.u);
+    let (w, h) = (grid.w, grid.h);
+    let grown = |areas: &[Area], r: usize| area::merge(areas.iter().map(|a| area::grow(*a, r, w, h)).collect());
+    for a in changed {
+        for y in a[1]..a[3] {
+            for i in y * w + a[0]..y * w + a[2] {
+                live.calmer[i] = shape::calmer(base.d[i], base.meanders[i]);
+            }
+        }
+    }
+    let puffs = shape::puffs(base, &live.calmer);
+    let mut cloudy = changed.to_vec();
+    cloudy.extend_from_slice(owned);
+    cloudy.extend(live.puffs.moved(&puffs, &grid));
+    live.puffs = puffs;
+    let cloudy = area::merge(cloudy);
+    for a in &cloudy {
+        shape::clouds_into(base, &live.calmer, &live.puffs, |i| fixed.sky[i] > 0.0, *a, &mut live.clouds);
+    }
+    let clouds = &live.clouds;
+    let mixed = refresh(&mut live.mixed, w, &cloudy, |a, out| fixed.mix_into(base, clouds, a, out));
+    let mixed_values = &live.mixed;
+    let field = refresh(&mut live.field, w, &area::merge(mixed.clone()), |a, out| fixed.field_into(mixed_values, a, out));
+    let near = area::merge(icons.iter().map(|r| shape::cells_near(&grid, r, shape::shade_reach(u))).collect());
+    let shade = refresh(&mut live.shade, w, &near, |a, out| shape::shade_into(&base.icons, &grid, u, a, out));
+    let (open_sigma, lit_sigma) = (fixed.spread(OPEN_SPREAD), fixed.spread(LIGHT_SPREAD));
+    let shaded = &live.shade;
+    let open = refresh(&mut live.open, w, &grown(&shade, blur::reach(open_sigma)), |a, out| blur::fixed_into(shaded, out, w, h, open_sigma, a));
+    let billows = refresh(&mut live.billows, w, &area::merge(changed.to_vec()), |a, out| shape::billows_into(&fixed.billows, &grid, u, |i| fixed.sky[i] > 0.0 && base.d[i] < FAR * u * 0.5, a, out));
+    let mut sloped = mixed;
+    sloped.extend(billows);
+    let (mixed_values, billow_values) = (&live.mixed, &live.billows);
+    let light = refresh(&mut live.light, w, &grown(&sloped, 1), |a, out| fixed.light_into(mixed_values, billow_values, a, out));
+    let light_values = &live.light;
+    let lit = refresh(&mut live.lit, w, &grown(&light, blur::reach(lit_sigma)), |a, out| blur::fixed_into(light_values, out, w, h, lit_sigma, a));
+    let mut looks = open;
+    looks.extend(lit);
+    let mut look = Vec::new();
+    let (open_values, lit_values) = (&live.open, &live.lit);
+    for a in area::merge(looks) {
+        let before = area::take(live.look.as_chunks::<4>().0, w, a);
+        fixed.look_into(open_values, lit_values, a, &mut live.look);
+        look.extend(area::moved(&before, live.look.as_chunks::<4>().0, w, a, area::equal));
+    }
+    (field, look)
+}
+
+pub fn fixed(input: &Sampled, options: &Options, materials: &Materials, u: f32, width: usize, height: usize) -> Fixed {
+    let grid = input.grid;
     let cells = grid.w * grid.h;
     let encode = color::encode_table();
     let lab: Vec<[f32; 3]> = input.small.par_iter().map(|c| color::oklab(c[0], c[1], c[2])).collect();
@@ -155,27 +324,6 @@ pub fn build(base: &Base, input: &Sampled, options: &Options, materials: &Materi
         .zip(&sky)
         .map(|(c, s)| if options.scenery == Scenery::Auto { c * smoothstep(SEAM.0, SEAM.1, (2.0 * s - 1.0).abs()) } else { *c })
         .collect();
-    let clouds = shape::clouds(base, |i| sky[i] > 0.0);
-    let mixed: Vec<f32> = base.d.iter().zip(&clouds).zip(&sky).map(|((l, c), s)| l + (c - l) * s).collect();
-    let shade = blurred(&shape::shade(base), &grid, spread(OPEN_SPREAD));
-    let billows = shape::billows(&grid, u, |i| sky[i] > 0.0 && base.d[i] < FAR * u * 0.5);
-    let light: Vec<f32> = (0..cells)
-        .into_par_iter()
-        .map(|i| {
-            let band = smoothstep(-VOLUME * u, 0.0, mixed[i]);
-            if sky[i] > 0.0 && mixed[i] < FAR * u * 0.5 {
-                band * slope(&mixed, &grid, i) + (1.0 - band) * slope(&billows, &grid, i)
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    let light = blurred(&light, &grid, spread(LIGHT_SPREAD));
-    let mut look = vec![0u8; cells * 4];
-    look.par_chunks_mut(4).enumerate().for_each(|(i, px)| {
-        let open = smoothstep(0.0, OPEN_RAMP * u, shade[i]);
-        px.copy_from_slice(&[byte(sky[i]), byte(belong[i]), byte(open), byte(0.5 + 0.5 * light[i])]);
-    });
     let paint_grid = Grid::of(width, height, P);
     let step = P / grid.cell;
     let pool = |values: &dyn Fn(usize) -> f32| -> Vec<f32> {
@@ -222,5 +370,5 @@ pub fn build(base: &Base, input: &Sampled, options: &Options, materials: &Materi
             paints[at + 3] = byte(alpha);
         }
     }
-    Scenic { field: mixed.iter().map(|d| (d / u).clamp(HOLD.0, HOLD.1)).collect(), look, paints, paint_grid, belong }
+    Fixed { sky, belong, paints, paint_grid, grid, u, billows: shape::billow_lattice(&grid, u) }
 }
