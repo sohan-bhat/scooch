@@ -358,6 +358,7 @@ mod probe {
         probe.section("4 First run", first_run);
         probe.section("5 Move to new wallpaper", moves);
         probe.section("5b Scenery", scenery_check);
+        probe.section("5c Glide", glide_check);
         probe.section("6 Idle", idle);
         probe.section("7 Off", off);
         probe.section("8 Second cycle", second_cycle);
@@ -2143,6 +2144,314 @@ mod probe {
         if let Some(recorded) = recorded.filter(|path| path.is_file()) {
             let _ = desktop.set_wallpaper(&screen, &recorded);
         }
+        Ok(())
+    }
+
+    struct Seen {
+        at: f64,
+        disc: Option<(f32, f32)>,
+        inked: f32,
+        step: u8,
+        thumb: RgbImage,
+    }
+
+    struct Dragged {
+        dropped: f64,
+        seen: Vec<Seen>,
+        log: Vec<String>,
+    }
+
+    fn disc(shot: &Shot) -> Option<(f32, f32)> {
+        let (mut sx, mut sy, mut count) = (0f64, 0f64, 0usize);
+        for y in (0..shot.height).step_by(2) {
+            for x in (0..shot.width).step_by(2) {
+                if near(shot.at(x, y), [245, 196, 92]) {
+                    sx += x as f64;
+                    sy += y as f64;
+                    count += 1;
+                }
+            }
+        }
+        (count > 30).then(|| ((sx / count as f64) as f32, (sy / count as f64) as f32))
+    }
+
+    fn thumb(shot: &Shot) -> RgbImage {
+        let (width, height) = (shot.width / 4, shot.height / 4);
+        let mut rgb = Vec::with_capacity(width * height * 3);
+        for y in 0..height {
+            for x in 0..width {
+                rgb.extend_from_slice(&shot.at(x * 4, y * 4));
+            }
+        }
+        RgbImage::from_raw(width as u32, height as u32, rgb).unwrap_or_default()
+    }
+
+    fn stamp_of(line: &str) -> Option<f64> {
+        line.split_whitespace().next()?.parse().ok()
+    }
+
+    fn helper_pids(p: &mut Probe) -> Vec<i32> {
+        p.tool("/usr/bin/pgrep", &["-f", "live-helper"]).out.lines().filter_map(|line| line.trim().parse().ok()).collect()
+    }
+
+    fn strong_ink(baseline: &Shot, field: &Shot, rect: &Rect, screen: &Screen) -> Vec<(usize, usize)> {
+        let scale = screen.scale;
+        let mut ink = Vec::new();
+        for y in (((rect.y - screen.frame.y) * scale).max(0.0) as usize..((rect.y - screen.frame.y + rect.h) * scale) as usize).step_by(2) {
+            for x in (((rect.x - screen.frame.x) * scale).max(0.0) as usize..((rect.x - screen.frame.x + rect.w) * scale) as usize).step_by(2) {
+                let (one, two) = (baseline.at(x, y), field.at(x, y));
+                if (0..3).map(|channel| one[channel].abs_diff(two[channel]) as u32).sum::<u32>() > 150 {
+                    ink.push((x, y));
+                }
+            }
+        }
+        ink
+    }
+
+    fn watch_drag(p: &mut Probe, display: u32, screen: &Screen, from: (f32, f32), to: (f32, f32), masks: &[Vec<(usize, usize)>]) -> Option<Dragged> {
+        let baseline = grab(display)?;
+        let menu = (30.0 * screen.scale) as usize;
+        let lines = daemon_log(p).lines().count();
+        drag(from, to);
+        let dropped = epoch();
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        let mut previous: Option<Shot> = None;
+        let mut done: Option<f64> = None;
+        let mut checks = 0;
+        while started.elapsed() < Duration::from_secs(8) {
+            let at = epoch();
+            let Some(shot) = grab(display) else { continue };
+            let inked = masks.iter().map(|ink| ink.iter().filter(|(x, y)| !near(shot.at(*x, *y), baseline.at(*x, *y))).count() as f32 / ink.len().max(1) as f32).fold(0.0, f32::max);
+            let step = previous.as_ref().map_or(0, |previous| difference(previous, &shot, &|_, y| y >= menu).max);
+            seen.push(Seen { at, disc: disc(&shot), inked, step, thumb: thumb(&shot) });
+            previous = Some(shot);
+            checks += 1;
+            if done.is_none() && checks % 3 == 0 && new_lines(&daemon_log(p), lines).iter().any(|line| line.contains(" tick ")) {
+                done = Some(epoch());
+            }
+            if done.is_some_and(|done| epoch() > done + 1.0) {
+                break;
+            }
+        }
+        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ") || line.contains("without the glide") || line.contains("turned the glide")).collect();
+        Some(Dragged { dropped, seen, log })
+    }
+
+    fn logged(dragged: &Dragged, word: &str) -> Option<f64> {
+        dragged.log.iter().find(|line| line.contains(word)).and_then(|line| stamp_of(line))
+    }
+
+    fn judge_glide(p: &mut Probe, dragged: &Dragged, label: &str, strip: Option<&Path>) -> bool {
+        let first = dragged.seen.first().and_then(|seen| seen.disc);
+        let last = dragged.seen.last().and_then(|seen| seen.disc);
+        let (Some(a), Some(b)) = (first, last) else {
+            p.line(format!("- {label}: the subject could not be found in the captures"));
+            return false;
+        };
+        let distance = |one: (f32, f32), two: (f32, f32)| ((one.0 - two.0).powi(2) + (one.1 - two.1).powi(2)).sqrt();
+        let span = distance(a, b).max(1.0);
+        let along = |point: (f32, f32)| ((point.0 - a.0) * (b.0 - a.0) + (point.1 - a.1) * (b.1 - a.1)) / (span * span);
+        let positions: Vec<(f64, f32)> = dragged.seen.iter().filter_map(|seen| seen.disc.map(|disc| (seen.at - dragged.dropped, along(disc)))).collect();
+        let moving: Vec<&(f64, f32)> = positions.iter().filter(|(_, t)| *t > 2.0 / span && *t < 1.0 - 2.0 / span).collect();
+        let steady = positions.windows(2).all(|pair| pair[1].1 >= pair[0].1 - 0.03);
+        let reached = positions.iter().position(|(_, t)| *t >= 1.0 - 2.0 / span);
+        let back = reached.is_some_and(|reached| positions[reached..].iter().any(|(_, t)| *t <= 2.0 / span));
+        let first_move = positions.iter().find(|(_, t)| *t > 2.0 / span).map(|(at, _)| at * 1000.0);
+        let inked = dragged.seen.iter().map(|seen| seen.inked).fold(0.0, f32::max);
+        let settled = logged(dragged, " glide settled");
+        let closed = logged(dragged, " glide closed");
+        let set = logged(dragged, " glide settle ");
+        let hand_over = settled.map(|settled| dragged.seen.iter().filter(|seen| seen.at > settled && closed.is_none_or(|closed| seen.at <= closed + 1.0)).map(|seen| seen.step).max().unwrap_or(0));
+        p.line(format!("- {label}: subject moved {span:.0} pixels, {} captures in {:.0} ms, {} between the old and new place, steady {steady}, old picture after the new {back}", dragged.seen.len(), dragged.seen.last().map_or(0.0, |seen| (seen.at - dragged.dropped) * 1000.0), moving.len()));
+        p.line(format!(
+            "  - drop to first moving frame on screen {:?} ms, drop to wallpaper set {:?} ms, drop to settled {:?} ms, drop to closed {:?} ms",
+            first_move.map(f64::round),
+            set.map(|at| ((at - dragged.dropped) * 1000.0).round()),
+            settled.map(|at| ((at - dragged.dropped) * 1000.0).round()),
+            closed.map(|at| ((at - dragged.dropped) * 1000.0).round())
+        ));
+        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255"));
+        p.line(format!("  - daemon log {:?}", dragged.log.iter().map(|line| line.chars().take(180).collect::<String>()).collect::<Vec<_>>()));
+        if let Some(path) = strip {
+            let until = settled.or(closed).unwrap_or(dragged.dropped + 2.0);
+            let picked: Vec<&Seen> = dragged.seen.iter().filter(|seen| seen.at <= until + 0.1).collect();
+            if picked.len() >= 9 {
+                let chosen: Vec<&RgbImage> = (0..9).map(|index| &picked[index * (picked.len() - 1) / 8].thumb).collect();
+                let (width, height) = (chosen[0].width(), chosen[0].height());
+                let mut rgb = vec![0u8; (width * 9 * height * 3) as usize];
+                for (index, image) in chosen.iter().enumerate() {
+                    for y in 0..height.min(image.height()) {
+                        for x in 0..width.min(image.width()) {
+                            let at = ((y * width * 9 + index as u32 * width + x) * 3) as usize;
+                            rgb[at..at + 3].copy_from_slice(&image.get_pixel(x, y).0);
+                        }
+                    }
+                }
+                if let Some(strip) = RgbImage::from_raw(width * 9, height, rgb) {
+                    let _ = scooch_core::encode_png(&strip).map(|bytes| fs::write(path, bytes));
+                    p.line(format!("  - nine frame strip saved as {}", path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+                }
+            }
+        }
+        moving.len() >= 2 && steady && !back && inked <= 0.1 && hand_over.is_some_and(|value| value <= 2) && settled.is_some()
+    }
+
+    fn wallpaper_after(p: &mut Probe, screen: &Screen, act: impl FnOnce(&mut Probe)) -> (Option<u128>, Vec<String>) {
+        let desktop = platform::current().ok();
+        let before = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
+        let lines = daemon_log(p).lines().count();
+        act(p);
+        let acted = Instant::now();
+        let changed = wait_until(Duration::from_secs(12), || desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten()) != before).map(|_| acted.elapsed().as_millis());
+        let home = p.home.clone();
+        let _ = wait_until(Duration::from_secs(5), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" tick ")));
+        std::thread::sleep(Duration::from_millis(600));
+        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ") || line.contains("without the glide")).map(|line| line.chars().take(180).collect()).collect();
+        (changed, log)
+    }
+
+    fn cover(marker: MainThreadMarker, screen: &Screen) -> Result<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+        use objc2::MainThreadOnly as _;
+        let (display, _) = picture::screen_for(marker, &screen.id)?;
+        let frame = display.frame();
+        let window = unsafe {
+            objc2_app_kit::NSWindow::initWithContentRect_styleMask_backing_defer_screen(objc2_app_kit::NSWindow::alloc(marker), objc2_foundation::NSRect::new(objc2_foundation::NSPoint::new(0.0, 0.0), frame.size), objc2_app_kit::NSWindowStyleMask::Borderless, objc2_app_kit::NSBackingStoreType::Buffered, false, Some(&display))
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        window.setFrame_display(frame, true);
+        window.setOpaque(true);
+        window.setBackgroundColor(Some(&objc2_app_kit::NSColor::blackColor()));
+        window.orderFrontRegardless();
+        spin(0.6);
+        Ok(window)
+    }
+
+    fn glide_check(p: &mut Probe) -> Result<()> {
+        let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
+        accessory(marker);
+        let desktop = platform::current()?;
+        let screen = main_screen(p)?;
+        let (_, display) = picture::screen_for(marker, &screen.id)?;
+        let name = PROBES[0].0;
+        if dismiss_prompt(p).is_none() {
+            p.finder = false;
+            p.line("- the glide check needs Apple Events to Finder, which the open consent window blocks, so it was skipped".to_string());
+            return Ok(());
+        }
+        let Some(daemon) = scooch_pid(p) else {
+            p.fail("no daemon runs for the glide check");
+            return Ok(());
+        };
+        p.line(format!("- glide setting `{}`, scenery `{}`, daemon {daemon}", state(p)["glide"], state(p)["options"]["scenery"].as_str().unwrap_or("missing")));
+        let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
+        let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
+        let (setup, _) = wallpaper_after(p, &screen, |p| {
+            let _ = place(p, name, subject);
+            poke(p);
+        });
+        std::thread::sleep(Duration::from_millis(1500));
+        p.line(format!("- set up with {name} on the subject, new wallpaper after {setup:?} ms"));
+        let paper = picture_window(&screen).and_then(|window| grab_window(window.number));
+        let baseline = grab(display).context("the desktop could not be captured")?;
+        let still: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().filter(|(found, _)| found.starts_with("scooch") && found != name).map(|(_, rect)| rect).collect();
+        let masks: Vec<Vec<(usize, usize)>> = paper.as_ref().map(|field| still.iter().map(|rect| strong_ink(&baseline, field, rect, &screen)).collect()).unwrap_or_default();
+        p.line(format!("- solid icon ink pixels of the still icons {:?}", masks.iter().map(Vec::len).collect::<Vec<_>>()));
+        let start = position(p, name).unwrap_or(subject);
+        let dragged = watch_drag(p, display, &screen, start, aside, &masks).context("the glide drag could not be watched")?;
+        let good = judge_glide(p, &dragged, "glide on, CGEvent drag", Some(&p.out.join("glide-strip.png")));
+        std::thread::sleep(Duration::from_millis(1000));
+        let pids = helper_pids(p);
+        let left = layer::every_window().into_iter().filter(|window| pids.contains(&(window.pid as i32))).count();
+        p.line(format!("- helper processes {pids:?} with windows left {left}"));
+        if !good || left > 0 {
+            p.fail("the glide did not move steadily under the icons and hand over cleanly");
+        }
+        let ran = p.scooch(&["glide"], LIMIT);
+        p.line(format!("- scooch glide said {:?}", ran.text()));
+        let back = position(p, name).unwrap_or(aside);
+        let (off, off_log) = wallpaper_after(p, &screen, |_| drag(back, subject));
+        p.line(format!("- glide off, the same drag back: new wallpaper after {off:?} ms, log {off_log:?}"));
+        let ran = p.scooch(&["glide"], LIMIT);
+        p.line(format!("- scooch glide said {:?}", ran.text()));
+        let reduce_before = p.tool("/usr/bin/defaults", &["read", "com.apple.universalaccess", "reduceMotion"]).out.trim().to_string();
+        let wrote = p.tool("/usr/bin/defaults", &["write", "com.apple.universalaccess", "reduceMotion", "-bool", "true"]);
+        std::thread::sleep(Duration::from_millis(800));
+        let reducing = NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
+        p.line(format!("- reduce motion written {}, read back by AppKit as {reducing}, value before `{reduce_before}`", if wrote.ok() { "ok".to_string() } else { wrote.text() }));
+        if reducing {
+            let back = position(p, name).unwrap_or(subject);
+            let (time, log) = wallpaper_after(p, &screen, |_| drag(back, aside));
+            let glided = log.iter().any(|line| line.contains(" glide open"));
+            p.line(format!("- reduce motion on, drag: new wallpaper after {time:?} ms, glided {glided}, log {log:?}"));
+            if glided {
+                p.fail("the daemon glided with reduce motion on");
+            }
+        } else {
+            p.limit("the runner would not take the reduce motion setting, so that path is proven only by the unit tests");
+        }
+        if reduce_before.is_empty() {
+            let _ = p.tool("/usr/bin/defaults", &["delete", "com.apple.universalaccess", "reduceMotion"]);
+        } else {
+            let _ = p.tool("/usr/bin/defaults", &["write", "com.apple.universalaccess", "reduceMotion", "-bool", if reduce_before == "1" { "true" } else { "false" }]);
+        }
+        std::thread::sleep(Duration::from_millis(800));
+        let window = cover(marker, &screen)?;
+        let target = if position(p, name).is_some_and(|at| (at.0 - subject.0).abs() < 5.0) { aside } else { subject };
+        let (covered, covered_log) = wallpaper_after(p, &screen, |p| {
+            let _ = place(p, name, target);
+            poke(p);
+        });
+        window.orderOut(None);
+        window.close();
+        drop(window);
+        spin(0.4);
+        let tick = |log: &[String]| log.iter().find_map(|line| line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<u64>().ok()));
+        p.line(format!("- a move while a window covers the whole desktop: new wallpaper after {covered:?} ms, tick {:?} ms against {:?} ms with glide off, log {covered_log:?}", tick(&covered_log), tick(&off_log)));
+        if covered.is_none() || tick(&covered_log).zip(tick(&off_log)).is_some_and(|(with, without)| with > without + 400 + 300) {
+            p.fail("a covered desktop delayed the plain swap");
+        }
+        std::thread::sleep(Duration::from_millis(1500));
+        let from = position(p, name).unwrap_or(subject);
+        let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
+        let lines = daemon_log(p).lines().count();
+        let shown_before = desktop.wallpaper(&screen).ok().flatten();
+        drag(from, to);
+        let home = p.home.clone();
+        let opened = wait_until(Duration::from_secs(5), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" glide open")));
+        let killed = helper_pids(p);
+        for pid in &killed {
+            let _ = p.tool("/bin/kill", &["-9", &pid.to_string()]);
+        }
+        let _ = wait_until(Duration::from_secs(6), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" tick ")));
+        std::thread::sleep(Duration::from_millis(1200));
+        let now_shown = desktop.wallpaper(&screen).ok().flatten();
+        let recorded = state(p)["screens"].as_object().and_then(|screens| screens.values().next().and_then(|entry| entry["output"].as_str().map(PathBuf::from)));
+        let shot = grab(display);
+        let icons: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().map(|(_, rect)| rect).collect();
+        let matches = shot.as_ref().zip(now_shown.as_ref()).and_then(|(shot, file)| matches_file(shot, file, &icons, &screen));
+        let alive = scooch_pid(p).is_some();
+        let kill_log: Vec<String> = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains("without the glide")).map(|line| line.chars().take(180).collect()).collect();
+        p.line(format!("- helper killed mid glide after the layer opened {:?} ms: killed {killed:?}, wallpaper changed {}, it is the recorded output {}, screen matches the file {matches:?}, daemon alive {alive}, log {kill_log:?}", opened.map(|time| time.as_millis()), now_shown != shown_before, now_shown == recorded));
+        std::thread::sleep(Duration::from_millis(1500));
+        let from = position(p, name).unwrap_or(subject);
+        let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
+        let again = watch_drag(p, display, &screen, from, to, &masks).context("the drag after the kill could not be watched")?;
+        let glided_again = logged(&again, " glide settled").is_some();
+        p.line(format!("- the next drag glides again {glided_again}, log {:?}", again.log.iter().map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()));
+        if killed.is_empty() || now_shown != recorded || !matches.is_some_and(|share| share >= 0.9) || !alive || !glided_again {
+            p.fail("killing the helper mid glide was not handled cleanly");
+        }
+        let last = Instant::now();
+        let gone = wait_until(Duration::from_secs(40), || helper_pids(p).is_empty());
+        p.line(format!("- no helper process {:?} s after the last drag", gone.map(|_| last.elapsed().as_secs())));
+        std::thread::sleep(Duration::from_secs(35).saturating_sub(last.elapsed()));
+        let pids = helper_pids(p);
+        p.line(format!("- 35 s after the last drag helper processes {pids:?}"));
+        if !pids.is_empty() {
+            p.fail("a helper was still running 35 s after the last drag");
+        }
+        quiet_minute(p, daemon, "the daemon with glide on, 35 s after its last glide")?;
         Ok(())
     }
 
