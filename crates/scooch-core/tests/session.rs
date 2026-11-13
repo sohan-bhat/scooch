@@ -1,7 +1,8 @@
 #[path = "support/layouts.rs"]
 mod layouts;
 
-use scooch_core::{Analysis, Options, Placement, Rect, RgbImage, Scene, Scenery, Session};
+use scooch_core::{Analysis, Bundle, Options, Placement, Rect, RgbImage, Scene, Scenery, Session};
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 struct Photo {
@@ -111,13 +112,27 @@ fn walk(seed: u64, steps: usize, photo: usize, layout: &str, scenery: Scenery, (
     let mut walk = Walk { photo, scene, options, placement };
     let mut session = Session::new();
     let mut most = 0;
+    let mut kept: Option<(Arc<Bundle>, Arc<RgbImage>, Bundle, RgbImage)> = None;
     for n in 0..=steps {
         let what = if n == 0 { "first" } else { step(&mut dice, &mut walk) };
         let photo = &photos()[walk.photo];
-        let (bundle, still) = session.still(&photo.image, &photo.analysis, &walk.placement, &walk.scene, &walk.options);
         let (want_bundle, want_still) = scooch_core::still(&photo.image, &photo.analysis, &walk.placement, &walk.scene, &walk.options);
-        assert!(still.as_raw() == want_still.as_raw(), "seed {seed} step {n} {what}: image differs");
-        assert!(bundle == want_bundle, "seed {seed} step {n} {what}: bundle differs");
+        if dice.next() < 0.5 {
+            let (bundle, still) = session.still_shared(&photo.image, &photo.analysis, &walk.placement, &walk.scene, &walk.options);
+            assert!(still.as_raw() == want_still.as_raw(), "seed {seed} step {n} {what}: shared image differs");
+            assert!(*bundle == want_bundle, "seed {seed} step {n} {what}: shared bundle differs");
+            if let Some((bundle, still, was_bundle, was_still)) = &kept {
+                assert!(**bundle == *was_bundle && still.as_raw() == was_still.as_raw(), "seed {seed} step {n} {what}: a held result changed");
+            }
+            kept = (dice.next() < 0.7).then_some((bundle, still, want_bundle, want_still));
+        } else {
+            let (bundle, still) = session.still(&photo.image, &photo.analysis, &walk.placement, &walk.scene, &walk.options);
+            assert!(still.as_raw() == want_still.as_raw(), "seed {seed} step {n} {what}: image differs");
+            assert!(bundle == want_bundle, "seed {seed} step {n} {what}: bundle differs");
+            if let Some((bundle, still, was_bundle, was_still)) = &kept {
+                assert!(**bundle == *was_bundle && still.as_raw() == was_still.as_raw(), "seed {seed} step {n} {what}: a held result changed");
+            }
+        }
         most = most.max(session.bytes());
     }
     assert!(most < 24 * (w * h) as usize + 8 * 1024 * 1024, "{most}");
@@ -183,8 +198,12 @@ fn a_session_at_2880_holds_under_eighty_megabytes() {
     let mut scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &analysis, w, h) };
     let placement = scooch_core::solve(&analysis, &scene, &options, None);
     let mut session = Session::new();
-    for k in 0..3 {
-        session.still(&image, &analysis, &placement, &scene, &options);
+    for k in 0..4 {
+        if k % 2 == 0 {
+            session.still(&image, &analysis, &placement, &scene, &options);
+        } else {
+            session.still_shared(&image, &analysis, &placement, &scene, &options);
+        }
         assert!(session.bytes() < 80 * 1024 * 1024, "{}", session.bytes());
         scene.icons[k].x += scene.icons[k].w;
     }
