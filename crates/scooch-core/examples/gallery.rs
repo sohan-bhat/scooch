@@ -4,7 +4,7 @@ mod desk;
 mod layouts;
 
 use image::{imageops, RgbImage};
-use scooch_core::{Options, Rect, Scene};
+use scooch_core::{Options, Rect, Scene, Scenery};
 use std::path::PathBuf;
 
 const SCREEN: (u32, u32) = (2880, 1800);
@@ -22,6 +22,8 @@ const PICKS: [(&str, &str); 12] = [
     ("great-wave", "scattered"),
     ("tree-field", "scattered"),
 ];
+
+const UNTOUCHED: [(&str, &str); 4] = [("bamboo", "scattered"), ("crown-portrait", "scattered"), ("city-night", "scattered"), ("glass-cubes", "mac")];
 
 enum Spot {
     Edge(usize),
@@ -42,7 +44,7 @@ fn shot(name: &str, layout: &str) -> (RgbImage, Vec<Rect>) {
     let (w, h) = SCREEN;
     let icons = layouts::layout(layout, &analysis, w, h);
     let scene = Scene { width: w, height: h, icons: icons.clone() };
-    let options = Options::default();
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
     let placement = scooch_core::solve(&analysis, &scene, &options, None);
     let mut picture = scooch_core::render_with(&photo, &analysis, &placement, &scene, &options);
     desk::draw_icons(&mut picture, &icons);
@@ -87,6 +89,13 @@ fn main() {
         println!("gallery {name} {layout}");
     }
     desk::grid(&tiles, 3, 12).save(out.join("gallery.png")).expect("save gallery");
+    let mut none = Vec::new();
+    for (name, layout) in UNTOUCHED {
+        let (picture, _) = shot(name, layout);
+        none.push(desk::fit(&picture, 960, 600));
+        println!("untouched {name} {layout}");
+    }
+    desk::grid(&none, 2, 12).save(out.join("untouched.png")).expect("save untouched");
     let mut crops = Vec::new();
     for (name, layout, spot) in CLOSE {
         let (picture, icons) = shot(name, layout);

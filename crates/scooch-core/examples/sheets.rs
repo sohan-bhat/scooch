@@ -19,7 +19,7 @@ fn row(name: &str, photo: &RgbImage, analysis: &Analysis, layout: &str) -> Vec<R
     let scene = Scene { width: w, height: h, icons: icons.clone() };
     let plain = Options { pads: 0.0, scenery: Scenery::Off, ..Options::default() };
     let off = Options { scenery: Scenery::Off, ..Options::default() };
-    let on = Options::default();
+    let on = Options { scenery: Scenery::Auto, ..Options::default() };
     let fill = scooch_core::fill(analysis.source_width, analysis.source_height, &scene);
     let before = scooch_core::render_with(photo, analysis, &fill, &scene, &plain);
     let off_placement = scooch_core::solve(analysis, &scene, &off, None);
