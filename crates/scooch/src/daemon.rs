@@ -550,11 +550,14 @@ pub fn merge(mine: &State, before: &State, fresh: &State) -> State {
         }
     }
     for (id, ours) in &mine.screens {
-        let untouched = |theirs: &Entry| before.screens.get(id).is_none_or(|was| was.source == theirs.source && was.original == theirs.original);
+        let untouched = |theirs: &Entry| before.screens.get(id).is_some_and(|was| was.source == theirs.source && was.original == theirs.original && was.chosen == theirs.chosen);
         match merged.screens.get_mut(id) {
             Some(theirs) if untouched(theirs) => *theirs = ours.clone(),
             Some(theirs) => {
-                (theirs.output, theirs.icons) = (ours.output.clone(), ours.icons);
+                if ours.output.is_some() {
+                    theirs.output.clone_from(&ours.output);
+                }
+                theirs.icons = ours.icons;
                 theirs.counter = theirs.counter.max(ours.counter);
             }
             None if before.screens.contains_key(id) => {}
@@ -1506,6 +1509,44 @@ pub mod tests {
         assert!(stray.exists() && state.screens.is_empty());
         assert_eq!(state.kept, vec![stray.clone()]);
         assert_eq!(state.problem.as_deref(), Some(ORPHAN));
+    }
+
+    #[test]
+    fn use_during_the_tick_that_first_sees_a_space_keeps_the_entry_use_made() {
+        let (daemon, fake, original) = rig("usenewspace", vec![screen("D@S1", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let wanted = picture(original.parent().unwrap(), "wanted.png");
+        let other = picture(original.parent().unwrap(), "other.png");
+        fake.connect(vec![screen("D@S1", 0.0, 1.0), screen("D@S2", 0.0, 1.0)]);
+        fake.show("D@S2", &other);
+        let (store, desktop, chosen) = (daemon.store.clone(), fake.clone(), wanted.clone());
+        fake.during(move || {
+            let mut state = store.load();
+            crate::commands::choose_picture(&mut state, desktop.as_ref(), &store, &chosen).unwrap();
+            store.save(&state).unwrap();
+        });
+        daemon.tick();
+        let state = daemon.store.load();
+        let entry = &state.screens["D@S2"];
+        assert_eq!((entry.source.clone(), entry.original.clone(), entry.chosen), (wanted.clone(), other.clone(), true));
+        assert_eq!(state.screens["D@S1"].source, wanted);
+        daemon.tick();
+        let state = daemon.store.load();
+        assert_eq!((state.screens["D@S2"].source.clone(), state.screens["D@S2"].original.clone()), (wanted, other));
+    }
+
+    #[test]
+    fn merge_keeps_what_a_command_wrote_for_an_id_the_tick_never_saw() {
+        let before = State { on: true, ..State::default() };
+        let mut mine = before.clone();
+        mine.screens.insert("D@S2".into(), Entry { output: Some("/d/out/D_S2-1.jpg".into()), counter: 1, icons: 3, fingerprint: Some("f".into()), ..Entry::new(Path::new("/p/old.jpg")) });
+        let mut fresh = before.clone();
+        fresh.screens.insert("D@S2".into(), Entry { chosen: true, original: "/p/old.jpg".into(), ..Entry::new(Path::new("/p/new.jpg")) });
+        let merged = merge(&mine, &before, &fresh);
+        let entry = &merged.screens["D@S2"];
+        assert_eq!((entry.source.clone(), entry.original.clone(), entry.chosen), (PathBuf::from("/p/new.jpg"), PathBuf::from("/p/old.jpg"), true));
+        assert_eq!((entry.output.clone(), entry.counter, entry.icons, entry.fingerprint.clone()), (Some(PathBuf::from("/d/out/D_S2-1.jpg")), 1, 3, None));
     }
 
     #[test]
