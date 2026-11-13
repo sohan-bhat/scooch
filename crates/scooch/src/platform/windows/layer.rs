@@ -1,61 +1,66 @@
 use super::com;
+use crate::live::helper::{Platform, Waker};
+use crate::live::Hints;
 use crate::platform::Screen;
-use anyhow::{anyhow, bail, Context, Result};
-pub use scooch_live::Gpu;
-use scooch_live::{Pattern, Renderer, Target};
-use std::cell::Cell;
+use anyhow::{bail, Context, Result};
+use scooch_live::Target;
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use ::windows::core::{w, Interface, PCWSTR};
-use ::windows::Win32::Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use ::windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
-use ::windows::Win32::Graphics::Direct3D11::{D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION};
-use ::windows::Win32::Graphics::Dwm::DwmFlush;
-use ::windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_DESC, DXGI_SAMPLE_DESC};
-use ::windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIFactory, IDXGISwapChain, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC, DXGI_SWAP_EFFECT_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT};
-use ::windows::Win32::Graphics::Gdi::{GetDC, MapWindowPoints, ReleaseDC, SetDIBitsToDevice, ValidateRect, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS};
+use ::windows::core::{w, PCWSTR};
+use ::windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use ::windows::Win32::Graphics::Gdi::{MapWindowPoints, ValidateRect};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use ::windows::Win32::System::Threading::GetCurrentThreadId;
 use ::windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows, EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetMessageW, GetWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW, PostQuitMessage, RegisterClassExW, SendMessageTimeoutW, SetLayeredWindowAttributes, SetParent, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, EVENT_OBJECT_CREATE, EVENT_OBJECT_REORDER, GWL_STYLE, GW_CHILD, GW_HWNDNEXT, HTTRANSPARENT, LWA_ALPHA, MA_NOACTIVATE, MSG, SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_DESTROY, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_CHILD, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows, EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetClientRect, GetWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, MsgWaitForMultipleObjects, PeekMessageW, PostThreadMessageW, RegisterClassExW, SendMessageTimeoutW, SetLayeredWindowAttributes, SetParent,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, EVENT_OBJECT_CREATE, EVENT_OBJECT_REORDER, GWL_STYLE, GW_CHILD, GW_HWNDNEXT, HTTRANSPARENT, LWA_ALPHA, MA_NOACTIVATE, MSG, PM_NOREMOVE,
+    PM_REMOVE, QS_ALLINPUT, SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_NCHITTEST,
+    WM_NULL, WM_PAINT, WNDCLASSEXW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 pub const CLASS: PCWSTR = w!("ScoochLayer");
-const CLOSE: u32 = WM_APP + 40;
 const SPAWN_MESSAGE: u32 = 0x052C;
 const LOOK_AGAIN: Duration = Duration::from_millis(100);
 const LOOK_FOR: Duration = Duration::from_secs(2);
-const READY_WAIT: Duration = Duration::from_secs(10);
-const BAR_HALF_WIDTH: i32 = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Method {
-    Hwnd,
+    Bare,
+    Window,
     Visual,
-    VisualNoRedirection,
-    Copy,
-    Gdi,
 }
 
 impl Method {
-    pub const ALL: [Method; 5] = [Method::Hwnd, Method::Visual, Method::VisualNoRedirection, Method::Copy, Method::Gdi];
+    pub const ALL: [Method; 3] = [Method::Bare, Method::Window, Method::Visual];
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Method::Bare => "bare",
+            Method::Window => "window",
+            Method::Visual => "visual",
+        }
+    }
 
     pub fn name(self) -> &'static str {
         match self {
-            Method::Hwnd => "wgpu surface from the window",
+            Method::Bare => "wgpu DirectComposition visual on a window without a redirection bitmap",
+            Method::Window => "wgpu surface from the window",
             Method::Visual => "wgpu surface through a DirectComposition visual",
-            Method::VisualNoRedirection => "wgpu DirectComposition visual on a window without a redirection bitmap",
-            Method::Copy => "Direct3D 11 swap chain in copy mode",
-            Method::Gdi => "GDI from a CPU buffer paced by DwmFlush",
+        }
+    }
+
+    pub fn from_hints(hints: &Hints) -> Result<Method> {
+        match hints.present.as_deref() {
+            None | Some("bare") => Ok(Method::Bare),
+            Some("window") => Ok(Method::Window),
+            Some("visual") => Ok(Method::Visual),
+            Some(other) => bail!("the live layer has no presentation called {other}"),
         }
     }
 }
@@ -100,42 +105,10 @@ impl Layout {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct Stats {
-    pub first: Option<Duration>,
-    pub presents: Vec<Duration>,
-    pub adapter: String,
-    pub error: Option<String>,
-}
-
-pub struct Layer {
-    pub window: isize,
-    pub layout: Layout,
-    pub notes: Vec<String>,
-    pub stats: Arc<Mutex<Stats>>,
-    stop: Arc<AtomicBool>,
-    window_thread: Option<(JoinHandle<()>, mpsc::Receiver<()>)>,
-    render_thread: Option<(JoinHandle<()>, mpsc::Receiver<()>)>,
-}
-
-const STOP_WAIT: Duration = Duration::from_secs(3);
-
-fn finish(thread: Option<(JoinHandle<()>, mpsc::Receiver<()>)>) -> bool {
-    let Some((handle, done)) = thread else { return true };
-    match done.recv_timeout(STOP_WAIT) {
-        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-            let _ = handle.join();
-            true
-        }
-        Err(mpsc::RecvTimeoutError::Timeout) => false,
-    }
-}
-
 static REPAIRS: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
-    static OURS: Cell<isize> = const { Cell::new(0) };
-    static ICONS: Cell<isize> = const { Cell::new(0) };
+    static ORDERED: RefCell<Vec<(isize, isize)>> = const { RefCell::new(Vec::new()) };
 }
 
 fn hwnd(raw: isize) -> HWND {
@@ -266,13 +239,15 @@ fn in_place(ours: HWND, icons: HWND) -> bool {
 }
 
 unsafe extern "system" fn reordered(_hook: HWINEVENTHOOK, _kind: u32, _window: HWND, _object: i32, _child: i32, _thread: u32, _time: u32) {
-    let (ours, icons) = (OURS.with(Cell::get), ICONS.with(Cell::get));
-    if ours == 0 || icons == 0 || !unsafe { IsWindow(Some(hwnd(ours))) }.as_bool() {
-        return;
-    }
-    if !in_place(hwnd(ours), hwnd(icons)) {
-        let _ = unsafe { SetWindowPos(hwnd(ours), Some(hwnd(icons)), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
-        REPAIRS.fetch_add(1, Ordering::SeqCst);
+    let pairs = ORDERED.with(|ordered| ordered.borrow().clone());
+    for (ours, icons) in pairs {
+        if !unsafe { IsWindow(Some(hwnd(ours))) }.as_bool() || !unsafe { IsWindow(Some(hwnd(icons))) }.as_bool() {
+            continue;
+        }
+        if !in_place(hwnd(ours), hwnd(icons)) {
+            let _ = unsafe { SetWindowPos(hwnd(ours), Some(hwnd(icons)), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+            REPAIRS.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -285,15 +260,6 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
             let _ = unsafe { ValidateRect(Some(window), None) };
             LRESULT(0)
         }
-        CLOSE => {
-            let _ = unsafe { ShowWindow(window, SW_HIDE) };
-            let _ = unsafe { DestroyWindow(window) };
-            LRESULT(0)
-        }
-        WM_DESTROY => {
-            unsafe { PostQuitMessage(0) };
-            LRESULT(0)
-        }
         _ => unsafe { DefWindowProcW(window, message, wparam, lparam) },
     }
 }
@@ -304,12 +270,10 @@ fn frame_in_parent(screen: &Screen, parent: HWND) -> RECT {
     RECT { left: corners[0].x, top: corners[0].y, right: corners[1].x, bottom: corners[1].y }
 }
 
-fn make_window(layout: Layout, area: RECT, no_redirection: bool) -> Result<HWND> {
+fn make_window(layout: Layout, area: RECT, method: Method) -> Result<HWND> {
     let instance = unsafe { GetModuleHandleW(PCWSTR::null()) }?;
-    let class = WNDCLASSEXW { cbSize: size_of::<WNDCLASSEXW>() as u32, lpfnWndProc: Some(procedure), hInstance: instance.into(), lpszClassName: CLASS, ..Default::default() };
-    unsafe { RegisterClassExW(&class) };
     let mut extended = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
-    if no_redirection {
+    if method == Method::Bare {
         extended |= WS_EX_NOREDIRECTIONBITMAP;
     }
     let (width, height) = (area.right - area.left, area.bottom - area.top);
@@ -321,7 +285,9 @@ fn make_window(layout: Layout, area: RECT, no_redirection: bool) -> Result<HWND>
         unsafe { SetWindowLongPtrW(window, GWL_STYLE, (style & !(WS_POPUP.0 as isize)) | WS_CHILD.0 as isize) };
         let after = layout.above().map(hwnd);
         unsafe { SetWindowPos(window, after, area.left, area.top, width, height, SWP_NOACTIVATE | SWP_FRAMECHANGED) }?;
-        let _ = unsafe { ShowWindow(window, SW_SHOWNA) };
+        if method == Method::Bare {
+            let _ = unsafe { ShowWindow(window, SW_SHOWNA) };
+        }
         Ok(())
     })();
     if let Err(error) = built {
@@ -331,310 +297,150 @@ fn make_window(layout: Layout, area: RECT, no_redirection: bool) -> Result<HWND>
     Ok(window)
 }
 
-fn window_thread(layout: Layout, area: RECT, no_redirection: bool, ready: mpsc::Sender<Result<isize>>) {
-    let window = match make_window(layout, area, no_redirection) {
-        Ok(window) => window,
-        Err(error) => {
-            let _ = ready.send(Err(error));
-            return;
-        }
-    };
-    OURS.with(|ours| ours.set(window.0 as isize));
-    ICONS.with(|icons| icons.set(layout.above().unwrap_or(0)));
-    let hook = unsafe { SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_REORDER, None, Some(reordered), layout.explorer(), 0, WINEVENT_OUTOFCONTEXT) };
-    let _ = ready.send(Ok(window.0 as isize));
-    let mut message = MSG::default();
-    while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
-        let _ = unsafe { TranslateMessage(&message) };
-        unsafe { DispatchMessageW(&message) };
-    }
-    if !hook.is_invalid() {
-        let _ = unsafe { UnhookWinEvent(hook) };
-    }
-    OURS.with(|ours| ours.set(0));
-}
-
-pub fn bgra(pattern: &Pattern) -> Vec<u8> {
-    let mut out = pattern.rgba.clone();
-    for pixel in out.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
-        pixel[3] = 255;
-    }
-    out
-}
-
-pub fn paint(base: &[u8], width: i32, height: i32, bar: Option<f32>, frame: &mut Vec<u8>) {
-    frame.clear();
-    frame.extend_from_slice(base);
-    let stride = width as usize * 4;
-    if let Some(bar) = bar {
-        let center = (bar * width as f32) as i32;
-        let (left, right) = ((center - BAR_HALF_WIDTH).max(0), (center + BAR_HALF_WIDTH).min(width));
-        for y in 0..height as usize {
-            for x in left..right {
-                let at = y * stride + x as usize * 4;
-                frame[at..at + 4].copy_from_slice(&[255, 0, 255, 255]);
-            }
-        }
-    }
-    for y in 9..24usize.min(height as usize) {
-        for x in (width - 23).max(0)..(width - 8).max(0) {
-            let at = y * stride + x as usize * 4;
-            frame[at..at + 4].copy_from_slice(&[0, 255, 0, 255]);
-        }
-    }
-}
-
-trait Presenter {
-    fn present(&mut self, bar: Option<f32>) -> Result<()>;
-    fn adapter(&self) -> String;
-}
-
-struct Wgpu(Renderer);
-
-impl Presenter for Wgpu {
-    fn present(&mut self, bar: Option<f32>) -> Result<()> {
-        self.0.frame(bar).map_err(|error| anyhow!(error))
-    }
-
-    fn adapter(&self) -> String {
-        self.0.adapter.clone()
-    }
-}
-
-struct Gdi {
-    window: HWND,
-    width: i32,
-    height: i32,
-    base: Vec<u8>,
-    frame: Vec<u8>,
-}
-
-impl Presenter for Gdi {
-    fn present(&mut self, bar: Option<f32>) -> Result<()> {
-        paint(&self.base, self.width, self.height, bar, &mut self.frame);
-        let header = BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: self.width, biHeight: -self.height, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() };
-        let info = BITMAPINFO { bmiHeader: header, ..Default::default() };
-        let dc = unsafe { GetDC(Some(self.window)) };
-        if dc.is_invalid() {
-            bail!("GetDC on the layer returned nothing");
-        }
-        let lines = unsafe { SetDIBitsToDevice(dc, 0, 0, self.width as u32, self.height as u32, 0, 0, 0, self.height as u32, self.frame.as_ptr() as *const c_void, &info, DIB_RGB_COLORS) };
-        unsafe { ReleaseDC(Some(self.window), dc) };
-        if lines == 0 {
-            bail!("SetDIBitsToDevice copied no lines");
-        }
-        unsafe { DwmFlush() }.context("DwmFlush failed")?;
-        Ok(())
-    }
-
-    fn adapter(&self) -> String {
-        "GDI".into()
-    }
-}
-
-struct Blit {
-    context: ID3D11DeviceContext,
-    chain: IDXGISwapChain,
-    width: i32,
-    height: i32,
-    base: Vec<u8>,
-    frame: Vec<u8>,
-    driver: &'static str,
-}
-
-impl Blit {
-    fn new(window: HWND, width: i32, height: i32, base: Vec<u8>) -> Result<Self> {
-        let mut failures = Vec::new();
-        for (driver, name) in [(D3D_DRIVER_TYPE_HARDWARE, "hardware"), (D3D_DRIVER_TYPE_WARP, "WARP")] {
-            match Self::with(window, width, height, driver) {
-                Ok((context, chain)) => return Ok(Self { context, chain, width, height, frame: Vec::with_capacity(base.len()), base, driver: name }),
-                Err(error) => failures.push(format!("{name} {error}")),
-            }
-        }
-        bail!("no Direct3D 11 swap chain, {}", failures.join(", "))
-    }
-
-    fn with(window: HWND, width: i32, height: i32, driver: D3D_DRIVER_TYPE) -> Result<(ID3D11DeviceContext, IDXGISwapChain)> {
-        let mut device: Option<ID3D11Device> = None;
-        let mut context: Option<ID3D11DeviceContext> = None;
-        unsafe { D3D11CreateDevice(None, driver, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)) }?;
-        let device = device.context("no device")?;
-        let context = context.context("no context")?;
-        let factory: IDXGIFactory = unsafe { device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent() }?;
-        let description = DXGI_SWAP_CHAIN_DESC {
-            BufferDesc: DXGI_MODE_DESC { Width: width as u32, Height: height as u32, Format: DXGI_FORMAT_B8G8R8A8_UNORM, ..Default::default() },
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            BufferCount: 1,
-            OutputWindow: window,
-            Windowed: true.into(),
-            SwapEffect: DXGI_SWAP_EFFECT_DISCARD,
-            Flags: 0,
-        };
-        let mut chain: Option<IDXGISwapChain> = None;
-        unsafe { factory.CreateSwapChain(&device, &description, &mut chain) }.ok()?;
-        Ok((context, chain.context("no swap chain")?))
-    }
-}
-
-impl Presenter for Blit {
-    fn present(&mut self, bar: Option<f32>) -> Result<()> {
-        paint(&self.base, self.width, self.height, bar, &mut self.frame);
-        let buffer: ID3D11Texture2D = unsafe { self.chain.GetBuffer(0) }?;
-        unsafe { self.context.UpdateSubresource(&buffer, 0, None, self.frame.as_ptr() as *const c_void, self.width as u32 * 4, 0) };
-        unsafe { self.chain.Present(1, DXGI_PRESENT(0)) }.ok()?;
-        Ok(())
-    }
-
-    fn adapter(&self) -> String {
-        format!("Direct3D 11 {}", self.driver)
-    }
-}
-
-fn presenter(method: Method, window: isize, pattern: &Pattern, gpu: Option<&Gpu>) -> Result<Box<dyn Presenter>> {
-    let (width, height) = (pattern.width as i32, pattern.height as i32);
-    Ok(match method {
-        Method::Hwnd | Method::Visual | Method::VisualNoRedirection => {
-            let instance = unsafe { GetModuleHandleW(PCWSTR::null()) }?;
-            let target = Target::Window { window, instance: instance.0 as isize, composition: method != Method::Hwnd };
-            let renderer = match gpu {
-                Some(gpu) => Renderer::on(gpu, target, pattern),
-                None => Renderer::new(target, pattern),
-            };
-            Box::new(Wgpu(renderer.map_err(|error| anyhow!(error))?))
-        }
-        Method::Copy => Box::new(Blit::new(hwnd(window), width, height, bgra(pattern))?),
-        Method::Gdi => Box::new(Gdi { window: hwnd(window), width, height, base: bgra(pattern), frame: Vec::new() }),
-    })
-}
-
-fn render_thread(mut presenter: Box<dyn Presenter>, opened: Instant, cycle: Duration, stop: Arc<AtomicBool>, stats: Arc<Mutex<Stats>>, ready: mpsc::Sender<Result<()>>) {
-    if let Err(error) = presenter.present(Some(0.0)) {
-        let _ = ready.send(Err(error));
-        return;
-    }
-    let first = opened.elapsed();
-    if let Ok(mut stats) = stats.lock() {
-        stats.first = Some(first);
-        stats.adapter = presenter.adapter();
-        stats.presents.push(Duration::ZERO);
-    }
-    let _ = ready.send(Ok(()));
-    let started = Instant::now();
-    while !stop.load(Ordering::SeqCst) {
-        let elapsed = started.elapsed();
-        let bar = (elapsed.as_secs_f32() % cycle.as_secs_f32()) / cycle.as_secs_f32();
-        let result = presenter.present(Some(bar));
-        if let Ok(mut stats) = stats.lock() {
-            match result {
-                Ok(()) => stats.presents.push(started.elapsed()),
-                Err(error) => {
-                    stats.error.get_or_insert(error.to_string());
-                }
-            }
-        }
-    }
-}
-
 pub fn repairs() -> u32 {
     REPAIRS.load(Ordering::SeqCst)
 }
 
-pub fn open(screen: &Screen, method: Method, pattern: Pattern, cycle: Duration) -> Result<Layer> {
-    open_on(screen, method, pattern, cycle, None)
+pub struct Host {
+    thread: u32,
+    instance: isize,
 }
 
-pub fn open_on(screen: &Screen, method: Method, pattern: Pattern, cycle: Duration, gpu: Option<Gpu>) -> Result<Layer> {
-    com::aware();
-    let (layout, notes) = layout()?;
-    let area = frame_in_parent(screen, hwnd(layout.parent()));
-    let (window_ready, window_wait) = mpsc::channel();
-    let no_redirection = method == Method::VisualNoRedirection;
-    let (window_done, window_finished) = mpsc::channel();
-    let window_thread = std::thread::Builder::new().name("scooch-layer-window".into()).spawn(move || {
-        window_thread(layout, area, no_redirection, window_ready);
-        let _ = window_done.send(());
-    })?;
-    let window = match window_wait.recv_timeout(READY_WAIT) {
-        Ok(Ok(window)) => window,
-        Ok(Err(error)) => {
-            finish(Some((window_thread, window_finished)));
-            return Err(error.context("the layer window could not be made"));
-        }
-        Err(_) => bail!("the layer window took over ten seconds to appear"),
-    };
-    let stats = Arc::new(Mutex::new(Stats::default()));
-    let stop = Arc::new(AtomicBool::new(false));
-    let (render_ready, render_wait) = mpsc::channel();
-    let (render_stop, render_stats) = (stop.clone(), stats.clone());
-    let (render_done, render_finished) = mpsc::channel();
-    let render_thread = std::thread::Builder::new().name("scooch-layer-render".into()).spawn(move || {
-        let opened = Instant::now();
-        let made = presenter(method, window, &pattern, gpu.as_ref());
-        drop(pattern);
-        match made {
-            Ok(made) => render_thread(made, opened, cycle, render_stop, render_stats, render_ready),
-            Err(error) => {
-                let _ = render_ready.send(Err(error));
-            }
-        }
-        let _ = render_done.send(());
-    });
-    let mut layer = Layer { window, layout, notes, stats, stop, window_thread: Some((window_thread, window_finished)), render_thread: render_thread.ok().map(|handle| (handle, render_finished)) };
-    match render_wait.recv_timeout(READY_WAIT) {
-        Ok(Ok(())) => Ok(layer),
-        Ok(Err(error)) => {
-            layer.close();
-            Err(error)
-        }
-        Err(_) => {
-            layer.close();
-            bail!("the first frame took over ten seconds")
-        }
+pub struct Window {
+    window: HWND,
+    icons: Option<isize>,
+    hook: HWINEVENTHOOK,
+    method: Method,
+}
+
+impl Host {
+    pub fn new() -> Result<Host> {
+        com::aware();
+        let mut message = MSG::default();
+        let _ = unsafe { PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE) };
+        let instance = unsafe { GetModuleHandleW(PCWSTR::null()) }?;
+        let class = WNDCLASSEXW { cbSize: size_of::<WNDCLASSEXW>() as u32, lpfnWndProc: Some(procedure), hInstance: instance.into(), lpszClassName: CLASS, ..Default::default() };
+        unsafe { RegisterClassExW(&class) };
+        Ok(Host { thread: unsafe { GetCurrentThreadId() }, instance: instance.0 as isize })
     }
 }
 
-pub fn ours_left() -> usize {
+impl Platform for Host {
+    type Layer = Window;
+
+    fn composition(&self, hints: &Hints) -> Result<bool> {
+        Ok(Method::from_hints(hints)? != Method::Window)
+    }
+
+    fn open(&mut self, screen: &Screen, hints: &Hints) -> Result<Window> {
+        let method = Method::from_hints(hints)?;
+        let (layout, _) = layout()?;
+        let area = frame_in_parent(screen, hwnd(layout.parent()));
+        let window = make_window(layout, area, method)?;
+        let icons = layout.above();
+        if let Some(icons) = icons {
+            ORDERED.with(|ordered| ordered.borrow_mut().push((window.0 as isize, icons)));
+        }
+        let hook = unsafe { SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_REORDER, None, Some(reordered), layout.explorer(), 0, WINEVENT_OUTOFCONTEXT) };
+        Ok(Window { window, icons, hook, method })
+    }
+
+    fn target(&self, layer: &Window) -> Target {
+        Target::Window { window: layer.window.0 as isize, instance: self.instance, composition: layer.method != Method::Window }
+    }
+
+    fn pixels(&self, layer: &Window) -> (u32, u32) {
+        let mut client = RECT::default();
+        let _ = unsafe { GetClientRect(layer.window, &mut client) };
+        ((client.right - client.left).max(1) as u32, (client.bottom - client.top).max(1) as u32)
+    }
+
+    fn show(&mut self, layer: &Window) -> Result<()> {
+        if layer.method != Method::Bare {
+            let _ = unsafe { ShowWindow(layer.window, SW_SHOWNA) };
+        }
+        if !unsafe { IsWindowVisible(layer.window) }.as_bool() {
+            bail!("the layer window is not visible");
+        }
+        if let Some(icons) = layer.icons {
+            if !in_place(layer.window, hwnd(icons)) {
+                let _ = unsafe { SetWindowPos(layer.window, Some(hwnd(icons)), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+                if !in_place(layer.window, hwnd(icons)) {
+                    bail!("the layer could not be ordered under the icons");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn close(&mut self, layer: Window) {
+        if !layer.hook.is_invalid() {
+            let _ = unsafe { UnhookWinEvent(layer.hook) };
+        }
+        ORDERED.with(|ordered| ordered.borrow_mut().retain(|(ours, _)| *ours != layer.window.0 as isize));
+        let _ = unsafe { ShowWindow(layer.window, SW_HIDE) };
+        let _ = unsafe { DestroyWindow(layer.window) };
+    }
+
+    fn wait(&mut self, timeout: Duration) {
+        let started = Instant::now();
+        unsafe { MsgWaitForMultipleObjects(None, false, timeout.as_millis().min(u128::from(u32::MAX)) as u32, QS_ALLINPUT) };
+        let mut message = MSG::default();
+        while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+            let _ = unsafe { TranslateMessage(&message) };
+            unsafe { DispatchMessageW(&message) };
+            if started.elapsed() > timeout {
+                break;
+            }
+        }
+    }
+
+    fn waker(&self) -> Waker {
+        let thread = self.thread;
+        Arc::new(move || {
+            let _ = unsafe { PostThreadMessageW(thread, WM_NULL, WPARAM(0), LPARAM(0)) };
+        })
+    }
+}
+
+pub fn layers() -> Vec<isize> {
     unsafe extern "system" fn each(window: HWND, data: LPARAM) -> ::windows::core::BOOL {
-        let count = unsafe { &mut *(data.0 as *mut usize) };
+        let found = unsafe { &mut *(data.0 as *mut Vec<isize>) };
         if class_of(window) == "ScoochLayer" {
-            *count += 1;
+            found.push(window.0 as isize);
         }
         true.into()
     }
-    let mut count = 0usize;
+    let mut found: Vec<isize> = Vec::new();
     let mut parents: Vec<HWND> = top_level().into_iter().filter(|window| class_of(*window) == "WorkerW").collect();
     parents.extend(unsafe { FindWindowW(w!("Progman"), PCWSTR::null()) }.ok());
     for parent in parents {
-        let _ = unsafe { EnumChildWindows(Some(parent), Some(each), LPARAM(&mut count as *mut usize as isize)) };
+        let _ = unsafe { EnumChildWindows(Some(parent), Some(each), LPARAM(&mut found as *mut Vec<isize> as isize)) };
     }
-    count + unsafe { FindWindowExW(None, None, CLASS, PCWSTR::null()) }.map_or(0, |_| 1)
+    if let Ok(top) = unsafe { FindWindowExW(None, None, CLASS, PCWSTR::null()) } {
+        found.push(top.0 as isize);
+    }
+    found.sort_unstable();
+    found.dedup();
+    found
 }
 
-impl Layer {
-    pub fn close(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        let rendered = finish(self.render_thread.take());
-        let _ = unsafe { PostMessageW(Some(hwnd(self.window)), CLOSE, WPARAM(0), LPARAM(0)) };
-        let windowed = finish(self.window_thread.take());
-        if !rendered || !windowed {
-            if let Ok(mut stats) = self.stats.lock() {
-                stats.error.get_or_insert(format!("a layer thread did not stop within three seconds, render {rendered} window {windowed}"));
-            }
-        }
-    }
+pub fn ours_left() -> usize {
+    layers().len()
+}
 
-    pub fn in_place(&self) -> bool {
-        match self.layout {
-            Layout::InProgman { icons, .. } | Layout::ProgmanOnly { icons, .. } => in_place(hwnd(self.window), hwnd(icons)),
-            Layout::InWorkerW { .. } => unsafe { IsWindow(Some(hwnd(self.window))) }.as_bool(),
-        }
+pub fn under_icons(window: isize) -> bool {
+    let Ok(progman) = (unsafe { FindWindowW(w!("Progman"), PCWSTR::null()) }) else { return false };
+    match seen(progman) {
+        Some(Layout::InProgman { icons, .. }) | Some(Layout::ProgmanOnly { icons, .. }) => in_place(hwnd(window), hwnd(icons)),
+        Some(Layout::InWorkerW { wallpaper, .. }) => children(hwnd(wallpaper)).contains(&hwnd(window)),
+        None => false,
     }
 }
 
-impl Drop for Layer {
-    fn drop(&mut self) {
-        self.close();
+pub fn serve() -> std::process::ExitCode {
+    match Host::new() {
+        Ok(host) => crate::live::helper::serve(host),
+        Err(error) => crate::live::helper::refuse(&format!("the live layer could not start {error:#}")),
     }
 }

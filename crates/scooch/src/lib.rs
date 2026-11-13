@@ -2,6 +2,8 @@ mod cache;
 mod commands;
 mod daemon;
 #[doc(hidden)]
+pub mod live;
+#[doc(hidden)]
 pub mod platform;
 #[doc(hidden)]
 pub mod poke;
@@ -44,6 +46,8 @@ enum Command {
     },
     #[command(about = "Let Scooch flip the picture when that clears your icons")]
     Flip,
+    #[command(about = "Turn the clouds and islands around your icons on or off")]
+    Scenery,
     #[command(about = "Run in the foreground, which is what the login item does")]
     Watch,
     #[command(about = "Check permissions and the desktop")]
@@ -51,6 +55,9 @@ enum Command {
 }
 
 pub fn run() -> ExitCode {
+    if std::env::args_os().nth(1).is_some_and(|first| first == live::HELPER) {
+        return live::helper::main();
+    }
     let code = match dispatch() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -70,6 +77,7 @@ fn dispatch() -> Result<()> {
         Some(Command::Status) => commands::status(),
         Some(Command::Render { image, icons, out, json, saliency, fill }) => commands::render(image, icons, out, json, saliency, fill),
         Some(Command::Flip) => commands::flip(),
+        Some(Command::Scenery) => commands::scenery(),
         Some(Command::Watch) => commands::watch(),
         Some(Command::Doctor) => commands::doctor(),
     }
