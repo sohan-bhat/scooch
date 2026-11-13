@@ -11,3 +11,4 @@ authors.workspace = true
 wgpu = { version = "30", default-features = false, features = ["wgsl", "dx12", "metal"] }
 raw-window-handle = "0.6"
 pollster = "0.4"
+scooch-core = { path = "../scooch-core" }

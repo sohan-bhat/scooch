@@ -1,5 +1,8 @@
 #![cfg(any(windows, target_os = "macos"))]
 
+mod glide;
+
+pub use glide::{half, Glide, Look, Picture, Screen, Still, OUTPUT};
 use std::num::NonZeroIsize;
 use std::sync::{Arc, Mutex};
 
@@ -25,6 +28,7 @@ pub struct Gpu {
     queue: wgpu::Queue,
     composition: bool,
     pipelines: Arc<Mutex<Vec<Pipeline>>>,
+    scenes: Arc<Result<glide::Pipes, String>>,
     pub name: String,
 }
 
@@ -71,7 +75,8 @@ impl Gpu {
         let info = adapter.get_info();
         let name = format!("{} {:?} {:?}", info.name, info.device_type, info.backend);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|error| format!("request device {error}"))?;
-        let gpu = Self { instance, adapter, device, queue, composition, pipelines: Arc::new(Mutex::new(Vec::new())), name };
+        let scenes = Arc::new(glide::pipes(&device));
+        let gpu = Self { instance, adapter, device, queue, composition, pipelines: Arc::new(Mutex::new(Vec::new())), scenes, name };
         gpu.pipeline(wgpu::TextureFormat::Bgra8Unorm);
         Ok(gpu)
     }
