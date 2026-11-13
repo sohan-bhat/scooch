@@ -1,5 +1,6 @@
 import { useFrame, useThree } from '@react-three/fiber';
 import { useEffect, useMemo } from 'react';
+import { runtime } from '@/story/state';
 import { quality } from './quality';
 
 const SIZE = 512;
@@ -115,6 +116,12 @@ export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | n
         fade.current.style.transition = 'opacity 420ms cubic-bezier(0.22, 1, 0.36, 1)';
         fade.current.style.opacity = '0';
       }
+    }
+    if (!runtime.ready || !runtime.props || !runtime.scenery) {
+      state.start = now;
+      state.frames.clear();
+      state.gpu.clear();
+      return;
     }
     if (now - state.start < WARMUP || now - state.changed < SETTLE) return;
     const frames = state.frames.stats(now, DOWN_WINDOW);

@@ -213,10 +213,19 @@ function Extras({ phone, onExtras }: { phone: boolean; onExtras: () => void }) {
     let stopped = false;
     group.visible = false;
     const target = new WebGLRenderTarget(1, 1, { type: HalfFloatType });
-    const previous = gl.getRenderTarget();
-    gl.setRenderTarget(target);
-    const pending = gl.compileAsync(group, camera, scene);
-    gl.setRenderTarget(previous);
+    const compileEach = async () => {
+      const waits: Promise<unknown>[] = [];
+      for (const holder of group.children) {
+        await nextFrame();
+        if (stopped) return;
+        const previous = gl.getRenderTarget();
+        gl.setRenderTarget(target);
+        waits.push(gl.compileAsync(holder, camera, scene));
+        gl.setRenderTarget(previous);
+      }
+      await Promise.all(waits);
+    };
+    const pending = compileEach();
     const textures = new Set<Texture>();
     group.traverse((child) => {
       const material = (child as Mesh).material as MeshStandardMaterial | undefined;
