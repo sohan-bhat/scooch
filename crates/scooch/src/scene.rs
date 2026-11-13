@@ -28,6 +28,9 @@ pub fn fingerprint(source: &Path, scene: &Scene, options: &Options) -> String {
         text.push_str(&format!("{}@{changed}|", details.len()));
     }
     text.push_str(&format!("{}/{}/{}/{}|", options.strength, options.max_zoom, options.mirror, options.pads));
+    if options.scenery != scooch_core::Scenery::Off {
+        text.push_str(&format!("scenery {:?}|", options.scenery));
+    }
     for icon in &scene.icons {
         text.push_str(&format!("{},{},{},{};", icon.x.round(), icon.y.round(), icon.w.round(), icon.h.round()));
     }
@@ -110,6 +113,7 @@ mod tests {
         assert_ne!(base, fingerprint(a, &scene(&screen, &[moved]), &options));
         assert_ne!(base, fingerprint(a, &scene(&screen, &[]), &options));
         assert_ne!(base, fingerprint(a, &scene(&screen, &[icon]), &Options { pads: 0.1, ..options }));
+        assert_ne!(base, fingerprint(a, &scene(&screen, &[icon]), &Options { scenery: scooch_core::Scenery::Auto, ..options }));
         assert_ne!(base, fingerprint(a, &scene(&Screen { scale: 1.0, ..retina() }, &[icon]), &options));
         assert_eq!(base.len(), 16);
     }

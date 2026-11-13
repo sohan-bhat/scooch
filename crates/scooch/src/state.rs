@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
-use scooch_core::{Options, Placement};
-use serde::{Deserialize, Serialize};
+use scooch_core::{Options, Placement, Scenery};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -16,6 +16,7 @@ pub const COMMAND_PATIENCE: Duration = Duration::from_secs(20);
 pub struct State {
     pub version: u32,
     pub on: bool,
+    #[serde(default = "fresh_options", deserialize_with = "options_or_scenery")]
     pub options: Options,
     pub screens: BTreeMap<String, Entry>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -32,6 +33,22 @@ pub struct State {
     pub kept: Vec<PathBuf>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stuck: Vec<PathBuf>,
+}
+
+pub fn fresh_options() -> Options {
+    Options { scenery: Scenery::Auto, ..Options::default() }
+}
+
+fn options_or_scenery<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Options, D::Error> {
+    let mut value = serde_json::Value::deserialize(deserializer)?;
+    if let Some(fields) = value.as_object_mut() {
+        fields.entry("scenery").or_insert_with(|| serde_json::json!(Scenery::Auto));
+    }
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
+}
+
+pub fn scenery_on(options: &Options) -> bool {
+    options.scenery != Scenery::Off
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -57,6 +74,12 @@ impl Default for State {
     }
 }
 
+impl State {
+    pub fn fresh() -> Self {
+        Self { options: fresh_options(), ..Self::default() }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Entry {
@@ -71,6 +94,8 @@ pub struct Entry {
     pub chosen: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub flip_helps: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub painted: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub unrestorable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -269,7 +294,7 @@ impl Store {
 }
 
 pub fn parse(bytes: Option<&[u8]>) -> State {
-    let mut state = bytes.and_then(|bytes| serde_json::from_slice::<State>(bytes).ok()).unwrap_or_default();
+    let mut state = bytes.and_then(|bytes| serde_json::from_slice::<State>(bytes).ok()).unwrap_or_else(State::fresh);
     state.version = VERSION;
     state
 }
@@ -405,7 +430,27 @@ mod tests {
         let state = store.load();
         assert!(state.on);
         assert_eq!(state.screens["main"].counter, 3);
-        assert_eq!(state.options, Options::default());
+        assert_eq!(state.options, fresh_options());
+    }
+
+    #[test]
+    fn a_file_without_the_scenery_setting_loads_with_scenery_on() {
+        let store = Store::at(scratch("scenery-old"));
+        fs::write(store.state_file(), br#"{"on":true,"options":{"strength":1.0,"max_zoom":1.3,"mirror":true,"pads":0.7}}"#).unwrap();
+        let state = store.load();
+        assert_eq!(state.options.scenery, Scenery::Auto);
+        assert!(state.options.mirror);
+        assert_eq!(Store::at(scratch("scenery-none")).load().options.scenery, Scenery::Auto);
+    }
+
+    #[test]
+    fn both_scenery_values_survive_a_round_trip() {
+        let store = Store::at(scratch("scenery-trip"));
+        for scenery in [Scenery::Auto, Scenery::Off] {
+            let state = State { on: true, options: Options { scenery, ..Options::default() }, ..State::default() };
+            store.save(&state).unwrap();
+            assert_eq!(store.load(), state);
+        }
     }
 
     #[test]
