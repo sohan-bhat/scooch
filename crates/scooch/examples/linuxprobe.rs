@@ -148,7 +148,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         probe.section("4 Move and events", events);
         probe.section("5 Wallpaper", wallpaper);
         probe.section("6 End to end", end_to_end);
-        probe.section("7 Cleanup", cleanup);
+        probe.section("7 Two monitors", monitors);
+        probe.section("8 Cleanup", cleanup);
         probe.save();
         ExitCode::SUCCESS
     }
@@ -183,9 +184,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn facts(p: &mut Probe) -> Result<()> {
+        let system = fs::read_to_string("/etc/os-release").ok().and_then(|text| text.lines().find_map(|line| line.strip_prefix("PRETTY_NAME=").map(|name| name.trim_matches('"').to_string()))).unwrap_or_default();
+        p.line(format!("- system {system}"));
         p.line(format!("- desktop {:?}, version {}", p.kind, version(p.kind)));
         p.line(format!("- session {:?}, WAYLAND_DISPLAY {:?}, DISPLAY {:?}, XDG_SESSION_TYPE {:?}", p.session, std::env::var("WAYLAND_DISPLAY").ok(), std::env::var("DISPLAY").ok(), std::env::var("XDG_SESSION_TYPE").ok()));
         p.line(format!("- Desktop folder {}", p.desktop.display()));
+        for line in fs::read_to_string(p.out.join("versions.txt")).unwrap_or_default().lines() {
+            p.line(format!("- package {line}"));
+        }
         let readiness = fs::read_to_string(p.out.join("readiness.txt")).unwrap_or_default();
         for line in readiness.lines() {
             p.line(format!("- session start {line}"));
@@ -316,6 +322,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             p.raw(format!("{name}\n{text}"));
             p.line(format!("- {name} {} bytes", text.len()));
         }
+        p.line(format!("- screen mapping {:?}", kde::mapping()));
         for containment in kde_rules::containments(&kde::groups(kde_rules::APPLETS)) {
             p.line(format!("- containment {} screen {} plugin {} activity {:?} image {:?}", containment.id, containment.screen, containment.plugin, containment.activity, containment.image));
             for (key, value) in &containment.general {
@@ -684,6 +691,13 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 }
             });
         }
+        if p.session == Session::X11 {
+            let push = push.clone();
+            std::thread::spawn(move || {
+                let release: screens::Shared = Arc::new(move || push("xinput primary release".into()));
+                scooch::platform::linux::pointer::watch(&release, false)
+            });
+        }
         let mut folders = vec![p.desktop.clone(), kde::config_folder(), kde::config_folder().join("xfce4").join("desktop")];
         if let Some(data) = dirs::data_dir() {
             folders.push(data.join("gvfs-metadata"));
@@ -747,6 +761,21 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         for (at, text) in seen {
             p.raw(format!("  event +{} {text}", at.saturating_sub(base)));
         }
+    }
+
+    fn wander(p: &mut Probe) -> Result<String> {
+        let (conn, number) = x11rb::connect(None)?;
+        let root = conn.setup().roots.get(number).context("no root")?.root;
+        let frame = primary_frame(p).context("no screen")?;
+        for step in 0..40i32 {
+            let x = frame.x + frame.w * (0.3 + 0.4 * (step as f32 / 40.0));
+            let y = frame.y + frame.h * (0.4 + 0.2 * ((step % 10) as f32 / 10.0));
+            conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, x as i16, y as i16, 0)?;
+            conn.flush()?;
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        conn.sync()?;
+        Ok("40 pointer steps across the screen, no button".into())
     }
 
     fn drag(from: (i16, i16), to: (i16, i16)) -> Result<()> {
@@ -857,9 +886,22 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             std::thread::sleep(Duration::from_secs(5));
             Ok("no input".into())
         });
+        act(p, "move the pointer without clicking", wander);
         act(p, "move a probe icon", |p| {
+            let linux = p.linux()?;
+            let before = icons(&linux);
             let target = aside(p)?;
-            move_icon(p, target)
+            let detail = move_icon(p, target)?;
+            let released = Instant::now();
+            let mut changed = None;
+            while released.elapsed() < Duration::from_secs(6) {
+                if icons(&linux) != before {
+                    changed = Some(released.elapsed().as_millis());
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(format!("{detail}, the adapter's reading changed {changed:?} ms after the release"))
         });
         let fresh = p.desktop.join("scooch-probe-new.txt");
         let renamed = p.desktop.join("scooch-probe-renamed.txt");
@@ -887,8 +929,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn photo(width: u32, height: u32) -> RgbImage {
+        photo_at(width, height, SUBJECT)
+    }
+
+    fn photo_at(width: u32, height: u32, subject: (f32, f32, f32)) -> RgbImage {
         let (w, h) = (width.max(1) as f32, height.max(1) as f32);
-        let (cx, cy, radius) = (SUBJECT.0 * w, SUBJECT.1 * h, SUBJECT.2 * h);
+        let (cx, cy, radius) = (subject.0 * w, subject.1 * h, subject.2 * h);
         let mut bytes = Vec::with_capacity(width as usize * height as usize * 3);
         for y in 0..height {
             for x in 0..width {
@@ -1060,20 +1106,29 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         state["screens"].as_object().is_some_and(|screens| !screens.is_empty() && screens.values().all(|screen| !screen["fingerprint"].is_null()))
     }
 
+    fn scooch_program() -> Result<PathBuf> {
+        let exe = std::env::current_exe()?;
+        exe.parent().and_then(Path::parent).map(|folder| folder.join("scooch")).filter(|path| path.is_file()).context("the scooch binary is missing, so build with --bins --examples")
+    }
+
+    fn start_daemon(p: &mut Probe, program: &Path, log_name: &str) -> Result<u32> {
+        fs::write(p.home.join("state.json"), br#"{"version":1,"on":true}"#)?;
+        let log = fs::File::create(p.out.join(log_name))?;
+        let child = Command::new(program).arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn()?;
+        let process = child.id();
+        p.daemon = Some(child);
+        Ok(process)
+    }
+
     fn end_to_end(p: &mut Probe) -> Result<()> {
         let linux = p.linux()?;
         let screen = linux.screens()?.first().cloned().context("no screen")?;
-        let exe = std::env::current_exe()?;
-        let program = exe.parent().and_then(Path::parent).map(|folder| folder.join("scooch")).filter(|path| path.is_file()).context("the scooch binary is missing, so build with --bins --examples")?;
+        let program = scooch_program()?;
         if let Some(picture) = p.pictures.first().cloned() {
             linux.set_wallpaper(&screen, &picture)?;
             p.line(format!("- wallpaper set to {}", picture.display()));
         }
-        fs::write(p.home.join("state.json"), br#"{"version":1,"on":true}"#)?;
-        let log = fs::File::create(p.out.join("watch.log"))?;
-        let child = Command::new(&program).arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn()?;
-        let process = child.id();
-        p.daemon = Some(child);
+        let process = start_daemon(p, &program, "watch.log")?;
         p.line(format!("- started {} as process {process}", program.display()));
         let home = p.home.clone();
         let first = wait_until(Duration::from_secs(60), || rendered(&home));
@@ -1122,6 +1177,147 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         for line in trace.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev() {
             p.line(format!("  - `{line}`"));
         }
+        Ok(())
+    }
+
+    fn touches(frame: &Rect, icon: &Rect) -> bool {
+        icon.x < frame.x + frame.w && icon.x + icon.w > frame.x && icon.y < frame.y + frame.h && icon.y + icon.h > frame.y
+    }
+
+    fn inside(frame: &Rect, point: (f32, f32)) -> bool {
+        point.0 >= frame.x && point.0 < frame.x + frame.w && point.1 >= frame.y && point.1 < frame.y + frame.h
+    }
+
+    fn monitor_view(p: &mut Probe) {
+        if p.session == Session::X11 {
+            p.line(format!("- xrandr monitors `{}`", output("xrandr", &["--listmonitors"]).replace('\n', " | ")));
+        }
+        match p.kind {
+            Some(Kind::Kde) => {
+                if let Ok(state) = kde::state() {
+                    p.line(format!("- Plasma screens {:?}", state.screens));
+                    for desktop in &state.desktops {
+                        p.line(format!("- Plasma desktop {} on screen {} image {:?}", desktop.id, desktop.screen, desktop.image));
+                    }
+                }
+                p.line(format!("- screen mapping {:?}", kde::mapping()));
+            }
+            Some(Kind::Xfce) => {
+                for property in settings::xfconf_list().into_iter().filter(|property| property.starts_with("/backdrop/") && property.ends_with("/last-image")) {
+                    let value = settings::xfconf(&property).unwrap_or_default();
+                    p.line(format!("- xfconf {property} = `{value}`"));
+                }
+                if let Ok(entries) = fs::read_dir(kde::config_folder().join("xfce4").join("desktop")) {
+                    for entry in entries.flatten() {
+                        p.line(format!("- positions file {}", entry.path().display()));
+                    }
+                }
+            }
+            Some(Kind::Gnome) => p.line(format!("- DING monitors {:?}", gnome::geometry().map(|found| found.len()).map_err(|error| error.to_string()))),
+            _ => {}
+        }
+    }
+
+    fn state_entries(home: &Path) -> Vec<(String, serde_json::Value)> {
+        let Ok(bytes) = fs::read(home.join("state.json")) else { return Vec::new() };
+        let Ok(state) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return Vec::new() };
+        state["screens"].as_object().map(|screens| screens.iter().map(|(id, entry)| (id.clone(), entry.clone())).collect()).unwrap_or_default()
+    }
+
+    fn monitors(p: &mut Probe) -> Result<()> {
+        let linux = p.linux()?;
+        let all = linux.all_screens()?;
+        for found in &all {
+            p.line(format!("- the adapter sees monitor `{}` at {} scale {} primary {}", found.screen.id, show(&found.screen.frame), found.screen.scale, found.primary));
+        }
+        monitor_view(p);
+        let picked = linux.screens()?;
+        p.line(format!("- Scooch arranges {} of them, one picture per screen {}", picked.len(), linux.shell.per_screen()));
+        if all.len() < 2 {
+            p.line("- one monitor only, so there is nothing more to check here".to_string());
+            return Ok(());
+        }
+        let scale = factor(p);
+        let second = all.iter().find(|found| !found.primary).unwrap_or(&all[1]).screen.clone();
+        let second_frame = physical(&second.frame, scale);
+        let target = (second_frame.x + 0.5 * second_frame.w, second_frame.y + 0.3 * second_frame.h);
+        let detail = move_icon(p, target).unwrap_or_else(|error| format!("failed {error:#}"));
+        std::thread::sleep(Duration::from_secs(4));
+        let icon = probe_icon(p, &linux).ok();
+        let landed = icon.is_some_and(|icon| inside(&second_frame, (icon.x + icon.w / 2.0, icon.y + icon.h / 2.0)));
+        p.line(format!("- moved the probe icon toward `{}`, {detail}, the adapter now reads it at {}, inside that monitor {landed}", second.id, icon.as_ref().map_or("nothing".into(), show)));
+        if let Ok(snapshot) = linux.snapshot() {
+            for screen in &snapshot.screens {
+                let mine: Vec<String> = snapshot.icons.iter().filter(|icon| touches(&screen.frame, icon)).map(show).collect();
+                p.line(format!("- screen `{}` gets {} icons {mine:?}", screen.id, mine.len()));
+            }
+        }
+        let mut pictures = Vec::new();
+        for (index, screen) in picked.iter().enumerate() {
+            let (width, height) = ((screen.frame.w * screen.scale) as u32, (screen.frame.h * screen.scale) as u32);
+            let subject = if index % 2 == 0 { SUBJECT } else { (1.0 - SUBJECT.0, SUBJECT.1, SUBJECT.2) };
+            let path = p.home.join(format!("monitor-{index}.jpg"));
+            fs::write(&path, jpeg(&photo_at(width, height, subject))?)?;
+            let set = linux.set_wallpaper(screen, &path);
+            p.line(format!("- set `{}` to {} {:?}", screen.id, path.display(), set.map_err(|error| error.to_string())));
+            pictures.push((screen.clone(), path));
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        for (screen, path) in &pictures {
+            let frame = physical(&screen.frame, scale);
+            let shown = capture(p.session, &frame).ok();
+            let file = scooch_core::open(path).ok();
+            let share = match (&shown, &file) {
+                (Some(shown), Some(file)) => matching(shown, file, &[Rect { x: 0.0, y: 0.0, w: frame.w, h: 64.0 * scale }, Rect { x: 0.0, y: frame.h - 64.0 * scale, w: frame.w, h: 64.0 * scale }]),
+                _ => None,
+            };
+            if let Some(shown) = &shown {
+                let _ = fs::write(p.out.join(format!("monitor-{}-set.png", screen.id)), scooch_core::encode_png(shown)?);
+            }
+            p.line(format!("- `{}` shows its picture, pixels within 12 levels {share:?}%", screen.id));
+        }
+        let _ = fs::remove_file(p.home.join("state.json"));
+        let program = scooch_program()?;
+        let process = start_daemon(p, &program, "watch-monitors.log")?;
+        let home = p.home.clone();
+        let first = wait_until(Duration::from_secs(60), || rendered(&home) && state_entries(&home).len() >= picked.len());
+        p.line(format!("- started Scooch as process {process}, every screen rendered after {:?} ms", first.map(|time| time.as_millis())));
+        std::thread::sleep(Duration::from_secs(2));
+        for (id, entry) in state_entries(&home) {
+            p.line(format!("- state for `{id}` source {} output {} icons {}", entry["source"], entry["output"], entry["icons"]));
+        }
+        let mut outputs = Vec::new();
+        for (screen, _) in &pictures {
+            let now_showing = linux.wallpaper(screen).ok().flatten();
+            let frame = physical(&screen.frame, scale);
+            let share = match (capture(p.session, &frame).ok(), now_showing.as_ref().and_then(|path| scooch_core::open(path).ok())) {
+                (Some(shown), Some(file)) => {
+                    let _ = fs::write(p.out.join(format!("monitor-{}-scooch.png", screen.id)), scooch_core::encode_png(&shown)?);
+                    matching(&shown, &file, &[Rect { x: 0.0, y: 0.0, w: frame.w, h: 64.0 * scale }, Rect { x: 0.0, y: frame.h - 64.0 * scale, w: frame.w, h: 64.0 * scale }])
+                }
+                _ => None,
+            };
+            p.line(format!("- `{}` now shows {:?}, on screen within 12 levels {share:?}%", screen.id, now_showing));
+            outputs.push(now_showing);
+        }
+        let distinct = outputs.iter().flatten().collect::<std::collections::BTreeSet<_>>().len();
+        p.line(format!("- distinct pictures across the screens {distinct} of {}", outputs.len()));
+        let reaper = p.daemon.take().map(|mut child| std::thread::spawn(move || child.wait().ok()));
+        let off = Command::new(&program).arg("off").env("SCOOCH_HOME", &p.home).stdin(Stdio::null()).output();
+        match &off {
+            Ok(result) => p.line(format!("- scooch off exit {:?}, said `{}` `{}`", result.status.code(), String::from_utf8_lossy(&result.stdout).trim().replace('\n', " "), String::from_utf8_lossy(&result.stderr).trim().replace('\n', " "))),
+            Err(error) => p.line(format!("- scooch off could not run {error}")),
+        }
+        if let Some(reaper) = reaper {
+            let ended = wait_until(Duration::from_secs(5), || reaper.is_finished());
+            p.line(format!("- the watcher ended {}", ended.is_some()));
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        for (screen, path) in &pictures {
+            let now_showing = linux.wallpaper(screen).ok().flatten();
+            p.line(format!("- after off `{}` shows {:?}, its own picture again {}", screen.id, now_showing, now_showing.as_deref() == Some(path.as_path())));
+        }
+        p.line(format!("- record file left behind {}", record::file(&p.home).exists()));
         Ok(())
     }
 
