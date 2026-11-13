@@ -40,7 +40,7 @@ fn one() -> f32 {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Reply {
     Hello { version: u32, pid: u32 },
-    Ready { adapter: String, ms: u64, #[serde(default)] uploads: u32 },
+    Ready { adapter: String, ms: u64, #[serde(default)] uploads: u32, #[serde(default, rename = "device")] kind: String },
     Shown { id: u32, ms: u64 },
     Glided { id: u32, frames: u32, slow_frames: u32, first_frame_ms: u64, #[serde(default)] uploads: u32 },
     Settled { id: u32 },
@@ -53,6 +53,7 @@ pub struct Ready {
     pub adapter: String,
     pub ms: u64,
     pub uploads: u32,
+    pub kind: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -155,7 +156,7 @@ impl Helper {
     pub fn warm(&mut self, hints: Hints, picture: Option<&Path>, size: Option<[u32; 2]>, timeout: Duration) -> Result<Ready> {
         self.send(&Command::Warm { hints, picture: picture.map(Path::to_path_buf), size })?;
         self.expect(timeout, |reply| match reply {
-            Reply::Ready { adapter, ms, uploads } => Some(Ok(Ready { adapter: adapter.clone(), ms: *ms, uploads: *uploads })),
+            Reply::Ready { adapter, ms, uploads, kind } => Some(Ok(Ready { adapter: adapter.clone(), ms: *ms, uploads: *uploads, kind: kind.clone() })),
             other => Self::failure(other, None).map(Err),
         })
     }
@@ -293,7 +294,7 @@ mod tests {
         }
         let replies = [
             Reply::Hello { version: VERSION, pid: 9 },
-            Reply::Ready { adapter: "gpu".into(), ms: 12, uploads: 1 },
+            Reply::Ready { adapter: "gpu".into(), ms: 12, uploads: 1, kind: "integrated".into() },
             Reply::Shown { id: 3, ms: 40 },
             Reply::Glided { id: 3, frames: 24, slow_frames: 1, first_frame_ms: 30, uploads: 1 },
             Reply::Settled { id: 3 },
@@ -303,6 +304,12 @@ mod tests {
         for reply in replies {
             assert_eq!(serde_json::from_str::<Reply>(line(&reply).trim()).unwrap(), reply);
         }
+    }
+
+    #[test]
+    fn the_ready_answer_names_the_adapter_kind_as_device() {
+        let text = line(&Reply::Ready { adapter: "warp".into(), ms: 1, uploads: 0, kind: "cpu".into() });
+        assert!(text.contains(r#""kind":"ready""#) && text.contains(r#""device":"cpu""#), "{text}");
     }
 
     #[test]
