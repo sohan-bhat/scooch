@@ -353,6 +353,7 @@ pub struct Daemon {
     ledger: Mutex<Ledger>,
     pub glider: Arc<Mutex<Glider>>,
     reaping: Arc<std::sync::atomic::AtomicBool>,
+    motion: std::sync::atomic::AtomicU8,
 }
 
 #[derive(Default)]
@@ -396,7 +397,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0) }
     }
 
     fn glide_block(&self, state: &State) -> Option<&'static str> {
@@ -404,11 +405,20 @@ impl Daemon {
             Some("not live")
         } else if !state.glide {
             Some("setting off")
-        } else if self.desktop.reduce_motion() {
+        } else if self.read_motion() {
             Some("reduce motion")
         } else {
             None
         }
+    }
+
+    fn read_motion(&self) -> bool {
+        let reduce = self.desktop.reduce_motion();
+        let seen = if reduce { 2 } else { 1 };
+        if self.motion.swap(seen, std::sync::atomic::Ordering::SeqCst) != seen {
+            eprintln!("{} glide reduce motion {}", stamp(), if reduce { "on" } else { "off" });
+        }
+        reduce
     }
 
     fn glide_wanted(&self, state: &State) -> bool {

@@ -84,6 +84,11 @@ type Output = extern "C" fn(*mut c_void, *const TimeStamp, *const TimeStamp, u64
 extern "C" {
     fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> Ref;
     fn CGWindowLevelForKey(key: i32) -> i32;
+    fn CGMainDisplayID() -> u32;
+}
+
+pub fn main_display() -> u32 {
+    unsafe { CGMainDisplayID() }
 }
 
 #[link(name = "CoreVideo", kind = "framework")]

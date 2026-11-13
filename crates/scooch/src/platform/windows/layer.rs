@@ -385,10 +385,11 @@ impl Platform for Host {
     }
 
     fn period(&self, _layer: &Window) -> Duration {
-        let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
-        let read = unsafe { EnumDisplaySettingsW(PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut mode) }.as_bool();
-        let rate = if read && mode.dmDisplayFrequency > 1 { mode.dmDisplayFrequency } else { 60 };
-        Duration::from_secs_f64(1.0 / f64::from(rate))
+        refresh_period()
+    }
+
+    fn refresh(&self) -> Duration {
+        refresh_period()
     }
 
     fn decode(path: &Path) -> Result<RgbImage> {
@@ -414,6 +415,13 @@ impl Platform for Host {
             let _ = unsafe { PostThreadMessageW(thread, WM_NULL, WPARAM(0), LPARAM(0)) };
         })
     }
+}
+
+fn refresh_period() -> Duration {
+    let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+    let read = unsafe { EnumDisplaySettingsW(PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut mode) }.as_bool();
+    let rate = if read && mode.dmDisplayFrequency > 1 { mode.dmDisplayFrequency } else { 60 };
+    Duration::from_secs_f64(1.0 / f64::from(rate))
 }
 
 pub fn layers() -> Vec<isize> {

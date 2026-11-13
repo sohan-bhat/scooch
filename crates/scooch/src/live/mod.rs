@@ -18,6 +18,8 @@ const QUIT_WAIT: Duration = Duration::from_millis(500);
 pub struct Hints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub present: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -42,7 +44,7 @@ pub enum Reply {
     Hello { version: u32, pid: u32 },
     Ready { adapter: String, ms: u64, #[serde(default)] uploads: u32, #[serde(default, rename = "device")] kind: String },
     Shown { id: u32, ms: u64 },
-    Glided { id: u32, frames: u32, slow_frames: u32, first_frame_ms: u64, #[serde(default)] uploads: u32 },
+    Glided { id: u32, frames: u32, slow_frames: u32, first_frame_ms: u64, #[serde(default)] uploads: u32, #[serde(default = "one")] scale: f32 },
     Settled { id: u32 },
     Closed { id: u32 },
     Failed { #[serde(default)] id: Option<u32>, why: String },
@@ -62,6 +64,7 @@ pub struct Glided {
     pub slow_frames: u32,
     pub first_frame_ms: u64,
     pub uploads: u32,
+    pub scale: f32,
 }
 
 pub fn line<T: Serialize>(message: &T) -> String {
@@ -183,7 +186,7 @@ impl Helper {
 
     pub fn glided(&mut self, id: u32, timeout: Duration) -> Result<Glided> {
         self.expect(timeout, |reply| match reply {
-            Reply::Glided { id: glided, frames, slow_frames, first_frame_ms, uploads } if *glided == id => Some(Ok(Glided { frames: *frames, slow_frames: *slow_frames, first_frame_ms: *first_frame_ms, uploads: *uploads })),
+            Reply::Glided { id: glided, frames, slow_frames, first_frame_ms, uploads, scale } if *glided == id => Some(Ok(Glided { frames: *frames, slow_frames: *slow_frames, first_frame_ms: *first_frame_ms, uploads: *uploads, scale: *scale })),
             other => Self::failure(other, Some(id)).map(Err),
         })
     }
@@ -282,7 +285,7 @@ mod tests {
     fn commands_and_replies_read_back_the_same() {
         let commands = [
             Command::Hello { version: VERSION },
-            Command::Warm { hints: Hints { present: Some("bare".into()) }, picture: Some(PathBuf::from("p.jpg")), size: Some([1024, 768]) },
+            Command::Warm { hints: Hints { present: Some("bare".into()), scale: Some(0.5) }, picture: Some(PathBuf::from("p.jpg")), size: Some([1024, 768]) },
             Command::Open { id: 3, screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5, still: Some(PathBuf::from("a.png")) },
             Command::Glide { id: 3, a: PathBuf::from("a.tables"), b: PathBuf::from("b.tables"), ms: 450 },
             Command::Settle { id: 3, still: PathBuf::from("b.png"), ms: None },
@@ -296,7 +299,7 @@ mod tests {
             Reply::Hello { version: VERSION, pid: 9 },
             Reply::Ready { adapter: "gpu".into(), ms: 12, uploads: 1, kind: "integrated".into() },
             Reply::Shown { id: 3, ms: 40 },
-            Reply::Glided { id: 3, frames: 24, slow_frames: 1, first_frame_ms: 30, uploads: 1 },
+            Reply::Glided { id: 3, frames: 24, slow_frames: 1, first_frame_ms: 30, uploads: 1, scale: 0.75 },
             Reply::Settled { id: 3 },
             Reply::Closed { id: 3 },
             Reply::Failed { id: None, why: "no".into() },

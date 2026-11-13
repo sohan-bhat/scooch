@@ -2,7 +2,7 @@
 
 mod glide;
 
-pub use glide::{half, Glide, Look, Picture, Screen, Still, OUTPUT};
+pub use glide::{choose, half, heavy, scaled_size, step, Glide, Look, Picture, Screen, Still, OUTPUT, SCALES};
 use std::num::NonZeroIsize;
 use std::sync::{Arc, Mutex};
 
@@ -29,6 +29,7 @@ pub struct Gpu {
     composition: bool,
     pipelines: Arc<Mutex<Vec<Pipeline>>>,
     scenes: Arc<Result<glide::Pipes, String>>,
+    small: Arc<Mutex<Option<glide::Small>>>,
     pub name: String,
     pub kind: &'static str,
 }
@@ -84,7 +85,7 @@ impl Gpu {
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|error| format!("request device {error}"))?;
         let scenes = Arc::new(glide::pipes(&device));
-        let gpu = Self { instance, adapter, device, queue, composition, pipelines: Arc::new(Mutex::new(Vec::new())), scenes, name, kind };
+        let gpu = Self { instance, adapter, device, queue, composition, pipelines: Arc::new(Mutex::new(Vec::new())), scenes, small: Arc::new(Mutex::new(None)), name, kind };
         gpu.pipeline(wgpu::TextureFormat::Bgra8Unorm);
         Ok(gpu)
     }

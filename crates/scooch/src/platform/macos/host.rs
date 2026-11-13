@@ -41,6 +41,10 @@ impl Platform for Host {
         layer::period(layer.display).unwrap_or(PERIOD)
     }
 
+    fn refresh(&self) -> Duration {
+        layer::period(layer::main_display()).unwrap_or(PERIOD)
+    }
+
     fn show(&mut self, _layer: &layer::Layer) -> Result<()> {
         Ok(())
     }

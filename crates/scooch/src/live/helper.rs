@@ -69,6 +69,9 @@ mod running {
         fn period(&self, _layer: &Self::Layer) -> Duration {
             Duration::from_micros(16_667)
         }
+        fn refresh(&self) -> Duration {
+            Duration::from_micros(16_667)
+        }
         fn show(&mut self, layer: &Self::Layer) -> Result<()>;
         fn close(&mut self, layer: Self::Layer);
         fn wait(&mut self, timeout: Duration);
@@ -100,7 +103,7 @@ mod running {
     }
 
     enum Job {
-        Glide { a: PathBuf, b: PathBuf, ms: u32, loaded: Option<Loaded>, asked: Instant },
+        Glide { a: PathBuf, b: PathBuf, ms: u32, loaded: Option<Loaded>, asked: Instant, scale: f32 },
         Settle { still: PathBuf, ms: u32 },
         Stop,
     }
@@ -108,9 +111,9 @@ mod running {
     enum Event {
         Command(Command),
         HangUp,
-        Warmed { gpu: Option<Result<Gpu, String>>, composition: bool, loaded: Option<Result<Loaded, String>>, ms: u64 },
+        Warmed { gpu: Option<Result<Gpu, String>>, composition: bool, loaded: Option<Result<Loaded, String>>, timed: Option<Duration>, ms: u64 },
         Presented { id: u32, result: Result<(), String> },
-        Glided { id: u32, frames: u32, slow: u32, first: u64 },
+        Glided { id: u32, frames: u32, slow: u32, first: u64, scale: f32, timed: Option<Duration> },
         Settled { id: u32 },
         Broke { id: u32, why: String },
         Stopped { id: u32 },
@@ -139,6 +142,9 @@ mod running {
         events: Sender<Event>,
         waker: Waker,
         hints: Hints,
+        scale: f32,
+        pinned: Option<f32>,
+        timed: Option<Duration>,
         gpu: Option<(Gpu, bool)>,
         loaded: Option<Loaded>,
         uploads: u32,
@@ -244,7 +250,8 @@ mod running {
             };
             match job {
                 Some(Job::Stop) => stop = true,
-                Some(Job::Glide { a, b, ms, loaded, asked }) => {
+                Some(Job::Glide { a, b, ms, loaded, asked, scale }) => {
+                    screen.scale = scale;
                     let built = loaded.ok_or_else(|| "glide needs a warm with a picture first".to_string()).and_then(|loaded| {
                         let (a, b) = (load_tables(&a, &loaded.canvas)?, load_tables(&b, &loaded.canvas)?);
                         let compatible = scooch_core::compatible(&a, &b);
@@ -355,8 +362,10 @@ mod running {
                 moving.last = Some(now);
                 moving.frames += 1;
                 if last {
+                    let scale = screen.scale;
+                    let timed = gpu.time_at(screen.width, screen.height, &looks(&layers), scale).ok();
                     shown = layers;
-                    tell(Event::Glided { id, frames: moving.frames, slow: moving.slow, first: moving.first.unwrap_or(0) });
+                    tell(Event::Glided { id, frames: moving.frames, slow: moving.slow, first: moving.first.unwrap_or(0), scale, timed });
                     motion = None;
                 }
             } else if last {
@@ -392,7 +401,22 @@ mod running {
                     return;
                 }
             };
+            let was = self.pinned;
+            self.pinned = hints.scale.map(|scale| scale.clamp(0.25, 1.0));
+            match (self.pinned, was) {
+                (Some(scale), _) => self.scale = scale,
+                (None, Some(_)) => self.scale = self.timed.map_or(1.0, |timed| scooch_live::choose(timed, self.platform.refresh())),
+                (None, None) => {}
+            }
             self.hints = hints;
+            if self.gpu.as_ref().is_some_and(|(_, made)| *made != composition) {
+                if !self.layers.is_empty() {
+                    self.fail(None, "the presentation cannot change while a layer is open");
+                    return;
+                }
+                self.gpu = None;
+                self.loaded = None;
+            }
             let device = self.gpu.as_ref().filter(|(_, made)| *made == composition).map(|(gpu, _)| gpu.clone());
             if device.is_some() && picture.is_none() {
                 if answer {
@@ -410,10 +434,12 @@ mod running {
             }
             self.warming = true;
             let (events, waker) = (self.events.clone(), self.waker.clone());
+            let pinned = self.pinned.is_some();
             let spawned = std::thread::Builder::new().name("scooch-live-warm".into()).spawn(move || {
                 let started = Instant::now();
                 let made = device.is_none().then(|| Gpu::new(composition));
                 let usable = device.clone().or_else(|| made.clone().and_then(Result::ok));
+                let mut timed = None;
                 let loaded = picture.map(|path| {
                     let gpu = usable.ok_or_else(|| "no device".to_string())?;
                     gpu.ready()?;
@@ -421,9 +447,17 @@ mod running {
                     let [width, height] = size.unwrap_or([image.width(), image.height()]);
                     let canvas = scooch_core::canvas(&image, width.max(1), height.max(1));
                     let picture = gpu.picture(&canvas);
+                    if !pinned {
+                        let heavy = scooch_live::heavy(width.max(1), height.max(1), &picture);
+                        if let Ok(glide) = gpu.glide(&picture, &heavy, &heavy) {
+                            let look = [(Look::Glide(&glide, 0.5), 1.0)];
+                            let _ = gpu.time(width.max(1), height.max(1), &look);
+                            timed = gpu.time(width.max(1), height.max(1), &look).ok();
+                        }
+                    }
                     Ok(Loaded { canvas: Arc::new(canvas), picture })
                 });
-                let _ = events.send(Event::Warmed { gpu: made, composition, loaded, ms: started.elapsed().as_millis() as u64 });
+                let _ = events.send(Event::Warmed { gpu: made, composition, loaded, timed, ms: started.elapsed().as_millis() as u64 });
                 waker();
             });
             if spawned.is_err() {
@@ -518,7 +552,7 @@ mod running {
                 Command::Warm { hints, picture, size } => self.warm(hints, picture, size, true),
                 Command::Open { id, screen, rect, scale, still } => self.open(Pending { id, screen: Screen { id: screen, frame: rect, scale }, still, asked: Instant::now() }),
                 Command::Glide { id, a, b, ms } => {
-                    let job = Job::Glide { a, b, ms, loaded: self.loaded.clone(), asked: Instant::now() };
+                    let job = Job::Glide { a, b, ms, loaded: self.loaded.clone(), asked: Instant::now(), scale: self.scale };
                     self.send_job(id, job, Duration::from_millis(u64::from(ms.min(LONGEST))));
                 }
                 Command::Settle { id, still, ms } => {
@@ -530,8 +564,12 @@ mod running {
             }
         }
 
-        fn warmed(&mut self, gpu: Option<Result<Gpu, String>>, composition: bool, loaded: Option<Result<Loaded, String>>, ms: u64) {
+        fn warmed(&mut self, gpu: Option<Result<Gpu, String>>, composition: bool, loaded: Option<Result<Loaded, String>>, timed: Option<Duration>, ms: u64) {
             self.warming = false;
+            if let (Some(timed), None) = (timed, self.pinned) {
+                self.timed = Some(timed);
+                self.scale = scooch_live::choose(timed, self.platform.refresh());
+            }
             let mut problem = None;
             match gpu {
                 Some(Ok(gpu)) => {
@@ -579,7 +617,7 @@ mod running {
             match event {
                 Event::Command(command) => self.command(command),
                 Event::HangUp => self.leaving = true,
-                Event::Warmed { gpu, composition, loaded, ms } => self.warmed(gpu, composition, loaded, ms),
+                Event::Warmed { gpu, composition, loaded, timed, ms } => self.warmed(gpu, composition, loaded, timed, ms),
                 Event::Presented { id, result } => {
                     let Some(live) = self.layers.get(&id) else { return };
                     if live.closing.is_some() {
@@ -605,11 +643,17 @@ mod running {
                         }
                     }
                 }
-                Event::Glided { id, frames, slow, first } => {
+                Event::Glided { id, frames, slow, first, scale, timed } => {
+                    if self.pinned.is_none() {
+                        if let Some(timed) = timed {
+                            self.timed = Some(timed);
+                            self.scale = scooch_live::step(scale, frames, slow, timed, self.platform.refresh());
+                        }
+                    }
                     if let Some(live) = self.layers.get_mut(&id) {
                         live.touched = Instant::now();
                     }
-                    self.tell(Reply::Glided { id, frames, slow_frames: slow, first_frame_ms: first, uploads: self.uploads });
+                    self.tell(Reply::Glided { id, frames, slow_frames: slow, first_frame_ms: first, uploads: self.uploads, scale });
                 }
                 Event::Settled { id } => {
                     if let Some(live) = self.layers.get_mut(&id) {
@@ -683,7 +727,7 @@ mod running {
             say(&out, &Reply::Failed { id: None, why: "could not start the protocol thread".into() });
             return ExitCode::from(1);
         }
-        let mut helper = Helper { platform, out, events, waker, hints: Hints::default(), gpu: None, loaded: None, uploads: 0, warming: false, waiting: 0, pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+        let mut helper = Helper { platform, out, events, waker, hints: Hints::default(), scale: 1.0, pinned: None, timed: None, gpu: None, loaded: None, uploads: 0, warming: false, waiting: 0, pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
         loop {
             helper.platform.wait(TICK);
             while let Ok(event) = inbox.try_recv() {

@@ -3,6 +3,8 @@
 use scooch_core::{Bundle, Options, Rect, RgbImage, Scene, Scenery};
 use scooch_live::{Gpu, Look};
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 const WIDTH: u32 = 960;
 const HEIGHT: u32 = 600;
@@ -38,15 +40,17 @@ fn compare(gpu: &RgbImage, cpu: &RgbImage) -> (f64, f64, u8) {
     (sum as f64 / pixels / 3.0, off as f64 / pixels, worst)
 }
 
-fn device() -> Option<Gpu> {
-    match Gpu::new(false) {
-        Ok(gpu) => Some(gpu),
+fn device() -> Option<MutexGuard<'static, Gpu>> {
+    static SHARED: OnceLock<Option<Mutex<Gpu>>> = OnceLock::new();
+    let shared = SHARED.get_or_init(|| match Gpu::new(false) {
+        Ok(gpu) => Some(Mutex::new(gpu)),
         Err(error) => {
-            assert!(std::env::var_os("SCOOCH_NEED_ADAPTER").is_none(), "no adapter, and this runner must have one: {error}");
             println!("skipped: no adapter {error}");
             None
         }
-    }
+    });
+    assert!(shared.is_some() || std::env::var_os("SCOOCH_NEED_ADAPTER").is_none(), "no adapter, and this runner must have one");
+    shared.as_ref().map(|gpu| gpu.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
 }
 
 fn states(name: &str, pairs: &[(Vec<Rect>, Vec<Rect>)], options: &Options) -> (RgbImage, Vec<(Bundle, Bundle)>) {
@@ -67,7 +71,7 @@ fn states(name: &str, pairs: &[(Vec<Rect>, Vec<Rect>)], options: &Options) -> (R
     (image, made)
 }
 
-fn measure(gpu: &Gpu, options: &Options, label: &str) -> (f64, f64) {
+fn measure(gpu: &Gpu, options: &Options, label: &str, scale: f32) -> (f64, f64) {
     let pairs = [(grid(false), moved(&grid(false), 7, 380.0, 120.0)), (grid(true), moved(&grid(true), 2, -300.0, 260.0))];
     let mut worst = (0.0f64, 0.0f64);
     for name in ["balloon-sky.jpg", "fox.jpg"] {
@@ -76,9 +80,9 @@ fn measure(gpu: &Gpu, options: &Options, label: &str) -> (f64, f64) {
         for (index, (a, b)) in made.iter().enumerate() {
             let glide = gpu.glide(&picture, a, b).expect("glide");
             for s in [0.0f32, 0.37, 1.0] {
-                let drawn = gpu.snapshot(WIDTH, HEIGHT, &[(Look::Glide(&glide, s), 1.0)]).expect("snapshot");
+                let drawn = gpu.snapshot_at(WIDTH, HEIGHT, &[(Look::Glide(&glide, s), 1.0)], scale).expect("snapshot");
                 let (mean, off, largest) = compare(&drawn, &scooch_core::frame(a, b, s));
-                println!("{label} {name} pair {index} s {s}: mean {mean:.3}/255, off by more than 8 {:.3}%, largest {largest}", off * 100.0);
+                println!("{label} at scale {scale} {name} pair {index} s {s}: mean {mean:.3}/255, off by more than 8 {:.3}%, largest {largest}", off * 100.0);
                 worst = (worst.0.max(mean), worst.1.max(off));
             }
         }
@@ -91,10 +95,56 @@ fn measure(gpu: &Gpu, options: &Options, label: &str) -> (f64, f64) {
 fn the_gpu_glide_matches_the_cpu_frame() {
     let Some(gpu) = device() else { return };
     println!("adapter {}", gpu.name);
-    let plain = measure(&gpu, &Options { pads: 0.0, ..Options::default() }, "picture only");
+    let plain = measure(&gpu, &Options { pads: 0.0, ..Options::default() }, "picture only", 1.0);
     assert!(plain.0 <= 1.5 && plain.1 <= 0.005, "the picture is too far from the CPU frame: mean {:.3}/255, share {:.3}%", plain.0, plain.1 * 100.0);
-    let scenic = measure(&gpu, &Options { scenery: Scenery::Auto, ..Options::default() }, "with scenery");
+    let scenic = measure(&gpu, &Options { scenery: Scenery::Auto, ..Options::default() }, "with scenery", 1.0);
     assert!(scenic.0 <= 1.5 && scenic.1 <= 0.005, "the scenery frame is too far from the CPU frame: mean {:.3}/255, share {:.3}%", scenic.0, scenic.1 * 100.0);
+}
+
+#[test]
+fn smaller_moving_frames_stay_close_to_the_cpu_frame() {
+    let Some(gpu) = device() else { return };
+    for scale in [0.75f32, 0.6, 0.5] {
+        let worst = measure(&gpu, &Options { scenery: Scenery::Auto, ..Options::default() }, "with scenery", scale);
+        assert!(worst.0 <= 3.0, "at scale {scale} the frame is too far from the CPU frame: mean {:.3}/255", worst.0);
+    }
+}
+
+#[test]
+fn a_still_lands_exactly_while_the_glide_is_scaled() {
+    let Some(gpu) = device() else { return };
+    let raw: Vec<u8> = (0..61u32).flat_map(|y| (0..97u32).flat_map(move |x| [(x * 3 % 256) as u8, (y * 11 % 256) as u8, ((x * y) % 256) as u8])).collect();
+    let image = RgbImage::from_raw(97, 61, raw).expect("image");
+    let still = gpu.still(&image).expect("still");
+    for scale in scooch_live::SCALES {
+        assert_eq!(gpu.snapshot_at(97, 61, &[(Look::Still(&still), 1.0)], scale).expect("snapshot"), image, "at scale {scale}");
+    }
+}
+
+#[test]
+fn the_chooser_fits_the_frame_in_the_period() {
+    let period = Duration::from_micros(16_667);
+    assert!(scooch_live::choose(Duration::from_millis(15), period) <= 0.75);
+    assert_eq!(scooch_live::choose(Duration::from_millis(5), period), 1.0);
+    assert_eq!(scooch_live::choose(Duration::from_millis(80), period), 0.5);
+    assert_eq!(scooch_live::step(1.0, 20, 3, Duration::from_millis(9), period), 0.75);
+    assert_eq!(scooch_live::step(0.6, 20, 0, Duration::from_millis(5), period), 0.75);
+    assert_eq!(scooch_live::step(0.75, 20, 1, Duration::from_millis(9), period), 0.75);
+    assert_eq!(scooch_live::step(0.5, 20, 5, Duration::from_millis(30), period), 0.5);
+}
+
+#[test]
+fn the_chooser_picks_a_scale_on_this_device() {
+    let Some(gpu) = device() else { return };
+    let image = RgbImage::from_raw(64, 40, vec![100u8; 64 * 40 * 3]).expect("image");
+    let picture = gpu.picture(&scooch_core::canvas(&image, 64, 40));
+    for (width, height) in [(1024u32, 768u32), (2880, 1800)] {
+        let heavy = scooch_live::heavy(width, height, &picture);
+        let glide = gpu.glide(&picture, &heavy, &heavy).expect("glide");
+        let _ = gpu.time(width, height, &[(Look::Glide(&glide, 0.5), 1.0)]);
+        let took = gpu.time(width, height, &[(Look::Glide(&glide, 0.5), 1.0)]).expect("time");
+        println!("{} at {width}x{height}: the heaviest frame took {took:?}, the chooser picks {} at 60 Hz", gpu.name, scooch_live::choose(took, Duration::from_micros(16_667)));
+    }
 }
 
 #[test]

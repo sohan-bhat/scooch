@@ -126,15 +126,18 @@ pub fn composite(picture: &mut RgbImage, layer: &RgbaImage) {
         return;
     }
     let below: &mut [u8] = picture;
-    below.par_chunks_mut(3).zip(layer.as_raw().par_chunks(4)).for_each(|(p, s)| {
-        let a = s[3] as u32;
-        if a == 0 {
-            return;
-        }
-        for k in 0..3 {
-            p[k] = ((s[k] as u32 * a + p[k] as u32 * (255 - a) + 127) / 255) as u8;
-        }
-    });
+    below.par_chunks_mut(3).zip(layer.as_raw().par_chunks(4)).for_each(|(p, s)| blend(p, s));
+}
+
+#[inline(always)]
+pub fn blend(p: &mut [u8], s: &[u8]) {
+    let a = s[3] as u32;
+    if a == 0 {
+        return;
+    }
+    for k in 0..3 {
+        p[k] = ((s[k] as u32 * a + p[k] as u32 * (255 - a) + 127) / 255) as u8;
+    }
 }
 
 #[cfg(test)]
