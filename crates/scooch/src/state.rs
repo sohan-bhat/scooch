@@ -19,11 +19,15 @@ pub struct State {
     pub problem: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub restoring: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub picture: Option<PathBuf>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { version: VERSION, on: false, options: Options::default(), screens: BTreeMap::new(), problem: None, daemon: None }
+        Self { version: VERSION, on: false, options: Options::default(), screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None }
     }
 }
 
@@ -214,6 +218,10 @@ pub fn parse(bytes: Option<&[u8]>) -> State {
     let mut state = bytes.and_then(|bytes| serde_json::from_slice::<State>(bytes).ok()).unwrap_or_default();
     state.version = VERSION;
     state
+}
+
+pub fn display_of(id: &str) -> &str {
+    id.split('@').next().unwrap_or(id)
 }
 
 pub fn same(a: &Path, b: &Path) -> bool {

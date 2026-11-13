@@ -113,11 +113,11 @@ pub fn install(exe: &Path, data: &Path) -> Result<()> {
 }
 
 pub fn remove() -> Result<()> {
-    unload(&mut System, &target());
     let path = plist_path()?;
     if path.exists() {
         std::fs::remove_file(&path).with_context(|| format!("Scooch could not remove {}, so delete it by hand.", path.display()))?;
     }
+    unload(&mut System, &target());
     Ok(())
 }
 

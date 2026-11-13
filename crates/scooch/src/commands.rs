@@ -62,7 +62,7 @@ pub fn start() -> Result<()> {
         return status();
     }
     let desktop = desktop()?;
-    if !state.on {
+    if !wake_up(&mut state) && !state.on {
         match first_run(record(&mut state, desktop.as_ref(), &store)?, terminal()) {
             FirstRun::Go => state.on = true,
             FirstRun::Fail => bail!(NO_PICTURE),
@@ -106,6 +106,9 @@ fn print(lines: &[String]) {
 }
 
 pub fn describe(state: &State, running: bool, connected: Option<&[String]>) -> Vec<String> {
+    if state.restoring && !state.on {
+        return vec![restoring_line(state.screens.len())];
+    }
     if !state.on {
         return vec!["Scooch is off. Run scooch to turn it on.".into()];
     }
@@ -238,36 +241,79 @@ pub fn is_picture(path: &Path) -> bool {
 pub fn off() -> Result<()> {
     let store = Store::open();
     let desktop = desktop()?;
-    desktop.autostart(None)?;
+    desktop.screens()?;
     stop(&store);
-    let mut state = store.load();
-    let back = put_back(&state, desktop.as_ref(), &store)?;
-    store.forget_pictures();
-    if store.state_file().exists() {
-        state.on = false;
-        state.problem = None;
-        state.screens.clear();
-        store.save(&state)?;
+    match wind_down(desktop.as_ref(), &store)? {
+        Off::Done { lost } => {
+            desktop.autostart(None)?;
+            println!("{}", off_line(!lost));
+        }
+        Off::GaveUp(left) => {
+            desktop.autostart(None)?;
+            println!("{}", off_gave_up_line(left));
+        }
+        Off::Pending(left) => {
+            begin(desktop.as_ref(), &store)?;
+            println!("{}", off_pending_line(left));
+        }
     }
-    println!("{}", off_line(back));
     Ok(())
 }
 
-pub fn put_back(state: &State, desktop: &dyn Desktop, store: &Store) -> Result<bool> {
-    let mut back = true;
-    for screen in desktop.screens().unwrap_or_default() {
-        let Some(entry) = state.screens.get(&screen.id) else { continue };
-        if !entry.unrestorable {
-            restore(desktop, store, &screen, entry)?;
-            continue;
-        }
-        back = false;
-        let showing_ours = desktop.wallpaper(&screen)?.is_some_and(|path| store.owns(&path));
-        if showing_ours && entry.source.is_file() {
-            desktop.set_wallpaper(&screen, &entry.source)?;
-        }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Off {
+    Done { lost: bool },
+    Pending(usize),
+    GaveUp(usize),
+}
+
+pub fn wind_down(desktop: &dyn Desktop, store: &Store) -> Result<Off> {
+    let screens = desktop.screens()?;
+    let known = desktop.known().ok().flatten();
+    let mut state = store.load();
+    let was_restoring = state.restoring;
+    let settled = daemon::settle_screens(&mut state, desktop, store, &screens, known.as_deref())?;
+    let off = match (state.screens.len(), was_restoring) {
+        (0, _) => Off::Done { lost: settled.lost },
+        (left, true) => Off::GaveUp(left),
+        (left, false) => Off::Pending(left),
+    };
+    state.on = false;
+    state.problem = None;
+    if let Off::Pending(_) = off {
+        state.restoring = true;
+        let _ = std::fs::remove_dir_all(store.cache());
+    } else {
+        state.screens.clear();
+        state.restoring = false;
+        state.picture = None;
+        store.forget_pictures();
     }
-    Ok(back)
+    if store.root.exists() {
+        store.save(&state)?;
+    }
+    Ok(off)
+}
+
+pub fn wake_up(state: &mut State) -> bool {
+    if !state.restoring {
+        return false;
+    }
+    state.restoring = false;
+    state.on = true;
+    true
+}
+
+pub fn off_pending_line(left: usize) -> String {
+    format!("Scooch is off. Your wallpaper is back here, and {left} more switch back the next time those desktops or screens show.")
+}
+
+pub fn off_gave_up_line(left: usize) -> String {
+    format!("Scooch is off. {left} desktops or screens it could not reach still point at a removed picture, so pick a wallpaper there.")
+}
+
+pub fn restoring_line(left: usize) -> String {
+    format!("Scooch is off. {left} desktops or screens switch back the next time they show.")
 }
 
 pub fn off_line(back: bool) -> &'static str {
@@ -276,15 +322,6 @@ pub fn off_line(back: bool) -> &'static str {
     } else {
         OFF_LOST
     }
-}
-
-fn restore(desktop: &dyn Desktop, store: &Store, screen: &Screen, entry: &Entry) -> Result<()> {
-    let Some(current) = desktop.wallpaper(screen)? else { return Ok(()) };
-    let ours = store.owns(&current) || same(&current, &entry.source);
-    if ours && !same(&current, &entry.original) && entry.original.is_file() {
-        desktop.set_wallpaper(screen, &entry.original)?;
-    }
-    Ok(())
 }
 
 fn stop(store: &Store) {
@@ -298,7 +335,8 @@ fn stop(store: &Store) {
 
 pub fn watch() -> Result<()> {
     let store = Store::open();
-    if !store.load().on {
+    let state = store.load();
+    if !state.on && !state.restoring {
         return Ok(());
     }
     let desktop: Arc<dyn Desktop> = Arc::from(desktop()?);
@@ -438,6 +476,7 @@ pub fn recorded(desktop: &dyn Desktop, store: &Store, screen: &Screen, chosen: O
 
 pub fn record(state: &mut State, desktop: &dyn Desktop, store: &Store) -> Result<bool> {
     state.screens.clear();
+    state.picture = None;
     for screen in desktop.screens()? {
         if let Some(entry) = recorded(desktop, store, &screen, None)? {
             state.screens.insert(screen.id.clone(), entry);
@@ -462,19 +501,21 @@ pub fn first_run(recorded: bool, terminal: bool) -> FirstRun {
 }
 
 pub fn choose_picture(state: &mut State, desktop: &dyn Desktop, store: &Store, image: &Path) -> Result<()> {
-    if !state.on {
+    let screens = desktop.screens()?;
+    if !wake_up(state) && !state.on {
         state.screens.clear();
     }
-    for screen in desktop.screens()? {
-        match state.screens.get_mut(&screen.id) {
-            Some(entry) => (entry.source, entry.placement, entry.fingerprint, entry.chosen) = (image.to_path_buf(), None, None, true),
-            None => {
-                if let Some(entry) = recorded(desktop, store, &screen, Some(image))? {
-                    state.screens.insert(screen.id.clone(), entry);
-                }
+    for entry in state.screens.values_mut() {
+        (entry.source, entry.placement, entry.fingerprint, entry.chosen) = (image.to_path_buf(), None, None, true);
+    }
+    for screen in &screens {
+        if !state.screens.contains_key(&screen.id) {
+            if let Some(entry) = recorded(desktop, store, screen, Some(image))? {
+                state.screens.insert(screen.id.clone(), entry);
             }
         }
     }
+    state.picture = Some(image.to_path_buf());
     Ok(())
 }
 
@@ -726,26 +767,34 @@ mod tests {
         output
     }
 
+    fn turned_on(fake: &crate::daemon::tests::Fake, store: &Store, chosen: &Path) {
+        let mut state = State::default();
+        choose_picture(&mut state, fake, store, chosen).unwrap();
+        state.on = true;
+        store.save(&state).unwrap();
+    }
+
     #[test]
     fn off_brings_back_a_moving_default() {
         let (fake, store, default, chosen) = desk("offmoving");
-        let mut state = State::default();
-        choose_picture(&mut state, fake.as_ref(), &store, &chosen).unwrap();
+        turned_on(&fake, &store, &chosen);
         shown_output(&fake, &store);
-        assert!(put_back(&state, fake.as_ref(), &store).unwrap());
+        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Done { lost: false });
         assert_eq!(fake.showing("main"), default);
         assert_eq!(fake.wallpaper(&crate::daemon::tests::screen("main", 0.0, 1.0)).unwrap(), None);
         assert_eq!(off_line(true), "Scooch is off. Your wallpaper is back.");
+        let state = store.load();
+        assert!(!state.on && !state.restoring && state.screens.is_empty() && state.picture.is_none());
+        assert!(!store.out().exists());
     }
 
     #[test]
     fn off_leaves_the_plain_picture_when_nothing_can_be_put_back() {
         let (fake, store, default, chosen) = desk("offlost");
         fake.lost.lock().unwrap().push(default);
-        let mut state = State::default();
-        choose_picture(&mut state, fake.as_ref(), &store, &chosen).unwrap();
+        turned_on(&fake, &store, &chosen);
         shown_output(&fake, &store);
-        assert!(!put_back(&state, fake.as_ref(), &store).unwrap());
+        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Done { lost: true });
         assert_eq!(fake.showing("main"), chosen);
         assert_eq!(off_line(false), "Scooch is off. Your old wallpaper was not a picture file and cannot be put back by an app, so pick it again in your system settings.");
     }
@@ -753,12 +802,144 @@ mod tests {
     #[test]
     fn off_leaves_a_wallpaper_the_user_picked_since() {
         let (fake, store, _, chosen) = desk("offpicked");
-        let mut state = State::default();
-        choose_picture(&mut state, fake.as_ref(), &store, &chosen).unwrap();
+        turned_on(&fake, &store, &chosen);
         let mine = crate::daemon::tests::picture(chosen.parent().unwrap(), "mine.png");
         fake.show("main", &mine);
-        assert!(put_back(&state, fake.as_ref(), &store).unwrap());
+        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Done { lost: false });
         assert_eq!(fake.showing("main"), mine);
+    }
+
+    #[test]
+    fn off_falls_back_to_the_picture_when_the_original_is_gone() {
+        let (fake, store, _, chosen) = desk("offfallback");
+        let gone = crate::daemon::tests::picture(chosen.parent().unwrap(), "gone.png");
+        fake.show("main", &gone);
+        turned_on(&fake, &store, &chosen);
+        shown_output(&fake, &store);
+        std::fs::remove_file(&gone).unwrap();
+        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Done { lost: false });
+        assert_eq!(fake.showing("main"), chosen);
+    }
+
+    #[test]
+    fn off_keeps_a_screen_pending_when_nothing_is_left_to_show() {
+        let (fake, store, _, chosen) = desk("offnothing");
+        let gone = crate::daemon::tests::picture(chosen.parent().unwrap(), "gone.png");
+        fake.show("main", &gone);
+        let lone = crate::daemon::tests::picture(chosen.parent().unwrap(), "lone.png");
+        turned_on(&fake, &store, &lone);
+        let output = shown_output(&fake, &store);
+        std::fs::remove_file(&gone).unwrap();
+        std::fs::remove_file(&lone).unwrap();
+        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Pending(1));
+        assert!(output.exists());
+        assert!(store.load().restoring);
+        assert_eq!(off_pending_line(1), "Scooch is off. Your wallpaper is back here, and 1 more switch back the next time those desktops or screens show.");
+    }
+
+    fn pair(name: &str) -> (std::sync::Arc<crate::daemon::tests::Fake>, Store, PathBuf, PathBuf) {
+        let folder = crate::state::scratch(name);
+        let left = crate::daemon::tests::picture(&folder, "left.png");
+        let right = crate::daemon::tests::picture(&folder, "right.png");
+        let fake = crate::daemon::tests::Fake::new(vec![crate::daemon::tests::screen("L", 0.0, 1.0), crate::daemon::tests::screen("R", 160.0, 1.0)], &left);
+        fake.show("R", &right);
+        let store = Store::at(folder.join("data"));
+        let mut state = State::default();
+        assert!(record(&mut state, fake.as_ref(), &store).unwrap());
+        state.on = true;
+        store.save(&state).unwrap();
+        std::fs::create_dir_all(store.out()).unwrap();
+        std::fs::create_dir_all(store.cache()).unwrap();
+        for id in ["L", "R"] {
+            let output = store.output(id, 1, "jpg");
+            std::fs::write(&output, b"x").unwrap();
+            fake.show(id, &output);
+        }
+        (fake, store, left, right)
+    }
+
+    #[test]
+    fn off_with_a_screen_unplugged_finishes_when_it_comes_back() {
+        let (fake, store, left, right) = pair("unplugged");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Pending(1));
+        assert_eq!(fake.showing("L"), left);
+        let state = store.load();
+        assert!(state.restoring && !state.on && state.screens.contains_key("R") && !state.screens.contains_key("L"));
+        assert!(store.output("R", 1, "jpg").exists() && !store.output("L", 1, "jpg").exists() && !store.cache().exists());
+        assert_eq!(describe(&state, false, None), vec!["Scooch is off. 1 desktops or screens switch back the next time they show."]);
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0), crate::daemon::tests::screen("R", 160.0, 1.0)]);
+        let daemon = crate::daemon::Daemon::new(fake.clone(), store.clone());
+        let report = daemon.tick();
+        assert!(report.unload);
+        assert_eq!(fake.showing("R"), right);
+        let state = store.load();
+        assert!(!state.restoring && state.screens.is_empty() && !store.out().exists());
+    }
+
+    #[test]
+    fn off_twice_gives_up_on_screens_it_cannot_reach() {
+        let (fake, store, _, _) = pair("twice");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Pending(1));
+        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::GaveUp(1));
+        let state = store.load();
+        assert!(!state.restoring && state.screens.is_empty() && !store.out().exists());
+        assert_eq!(off_gave_up_line(1), "Scooch is off. 1 desktops or screens it could not reach still point at a removed picture, so pick a wallpaper there.");
+    }
+
+    #[test]
+    fn turning_on_while_restoring_keeps_the_originals() {
+        let (fake, store, left, right) = pair("resume");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        wind_down(fake.as_ref(), &store).unwrap();
+        let mut state = store.load();
+        assert!(wake_up(&mut state));
+        assert!(state.on && !state.restoring);
+        assert_eq!(state.screens["R"].original, right);
+        let mut chosen = store.load();
+        choose_picture(&mut chosen, fake.as_ref(), &store, &left).unwrap();
+        assert!(chosen.on && !chosen.restoring);
+        assert_eq!((chosen.screens["R"].source.clone(), chosen.screens["R"].original.clone()), (left.clone(), right));
+        assert_eq!(chosen.picture, Some(left));
+    }
+
+    #[test]
+    fn a_space_that_no_longer_exists_is_forgotten() {
+        let (fake, store, _, chosen) = desk("gonespace");
+        let mut state = State::default();
+        let mut gone = Entry::new(&chosen);
+        gone.output = Some(store.output("main@S9", 1, "jpg"));
+        state.screens.insert("main@S9".into(), gone);
+        state.on = true;
+        store.save(&state).unwrap();
+        std::fs::create_dir_all(store.out()).unwrap();
+        std::fs::write(store.output("main@S9", 1, "jpg"), b"x").unwrap();
+        fake.connect(vec![crate::daemon::tests::screen("main@S1", 0.0, 1.0)]);
+        *fake.known.lock().unwrap() = Some(vec!["main@S1".into(), "main@S2".into()]);
+        assert_eq!(wind_down(fake.as_ref(), &store).unwrap(), Off::Done { lost: false });
+        assert!(store.load().screens.is_empty() && !store.out().exists());
+    }
+
+    #[test]
+    fn off_changes_nothing_when_screens_cannot_be_read() {
+        let (fake, store, _, _) = pair("blind");
+        *fake.blind.lock().unwrap() = true;
+        let before = store.read();
+        assert!(wind_down(fake.as_ref(), &store).is_err());
+        assert_eq!(store.read(), before);
+        assert!(store.output("L", 1, "jpg").exists() && store.cache().exists());
+    }
+
+    #[test]
+    fn use_sets_every_desktop_and_remembers_the_picture() {
+        let (fake, store, left, right) = pair("useall");
+        let mut state = store.load();
+        state.screens.insert("hidden@S2".into(), Entry::new(&right));
+        choose_picture(&mut state, fake.as_ref(), &store, &left).unwrap();
+        assert!(state.screens.values().all(|entry| entry.source == left));
+        assert_eq!(state.screens["hidden@S2"].original, right);
+        assert_eq!(state.picture, Some(left));
     }
 
     #[test]
