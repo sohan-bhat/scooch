@@ -38,6 +38,12 @@ float sweepFront(vec2 uv) {
   return smoothstep(0.0, 0.12, front - diagonal);
 }
 
+uniform float uScenery;
+
+float scenery(vec2 uv) {
+  return 0.0;
+}
+
 float relief(vec2 uv) {
   float s = textureLod(uSaliency, place(clamp(uv, 0.0, 1.0)), 0.5).r;
   return smoothstep(0.32, 0.85, s) * sweepFront(uv);
@@ -46,7 +52,7 @@ float relief(vec2 uv) {
 void main() {
   vec2 uv = vec2(position.x / uSize.x + 0.5, 0.5 - position.y / uSize.y);
   float edge = smoothstep(0.0, 0.02, uv.x) * smoothstep(0.0, 0.02, uv.y) * smoothstep(0.0, 0.02, 1.0 - uv.x) * smoothstep(0.0, 0.02, 1.0 - uv.y);
-  float h = relief(uv) * edge;
+  float h = (relief(uv) + scenery(uv) * uScenery) * edge;
   float e = 1.0 / 128.0;
   float hx = relief(uv + vec2(e, 0.0)) - relief(uv - vec2(e, 0.0));
   float hy = relief(uv + vec2(0.0, e)) - relief(uv - vec2(0.0, e));
@@ -183,6 +189,7 @@ export function createInside(manifest: DemoManifest, photo: Texture, saliency: T
     ...pictureUniforms(),
     uSaliency: { value: saliency },
     uRelief: { value: 0 },
+    uScenery: { value: 0 },
     uSweep: { value: 0 },
     uFade: { value: 1 },
     uSize: { value: [stage.width, stage.height] },
