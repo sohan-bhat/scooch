@@ -861,6 +861,16 @@ pub fn retire(store: &Store, stop: &Stop) {
     }
 }
 
+pub fn release(desktop: &dyn Desktop, store: &Store, report: &Report, stop: &Stop) {
+    let asked = stop.requested();
+    retire(store, stop);
+    if report.unload || (report.exit && !asked) {
+        if let Err(error) = desktop.autostart(None) {
+            eprintln!("{error}");
+        }
+    }
+}
+
 fn finish(store: &Store, stop: &Stop) -> ! {
     retire(store, stop);
     if stop.wait_idle(STOP_CAP) {
@@ -916,14 +926,8 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
                 eprintln!("Scooch could not save its settings, so it stopped until the disk has room.");
                 finish(&daemon.store, &stop);
             }
-            if report.unload {
-                retire(&daemon.store, &stop);
-                if let Err(error) = daemon.desktop.autostart(None) {
-                    eprintln!("{error}");
-                }
-                finish(&daemon.store, &stop);
-            }
-            if report.exit {
+            if report.unload || report.exit {
+                release(daemon.desktop.as_ref(), &daemon.store, &report, &stop);
                 finish(&daemon.store, &stop);
             }
             if report.retry {
@@ -1932,6 +1936,22 @@ pub mod tests {
         let state = daemon.store.load();
         assert_eq!((state.screens["main"].source.clone(), state.screens["main"].original.clone()), (chosen, original));
         assert_ne!(fake.showing("main"), render);
+    }
+
+    #[test]
+    fn a_daemon_with_nothing_to_watch_takes_its_login_item_away() {
+        let (daemon, fake, _) = rig("release", vec![screen("main", 0.0, 1.0)]);
+        let unloads = || fake.unloads.load(Ordering::SeqCst);
+        release(fake.as_ref(), &daemon.store, &Report { exit: true, ..Report::default() }, &Stop::default());
+        assert_eq!(unloads(), 1);
+        let asked = Stop::default();
+        asked.request();
+        release(fake.as_ref(), &daemon.store, &Report { exit: true, ..Report::default() }, &asked);
+        assert_eq!(unloads(), 1);
+        release(fake.as_ref(), &daemon.store, &Report { unload: true, ..Report::default() }, &asked);
+        assert_eq!(unloads(), 2);
+        release(fake.as_ref(), &daemon.store, &Report::default(), &Stop::default());
+        assert_eq!(unloads(), 2);
     }
 
     #[test]

@@ -430,12 +430,20 @@ pub fn wait_gone(mut alive: impl FnMut() -> bool, patience: Duration, poll: Dura
 
 pub fn watch() -> Result<()> {
     let store = Store::open();
-    let state = store.load();
-    if !state.on && !state.restoring {
+    let desktop: Arc<dyn Desktop> = Arc::from(desktop()?);
+    if idle(desktop.as_ref(), &store)? {
         return Ok(());
     }
-    let desktop: Arc<dyn Desktop> = Arc::from(desktop()?);
     daemon::watch(desktop, store)
+}
+
+pub fn idle(desktop: &dyn Desktop, store: &Store) -> Result<bool> {
+    let state = store.load();
+    if state.on || state.restoring {
+        return Ok(false);
+    }
+    desktop.autostart(None)?;
+    Ok(true)
 }
 
 pub fn flip() -> Result<()> {
@@ -1550,6 +1558,22 @@ mod tests {
         assert_eq!(off_of(&fake, &store), Off::Done(tally(1, 0, 0, 0, 0)));
         assert_eq!(fake.showing("D@S1"), first);
         assert!(!render.exists());
+    }
+
+    #[test]
+    fn a_watcher_started_with_nothing_to_do_takes_its_login_item_away() {
+        let (fake, store, _) = spaces("idlewatch");
+        let unloads = || fake.unloads.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(idle(fake.as_ref(), &store).unwrap());
+        assert_eq!(unloads(), 1);
+        std::fs::write(store.state_file(), b"{ broken").unwrap();
+        assert!(idle(fake.as_ref(), &store).unwrap());
+        assert_eq!(unloads(), 2);
+        store.save(&State { on: true, ..State::default() }).unwrap();
+        assert!(!idle(fake.as_ref(), &store).unwrap());
+        store.save(&State { restoring: true, ..State::default() }).unwrap();
+        assert!(!idle(fake.as_ref(), &store).unwrap());
+        assert_eq!(unloads(), 2);
     }
 
     #[test]
