@@ -103,6 +103,10 @@ impl Desktop for Mac {
         Ok(Some(found))
     }
 
+    fn in_use(&self, folder: &Path) -> Result<Option<Vec<PathBuf>>> {
+        Ok(store::in_use(folder))
+    }
+
     fn run(&self, wake: Wake) -> Result<()> {
         RUNNING.store(true, Ordering::SeqCst);
         let result = watch::run(wake);

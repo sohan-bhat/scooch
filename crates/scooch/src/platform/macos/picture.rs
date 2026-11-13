@@ -33,6 +33,17 @@ pub fn screens(marker: MainThreadMarker) -> Result<Vec<Screen>> {
     Ok(found)
 }
 
+pub fn shown(marker: MainThreadMarker) -> Vec<(String, Option<PathBuf>)> {
+    screens(marker).unwrap_or_default().into_iter().map(|screen| {
+        let reported = reported(marker, &screen.id).ok().flatten();
+        (screen.id, reported)
+    }).collect()
+}
+
+pub fn display_ids(marker: MainThreadMarker) -> Vec<String> {
+    NSScreen::screens(marker).into_iter().filter_map(|screen| number(&screen)).map(identifier).collect()
+}
+
 fn number(screen: &NSScreen) -> Option<u32> {
     let value: Option<Retained<AnyObject>> = unsafe { msg_send![&*screen.deviceDescription(), objectForKey: ns_string!("NSScreenNumber")] };
     value.and_then(|value| value.downcast_ref::<NSNumber>().map(|number| number.unsignedIntValue()))

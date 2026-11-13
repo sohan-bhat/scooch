@@ -73,6 +73,9 @@ pub trait Desktop: Send + Sync {
     fn known(&self) -> Result<Option<Vec<String>>> {
         Ok(None)
     }
+    fn in_use(&self, _folder: &Path) -> Result<Option<Vec<PathBuf>>> {
+        Ok(None)
+    }
 }
 
 pub fn folder_and_children(root: &Path) -> Vec<PathBuf> {

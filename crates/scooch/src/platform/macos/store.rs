@@ -8,12 +8,15 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
+use std::time::{Duration, Instant};
 
 pub const INDEX: &str = "Library/Application Support/com.apple.wallpaper/Store/Index.plist";
 pub const DEFAULT_DESKTOP: &str = "/System/Library/CoreServices/DefaultDesktop.heic";
 const IMAGE: &str = "com.apple.wallpaper.choice.image";
 const DEFAULT: &str = "default";
 const VIDEO: [&str; 2] = ["mov", "mp4"];
+const AGREE: Duration = Duration::from_millis(500);
+const RECHECK: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Plist {
@@ -215,6 +218,93 @@ fn read() -> Option<Plist> {
     parse(&std::fs::read(home.join(INDEX)).ok()?)
 }
 
+pub fn in_use(folder: &Path) -> Option<Vec<PathBuf>> {
+    let deadline = Instant::now() + AGREE;
+    loop {
+        let index = read()?;
+        let showing = super::on_main(super::picture::shown);
+        let agreed = showing.iter().all(|(id, reported)| agree(&index, id, reported.as_deref(), folder));
+        if agreed || Instant::now() >= deadline {
+            let live = live_spaces();
+            let connected = super::on_main(super::picture::display_ids);
+            let mut found = files_within(&index, folder, |space, displays| stale(space, displays, live.as_deref(), &connected));
+            found.extend(showing.into_iter().filter_map(|(_, reported)| reported).filter(|path| within(path, folder)));
+            let mut unique: Vec<PathBuf> = Vec::new();
+            for path in found {
+                if !unique.iter().any(|seen| same(seen, &path)) {
+                    unique.push(path);
+                }
+            }
+            return Some(unique);
+        }
+        std::thread::sleep(RECHECK);
+    }
+}
+
+pub fn files_within(index: &Plist, folder: &Path, stale: impl Fn(&str, &[&str]) -> bool) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Plist::Dict(entries) = index else { return found };
+    for (key, value) in entries {
+        match (key.as_str(), value) {
+            ("Spaces", Plist::Dict(spaces)) => {
+                for (space, entry) in spaces {
+                    let displays: Vec<&str> = match entry.get("Displays") {
+                        Some(Plist::Dict(displays)) => displays.iter().map(|(display, _)| display.as_str()).collect(),
+                        _ => Vec::new(),
+                    };
+                    if !stale(space, &displays) {
+                        gather(entry, folder, &mut found);
+                    }
+                }
+            }
+            _ => gather(value, folder, &mut found),
+        }
+    }
+    found
+}
+
+fn gather(node: &Plist, folder: &Path, found: &mut Vec<PathBuf>) {
+    match node {
+        Plist::Dict(entries) => {
+            for (key, value) in entries {
+                match value.text().filter(|_| key == "relative").and_then(file_path) {
+                    Some(path) if within(&path, folder) => found.push(path),
+                    Some(_) => {}
+                    None => gather(value, folder, found),
+                }
+            }
+        }
+        Plist::Array(items) => items.iter().for_each(|item| gather(item, folder, found)),
+        _ => {}
+    }
+}
+
+pub fn within(path: &Path, folder: &Path) -> bool {
+    path.starts_with(folder) || matches!((path.canonicalize(), folder.canonicalize()), (Ok(path), Ok(folder)) if path.starts_with(&folder))
+}
+
+pub fn stale(space: &str, displays: &[&str], live: Option<&[String]>, connected: &[String]) -> bool {
+    let Some(live) = live else { return false };
+    !live.iter().any(|known| known == space) && !displays.is_empty() && displays.iter().all(|display| connected.iter().any(|attached| attached == display))
+}
+
+fn live_spaces() -> Option<Vec<String>> {
+    Some(super::spaces::window_server()?.into_iter().flat_map(|monitor| monitor.spaces.into_iter().chain(monitor.current)).collect())
+}
+
+pub fn agree(index: &Plist, id: &str, reported: Option<&Path>, folder: &Path) -> bool {
+    let (display, space) = super::spaces::split(id);
+    let stored = match kind(index, display, space) {
+        Some(Kind::Picture(path)) => Some(path).filter(|path| within(path, folder)),
+        _ => None,
+    };
+    match (stored, reported.filter(|path| within(path, folder))) {
+        (None, None) => true,
+        (Some(stored), Some(reported)) => same(&stored, reported),
+        _ => false,
+    }
+}
+
 pub fn still(path: &Path) -> bool {
     let Some(url) = NSURL::from_file_path(path) else { return false };
     let Some(source) = Owned::new(unsafe { sys::CGImageSourceCreateWithURL(&*url as *const NSURL as Ref, null()) }) else { return false };
@@ -370,6 +460,48 @@ mod tests {
         assert!(!moving(&picture));
         std::fs::write(folder.join("Sunrise.mov"), b"x").unwrap();
         assert!(moving(&picture));
+    }
+
+    #[test]
+    fn every_space_and_display_pointing_into_the_folder_is_in_use() {
+        let ours = choice(IMAGE, &["file:///d/out/D_S1-2.jpg"], NULL);
+        let other = choice(IMAGE, &["file:///p/lake.jpg"], NULL);
+        let index = store(&ours, &other, &choice(IMAGE, &["file:///d/out/D-1.jpg"], NULL), &other);
+        let mut found = files_within(&index, Path::new("/d/out"), |_, _| false);
+        found.sort();
+        assert_eq!(found, vec![PathBuf::from("/d/out/D-1.jpg"), PathBuf::from("/d/out/D_S1-2.jpg")]);
+        assert_eq!(files_within(&index, Path::new("/d/out"), |space, _| space == SPACE), vec![PathBuf::from("/d/out/D-1.jpg")]);
+        assert!(files_within(&index, Path::new("/elsewhere"), |_, _| false).is_empty());
+    }
+
+    #[test]
+    fn a_space_is_stale_only_when_the_window_server_lists_every_display_without_it() {
+        let connected = vec![DISPLAY.to_string()];
+        let live = vec!["LIVE".to_string()];
+        assert!(stale("CLOSED", &[DISPLAY], Some(&live), &connected));
+        assert!(!stale("LIVE", &[DISPLAY], Some(&live), &connected));
+        assert!(!stale("CLOSED", &[DISPLAY, "UNPLUGGED"], Some(&live), &connected));
+        assert!(!stale("CLOSED", &[], Some(&live), &connected));
+        assert!(!stale("CLOSED", &[DISPLAY], None, &connected));
+    }
+
+    #[test]
+    fn the_store_agrees_once_it_shows_what_macos_reports() {
+        let id = format!("{DISPLAY}@{SPACE}");
+        let ours = everywhere(&choice(IMAGE, &["file:///d/out/D_S1-2.jpg"], NULL));
+        let default = everywhere(&choice(DEFAULT, &[], NULL));
+        let folder = Path::new("/d/out");
+        assert!(agree(&ours, &id, Some(Path::new("/d/out/D_S1-2.jpg")), folder));
+        assert!(!agree(&ours, &id, Some(Path::new(DEFAULT_DESKTOP)), folder));
+        assert!(!agree(&ours, &id, Some(Path::new("/d/out/D_S1-3.jpg")), folder));
+        assert!(agree(&default, &id, Some(Path::new(DEFAULT_DESKTOP)), folder));
+        assert!(!agree(&default, &id, Some(Path::new("/d/out/D_S1-3.jpg")), folder));
+    }
+
+    #[test]
+    fn live_in_use_reads_the_store() {
+        let Some(folder) = std::env::var_os("SCOOCH_IN_USE").filter(|_| std::env::var_os("SCOOCH_LIVE").is_some_and(|value| value == "1")) else { return };
+        println!("in_use {:?}", in_use(Path::new(&folder)));
     }
 
     #[test]
