@@ -63,7 +63,7 @@ start_xvfb() {
     if [ "${SCOOCH_MONITORS:-1}" = "2" ]; then
         size="3840x1080"
     fi
-    Xvfb :99 -screen 0 "${size}x24" -nolisten tcp >"$out/xvfb.log" 2>&1 &
+    Xvfb :99 -screen 0 "${size}x24" -nolisten tcp -noreset >"$out/xvfb.log" 2>&1 &
     export DISPLAY=:99
     export XDG_SESSION_TYPE=x11
     dbus-update-activation-environment DISPLAY XDG_SESSION_TYPE >/dev/null 2>&1 || true

@@ -24,6 +24,6 @@ plasma_answers() {
 ready "Plasma shell" 120 owned org.kde.plasmashell
 ready "Plasma desktop containment" 60 plasma_answers
 ready "work area" 60 workarea_set
-sort_mode="$(dbus-send --session --print-reply --dest=org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "string:var d = desktops()[0]; d.currentConfigGroup = ['General']; d.writeConfig('sortMode', -1); print(d.readConfig('sortMode'));" 2>&1 | sed -n 's/.*string "\(.*\)"/\1/p')"
+sort_mode="$(dbus-send --session --print-reply --dest=org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "string:desktops().forEach(function (d) { d.currentConfigGroup = ['General']; d.writeConfig('sortMode', -1); }); print(desktops()[0].readConfig('sortMode'));" 2>&1 | sed -n 's/.*string "\(.*\)"/\1/p')"
 echo "Plasma folder sort mode now ${sort_mode:-unknown}, so icons stay where they are dropped" >>"$out/readiness.txt"
 run_probe 15

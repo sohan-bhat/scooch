@@ -55,16 +55,27 @@ jobs:
             packages: xvfb x11-utils x11-xserver-utils caja marco mate-panel gvfs gvfs-daemons libglib2.0-bin
             extras: mate-desktop-environment-core mate-backgrounds
           - desktop: kde-arch
-            script: kde
+            script: kde-wayland
             container: archlinux:latest
-            packages: plasma-desktop plasma-workspace breeze-icons
-            extras: kwin-x11 openbox plasma-workspace-wallpapers
+            packages: plasma-desktop plasma-workspace kwin breeze-icons
+            extras: plasma-workspace-wallpapers
           - desktop: kde-arch-dual
-            script: kde
+            script: kde-wayland
             container: archlinux:latest
             monitors: 2
-            packages: plasma-desktop plasma-workspace breeze-icons
-            extras: kwin-x11 openbox plasma-workspace-wallpapers
+            packages: plasma-desktop plasma-workspace kwin breeze-icons
+            extras: plasma-workspace-wallpapers
+          - desktop: kde-debian
+            script: kde
+            container: debian:testing
+            packages: plasma-desktop plasma-workspace kwin-x11 breeze-icon-theme
+            extras: plasma-workspace-wallpapers kio-extras
+          - desktop: kde-debian-dual
+            script: kde
+            container: debian:testing
+            monitors: 2
+            packages: plasma-desktop plasma-workspace kwin-x11 breeze-icon-theme
+            extras: plasma-workspace-wallpapers kio-extras
           - desktop: xfce-arch
             script: xfce
             container: archlinux:latest
