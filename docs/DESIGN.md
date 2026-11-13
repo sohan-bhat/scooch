@@ -121,7 +121,9 @@ State lives in the per-user data folder as `state.json`, with the source per scr
 
 A screen entry belongs to one desktop. On macOS that is one display on one Space, because macOS keeps a wallpaper for each and an app can only set the one that is showing. Each entry has its own source, original and output files.
 
-**Off.** `scooch off` restores every entry that is showing and removes it. An entry that is not showing, such as another Space or an unplugged monitor, stays as pending. With pending entries the daemon keeps running in a restoring mode. It never renders, restores each pending entry when its desktop or screen next shows, and removes the login item and itself when none are left. A second `scooch off` gives up on the pending ones and says how many.
+**Off.** `scooch off` restores every entry that is showing and removes it. An entry that is not showing, such as another Space or an unplugged monitor, stays as pending. With pending entries the daemon keeps running in a restoring mode. It never renders, restores each pending entry when its desktop or screen next shows, and removes the login item and itself when none are left. A second `scooch off` gives up on the pending ones, keeps their files and says how many.
+
+A restore ends one of three ways, and the closing line counts each. The original is back. Or the original was a kind no app can put back, so the plain picture is shown. Or no file is left to show, so Scooch's picture stays and its file is kept. A picture file that a desktop may still show is never deleted.
 
 **Never the wrong picture.** Right before setting an image the daemon reads the wallpaper again. If the user picked a new picture while the render ran, the render is dropped. A stop signal lets the running tick finish and save.
 
