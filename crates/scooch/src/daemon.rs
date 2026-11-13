@@ -445,7 +445,9 @@ impl Daemon {
                 return;
             }
         };
-        let settled = settle_screens(state, self.desktop.as_ref(), &self.store, &screens, None, false);
+        let known = self.desktop.known().ok().flatten();
+        prune(state, self.desktop.as_ref(), &self.store, known.as_deref(), &screens, unix_now());
+        let settled = settle_screens(state, self.desktop.as_ref(), &self.store, &screens, known.as_deref(), false);
         absorb(&mut state.tally, &settled);
         if settled.tally.strays > 0 {
             report.problem = Some(ORPHAN.to_string());

@@ -1429,6 +1429,28 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_space_closed_while_restoring_lets_restoring_end() {
+        let (fake, store, first) = spaces("closedpending");
+        let output = store.output("D@S2", 1, "jpg");
+        std::fs::write(&output, b"x").unwrap();
+        let mut state = State { restoring: true, ..State::default() };
+        state.screens.insert("D@S2".into(), Entry { output: Some(output.clone()), ..Entry::new(&first) });
+        store.save(&state).unwrap();
+        *fake.known.lock().unwrap() = Some(vec!["D@S1".into()]);
+        let daemon = crate::daemon::Daemon::new(fake.clone(), store.clone());
+        assert!(!daemon.tick().unload);
+        let marked = store.load().screens["D@S2"].clone();
+        assert!(marked.absent_since.is_some() && marked.absent_ticks == 1 && output.exists());
+        let mut state = store.load();
+        let entry = state.screens.get_mut("D@S2").unwrap();
+        (entry.absent_since, entry.absent_ticks) = (Some(1), 4);
+        store.save(&state).unwrap();
+        assert!(daemon.tick().unload);
+        let state = store.load();
+        assert!(!state.restoring && state.screens.is_empty() && !output.exists());
+    }
+
+    #[test]
     fn tilde_shortens_the_home_folder() {
         let home = dirs::home_dir().unwrap();
         assert_eq!(tilde(&home.join("Pictures/harbor.jpg")), "~/Pictures/harbor.jpg");
