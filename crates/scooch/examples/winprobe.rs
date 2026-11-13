@@ -27,7 +27,7 @@ mod probe {
     use std::sync::OnceLock;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use ::windows::core::{w, HSTRING, PCWSTR};
-    use ::windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, FILETIME, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use ::windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, FILETIME, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM};
     use ::windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW, MapWindowPoints, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
         BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HDC, HMONITOR, LOGFONTW, MONITORINFO, SRCCOPY, ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH,
@@ -40,8 +40,11 @@ mod probe {
     use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use ::windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
     use ::windows::Win32::System::Registry::{RegCloseKey, RegDeleteKeyValueW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_BINARY, REG_DWORD, RRF_RT_REG_DWORD};
-    use ::windows::Win32::System::Threading::{GetCurrentProcess, GetGuiResources, GetProcessHandleCount, GetProcessTimes, OpenProcess, TerminateProcess, GR_GDIOBJECTS, GR_USEROBJECTS, PROCESS_TERMINATE};
+    use ::windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount, GetProcessTimes, OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, PROCESS_VM_READ};
+    use scooch::live::{Command as LiveCommand, Helper, Hints, Reply, TestPattern};
     use scooch::platform::windows::layer::{self, Method};
+    use ::windows::Wdk::Foundation::{NtQueryObject, OBJECT_INFORMATION_CLASS};
+    use ::windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SYSTEM_INFORMATION_CLASS};
     use ::windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK, TreeScope_Children};
     use ::windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow, SystemParametersInfoForDpi, MDT_EFFECTIVE_DPI};
     use ::windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -182,6 +185,10 @@ mod probe {
 
     pub fn main() -> ExitCode {
         START.get_or_init(Instant::now);
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).is_some_and(|first| first == "--hold") {
+            return hold(&args[2..]);
+        }
         let out = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "winprobe".into()));
         let home = std::env::temp_dir().join(format!("scooch-probe-{}", std::process::id()));
         if fs::create_dir_all(&out).is_err() || fs::create_dir_all(&home).is_err() {
@@ -2240,6 +2247,268 @@ mod probe {
         }
         drop(layer);
         park_cursor();
+        Ok(())
+    }
+
+    fn hints(method: Method) -> Hints {
+        Hints { present: Some(method.hint().into()) }
+    }
+
+    const PATTERN: TestPattern = TestPattern { cycle_ms: 500 };
+    const ANSWER: Duration = Duration::from_secs(3);
+
+    fn green(pixel: &[u8]) -> bool {
+        pixel.len() >= 3 && pixel[0] < 60 && pixel[1] > 200 && pixel[2] < 60
+    }
+
+    fn spot_of(area: RECT) -> RECT {
+        RECT { left: area.right - 24, top: area.top + 8, right: area.right - 8, bottom: area.top + 24 }
+    }
+
+    fn marker_on(spot: RECT) -> bool {
+        capture(spot).is_ok_and(|shot| green(&shot.get_pixel(8, 8).0))
+    }
+
+    fn marker_until(spot: RECT, wanted: bool, limit: Duration) -> Option<Duration> {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            if marker_on(spot) == wanted {
+                return Some(started.elapsed());
+            }
+            std::thread::yield_now();
+        }
+        None
+    }
+
+    fn own_private() -> usize {
+        let process = unsafe { GetCurrentProcess() };
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+        let _ = unsafe { GetProcessMemoryInfo(process, &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS, counters.cb) };
+        counters.PrivateUsage
+    }
+
+    fn process_numbers(pid: u32) -> Option<(usize, u32)> {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) }.ok()?;
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+        let read = unsafe { GetProcessMemoryInfo(handle, &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS, counters.cb) }.is_ok();
+        let mut handles = 0u32;
+        let counted = unsafe { GetProcessHandleCount(handle, &mut handles) }.is_ok();
+        let _ = unsafe { CloseHandle(handle) };
+        (read && counted).then_some((counters.PrivateUsage, handles))
+    }
+
+    fn process_gone(pid: u32) -> bool {
+        let Ok(handle) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else { return true };
+        let ended = unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0;
+        let _ = unsafe { CloseHandle(handle) };
+        ended
+    }
+
+    fn gone_within(pid: u32, limit: Duration) -> Option<Duration> {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            if process_gone(pid) {
+                return Some(started.elapsed());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        process_gone(pid).then(|| started.elapsed())
+    }
+
+    fn type_names() -> BTreeMap<u16, String> {
+        let mut words = vec![0u64; 1 << 13];
+        for _ in 0..8 {
+            let mut needed = 0u32;
+            let status = unsafe { NtQueryObject(None, OBJECT_INFORMATION_CLASS(3), Some(words.as_mut_ptr() as *mut c_void), (words.len() * 8) as u32, Some(&mut needed)) };
+            if status.is_ok() {
+                break;
+            }
+            let wanted = (needed as usize / 8 + 1).max(words.len() * 2);
+            words = vec![0u64; wanted];
+        }
+        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let read16 = |at: usize| bytes.get(at..at + 2).map_or(0, |pair| u16::from_le_bytes([pair[0], pair[1]]));
+        let count = bytes.get(0..4).map_or(0, |four| u32::from_le_bytes([four[0], four[1], four[2], four[3]]));
+        let mut names = BTreeMap::new();
+        let mut at = 8usize;
+        for _ in 0..count {
+            if at + 0x68 > bytes.len() {
+                break;
+            }
+            let (length, maximum) = (read16(at) as usize, read16(at + 2) as usize);
+            let index = bytes[at + 0x5a];
+            let units: Vec<u16> = (0..length / 2).map(|unit| read16(at + 0x68 + unit * 2)).collect();
+            names.insert(u16::from(index), String::from_utf16_lossy(&units));
+            at = (at + 0x68 + maximum + 7) & !7;
+        }
+        names
+    }
+
+    fn handle_types(pid: u32) -> Option<BTreeMap<String, usize>> {
+        let mut words = vec![0u64; 1 << 17];
+        let mut read = false;
+        for _ in 0..8 {
+            let mut needed = 0u32;
+            let status = unsafe { NtQuerySystemInformation(SYSTEM_INFORMATION_CLASS(64), words.as_mut_ptr() as *mut c_void, (words.len() * 8) as u32, &mut needed) };
+            if status.is_ok() {
+                read = true;
+                break;
+            }
+            let wanted = (needed as usize / 8 + 8192).max(words.len() * 2);
+            if wanted > 1 << 26 {
+                break;
+            }
+            words = vec![0u64; wanted];
+        }
+        if !read {
+            return None;
+        }
+        let names = type_names();
+        let count = words[0] as usize;
+        let mut kinds = BTreeMap::new();
+        for entry in 0..count {
+            let base = 2 + entry * 5;
+            let Some(fields) = words.get(base..base + 5) else { break };
+            if fields[1] as u32 == pid {
+                let kind = (fields[3] >> 48) as u16;
+                *kinds.entry(names.get(&kind).cloned().unwrap_or_else(|| format!("type {kind}"))).or_insert(0usize) += 1;
+            }
+        }
+        Some(kinds)
+    }
+
+    fn hold(args: &[String]) -> ExitCode {
+        let run = || -> Result<()> {
+            let [program, picture, x, y, w, h, present] = args else { bail!("hold needs a program, a picture, a rectangle and a presentation") };
+            let frame = Rect { x: x.parse()?, y: y.parse()?, w: w.parse()?, h: h.parse()? };
+            let screen = Screen { id: "held".into(), frame, scale: 1.0 };
+            let mut helper = Helper::spawn(Path::new(program), Duration::from_secs(5))?;
+            helper.warm(Hints { present: Some(present.clone()) }, Duration::from_secs(20))?;
+            helper.open(1, &screen, Some(Path::new(picture)), ANSWER)?;
+            println!("shown {}", helper.pid);
+            let _ = std::io::stdout().flush();
+            loop {
+                let _ = helper.play(1, PATTERN, 1000, ANSWER);
+            }
+        };
+        match run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                println!("failed {error:#}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    fn parent_check(p: &mut Probe, program: &Path, screen: &Screen, picture: &Path, method: Method) -> Result<()> {
+        let spot = spot_of(screen_rect(screen));
+        let frame = screen.frame;
+        let mut holder = Command::new(std::env::current_exe()?)
+            .arg("--hold")
+            .arg(program)
+            .arg(picture)
+            .args([frame.x, frame.y, frame.w, frame.h].map(|value| value.to_string()))
+            .arg(method.hint())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let output = holder.stdout.take().context("the holder has no output")?;
+        let (sender, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for text in std::io::BufRead::lines(std::io::BufReader::new(output)).map_while(Result::ok) {
+                if sender.send(text).is_err() {
+                    break;
+                }
+            }
+        });
+        let said = lines.recv_timeout(Duration::from_secs(40)).unwrap_or_default();
+        let Some(pid) = said.strip_prefix("shown ").and_then(|pid| pid.trim().parse::<u32>().ok()) else {
+            let _ = holder.kill();
+            let _ = holder.wait();
+            bail!("the holding process said {said:?}");
+        };
+        let before = marker_on(spot);
+        holder.kill()?;
+        let _ = holder.wait();
+        let off = marker_until(spot, false, Duration::from_secs(2));
+        let ended = gone_within(pid, Duration::from_secs(3));
+        p.line(format!("- the process that started the helper was ended with the layer open, layer on screen before {before}, gone from the screen after {:?} ms, helper process gone after {:?} ms", off.map(|off| off.as_millis()), ended.map(|ended| ended.as_millis())));
+        if !before || off.is_none_or(|off| off > Duration::from_millis(500)) || ended.is_none() {
+            p.failed.push("ending the daemon side did not take the layer and the helper away within 500 ms".into());
+        }
+        Ok(())
+    }
+
+    fn hang_up_check(p: &mut Probe, program: &Path, screen: &Screen, picture: &Path, method: Method) -> Result<()> {
+        let spot = spot_of(screen_rect(screen));
+        let mut helper = Helper::spawn(program, Duration::from_secs(5))?;
+        helper.warm(hints(method), Duration::from_secs(20))?;
+        helper.open(1, screen, Some(picture), ANSWER)?;
+        let before = marker_until(spot, true, Duration::from_secs(1)).is_some();
+        helper.hang_up();
+        let off = marker_until(spot, false, Duration::from_secs(2));
+        let ended = helper.wait_exit(Duration::from_secs(3));
+        p.line(format!("- the pipe to the helper was closed with the layer open, layer on screen before {before}, gone from the screen after {:?} ms, helper exited after {:?} ms", off.map(|off| off.as_millis()), ended.map(|ended| ended.as_millis())));
+        if !before || off.is_none_or(|off| off > Duration::from_millis(500)) || ended.is_none() {
+            p.failed.push("closing the pipe did not take the layer and the helper away within 500 ms".into());
+        }
+        Ok(())
+    }
+
+    fn helper_kill_check(p: &mut Probe, program: &Path, screen: &Screen, picture: &Path, field: &RgbImage, method: Method) -> Result<()> {
+        let area = screen_rect(screen);
+        let spot = spot_of(area);
+        let shell_before = shell_process();
+        let mut helper = Helper::spawn(program, Duration::from_secs(5))?;
+        helper.warm(hints(method), Duration::from_secs(20))?;
+        helper.open(1, screen, Some(picture), ANSWER)?;
+        let before = marker_until(spot, true, Duration::from_secs(1)).is_some();
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, false, helper.pid) }?;
+        let ended = unsafe { TerminateProcess(handle, 9) };
+        let _ = unsafe { CloseHandle(handle) };
+        ended?;
+        let off = marker_until(spot, false, Duration::from_secs(2));
+        let cleared = wait_until(Duration::from_secs(2), || layer::ours_left() == 0);
+        let gap = capture(area).ok().map(|shot| mean_gap(&shot, field));
+        let explorer = shell_process() == shell_before && shell::view().is_ok();
+        let asked = Instant::now();
+        let answer = helper.close(1, Duration::from_millis(400));
+        let took = asked.elapsed().as_millis();
+        p.line(format!(
+            "- the helper was ended with the layer open, layer on screen before {before}, gone from the screen after {:?} ms, windows gone after {:?} ms, screen gap to the picture {gap:?}, Explorer unchanged {explorer}, close answered {:?} after {took} ms",
+            off.map(|off| off.as_millis()),
+            cleared.map(|cleared| cleared.as_millis()),
+            answer.map_err(|error| error.to_string())
+        ));
+        if !before || off.is_none() || cleared.is_none() || !explorer || took > 450 {
+            p.failed.push("ending the helper did not leave a clean desktop and a quick failure".into());
+        }
+        Ok(())
+    }
+
+    fn shell_process() -> u32 {
+        let shell = unsafe { GetShellWindow() };
+        let mut process = 0u32;
+        if !shell.is_invalid() {
+            unsafe { GetWindowThreadProcessId(shell, Some(&mut process)) };
+        }
+        process
+    }
+
+    fn idle_check(p: &mut Probe, program: &Path, screen: &Screen, picture: &Path, method: Method) -> Result<()> {
+        let mut helper = Helper::spawn(program, Duration::from_secs(5))?;
+        helper.warm(hints(method), Duration::from_secs(20))?;
+        helper.open(1, screen, Some(picture), ANSWER)?;
+        helper.play(1, PATTERN, 100, ANSWER)?;
+        helper.close(1, ANSWER)?;
+        let last = Instant::now();
+        let pid = helper.pid;
+        let ended = wait_until(Duration::from_secs(45), || helper.exited()).map(|_| last.elapsed());
+        let left = layer::ours_left();
+        p.line(format!("- a helper left alone exited {:?} ms after its last command, process gone {}, windows left {left}", ended.map(|ended| ended.as_millis()), process_gone(pid)));
+        if ended.is_none_or(|ended| ended < Duration::from_secs(29) || ended > Duration::from_secs(36)) || left > 0 {
+            p.failed.push("a helper left alone did not exit by itself after about 30 seconds".into());
+        }
         Ok(())
     }
 
