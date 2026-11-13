@@ -1533,6 +1533,26 @@ mod tests {
     }
 
     #[test]
+    fn off_right_after_a_first_render_still_sees_the_render() {
+        let (fake, store, first) = spaces("lagoff");
+        let chosen = crate::daemon::tests::picture(first.parent().unwrap(), "chosen.png");
+        let mut state = State::default();
+        choose_picture(&mut state, fake.as_ref(), &store, &chosen).unwrap();
+        state.on = true;
+        store.save(&state).unwrap();
+        *fake.lag.lock().unwrap() = 3;
+        fake.place(vec![Rect { x: 60.0, y: 30.0, w: 40.0, h: 40.0 }]);
+        let mut daemon = crate::daemon::Daemon::new(fake.clone(), store.clone());
+        daemon.grace = Duration::ZERO;
+        daemon.tick();
+        let render = fake.showing("D@S1");
+        assert!(store.owns(&render));
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(1, 0, 0, 0, 0)));
+        assert_eq!(fake.showing("D@S1"), first);
+        assert!(!render.exists());
+    }
+
+    #[test]
     fn tilde_shortens_the_home_folder() {
         let home = dirs::home_dir().unwrap();
         assert_eq!(tilde(&home.join("Pictures/harbor.jpg")), "~/Pictures/harbor.jpg");

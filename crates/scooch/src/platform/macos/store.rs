@@ -8,15 +8,14 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
-use std::time::{Duration, Instant};
+use crate::platform::{AGREE, RECHECK};
+use std::time::Instant;
 
 pub const INDEX: &str = "Library/Application Support/com.apple.wallpaper/Store/Index.plist";
 pub const DEFAULT_DESKTOP: &str = "/System/Library/CoreServices/DefaultDesktop.heic";
 const IMAGE: &str = "com.apple.wallpaper.choice.image";
 const DEFAULT: &str = "default";
 const VIDEO: [&str; 2] = ["mov", "mp4"];
-const AGREE: Duration = Duration::from_millis(500);
-const RECHECK: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Plist {
@@ -174,21 +173,29 @@ pub fn decide(kind: Kind, reported: Option<PathBuf>, still: impl Fn(&Path) -> bo
     }
 }
 
-pub fn trusted(reported: Option<PathBuf>, id: &str) -> Option<PathBuf> {
-    let Some(store) = read() else { return reported };
+pub fn trusted_in(index: Option<&Plist>, reported: Option<PathBuf>, id: &str) -> Option<PathBuf> {
+    let Some(store) = index else { return reported };
     let (display, space) = place(id);
-    match kind(&store, display, space.as_deref()) {
+    match kind(store, display, space.as_deref()) {
         Some(kind) => decide(kind, reported, still, |path| Store::open().owns(path), default_still),
         None => reported,
     }
 }
 
-pub fn restorable(reported: Option<PathBuf>, id: &str) -> Option<PathBuf> {
-    let Some(store) = read() else { return reported };
+pub fn restorable_in(index: Option<&Plist>, reported: Option<PathBuf>, id: &str) -> Option<PathBuf> {
+    let Some(store) = index else { return reported };
     let (display, space) = place(id);
-    match kind(&store, display, space.as_deref()) {
+    match kind(store, display, space.as_deref()) {
         Some(kind) => keep(kind, reported),
         None => reported,
+    }
+}
+
+pub fn recorded(index: &Plist, id: &str) -> Option<PathBuf> {
+    let (display, space) = place(id);
+    match kind(index, display, space.as_deref())? {
+        Kind::Picture(path) => Some(path),
+        _ => None,
     }
 }
 
@@ -213,7 +220,7 @@ fn place(id: &str) -> (&str, Option<String>) {
     }
 }
 
-fn read() -> Option<Plist> {
+pub fn read() -> Option<Plist> {
     let home = super::real_home()?;
     parse(&std::fs::read(home.join(INDEX)).ok()?)
 }
@@ -496,6 +503,13 @@ mod tests {
         assert!(!agree(&ours, &id, Some(Path::new("/d/out/D_S1-3.jpg")), folder));
         assert!(agree(&default, &id, Some(Path::new(DEFAULT_DESKTOP)), folder));
         assert!(!agree(&default, &id, Some(Path::new("/d/out/D_S1-3.jpg")), folder));
+    }
+
+    #[test]
+    fn the_record_names_a_file_only_for_a_plain_picture() {
+        let id = format!("{DISPLAY}@{SPACE}");
+        assert_eq!(recorded(&everywhere(&choice(IMAGE, &["file:///d/out/D_S1-2.jpg"], NULL)), &id), Some(PathBuf::from("/d/out/D_S1-2.jpg")));
+        assert_eq!(recorded(&everywhere(&choice(DEFAULT, &[], NULL)), &id), None);
     }
 
     #[test]

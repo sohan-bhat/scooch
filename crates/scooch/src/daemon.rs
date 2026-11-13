@@ -965,12 +965,14 @@ pub mod tests {
         pub refuse: Mutex<Vec<String>>,
         pub unknowable: Mutex<bool>,
         pub crash_after_set: Mutex<bool>,
+        pub lag: Mutex<usize>,
+        pub stale: Mutex<HashMap<String, (PathBuf, usize)>>,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -983,6 +985,18 @@ pub mod tests {
 
         pub fn show(&self, screen: &str, picture: &Path) {
             self.shown.lock().unwrap().insert(screen.into(), picture.to_path_buf());
+        }
+
+        fn look(&self, screen: &str) -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
+            let reported = self.shown.lock().unwrap().get(screen).cloned();
+            let recorded = match self.stale.lock().unwrap().get_mut(screen) {
+                Some((old, left)) if *left > 0 => {
+                    *left -= 1;
+                    Some(old.clone())
+                }
+                _ => reported.clone(),
+            };
+            (recorded.clone(), reported, recorded)
         }
 
         pub fn place(&self, icons: Vec<Rect>) {
@@ -1023,7 +1037,11 @@ pub mod tests {
         }
 
         fn wallpaper(&self, screen: &Screen) -> Result<Option<PathBuf>> {
-            let shown = self.shown.lock().unwrap().get(&screen.id).cloned();
+            let ours = |path: &Path| path.parent().is_some_and(|folder| folder.ends_with("out"));
+            let shown = match crate::platform::agreed(|| Ok(self.look(&screen.id)), ours)? {
+                crate::platform::Seen::Agreed(recorded) => recorded,
+                crate::platform::Seen::Ours(path) => Some(path),
+            };
             let special = shown.as_ref().is_some_and(|path| self.moving.lock().unwrap().as_ref() == Some(path) || self.lost.lock().unwrap().contains(path));
             Ok(shown.filter(|_| !special))
         }
@@ -1045,6 +1063,10 @@ pub mod tests {
                 anyhow::bail!("The desktop would not take the picture.");
             }
             self.sets.fetch_add(1, Ordering::SeqCst);
+            let lag = *self.lag.lock().unwrap();
+            if let Some(old) = self.shown.lock().unwrap().get(&screen.id).cloned().filter(|_| lag > 0) {
+                self.stale.lock().unwrap().insert(screen.id.clone(), (old, lag));
+            }
             self.show(&screen.id, path);
             if std::mem::take(&mut *self.crash_after_set.lock().unwrap()) {
                 panic!("the process was killed right after the set");
@@ -1892,6 +1914,24 @@ pub mod tests {
         let mut closed = state();
         assert!(relink(&mut closed, "D@S2", shown, Some(&["D@S2".to_string()]), &screens));
         assert!(!closed.screens.contains_key("D@S1") && closed.screens.contains_key("D@S2"));
+    }
+
+    #[test]
+    fn a_tick_right_after_a_render_never_adopts_the_old_picture() {
+        let (daemon, fake, original) = rig("lagtick", vec![screen("main", 0.0, 1.0)]);
+        let chosen = picture(original.parent().unwrap(), "chosen.png");
+        let mut state = daemon.store.load();
+        crate::commands::choose_picture(&mut state, fake.as_ref(), &daemon.store, &chosen).unwrap();
+        daemon.store.save(&state).unwrap();
+        *fake.lag.lock().unwrap() = 3;
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let render = fake.showing("main");
+        fake.place(vec![corner()]);
+        daemon.tick();
+        let state = daemon.store.load();
+        assert_eq!((state.screens["main"].source.clone(), state.screens["main"].original.clone()), (chosen, original));
+        assert_ne!(fake.showing("main"), render);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use scooch_core::{Rect, RgbImage};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "linux", test))]
 #[doc(hidden)]
@@ -78,6 +79,41 @@ pub trait Desktop: Send + Sync {
     }
 }
 
+pub const AGREE: Duration = Duration::from_millis(500);
+pub const RECHECK: Duration = Duration::from_millis(20);
+
+#[derive(Debug, PartialEq)]
+pub enum Seen<T> {
+    Agreed(T),
+    Ours(PathBuf),
+}
+
+pub fn agreed<T>(mut look: impl FnMut() -> Result<(Option<PathBuf>, Option<PathBuf>, T)>, ours: impl Fn(&Path) -> bool) -> Result<Seen<T>> {
+    let deadline = Instant::now() + AGREE;
+    loop {
+        let (recorded, reported, view) = look()?;
+        match disagreement(recorded.as_deref(), reported.as_deref(), &ours) {
+            None => return Ok(Seen::Agreed(view)),
+            Some(preferred) if Instant::now() >= deadline => return Ok(Seen::Ours(preferred)),
+            Some(_) => std::thread::sleep(RECHECK),
+        }
+    }
+}
+
+pub fn disagreement(recorded: Option<&Path>, reported: Option<&Path>, ours: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let reported_ours = reported.filter(|path| ours(path));
+    let recorded_ours = recorded.filter(|path| ours(path));
+    if reported_ours.is_none() && recorded_ours.is_none() {
+        return None;
+    }
+    if let (Some(recorded), Some(reported)) = (recorded, reported) {
+        if crate::state::same(recorded, reported) {
+            return None;
+        }
+    }
+    reported_ours.or(recorded_ours).map(Path::to_path_buf)
+}
+
 pub fn folder_and_children(root: &Path) -> Vec<PathBuf> {
     let mut folders = vec![root.to_path_buf()];
     if let Ok(entries) = std::fs::read_dir(root) {
@@ -97,4 +133,40 @@ pub fn current() -> Result<Box<dyn Desktop>> {
     return linux::desktop();
     #[allow(unreachable_code)]
     Err(anyhow::anyhow!("Scooch does not run on this system yet."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_disagreement_matters_only_when_one_side_points_at_scoochs_picture() {
+        let ours = |path: &Path| path.starts_with("/d/out");
+        let (render, old, newer) = (Path::new("/d/out/D-1.jpg"), Path::new("/p/old.jpg"), Path::new("/p/new.jpg"));
+        assert_eq!(disagreement(Some(old), Some(render), ours), Some(render.to_path_buf()));
+        assert_eq!(disagreement(Some(render), Some(old), ours), Some(render.to_path_buf()));
+        assert_eq!(disagreement(Some(render), None, ours), Some(render.to_path_buf()));
+        assert_eq!(disagreement(Some(render), Some(render), ours), None);
+        assert_eq!(disagreement(Some(old), Some(newer), ours), None);
+        assert_eq!(disagreement(None, None, ours), None);
+    }
+
+    #[test]
+    fn a_lasting_disagreement_ends_on_scoochs_picture_at_the_cap() {
+        let started = Instant::now();
+        let seen = agreed(|| Ok((Some(PathBuf::from("/p/old.jpg")), Some(PathBuf::from("/d/out/D-1.jpg")), ())), |path: &Path| path.starts_with("/d/out")).unwrap();
+        assert_eq!(seen, Seen::Ours(PathBuf::from("/d/out/D-1.jpg")));
+        assert!(started.elapsed() >= AGREE);
+        let mut reads = 0;
+        let seen = agreed(
+            || {
+                reads += 1;
+                let recorded = if reads < 3 { "/p/old.jpg" } else { "/d/out/D-1.jpg" };
+                Ok((Some(PathBuf::from(recorded)), Some(PathBuf::from("/d/out/D-1.jpg")), reads))
+            },
+            |path: &Path| path.starts_with("/d/out"),
+        )
+        .unwrap();
+        assert_eq!(seen, Seen::Agreed(3));
+    }
 }

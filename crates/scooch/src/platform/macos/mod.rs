@@ -6,7 +6,7 @@ mod store;
 mod sys;
 mod watch;
 
-use super::{Desktop, Format, Screen, Snapshot, Wake};
+use super::{Desktop, Format, Screen, Seen, Snapshot, Wake};
 use anyhow::{anyhow, Result};
 use objc2::rc::autoreleasepool;
 use objc2::MainThreadMarker;
@@ -58,6 +58,20 @@ fn trampoline<F: FnMut()>(_: &F) -> sys::Work {
 
 struct Mac;
 
+type View = (Option<PathBuf>, Option<store::Plist>);
+
+fn look(id: &str) -> Result<(Option<PathBuf>, Option<PathBuf>, View)> {
+    let shown = id.to_string();
+    let reported = on_main(move |marker| picture::reported(marker, &shown))?;
+    let index = store::read();
+    let recorded = index.as_ref().and_then(|index| store::recorded(index, id));
+    Ok((recorded, reported.clone(), (reported, index)))
+}
+
+fn ours(path: &Path) -> bool {
+    crate::state::Store::open().owns(path)
+}
+
 pub fn desktop() -> Result<Box<dyn Desktop>> {
     Ok(Box::new(Mac))
 }
@@ -82,8 +96,10 @@ impl Desktop for Mac {
     }
 
     fn wallpaper(&self, screen: &Screen) -> Result<Option<PathBuf>> {
-        let id = screen.id.clone();
-        on_main(move |marker| picture::wallpaper(marker, &id))
+        match super::agreed(|| look(&screen.id), ours)? {
+            Seen::Agreed((reported, index)) => Ok(store::trusted_in(index.as_ref(), reported, &screen.id)),
+            Seen::Ours(path) => Ok(Some(path)),
+        }
     }
 
     fn set_wallpaper(&self, screen: &Screen, path: &Path) -> Result<()> {
@@ -151,8 +167,10 @@ impl Desktop for Mac {
     }
 
     fn restorable(&self, screen: &Screen) -> Result<Option<PathBuf>> {
-        let id = screen.id.clone();
-        on_main(move |marker| picture::restorable(marker, &id))
+        match super::agreed(|| look(&screen.id), ours)? {
+            Seen::Agreed((reported, index)) => Ok(store::restorable_in(index.as_ref(), reported, &screen.id)),
+            Seen::Ours(path) => Ok(Some(path)),
+        }
     }
 
     fn gallery(&self) -> Vec<PathBuf> {
