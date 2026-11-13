@@ -8,6 +8,8 @@ import type { ScreenFrame } from '../rig';
 import { createScreenMaterial } from './material';
 
 function prepareTexture(texture: Texture, srgb: boolean, anisotropy: number) {
+  if (texture.userData.prepared) return;
+  texture.userData.prepared = true;
   if (srgb) texture.colorSpace = SRGBColorSpace;
   texture.flipY = false;
   texture.generateMipmaps = true;
@@ -16,20 +18,31 @@ function prepareTexture(texture: Texture, srgb: boolean, anisotropy: number) {
   texture.needsUpdate = true;
 }
 
-export function useScreen(manifest: DemoManifest) {
+function useScreenTextures(manifest: DemoManifest) {
   const { frames } = manifest;
-  const [frameA, frameB, frameC, saliency, atlas] = useTexture([
+  const textures = useTexture([
     asset(`demo/${frames.before.frame}`),
     asset(`demo/${frames.fixed.frame}`),
     asset(`demo/${frames.moved.frame}`),
     asset(`demo/${frames.before.saliency}`),
     asset('demo/atlas.png'),
   ]);
+  const [frameA, frameB, frameC, saliency, atlas] = textures;
+  for (const texture of [frameA, frameB, frameC, atlas]) prepareTexture(texture, true, 8);
+  prepareTexture(saliency, false, 1);
+  return textures;
+}
+
+export function ScreenTextures({ manifest }: { manifest: DemoManifest }) {
+  useScreenTextures(manifest);
+  return null;
+}
+
+export function useScreen(manifest: DemoManifest) {
+  const { frames } = manifest;
+  const [frameA, frameB, frameC, saliency, atlas] = useScreenTextures(manifest);
 
   return useMemo(() => {
-    for (const texture of [frameA, frameB, frameC]) prepareTexture(texture, true, 8);
-    prepareTexture(saliency, false, 1);
-    prepareTexture(atlas, true, 8);
     const { material, uniforms } = createScreenMaterial();
     uniforms.uFrameA.value = frameA;
     uniforms.uFrameB.value = frameB;

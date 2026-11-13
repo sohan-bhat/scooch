@@ -1,5 +1,5 @@
-import { ContactShadows, Environment } from '@react-three/drei';
-import { useFrame, useThree } from '@react-three/fiber';
+import { ContactShadows } from '@react-three/drei';
+import { useFrame, useLoader, useThree } from '@react-three/fiber';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Color,
@@ -16,7 +16,7 @@ import {
   Vector2,
   Vector3,
 } from 'three';
-import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
+import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import { asset } from '@/lib/base';
 import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
@@ -27,8 +27,7 @@ import { useRoomMaterial } from './Room';
 import { Rig, type ScreenFrame } from './rig';
 import { measureScreen, useScreen } from './screen/useScreen';
 import { layoutFor, shots } from './shots';
-
-RectAreaLightUniformsLib.init();
+import { applyEnvironment, environmentReady, precompile } from './warm';
 
 const SPOT = 4;
 const BULB_GLOW = 7;
@@ -47,6 +46,18 @@ const floorCenter = new Vector2(bulbWorld.x, bulbWorld.z + 0.4);
 const keyboard = toWorld(new Vector3(0.01, 0.05, 0.035), LAPTOP.position, LAPTOP.rotation);
 
 type Built = { mesh: Mesh; frame: Group; screen: ScreenFrame };
+
+export function Surroundings() {
+  const texture = useLoader(HDRLoader, asset('hdri/studio.hdr'));
+  const gl = useThree((state) => state.gl);
+  const scene = useThree((state) => state.scene);
+  useLayoutEffect(() => {
+    scene.environmentRotation.set(0, Math.PI * 0.7, 0);
+    scene.environmentIntensity = 0.22;
+    return applyEnvironment(gl, scene, texture);
+  }, [gl, scene, texture]);
+  return null;
+}
 
 export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: () => void }) {
   const { camera, size, scene, gl } = useThree();
@@ -134,13 +145,17 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     let cancelled = false;
     const wait = () => {
       frames += 1;
-      if (frames < 3) handle = requestAnimationFrame(wait);
+      if (frames === 1) performance.mark('scooch:frame');
+      if (frames < 2) handle = requestAnimationFrame(wait);
       else onReady();
     };
-    gl.compileAsync(scene, camera)
+    performance.mark('scooch:assets');
+    environmentReady(scene)
+      .then(() => precompile(gl, scene, camera, quality.composer))
       .catch(() => undefined)
       .then(() => {
         if (cancelled) return;
+        performance.mark('scooch:compiled');
         runtime.compiled = true;
         runtime.resume?.();
         handle = requestAnimationFrame(wait);
@@ -233,7 +248,6 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
 
   return (
     <>
-      <Environment files={asset('hdri/studio.hdr')} environmentIntensity={0.22} environmentRotation={[0, Math.PI * 0.7, 0]} />
       <fogExp2 attach="fog" args={[room, 0.32]} />
       <spotLight
         ref={spot}

@@ -1,6 +1,6 @@
 import { Canvas, useThree } from '@react-three/fiber';
 import { Suspense, useEffect, useRef } from 'react';
-import { DefaultLoadingManager, setConsoleFunction } from 'three';
+import { setConsoleFunction } from 'three';
 import { suspend } from 'suspend-react';
 import { loadManifest } from '@/story/demo';
 import { pointer, runtime } from '@/story/state';
@@ -8,34 +8,16 @@ import { Post } from './Post';
 import { Governor } from './Governor';
 import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
-import { World } from './World';
+import { ScreenTextures } from './screen/useScreen';
+import { Surroundings, World } from './World';
+
+performance.mark('scooch:stage');
 
 setConsoleFunction((type: string, message: unknown, ...params: unknown[]) => {
   if (type === 'warn' && String(message).startsWith('THREE.Clock:')) return;
   const write = (console as unknown as Record<string, (...input: unknown[]) => void>)[type] ?? console.log;
   write(message, ...params);
 });
-
-const loading = { value: 0, listener: null as ((value: number) => void) | null };
-DefaultLoadingManager.onProgress = (_url, loaded, total) => {
-  loading.value = total > 0 ? loaded / total : 0;
-  loading.listener?.(loading.value);
-};
-DefaultLoadingManager.onLoad = () => {
-  loading.value = 1;
-  loading.listener?.(1);
-};
-
-function Progress({ onProgress }: { onProgress: (value: number) => void }) {
-  useEffect(() => {
-    loading.listener = onProgress;
-    onProgress(loading.value);
-    return () => {
-      loading.listener = null;
-    };
-  }, [onProgress]);
-  return null;
-}
 
 function Pauser({ host }: { host: React.RefObject<HTMLDivElement | null> }) {
   const setFrameloop = useThree((state) => state.setFrameloop);
@@ -67,8 +49,23 @@ function Pauser({ host }: { host: React.RefObject<HTMLDivElement | null> }) {
   return null;
 }
 
+function Early() {
+  const manifest = suspend(loadManifest, ['scooch-manifest']);
+  return (
+    <>
+      <Surroundings />
+      <ScreenTextures manifest={manifest} />
+    </>
+  );
+}
+
+function loadAreaLights() {
+  return import('three/examples/jsm/lights/RectAreaLightUniformsLib.js').then(({ RectAreaLightUniformsLib }) => RectAreaLightUniformsLib.init());
+}
+
 function Scene({ phone, onReady }: { phone: boolean; onReady: () => void }) {
   const manifest = suspend(loadManifest, ['scooch-manifest']);
+  if (quality.tier === 'full') suspend(loadAreaLights, ['scooch-area-lights']);
   return (
     <>
       <World manifest={manifest} onReady={onReady} />
@@ -77,7 +74,7 @@ function Scene({ phone, onReady }: { phone: boolean; onReady: () => void }) {
   );
 }
 
-export default function Stage({ onProgress, onReady }: { onProgress: (value: number) => void; onReady: () => void }) {
+export default function Stage({ onReady }: { onReady: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const fade = useRef<HTMLCanvasElement>(null);
   const phone = layoutFor(window.innerWidth, window.innerHeight) === 'phone';
@@ -97,9 +94,11 @@ export default function Stage({ onProgress, onReady }: { onProgress: (value: num
         tabIndex={-1}
       >
         <Suspense fallback={null}>
+          <Early />
+        </Suspense>
+        <Suspense fallback={null}>
           <Scene phone={phone} onReady={onReady} />
         </Suspense>
-        <Progress onProgress={onProgress} />
         <Pauser host={host} />
         {runtime.still < 0 && <Governor fade={fade} />}
       </Canvas>

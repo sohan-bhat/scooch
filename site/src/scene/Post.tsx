@@ -2,7 +2,7 @@ import { Bloom, DepthOfField, EffectComposer, N8AO, Noise, SMAA, ToneMapping, Vi
 import { BlendFunction, ToneMappingMode } from 'postprocessing';
 import { useCallback } from 'react';
 import { HalfFloatType, type Texture } from 'three';
-import type { DepthOfFieldEffect, NoiseEffect } from 'postprocessing';
+import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect } from 'postprocessing';
 import { GRAIN_OPACITY, quality, type Toggle } from './quality';
 
 type Target = { isWebGLMultipleRenderTargets?: boolean; textures?: Texture[] & { mipmaps?: unknown[] } };
@@ -34,13 +34,16 @@ export function Post({ phone }: { phone: boolean }) {
     quality.ao = pass;
     if (pass) pass.enabled = quality.step.ao;
   }, []);
+  const composer = useCallback((value: EffectComposerType | null) => {
+    quality.composer = value;
+  }, []);
   const noise = useCallback((effect: NoiseEffect | null) => {
     quality.noise = effect;
     if (effect) effect.blendMode.opacity.value = quality.step.grain ? GRAIN_OPACITY : 0;
   }, []);
 
   return (
-    <EffectComposer multisampling={0} frameBufferType={HalfFloatType}>
+    <EffectComposer ref={composer} multisampling={0} frameBufferType={HalfFloatType}>
       {full && <N8AO ref={ao} halfRes quality="performance" aoRadius={0.18} distanceFalloff={0.5} intensity={1.4} />}
       {full && <DepthOfField ref={dof} focusDistance={1} focusRange={0.2} bokehScale={0} resolutionScale={0.5} />}
       <Bloom mipmapBlur levels={full ? 5 : 4} luminanceThreshold={1.3} luminanceSmoothing={0.35} intensity={0.6} radius={0.7} />
