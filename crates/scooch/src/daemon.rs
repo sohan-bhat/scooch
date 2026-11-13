@@ -212,7 +212,7 @@ pub fn prune(state: &mut State, store: &Store, known: Option<&[String]>, screens
     let ids: Vec<String> = state.screens.keys().cloned().collect();
     let mut pruned = 0;
     for id in ids {
-        let present = listed.contains(&id);
+        let present = listed.contains(&id) || screens.iter().any(|screen| screen.id == id);
         if !present && !gone(&id, known, screens) {
             continue;
         }
@@ -1609,6 +1609,17 @@ pub mod tests {
         assert_eq!((back.absent_since, back.absent_ticks), (None, 0));
         assert!(!absence(&mut back, false, start + 3 * ABSENT_FOR));
         assert_eq!((back.absent_since, back.absent_ticks), (Some(start + 3 * ABSENT_FOR), 1));
+    }
+
+    #[test]
+    fn a_showing_space_is_never_marked_absent() {
+        let store = Store::at(scratch("showingpresent"));
+        let mut state = State::default();
+        state.screens.insert("D@S1".into(), Entry::new(Path::new("/p/a.jpg")));
+        for tick in 0..10 {
+            assert_eq!(prune(&mut state, &store, Some(&[]), &[screen("D@S1", 0.0, 1.0)], tick * ABSENT_FOR), 0);
+        }
+        assert_eq!((state.screens["D@S1"].absent_since, state.screens["D@S1"].absent_ticks), (None, 0));
     }
 
     #[test]
