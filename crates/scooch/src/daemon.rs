@@ -556,7 +556,9 @@ impl Daemon {
             Ok(made)
         })?;
         lap("analysis", &mut clock);
-        let placement = scooch_core::solve(&analysis, scene, options, entry.placement.as_ref());
+        let painted = crate::state::scenery_on(options) && !scene.icons.is_empty();
+        let previous = entry.placement.as_ref().filter(|_| entry.painted == painted);
+        let placement = scooch_core::solve(&analysis, scene, options, previous);
         lap("solve", &mut clock);
         entry.flip_helps = flip_check(&analysis, scene, options, &placement);
         let pads = scooch_core::pads_active(&analysis, &placement, scene, options);
@@ -565,16 +567,17 @@ impl Daemon {
         if scene::is_identity(&placement) && !pads {
             drop(analysis);
             drop(image);
-            let copied = showing_output && entry.placement.as_ref().is_some_and(scene::is_identity);
+            let copied = showing_output && !entry.painted && entry.placement.as_ref().is_some_and(scene::is_identity);
             entry.placement = Some(placement);
             if current.is_some_and(|path| same(path, &source)) {
                 entry.output = None;
             } else if !copied && !self.plain(entry, screen, current, seen)? {
                 return Ok(Outcome::Interrupted);
             }
+            entry.painted = false;
             return Ok(Outcome::Plain);
         }
-        if options.pads <= 0.0 && showing_output && entry.placement.as_ref() == Some(&placement) {
+        if options.pads <= 0.0 && !painted && !entry.painted && showing_output && entry.placement.as_ref() == Some(&placement) {
             return Ok(Outcome::Kept);
         }
         let decoded = match image.take() {
@@ -596,7 +599,12 @@ impl Daemon {
                 return Ok(Outcome::Kept);
             }
         }
-        if !self.publish(entry, screen, current, seen, format.extension(), |path| write_atomic(path, &bytes))? {
+        let was = std::mem::replace(&mut entry.painted, painted);
+        let published = self.publish(entry, screen, current, seen, format.extension(), |path| write_atomic(path, &bytes));
+        if !matches!(published, Ok(true)) {
+            entry.painted = was;
+        }
+        if !published? {
             return Ok(Outcome::Interrupted);
         }
         entry.placement = Some(placement);
@@ -645,6 +653,7 @@ impl Daemon {
         match state.screens.get_mut(id) {
             Some(theirs) => {
                 theirs.output.clone_from(&entry.output);
+                theirs.painted = entry.painted;
                 theirs.counter = theirs.counter.max(entry.counter);
             }
             None => {
@@ -726,6 +735,7 @@ pub fn merge(mine: &State, before: &State, fresh: &State) -> State {
             Some(theirs) => {
                 if ours.output.is_some() {
                     theirs.output.clone_from(&ours.output);
+                    theirs.painted = ours.painted;
                 }
                 theirs.icons = ours.icons;
                 theirs.counter = theirs.counter.max(ours.counter);
@@ -2134,6 +2144,122 @@ pub mod tests {
         signal.wake();
         let waited = waiting.join().unwrap();
         assert!(waited >= Duration::from_millis(170), "{waited:?}");
+    }
+
+    fn scenery_rig(name: &str, on: bool) -> (Daemon, Arc<Fake>, PathBuf) {
+        let (daemon, fake, original) = rig(name, vec![screen("main", 0.0, 2.0)]);
+        let mut state = daemon.store.load();
+        state.options.scenery = if on { scooch_core::Scenery::Auto } else { scooch_core::Scenery::Off };
+        daemon.store.save(&state).unwrap();
+        (daemon, fake, original)
+    }
+
+    fn set_scenery(daemon: &Daemon, on: bool) {
+        let mut state = daemon.store.load();
+        state.options.scenery = if on { scooch_core::Scenery::Auto } else { scooch_core::Scenery::Off };
+        daemon.store.save(&state).unwrap();
+    }
+
+    fn calm() -> Rect {
+        Rect { x: 4.0, y: 4.0, w: 20.0, h: 20.0 }
+    }
+
+    fn calm_moved() -> Rect {
+        Rect { x: 4.0, y: 70.0, w: 20.0, h: 20.0 }
+    }
+
+    fn differs_near(a: &RgbImage, b: &RgbImage, icon: &Rect, scale: f32) -> usize {
+        let margin = 12.0;
+        let x0 = ((icon.x - margin) * scale).max(0.0) as u32;
+        let y0 = ((icon.y - margin) * scale).max(0.0) as u32;
+        let x1 = (((icon.x + icon.w + margin) * scale) as u32).min(a.width());
+        let y1 = (((icon.y + icon.h + margin) * scale) as u32).min(a.height());
+        (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|(x, y)| a.get_pixel(*x, *y).0.iter().zip(b.get_pixel(*x, *y).0.iter()).any(|(p, q)| p.abs_diff(*q) > 6)).count()
+    }
+
+    #[test]
+    fn with_scenery_on_a_moved_icon_on_calm_ground_renders_again() {
+        let (daemon, fake, _) = scenery_rig("scenery-move", true);
+        fake.place(vec![subject(), calm()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let first = daemon.store.load().screens["main"].clone();
+        let before = scooch_core::open(first.output.as_ref().unwrap()).unwrap();
+        fake.place(vec![subject(), calm_moved()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let second = daemon.store.load().screens["main"].clone();
+        assert_eq!(second.placement, first.placement);
+        assert_ne!(second.output, first.output);
+        assert!(second.painted);
+        let after = scooch_core::open(second.output.as_ref().unwrap()).unwrap();
+        assert!(differs_near(&before, &after, &calm(), 2.0) > 0);
+        assert!(differs_near(&before, &after, &calm_moved(), 2.0) > 0);
+    }
+
+    #[test]
+    fn with_scenery_off_the_same_move_is_kept() {
+        let (daemon, fake, _) = scenery_rig("scenery-kept", false);
+        fake.place(vec![subject(), calm()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let first = daemon.store.load().screens["main"].clone();
+        fake.place(vec![subject(), calm_moved()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
+        let second = daemon.store.load().screens["main"].clone();
+        assert_eq!((second.output, second.placement, second.painted), (first.output, first.placement, false));
+    }
+
+    #[test]
+    fn switching_scenery_renders_again_both_ways_and_off_matches_today() {
+        let (today, today_fake, _) = scenery_rig("scenery-today", false);
+        today_fake.place(vec![subject(), calm()]);
+        today.tick();
+        let expected = std::fs::read(today_fake.showing("main")).unwrap();
+        let (daemon, fake, _) = scenery_rig("scenery-switch", false);
+        fake.place(vec![subject(), calm()]);
+        daemon.tick();
+        assert_eq!(std::fs::read(fake.showing("main")).unwrap(), expected);
+        set_scenery(&daemon, true);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let painted = std::fs::read(fake.showing("main")).unwrap();
+        assert_ne!(painted, expected);
+        assert!(daemon.store.load().screens["main"].painted);
+        set_scenery(&daemon, false);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert_eq!(std::fs::read(fake.showing("main")).unwrap(), expected);
+        assert!(!daemon.store.load().screens["main"].painted);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+    }
+
+    #[test]
+    fn switching_scenery_off_on_calm_ground_shows_the_picture_itself_again() {
+        let (daemon, fake, original) = scenery_rig("scenery-plain", true);
+        fake.place(vec![calm()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert!(daemon.store.load().screens["main"].painted);
+        set_scenery(&daemon, false);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
+        assert_eq!(std::fs::read(fake.showing("main")).unwrap(), std::fs::read(&original).unwrap());
+        assert!(!daemon.store.load().screens["main"].painted);
+    }
+
+    #[test]
+    fn scenery_with_no_icons_keeps_the_picture_itself() {
+        let (daemon, fake, original) = scenery_rig("scenery-empty", true);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
+        assert_eq!(fake.showing("main"), original);
+        assert_eq!(fake.decodes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_restore_after_scenery_brings_back_the_users_own_picture() {
+        let (daemon, fake, original) = scenery_rig("scenery-off", true);
+        fake.place(vec![subject(), calm()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert!(daemon.store.load().screens["main"].painted);
+        fake.connect(Vec::new());
+        assert!(matches!(crate::commands::wind_down(fake.as_ref(), &daemon.store).unwrap(), crate::commands::Off::Pending(_)));
+        fake.connect(vec![screen("main", 0.0, 2.0)]);
+        assert!(daemon.tick().unload);
+        assert_eq!(fake.showing("main"), original);
     }
 
     #[cfg(unix)]
