@@ -9,10 +9,19 @@ pub fn plist_path() -> Result<PathBuf> {
     Ok(super::real_home().context("Scooch could not find your home folder.")?.join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
 }
 
-pub fn plist(exe: &Path, data: &Path, home: Option<&Path>) -> String {
-    let environment = match home {
-        Some(home) => format!("\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>SCOOCH_HOME</key>\n\t\t<string>{}</string>\n\t</dict>\n", escape(&home.to_string_lossy())),
-        None => String::new(),
+pub fn plist(exe: &Path, data: &Path, home: Option<&Path>, trace: bool) -> String {
+    let mut pairs: Vec<(&str, String)> = Vec::new();
+    if let Some(home) = home {
+        pairs.push(("SCOOCH_HOME", escape(&home.to_string_lossy())));
+    }
+    if trace {
+        pairs.push(("SCOOCH_TRACE", "1".into()));
+    }
+    let environment = if pairs.is_empty() {
+        String::new()
+    } else {
+        let entries: String = pairs.iter().map(|(key, value)| format!("\t\t<key>{key}</key>\n\t\t<string>{value}</string>\n")).collect();
+        format!("\t<key>EnvironmentVariables</key>\n\t<dict>\n{entries}\t</dict>\n")
     };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -108,7 +117,7 @@ pub fn install(exe: &Path, data: &Path) -> Result<()> {
     std::fs::create_dir_all(path.parent().context("Scooch could not find the LaunchAgents folder.")?)?;
     std::fs::create_dir_all(data)?;
     let home = std::env::var_os("SCOOCH_HOME").filter(|value| !value.is_empty()).map(PathBuf::from);
-    std::fs::write(&path, plist(exe, data, home.as_deref())).with_context(|| format!("Scooch could not write {}, so check that the folder is writable.", path.display()))?;
+    std::fs::write(&path, plist(exe, data, home.as_deref(), crate::daemon::trace())).with_context(|| format!("Scooch could not write {}, so check that the folder is writable.", path.display()))?;
     load(&mut System, &domain(), &target(), &path)
 }
 
@@ -147,7 +156,7 @@ mod tests {
 
     #[test]
     fn the_login_item_runs_watch_in_the_background() {
-        let text = plist(Path::new("/opt/bin/scooch"), Path::new("/data"), None);
+        let text = plist(Path::new("/opt/bin/scooch"), Path::new("/data"), None, false);
         assert!(text.contains("<string>/opt/bin/scooch</string>\n\t\t<string>watch</string>"));
         assert!(text.contains("<key>RunAtLoad</key>\n\t<true/>"));
         assert!(text.contains("<key>SuccessfulExit</key>\n\t\t<false/>"));
@@ -158,8 +167,12 @@ mod tests {
 
     #[test]
     fn a_custom_data_folder_is_passed_on() {
-        let text = plist(Path::new("/opt/bin/scooch"), Path::new("/data"), Some(Path::new("/scratch/state")));
+        let text = plist(Path::new("/opt/bin/scooch"), Path::new("/data"), Some(Path::new("/scratch/state")), false);
         assert!(text.contains("<key>SCOOCH_HOME</key>\n\t\t<string>/scratch/state</string>"));
+        assert!(!text.contains("SCOOCH_TRACE"));
+        let traced = plist(Path::new("/opt/bin/scooch"), Path::new("/data"), Some(Path::new("/scratch/state")), true);
+        assert!(traced.contains("<dict>\n\t\t<key>SCOOCH_HOME</key>\n\t\t<string>/scratch/state</string>\n\t\t<key>SCOOCH_TRACE</key>\n\t\t<string>1</string>\n\t</dict>"));
+        assert!(plist(Path::new("/opt/bin/scooch"), Path::new("/data"), None, true).contains("<key>SCOOCH_TRACE</key>"));
     }
 
     struct Script {
@@ -233,13 +246,13 @@ mod tests {
     fn the_file_passes_plutil() {
         let folder = crate::state::scratch("plist");
         let file = folder.join("agent.plist");
-        std::fs::write(&file, plist(Path::new("/Users/a&b/scooch"), &folder, Some(&folder))).unwrap();
+        std::fs::write(&file, plist(Path::new("/Users/a&b/scooch"), &folder, Some(&folder), false)).unwrap();
         assert!(Command::new("/usr/bin/plutil").arg("-lint").arg(&file).stdout(Stdio::null()).status().unwrap().success());
     }
 
     #[test]
     fn odd_paths_stay_valid_xml() {
-        let text = plist(Path::new("/Users/a&b/<scooch>"), Path::new("/data"), None);
+        let text = plist(Path::new("/Users/a&b/<scooch>"), Path::new("/data"), None, false);
         assert!(text.contains("/Users/a&amp;b/&lt;scooch&gt;"));
     }
 }
