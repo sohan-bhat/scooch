@@ -203,8 +203,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     for (const bulb of bulbs.current) bulb.emissiveIntensity = BULB_GLOW * lamp;
 
     uniforms.uTime.value = time;
-    uniforms.uMixAB.value = story.mixAB;
-    uniforms.uMixBC.value = story.mixBC;
+    uniforms.uPlace.value = story.place;
     uniforms.uSweep.value = story.sweep;
     uniforms.uLampLevel.value = lamp;
     uniforms.uPower.value = Math.min(Math.max((power - 0.35) / 0.65, 0), 1);
@@ -234,7 +233,9 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
 
     const light = rect.current ?? screenSpot.current;
     if (light) {
-      scratch.color.copy(averages[0]).lerp(averages[1], story.mixAB).lerp(averages[2], story.mixBC).lerp(scratch.white, 0.3);
+      const step = Math.min(Math.max(story.place, 0), averages.length - 1);
+      const index = Math.min(Math.floor(step), averages.length - 2);
+      scratch.color.copy(averages[index]).lerp(averages[index + 1], step - index).lerp(scratch.white, 0.3);
       const heat = Math.min(Math.max((story.sweep - 0.15) / 0.6, 0), 1);
       light.color.copy(scratch.color);
       const base = rect.current ? RECT : SCREEN_SPOT;

@@ -4,7 +4,7 @@ import Lenis from 'lenis';
 import { useEffect } from 'react';
 import { loadManifest, type DemoManifest } from '@/story/demo';
 import { runtime, story } from '@/story/state';
-import { beats as beatList, buildTimeline } from '@/story/timeline';
+import { beats as beatList, buildTimeline, TOTAL } from '@/story/timeline';
 
 type Refs = {
   beats: React.RefObject<HTMLDivElement[]>;
@@ -103,7 +103,7 @@ export function useStory(refs: Refs, live: boolean, still: number) {
       );
       refs.section.current?.querySelector('.beats')?.removeAttribute('data-pending');
       if (still >= 0) {
-        built.timeline.progress(beatList[Math.min(still, beatList.length - 1)].rest / 100);
+        built.timeline.progress(beatList[Math.min(still, beatList.length - 1)].rest / TOTAL);
         runtime.posed = true;
         return;
       }
