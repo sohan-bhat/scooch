@@ -1,11 +1,11 @@
 import { useGLTF } from '@react-three/drei';
 import { useThree } from '@react-three/fiber';
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
-import { Box3, Group, Mesh, MeshStandardMaterial, Object3D, Vector3, type Texture, type WebGLRenderer } from 'three';
+import { Box3, Group, HalfFloatType, Mesh, MeshStandardMaterial, Object3D, Vector3, WebGLRenderTarget, type Texture, type WebGLRenderer } from 'three';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { asset } from '@/lib/base';
 import { runtime } from '@/story/state';
-import { gpuClass } from './quality';
+import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
 
@@ -126,7 +126,7 @@ function Sharpener() {
     if (!lite) return;
     return whenReady(
       () => setIndex(0),
-      () => runtime.props && layoutFor(window.innerWidth, window.innerHeight) !== 'phone',
+      () => runtime.props && quality.tier === 'full' && layoutFor(window.innerWidth, window.innerHeight) !== 'phone',
     );
   }, []);
   if (index < 0 || index >= heroes.length) return null;
@@ -184,6 +184,9 @@ function placeOnDesk(object: Object3D, placement: Placement, top: number) {
 }
 
 function Extras({ phone, onExtras }: { phone: boolean; onExtras: () => void }) {
+  const gl = useThree((state) => state.gl);
+  const scene = useThree((state) => state.scene);
+  const camera = useThree((state) => state.camera);
   const scenes = extras.map((name) => useGLTF(extraUrls[name], false, true, extend).scene);
   const group = useMemo(() => {
     const loaded = Object.fromEntries(extras.map((name, index) => [name, { scene: scenes[index] }])) as Record<Extra, { scene: Group }>;
@@ -207,9 +210,37 @@ function Extras({ phone, onExtras }: { phone: boolean; onExtras: () => void }) {
   }, [group, phone]);
 
   useEffect(() => {
-    runtime.props = true;
-    onExtras();
-  }, [group, onExtras]);
+    let stopped = false;
+    group.visible = false;
+    const target = new WebGLRenderTarget(1, 1, { type: HalfFloatType });
+    const previous = gl.getRenderTarget();
+    gl.setRenderTarget(target);
+    const pending = gl.compileAsync(group, camera, scene);
+    gl.setRenderTarget(previous);
+    const textures = new Set<Texture>();
+    group.traverse((child) => {
+      const material = (child as Mesh).material as MeshStandardMaterial | undefined;
+      if (!material?.isMeshStandardMaterial) return;
+      for (const slot of slots) if (material[slot]) textures.add(material[slot]);
+    });
+    void pending
+      .catch(() => undefined)
+      .then(async () => {
+        target.dispose();
+        for (const texture of textures) {
+          await nextFrame();
+          if (stopped) return;
+          gl.initTexture(texture);
+        }
+        if (stopped) return;
+        group.visible = true;
+        runtime.props = true;
+        onExtras();
+      });
+    return () => {
+      stopped = true;
+    };
+  }, [group, gl, scene, camera, onExtras]);
 
   return <primitive object={group} />;
 }

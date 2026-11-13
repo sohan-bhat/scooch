@@ -206,8 +206,10 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     }
     if (street.current) {
       street.current.target = targets.street;
-      street.current.map = blinds;
-      street.current.shadow.needsUpdate = true;
+      if (quality.tier === 'full') {
+        street.current.map = blinds;
+        street.current.shadow.needsUpdate = true;
+      }
     }
     wall.uniforms.uBlindsMatrix.value.copy(blindsMatrix);
     floor.uniforms.uBlindsMatrix.value.copy(blindsMatrix);
@@ -251,7 +253,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       shadowProps.current = true;
       shadowFrames.current = 0;
     }
-    if (shadowFrames.current < 24) {
+    if (shadowFrames.current < 4) {
       gl.shadowMap.needsUpdate = true;
       shadowFrames.current += 1;
     }
@@ -369,15 +371,15 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         decay={2}
         distance={0}
         intensity={0}
-        castShadow
-        shadow-mapSize={phone ? [1024, 1024] : [1536, 1536]}
+        castShadow={quality.tier === 'full'}
+        shadow-mapSize={[1536, 1536]}
         shadow-radius={3}
         shadow-bias={-0.0004}
         shadow-normalBias={0.02}
         shadow-camera-near={1.2}
         shadow-camera-far={6}
       />
-      <pointLight ref={inner} position={bulbWorld} color="#ffb46b" intensity={INNER} distance={0.32} decay={2} />
+      {quality.tier === 'full' ? <pointLight ref={inner} position={bulbWorld} color="#ffb46b" intensity={INNER} distance={0.32} decay={2} /> : null}
       <directionalLight ref={rim} position={[1.4, 1.8, -1.6]} color={scratch.street} intensity={0.3} />
       {quality.tier === 'full' ? (
         <>
