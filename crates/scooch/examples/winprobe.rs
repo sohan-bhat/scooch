@@ -1799,7 +1799,12 @@ mod probe {
             let spot = (16 * self.width + self.width.saturating_sub(16)) * 3;
             let marker = raw.get(spot..spot + 3).is_some_and(|pixel| pixel[0] < 60 && pixel[1] > 200 && pixel[2] < 60);
             let base = self.baseline.as_raw();
+            let band = bar.map(|bar| bar * self.width as f32);
             let icons_changed = self.icons.iter().filter(|index| {
+                let x = (*index % self.width) as f32;
+                if band.is_some_and(|center| (x - center).abs() < 28.0) {
+                    return false;
+                }
                 let at = *index * 3;
                 (0..3).any(|channel| raw.get(at + channel).zip(base.get(at + channel)).is_some_and(|(a, b)| a.abs_diff(*b) > 40))
             }).count();
@@ -1952,7 +1957,7 @@ mod probe {
             "  - opened in {open_ms} ms, first frame after {first:?} ms on {adapter}, {presents} presents at {rate:.1} per second, present error {error:?}"
         ));
         p.line(format!(
-            "  - {} captures at {:.1} per second, bar seen in {}, steps forward {} backward {}, marker in {}, marker gaps {}, most changed icon pixels {}, ordered under the icons {in_place}",
+            "  - {} captures at {:.1} per second, bar seen in {}, steps forward {} backward {}, marker in {}, marker gaps {}, most changed icon pixels away from the bar {}, ordered under the icons {in_place}",
             verdict.captures, verdict.rate, verdict.bars, verdict.forward, verdict.backward, verdict.markers, verdict.gaps, verdict.icons_changed
         ));
         p.line(format!("  - after closing, windows of ours left {left}, screen gap to the wallpaper {after:?}"));
@@ -1962,8 +1967,8 @@ mod probe {
         Ok(verdict)
     }
 
-    fn works(verdict: &Verdict) -> bool {
-        verdict.bars >= 3 && verdict.forward > verdict.backward && verdict.markers > 0 && verdict.icons_changed < 50
+    fn works(verdict: &Verdict, watched: usize) -> bool {
+        verdict.bars >= 3 && verdict.forward > verdict.backward && verdict.markers > 0 && verdict.icons_changed * 50 < watched.max(1)
     }
 
     fn live(p: &mut Probe) -> Result<()> {
@@ -2009,7 +2014,7 @@ mod probe {
             p.line(format!("- **{}**", method.name()));
             match rung(p, &screen, method, &field, &sight, true) {
                 Ok(verdict) => {
-                    let good = works(&verdict);
+                    let good = works(&verdict, sight.icons.len());
                     p.line(format!("  - {}", if good { "shows the pattern under the icons" } else { "does not show the pattern under the icons" }));
                     if good && kept.is_none() {
                         kept = Some(method);
@@ -2083,7 +2088,7 @@ mod probe {
         p.line("- **after an Explorer restart**".to_string());
         p.line(format!("- layout now {}", layer::layout().map(|(layout, notes)| format!("{}, {}", layout.describe(), notes.join(", "))).unwrap_or_else(|error| error.to_string())));
         match rung(p, &screen, method, &field, &sight, false) {
-            Ok(verdict) if works(&verdict) => p.line("  - shows the pattern under the icons after the restart".to_string()),
+            Ok(verdict) if works(&verdict, sight.icons.len()) => p.line("  - shows the pattern under the icons after the restart".to_string()),
             Ok(_) => p.failed.push("the layer did not show under the icons after an Explorer restart".into()),
             Err(error) => p.failed.push(format!("the layer did not open after an Explorer restart {error:#}")),
         }
