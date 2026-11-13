@@ -139,6 +139,62 @@
         "url": "https://polyhaven.com/a/stationery_supplies"
       },
       {
+        "what": "Television 02",
+        "use": "The television",
+        "author": "Benny Weimer",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/television_02"
+      },
+      {
+        "what": "Alarm Clock 01",
+        "use": "The alarm clock",
+        "author": "James Ray Cock and Yann Kervran",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/alarm_clock_01"
+      },
+      {
+        "what": "Cassette Player",
+        "use": "The tape recorder",
+        "author": "Oday Abuzaeed",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/cassette_player"
+      },
+      {
+        "what": "Potted Plant 04",
+        "use": "The plant",
+        "author": "James Ray Cock",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/potted_plant_04"
+      },
+      {
+        "what": "Vintage Stapler",
+        "use": "The stapler",
+        "author": "Mateusz Sadek",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/vintage_stapler"
+      },
+      {
+        "what": "Round Spectacles",
+        "use": "The glasses",
+        "author": "Sean Buckley",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/round_spectacles"
+      },
+      {
+        "what": "Digital Wrist Watch",
+        "use": "The watch",
+        "author": "Adrian C",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/digital_wrist_watch"
+      },
+      {
+        "what": "Gamepad",
+        "use": "The game controller",
+        "author": "Josh Dean",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/gamepad"
+      },
+      {
         "what": "Studio Small 08",
         "use": "Reflections in the scene",
         "author": "Sergej Majboroda",
@@ -147,10 +203,17 @@
       },
       {
         "what": "Hot air balloon in blue sky",
-        "use": "The wallpaper on the laptop",
+        "use": "The wallpaper on the television",
         "author": "Kupono Kuwamura",
         "license": "CC0 1.0",
         "url": "https://commons.wikimedia.org/wiki/File:Hot_air_balloon_in_blue_sky_(Unsplash).jpg"
+      },
+      {
+        "what": "Frosty tree",
+        "use": "The wallpaper on the laptop",
+        "author": "Jaleel Akbash",
+        "license": "CC0 1.0",
+        "url": "https://commons.wikimedia.org/wiki/File:Frosty_tree_(Unsplash).jpg"
       },
       {
         "what": "Phosphor Icons",
