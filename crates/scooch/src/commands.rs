@@ -351,12 +351,26 @@ pub fn wake_up(state: &mut State) -> bool {
     true
 }
 
-pub fn plain_sentence(count: usize) -> String {
-    format!("{count} of your old wallpapers were not picture files and cannot be put back by an app, so pick them again in your system settings.")
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Count {
+    Plain,
+    Stuck,
+    Pending,
+    Unreached,
 }
 
-pub fn stuck_sentence(count: usize) -> String {
-    format!("{count} desktops still show Scooch's picture because the original file is gone, so pick a wallpaper there.")
+pub fn counted(kind: Count, count: usize) -> String {
+    let (one, many) = match kind {
+        Count::Plain => ("1 of your old wallpapers could not be put back by an app, so pick it again in your system settings.", "{n} of your old wallpapers could not be put back by an app, so pick them again in your system settings."),
+        Count::Stuck => ("1 desktop still shows Scooch's picture because nothing was left to put back, so pick a wallpaper there.", "{n} desktops still show Scooch's picture because nothing was left to put back, so pick a wallpaper there."),
+        Count::Pending => ("1 more switches back the next time that desktop or screen shows.", "{n} more switch back the next time those desktops or screens show."),
+        Count::Unreached => ("1 desktop or screen it could not reach still shows Scooch's picture, so pick a wallpaper there.", "{n} desktops or screens it could not reach still show Scooch's picture, so pick a wallpaper there."),
+    };
+    if count == 1 {
+        one.to_string()
+    } else {
+        many.replace("{n}", &count.to_string())
+    }
 }
 
 pub fn closing(tally: &Tally) -> String {
@@ -365,17 +379,10 @@ pub fn closing(tally: &Tally) -> String {
     if tally.back > 0 || nothing_else {
         parts.push("Your wallpaper is back.".into());
     }
-    if tally.plain > 0 {
-        parts.push(plain_sentence(tally.plain));
-    }
-    if tally.stuck > 0 {
-        parts.push(stuck_sentence(tally.stuck));
-    }
-    if tally.pending > 0 {
-        parts.push(format!("{} more switch back the next time those desktops or screens show.", tally.pending));
-    }
-    if tally.abandoned > 0 {
-        parts.push(format!("{} desktops or screens it could not reach still show Scooch's picture, so pick a wallpaper there.", tally.abandoned));
+    for (kind, count) in [(Count::Plain, tally.plain), (Count::Stuck, tally.stuck), (Count::Pending, tally.pending), (Count::Unreached, tally.abandoned)] {
+        if count > 0 {
+            parts.push(counted(kind, count));
+        }
     }
     if tally.strays > 0 {
         parts.push(daemon::ORPHAN.into());
@@ -384,16 +391,15 @@ pub fn closing(tally: &Tally) -> String {
 }
 
 pub fn restoring_line(left: usize) -> String {
-    format!("Scooch is off. {left} desktops or screens switch back the next time they show.")
+    format!("Scooch is off. {}", counted(Count::Pending, left))
 }
 
 fn tally_lines(tally: &Tally) -> Vec<String> {
     let mut lines = Vec::new();
-    if tally.plain > 0 {
-        lines.push(plain_sentence(tally.plain));
-    }
-    if tally.stuck > 0 {
-        lines.push(stuck_sentence(tally.stuck));
+    for (kind, count) in [(Count::Plain, tally.plain), (Count::Stuck, tally.stuck)] {
+        if count > 0 {
+            lines.push(counted(kind, count));
+        }
     }
     if tally.strays > 0 {
         lines.push(daemon::ORPHAN.into());
@@ -979,7 +985,7 @@ mod tests {
         let state = store.load();
         assert!(state.restoring && !state.on && state.screens.contains_key("R") && !state.screens.contains_key("L"));
         assert!(store.output("R", 1, "jpg").exists() && !store.output("L", 1, "jpg").exists() && !store.cache().exists());
-        assert_eq!(describe(&state, true, None), vec!["Scooch is off. 1 desktops or screens switch back the next time they show."]);
+        assert_eq!(describe(&state, true, None), vec!["Scooch is off. 1 more switches back the next time that desktop or screen shows."]);
         fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0), crate::daemon::tests::screen("R", 160.0, 1.0)]);
         let daemon = crate::daemon::Daemon::new(fake.clone(), store.clone());
         let report = daemon.tick();
@@ -998,7 +1004,8 @@ mod tests {
         let state = store.load();
         assert!(!state.restoring && state.screens.is_empty());
         assert!(store.output("R", 1, "jpg").exists() && !store.output("L", 1, "jpg").exists());
-        assert_eq!(closing(&tally(0, 0, 0, 0, 1)), "Scooch is off. 1 desktops or screens it could not reach still show Scooch's picture, so pick a wallpaper there.");
+        assert_eq!(closing(&tally(0, 0, 0, 0, 1)), "Scooch is off. 1 desktop or screen it could not reach still shows Scooch's picture, so pick a wallpaper there.");
+        assert_eq!(closing(&tally(0, 0, 0, 0, 2)), "Scooch is off. 2 desktops or screens it could not reach still show Scooch's picture, so pick a wallpaper there.");
     }
 
     #[test]
@@ -1116,7 +1123,7 @@ mod tests {
     fn status_while_restoring_says_when_nothing_is_running() {
         let mut state = State { restoring: true, ..State::default() };
         state.screens.insert("R".into(), Entry::new(Path::new("/p/a.jpg")));
-        assert_eq!(describe(&state, true, None), vec!["Scooch is off. 1 desktops or screens switch back the next time they show."]);
+        assert_eq!(describe(&state, true, None), vec!["Scooch is off. 1 more switches back the next time that desktop or screen shows."]);
         assert_eq!(describe(&state, false, None)[1], NO_RESTORER);
     }
 
@@ -1133,19 +1140,23 @@ mod tests {
 
     #[test]
     fn the_closing_line_tells_every_mix_apart() {
-        let plain = "2 of your old wallpapers were not picture files and cannot be put back by an app, so pick them again in your system settings.";
-        let stuck = "2 desktops still show Scooch's picture because the original file is gone, so pick a wallpaper there.";
-        let pending = "2 more switch back the next time those desktops or screens show.";
-        for mix in 0..16_usize {
-            let count = |bit: usize| if mix & (1 << bit) == 0 { 0 } else { 2 };
-            let counts = tally(count(0), count(1), count(2), count(3), 0);
+        let sentences = [
+            ("1 of your old wallpapers could not be put back by an app, so pick it again in your system settings.", "2 of your old wallpapers could not be put back by an app, so pick them again in your system settings."),
+            ("1 desktop still shows Scooch's picture because nothing was left to put back, so pick a wallpaper there.", "2 desktops still show Scooch's picture because nothing was left to put back, so pick a wallpaper there."),
+            ("1 more switches back the next time that desktop or screen shows.", "2 more switch back the next time those desktops or screens show."),
+        ];
+        for mix in 0..81_usize {
+            let digit = |place: u32| (mix / 3_usize.pow(place)) % 3;
+            let counts = tally(digit(0), digit(1), digit(2), digit(3), 0);
             let mut expected = vec!["Scooch is off."];
             if counts.back > 0 || mix == 0 {
                 expected.push("Your wallpaper is back.");
             }
-            for (number, sentence) in [(counts.plain, plain), (counts.stuck, stuck), (counts.pending, pending)] {
-                if number > 0 {
-                    expected.push(sentence);
+            for ((one, two), number) in sentences.iter().zip([counts.plain, counts.stuck, counts.pending]) {
+                match number {
+                    1 => expected.push(one),
+                    2 => expected.push(two),
+                    _ => {}
                 }
             }
             let line = closing(&counts);
@@ -1154,6 +1165,9 @@ mod tests {
         }
         assert_eq!(closing(&tally(3, 0, 0, 0, 0)), "Scooch is off. Your wallpaper is back.");
         assert_eq!(closing(&Tally { strays: 1, ..Tally::default() }), format!("Scooch is off. {}", daemon::ORPHAN));
+        assert_eq!(restoring_line(2), "Scooch is off. 2 more switch back the next time those desktops or screens show.");
+        assert_eq!(counted(Count::Unreached, 1), "1 desktop or screen it could not reach still shows Scooch's picture, so pick a wallpaper there.");
+        assert_eq!(counted(Count::Unreached, 3), "3 desktops or screens it could not reach still show Scooch's picture, so pick a wallpaper there.");
     }
 
     fn screens(ids: &[&str]) -> Vec<Screen> {
@@ -1194,7 +1208,7 @@ mod tests {
         let state = store.load();
         assert!(state.restoring && ids(&state) == ["B"]);
         assert!(store.output("B", 1, "jpg").exists() && !store.output("A", 1, "jpg").exists());
-        assert_eq!(closing(&tally(2, 0, 0, 1, 0)), "Scooch is off. Your wallpaper is back. 1 more switch back the next time those desktops or screens show.");
+        assert_eq!(closing(&tally(2, 0, 0, 1, 0)), "Scooch is off. Your wallpaper is back. 1 more switches back the next time that desktop or screen shows.");
     }
 
     #[test]
@@ -1228,7 +1242,7 @@ mod tests {
         assert!(output.exists());
         let state = store.load();
         assert_eq!(state.tally, Tally { back: 1, stuck: 1, ..Tally::default() });
-        assert_eq!(describe(&state, false, None), vec!["Scooch is off. Run scooch to turn it on.".to_string(), stuck_sentence(1)]);
+        assert_eq!(describe(&state, false, None), vec!["Scooch is off. Run scooch to turn it on.".to_string(), "1 desktop still shows Scooch's picture because nothing was left to put back, so pick a wallpaper there.".to_string()]);
     }
 
     fn spaces(name: &str) -> (std::sync::Arc<crate::daemon::tests::Fake>, Store, PathBuf) {
