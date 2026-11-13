@@ -8,7 +8,7 @@ Scooch moves your wallpaper so your desktop icons stay off the best part of the 
 2. **Any wallpaper.** The picture is the user's own. Scooch reframes and gently reshapes that picture. It never swaps in its own art.
 3. **No AI.** Subject detection is classic image processing. No model files, no network.
 4. **One codebase.** macOS, Windows and Linux share the engine and the daemon. Only the desktop adapter differs.
-5. **Leave no trace.** `scooch off` restores the original wallpaper and every setting Scooch changed, and removes the login item.
+5. **Leave no trace.** `scooch off` restores the original wallpaper and every setting Scooch changed, and removes the login item. A desktop or screen that is not showing at that moment is restored the next time it shows, and Scooch says so.
 6. **Do no harm.** When moving the picture would not help, the picture stays exactly as the system would show it.
 
 ## Layout
@@ -103,9 +103,11 @@ autostart(exe or none)        -> add or remove the login item
 | Cinnamon | Nemo positions in gvfs metadata, on Nemo's desktop grid | gsettings | The gvfs metadata signal, the dconf signal, Nemo's desktop file, the Desktop folder |
 | MATE | Caja positions in gvfs metadata | gsettings | The gvfs metadata signal, the dconf signal, Caja's desktop file, the Desktop folder |
 
-Windows builds two programs from the same code. `scooch.exe` is the console command. `scoochw.exe` is the same program with no console, which is what runs at login. No code is injected into Explorer and no input is hooked.
+Windows builds two programs from the same code. `scooch.exe` is the console command. `scoochw.exe` is the same program with no console, which is what runs at login. No code is injected into Explorer and no input is hooked. Scooch does not run as administrator while Explorer runs as a normal user, because Windows would then block Explorer's messages to it.
 
-Linux uses pure Rust libraries only, so one static program runs on every distribution. On GNOME, Cinnamon and MATE one picture covers every monitor, so Scooch arranges it for the main one.
+On macOS every picture is decoded with its color profile and matched into sRGB, and outputs carry the sRGB profile. Colors outside sRGB are clipped.
+
+Linux uses pure Rust libraries only, so one static program runs on every distribution. On KDE an icon move can take up to 10 seconds to arrive, because Plasma saves icon positions on a 10 second timer and sends no signal for a move. On GNOME, Cinnamon and MATE one picture covers every monitor, so Scooch arranges it for the main one.
 
 ## Daemon
 
@@ -115,7 +117,13 @@ On each change, after 250 ms of quiet, for each screen
 2. Skip when the source, screen, icons and options match the last render.
 3. Take the analysis from cache, solve, render at most once, write `out/<screen>-<n>` and set it. Delete older outputs.
 
-State lives in the per-user data folder as `state.json`, with the source per screen, the last placement, and the wallpaper to restore. The file is written to a temporary name and renamed, so a crash never leaves half a file. One daemon runs at a time, held by a lock file.
+State lives in the per-user data folder as `state.json`, with the source per screen, the last placement, and the wallpaper to restore. The file is written to a temporary name and renamed, so a crash never leaves half a file. A file that cannot be read is moved aside and never overwritten. One daemon runs at a time, held by a lock file.
+
+A screen entry belongs to one desktop. On macOS that is one display on one Space, because macOS keeps a wallpaper for each and an app can only set the one that is showing. Each entry has its own source, original and output files.
+
+**Off.** `scooch off` restores every entry that is showing and removes it. An entry that is not showing, such as another Space or an unplugged monitor, stays as pending. With pending entries the daemon keeps running in a restoring mode. It never renders, restores each pending entry when its desktop or screen next shows, and removes the login item and itself when none are left. A second `scooch off` gives up on the pending ones and says how many.
+
+**Never the wrong picture.** Right before setting an image the daemon reads the wallpaper again. If the user picked a new picture while the render ran, the render is dropped. A stop signal lets the running tick finish and save.
 
 Measured on macOS at rest, the daemon uses 0.01 s of CPU over two minutes, has no idle wakeups and holds about 5 to 7 MB. A moved icon becomes a new wallpaper in about half a second, of which 250 ms is the quiet period.
 

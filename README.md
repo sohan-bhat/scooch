@@ -29,7 +29,7 @@ Then run `scooch`.
 | `scooch` | Turns Scooch on. Run it again to see how it is doing. |
 | `scooch use` | Picks a different picture. |
 | `scooch flip` | Lets Scooch flip the picture when that clears your icons. |
-| `scooch off` | Puts your wallpaper back and removes the login item. |
+| `scooch off` | Puts your wallpaper back and removes the login item. Desktops and screens that are not showing switch back the next time they show. |
 | `scooch doctor` | Checks that Scooch can read your desktop. |
 
 Move an icon and the wallpaper follows about half a second later.
@@ -57,6 +57,8 @@ One small background program does this. It runs only when an icon moves, a file 
 - Scooch needs a picture file. With a slideshow, a video wallpaper or a plain color it leaves your wallpaper alone until you pick a picture with `scooch use`.
 - On macOS the first run asks once for permission to read icon positions from Finder.
 - On GNOME, Cinnamon and MATE one picture covers every monitor, so Scooch arranges it for the main one.
+- On KDE an icon move can take up to 10 seconds to change the picture, because Plasma saves icon positions on a timer.
+- On macOS colors outside sRGB lose a little saturation once Scooch renders the picture.
 
 ## Remove
 
