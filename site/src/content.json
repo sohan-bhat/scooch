@@ -10,7 +10,6 @@
     "install": "Install",
     "home": "Scooch home"
   },
-  "loading": "Loading the desk",
   "beats": [
     {
       "id": "hero",

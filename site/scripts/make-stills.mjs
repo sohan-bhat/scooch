@@ -11,10 +11,26 @@ const sizes = [
   { name: 'phone', width: 390, height: 844, scale: 2, crop: { width: 780, height: 940 } },
 ];
 
+const heroes = [
+  { name: 'hero-desktop', width: 2304, height: 900, scale: 1.5, quality: 80 },
+  { name: 'hero-square', width: 1280, height: 1278, scale: 1.5, quality: 80 },
+  { name: 'hero-phone', width: 720, height: 847, scale: 2, quality: 80 },
+];
+
+const heroOnly = process.argv.includes('--hero');
+
 await mkdir(out, { recursive: true });
 const browser = await launch();
 try {
-  for (const size of sizes) {
+  for (const hero of heroes) {
+    const { context, page } = await openStill(browser, { beat: 0, hero: true, ...hero });
+    const shot = await page.screenshot({ type: 'png' });
+    await context.close();
+    const file = join(out, `${hero.name}.webp`);
+    await writeFile(file, await sharp(shot).webp({ quality: hero.quality, effort: 6 }).toBuffer());
+    console.log('wrote', file);
+  }
+  for (const size of heroOnly ? [] : sizes) {
     for (let beat = 0; beat < 7; beat++) {
       const { context, page } = await openStill(browser, { beat, ...size });
       const shot = await page.screenshot({ type: 'png' });

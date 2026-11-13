@@ -12,8 +12,7 @@ type Refs = {
   canvas: React.RefObject<HTMLDivElement | null>;
   action: React.RefObject<HTMLAnchorElement | null>;
   skip: React.RefObject<HTMLAnchorElement | null>;
-  progress: React.RefObject<HTMLSpanElement | null>;
-  meter: React.RefObject<HTMLSpanElement | null>;
+  still: React.RefObject<HTMLPictureElement | null>;
 };
 
 const initial = { ...story };
@@ -81,7 +80,9 @@ export function useStory(refs: Refs, live: boolean, still: number) {
     runtime.still = still;
     if (still >= 0) {
       html.classList.add('still-shot');
-      if (new URLSearchParams(window.location.search).has('share')) html.classList.add('share-shot');
+      const query = new URLSearchParams(window.location.search);
+      if (query.has('share')) html.classList.add('share-shot');
+      if (query.has('hero')) html.classList.add('hero-shot');
       runtime.idle = false;
     }
 
@@ -175,10 +176,10 @@ export function useStory(refs: Refs, live: boolean, still: number) {
 
 export function introduce(refs: Refs, still: number) {
   const canvas = refs.canvas.current;
-  const meter = refs.meter.current;
+  const picture = refs.still.current;
+  runtime.power = 1;
+  if (canvas) canvas.style.opacity = '1';
   if (still >= 0) {
-    runtime.power = 1;
-    if (canvas) canvas.style.opacity = '1';
     let frames = 0;
     const wait = () => {
       if (runtime.posed) frames += 1;
@@ -189,16 +190,13 @@ export function introduce(refs: Refs, still: number) {
     return;
   }
   runtime.ready = true;
-  gsap.to(canvas, { opacity: 1, duration: 1.3, ease: 'power2.out' });
-  gsap.fromTo(runtime, { power: 0 }, { power: 1, duration: 1.1, delay: 0.25, ease: 'power3.out' });
-  if (meter) {
-    gsap.to(meter, { autoAlpha: 0, duration: 0.6, delay: 0.5, ease: 'power2.in' });
-    meter.setAttribute('aria-valuenow', '100');
-  }
-}
-
-export function reportProgress(refs: Refs, value: number) {
-  const bar = refs.progress.current;
-  if (bar) bar.style.transform = `scaleX(${Math.max(0.04, value)})`;
-  refs.meter.current?.setAttribute('aria-valuenow', String(Math.round(value * 100)));
+  performance.mark('scooch:ready');
+  gsap.to(picture, {
+    autoAlpha: 0,
+    duration: 0.3,
+    ease: 'power2.out',
+    onComplete: () => {
+      performance.mark('scooch:shown');
+    },
+  });
 }
