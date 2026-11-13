@@ -18,7 +18,7 @@ mod probe {
     use std::fs;
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, ExitCode, Stdio};
+    use std::process::{Child, Command, ExitCode, Stdio};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -134,7 +134,7 @@ mod probe {
         allowed: bool,
         runs: u32,
         limits: Vec<String>,
-        wrapped: bool,
+        stand: Option<Child>,
         finder: bool,
     }
 
@@ -258,7 +258,7 @@ mod probe {
             allowed: false,
             runs: 0,
             limits: Vec::new(),
-            wrapped: false,
+            stand: None,
             finder: true,
         };
         probe.section("1 Session facts", facts);
@@ -682,32 +682,6 @@ mod probe {
         ran.ok().then_some(ran.took.as_millis())
     }
 
-    fn start_wrapped(p: &mut Probe) -> Result<Duration> {
-        let plist = launchd::plist_path()?;
-        let domain = format!("gui/{}", uid());
-        let _ = p.tool("/bin/launchctl", &["bootout", &target()]);
-        let _ = wait_until(Duration::from_secs(10), || !launchd::loaded());
-        let command = format!("'{}' watch; exit $?", p.bin.display());
-        let text = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array><string>/bin/bash</string><string>-c</string><string>{}</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ProcessType</key><string>Standard</string>\n<key>EnvironmentVariables</key><dict><key>SCOOCH_HOME</key><string>{}</string><key>SCOOCH_TRACE</key><string>1</string></dict>\n<key>StandardErrorPath</key><string>{}</string>\n</dict>\n</plist>\n",
-            launchd::LABEL,
-            command.replace('&', "&amp;").replace('<', "&lt;"),
-            p.home.display(),
-            p.home.join("watch.log").display()
-        );
-        fs::write(&plist, text)?;
-        let _ = fs::remove_file(p.home.join("watch.pid"));
-        let started = Instant::now();
-        let loaded = p.tool("/bin/launchctl", &["bootstrap", &domain, &plist.to_string_lossy()]);
-        if !loaded.ok() {
-            anyhow::bail!("launchctl bootstrap of the bash started job failed: {}", loaded.text());
-        }
-        let home = p.home.clone();
-        wait_until(Duration::from_secs(15), || fs::read_to_string(home.join("watch.pid")).ok().and_then(|text| text.trim().parse::<i32>().ok()).is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)).context("the bash started job wrote no pid file")?;
-        p.wrapped = true;
-        Ok(started.elapsed())
-    }
-
     fn dismiss_prompt(p: &mut Probe) -> Option<u128> {
         if let Some(answers) = finder_answers(p) {
             p.line(format!("- Finder answers Apple Events in {answers} ms"));
@@ -727,21 +701,44 @@ mod probe {
         answers
     }
 
-    fn need_wrapped(p: &mut Probe, what: &str) -> Result<Option<Duration>> {
+    fn stand_in(p: &mut Probe, what: &str) -> Result<Option<Duration>> {
         if !asking(p) {
             return Ok(None);
         }
-        p.limit("on a hosted runner the login item daemon waits for the Finder automation prompt that nobody can click, and the runner image pre-grants Finder automation only to bash, osascript and its own agents");
+        p.limit("on a hosted runner the login item daemon waits for a Finder automation prompt that nobody can click, and the runner image pre-grants Finder automation only to bash, osascript and its own agents, which a launchd job does not inherit");
         let job = daemon_pid(p);
         let _ = p.tool("/bin/launchctl", &["bootout", &target()]);
         let _ = wait_until(Duration::from_secs(10), || !launchd::loaded());
-        let _ = prompt_owners(p);
         p.finder = dismiss_prompt(p).is_some();
+        let _ = fs::remove_file(p.home.join("watch.pid"));
+        let log = fs::OpenOptions::new().create(true).append(true).open(p.home.join("watch.log"))?;
         let started = Instant::now();
-        start_wrapped(p)?;
+        let child = Command::new(&p.bin).arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn()?;
+        p.stand = Some(child);
+        let home = p.home.clone();
+        wait_until(Duration::from_secs(15), || fs::read_to_string(home.join("watch.pid")).ok().and_then(|text| text.trim().parse::<i32>().ok()).is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)).context("the probe started daemon wrote no pid file")?;
         let pid = scooch_pid(p);
-        p.line(format!("- {what}: swapped the login item job {job:?} for the same label and plist path started through /bin/bash, scooch now runs as {pid:?}"));
+        p.line(format!("- {what}: booted out the login item job {job:?}, closed its consent window, and started scooch watch from the probe as {pid:?}, which inherits the runner's Finder automation"));
         Ok(Some(started.elapsed()))
+    }
+
+    fn reap(p: &mut Probe) {
+        if let Some(mut child) = p.stand.take() {
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(10) {
+                if let Ok(Some(_)) = child.try_wait() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            p.line("- the probe started daemon had to be killed".to_string());
+        }
+    }
+
+    fn ticks(p: &Probe) -> usize {
+        daemon_log(p).lines().filter(|line| line.contains(" tick ")).count()
     }
 
     fn first_run(p: &mut Probe) -> Result<()> {
@@ -799,16 +796,16 @@ mod probe {
             p.fail("the daemon under launchd never rendered");
             return Ok(());
         }
-        let swapped = need_wrapped(p, "first run")?;
+        let swapped = stand_in(p, "first run")?;
         let rendered = wait_render(p, Duration::from_secs(45), None);
         let shown = desktop.wallpaper(&screen).ok().flatten();
         let ours = shown.as_ref().is_some_and(|path| path.starts_with(p.home.join("out")));
         p.line(format!(
-            "- first render by the bash started launchd job {:?} ms after it was loaded, wallpaper now {shown:?}, inside the probe home {ours}",
+            "- first render by the probe started daemon {:?} ms after it started, wallpaper now {shown:?}, inside the probe home {ours}",
             swapped.zip(rendered).map(|(load, render)| (load + render).as_millis())
         ));
         if rendered.is_none() || !ours {
-            p.fail("the bash started launchd job never rendered");
+            p.fail("the probe started daemon never rendered");
         }
         Ok(())
     }
@@ -921,9 +918,8 @@ mod probe {
 
     fn idle(p: &mut Probe) -> Result<()> {
         std::thread::sleep(Duration::from_secs(3));
-        let job = daemon_pid(p);
         let pid = scooch_pid(p).context("no scooch daemon runs")?;
-        p.line(format!("- launchd job pid {job:?}, scooch daemon pid {pid}, started through bash {}", p.wrapped));
+        p.line(format!("- scooch daemon pid {pid}, started by {}", if p.stand.is_some() { "the probe" } else { "launchd" }));
         let before = rusage(pid).context("the daemon usage could not be read")?;
         let from = epoch();
         std::thread::sleep(Duration::from_secs(60));
@@ -963,7 +959,7 @@ mod probe {
             p.line(format!("  - `{line}`"));
         }
         std::thread::sleep(Duration::from_millis(1500));
-        p.wrapped = false;
+        reap(p);
         let shown = desktop.wallpaper(&screen).ok().flatten();
         let kind = format!("{:?}", store::describe(&screen.id));
         let same_path = shown.as_ref().zip(p.subject.as_ref()).is_some_and(|(shown, subject)| shown == subject || shown.canonicalize().ok() == subject.canonicalize().ok());
@@ -978,50 +974,50 @@ mod probe {
     }
 
     fn second_cycle(p: &mut Probe) -> Result<()> {
-        let desktop = platform::current()?;
         let screen = main_screen(p)?;
         let (width, height) = pixels(&screen);
         let second = picture_file(p, "probe-second.jpg", &subject_picture(width, height, (0.35, 0.55)))?;
         let third = picture_file(p, "probe-third.jpg", &subject_picture(width, height, (0.65, 0.45)))?;
-        let started = Instant::now();
         let ran = p.scooch(&["use", &second.to_string_lossy()], Duration::from_secs(60));
         p.line(format!("- scooch use from off exit {:?} after {} ms", ran.code, ran.took.as_millis()));
         for line in ran.text().lines() {
             p.line(format!("  - `{line}`"));
         }
-        let mut rendered = wait_render(p, Duration::from_secs(30), Some(&second));
-        p.line(format!("- the login item it installed is loaded {}, rendered the new picture after {:?} ms, problem {:?}", launchd::loaded(), rendered.map(|_| started.elapsed().as_millis()), problem(p)));
-        if rendered.is_none() && need_wrapped(p, "second cycle")?.is_some() {
-            rendered = wait_render(p, Duration::from_secs(30), Some(&second));
-            p.line(format!("- the bash started job rendered the new picture {:?}", rendered.map(|time| time.as_millis())));
-        }
-        if rendered.is_none() {
-            p.fail("scooch use did not bring a render from a daemon under launchd");
-        }
-        let job = daemon_pid(p);
-        let started = Instant::now();
-        let ran = p.scooch(&["use", &third.to_string_lossy()], Duration::from_secs(60));
-        let rendered = wait_render(p, Duration::from_secs(30), Some(&third));
-        let kept = fs::read_to_string(launchd::plist_path()?).is_ok_and(|text| !p.wrapped || text.contains("/bin/bash"));
-        let after = daemon_pid(p);
-        p.line(format!("- scooch use while it runs exit {:?}, job {job:?} then {after:?}, plist untouched {kept}, rendered after {:?} ms, wallpaper {:?}", ran.code, rendered.map(|_| started.elapsed().as_millis()), desktop.wallpaper(&screen).ok().flatten()));
-        if rendered.is_none() || !kept {
-            p.fail("scooch use did not reach the daemon running under launchd");
-        }
-        let ticks_before = daemon_log(p).lines().filter(|line| line.contains(" tick ")).count();
-        let ran = p.scooch(&["flip"], LIMIT);
-        p.line(format!("- scooch flip exit {:?}: {}", ran.code, ran.text()));
         let home = p.home.clone();
-        let ticked = wait_until(Duration::from_secs(10), || fs::read_to_string(home.join("watch.log")).unwrap_or_default().lines().filter(|line| line.contains(" tick ")).count() > ticks_before);
-        p.line(format!("- mirror saved {}, the daemon ticked {:?} ms after the flip", state(p)["options"]["mirror"], ticked.map(|time| time.as_millis())));
-        if ticked.is_none() {
-            p.fail("scooch flip did not reach the daemon under launchd");
+        let first = wait_until(Duration::from_secs(20), || fs::read_to_string(home.join("watch.log")).unwrap_or_default().lines().any(|line| line.contains(" tick ")) || fs::read(home.join("state.json")).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok()).is_some_and(|state| !state["problem"].is_null()));
+        let job = daemon_pid(p);
+        let parent = job.map(|pid| p.tool("/bin/ps", &["-o", "ppid=", "-p", &pid.to_string()]).out.trim().to_string());
+        p.line(format!("- login item loaded {}, daemon pid {job:?} with parent {parent:?}, first tick {:?} ms, problem {:?}", launchd::loaded(), first.map(|time| time.as_millis()), problem(p)));
+        if job.is_none() || first.is_none() {
+            p.fail("scooch use did not start a daemon under launchd");
+        }
+        for (what, arguments) in [("scooch use while it runs", vec!["use".to_string(), third.to_string_lossy().into_owned()]), ("scooch flip", vec!["flip".to_string()])] {
+            let before = ticks(p);
+            let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+            let ran = p.scooch(&arguments, Duration::from_secs(60));
+            let home = p.home.clone();
+            let ticked = wait_until(Duration::from_secs(15), || fs::read_to_string(home.join("watch.log")).unwrap_or_default().lines().filter(|line| line.contains(" tick ")).count() > before);
+            let after = daemon_pid(p);
+            p.line(format!("- {what} exit {:?} in {} ms, the same launchd daemon {} ticked {:?} ms later", ran.code, ran.took.as_millis(), after == job, ticked.map(|time| time.as_millis())));
+            if ticked.is_none() || after != job {
+                p.fail(format!("{what} did not reach the daemon under launchd"));
+            }
+        }
+        p.line(format!("- mirror saved {}, source now {:?}", state(p)["options"]["mirror"], state(p)["screens"].as_object().and_then(|screens| screens.values().next().map(|entry| entry["source"].clone()))));
+        if let Some(pid) = job {
+            if let Some(before) = rusage(pid) {
+                std::thread::sleep(Duration::from_secs(60));
+                if let Some(after) = rusage(pid) {
+                    let cpu = nanos((after.user + after.system).saturating_sub(before.user + before.system)) / 1_000_000;
+                    p.line(format!("- the launchd daemon over a quiet 60 s, waiting for consent: CPU {cpu} ms, idle wakeups {}, interrupt wakeups {}, footprint {:.1} MB", after.idle_wakeups.saturating_sub(before.idle_wakeups), after.interrupt_wakeups.saturating_sub(before.interrupt_wakeups), after.footprint as f64 / 1_048_576.0));
+                }
+            }
         }
         let ran = p.scooch(&["off"], Duration::from_secs(60));
         p.line(format!("- scooch off exit {:?} after {} ms: {}", ran.code, ran.took.as_millis(), ran.text()));
         std::thread::sleep(Duration::from_millis(1500));
-        p.wrapped = false;
         gone(p, "the second off");
+        p.finder = dismiss_prompt(p).is_some();
         Ok(())
     }
 
@@ -1066,7 +1062,7 @@ mod probe {
         let ran = p.scooch(&["use", &subject.to_string_lossy()], Duration::from_secs(60));
         p.line(format!("- scooch use on the first Space exit {:?}", ran.code));
         if wait_render(p, Duration::from_secs(30), Some(&subject)).is_none() {
-            need_wrapped(p, "Spaces")?;
+            stand_in(p, "Spaces")?;
         }
         let one = wait_render(p, Duration::from_secs(30), Some(&subject));
         p.line(format!("- first Space rendered {:?}, entries {:?}", one.map(|time| time.as_millis()), entries(p)));
@@ -1079,11 +1075,13 @@ mod probe {
         p.line(format!("- second Space entry with its own output after {:?} ms: {:?}", two.map(|time| time.as_millis()), entries(p)));
         switch(p, 123);
         let ran = p.scooch(&["off"], Duration::from_secs(60));
-        p.wrapped = false;
+        reap(p);
         p.line(format!("- scooch off from the first Space exit {:?}: {}", ran.code, ran.text()));
         p.line(format!("- after off, restoring {}, entries {:?}, login item loaded {}", state(p)["restoring"], entries(p), launchd::loaded()));
         let plist = fs::read_to_string(launchd::plist_path()?).unwrap_or_default();
-        p.line(format!("- the restoring daemon is the real login item {}", !plist.is_empty() && !plist.contains("/bin/bash")));
+        let restorer = daemon_pid(p);
+        let parent = restorer.map(|pid| p.tool("/bin/ps", &["-o", "ppid=", "-p", &pid.to_string()]).out.trim().to_string());
+        p.line(format!("- the restoring daemon is the real login item {}, pid {restorer:?} with parent {parent:?}", !plist.is_empty() && plist.contains("<string>watch</string>")));
         switch(p, 124);
         let finished = wait_until(Duration::from_secs(30), || !launchd::loaded() && !launchd::installed());
         let back = platform::current()?.screens()?.first().cloned().and_then(|screen| platform::current().ok()?.wallpaper(&screen).ok().flatten());
@@ -1097,10 +1095,11 @@ mod probe {
     }
 
     fn cleanup(p: &mut Probe) -> Result<()> {
-        if launchd::loaded() || launchd::plist_path().is_ok_and(|path| path.exists()) {
+        if p.stand.is_some() || launchd::loaded() || launchd::plist_path().is_ok_and(|path| path.exists()) {
             let ran = p.scooch(&["off"], Duration::from_secs(60));
             p.line(format!("- scooch off during cleanup exit {:?}: {}", ran.code, ran.text()));
         }
+        reap(p);
         if launchd::loaded() {
             let _ = p.tool("/bin/launchctl", &["bootout", &target()]);
         }
