@@ -44,8 +44,6 @@ const _: () = assert!(wakes::EVENT_OBJECT_DESTROY == ::windows::Win32::UI::Windo
 const _: () = assert!(wakes::EVENT_OBJECT_SHOW == ::windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_SHOW);
 const _: () = assert!(wakes::EVENT_OBJECT_HIDE == ::windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_HIDE);
 const _: () = assert!(wakes::OBJID_WINDOW == ::windows::Win32::UI::WindowsAndMessaging::OBJID_WINDOW.0);
-const _: () = assert!(wakes::EVENT_OBJECT_REORDER == ::windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_REORDER);
-const _: () = assert!(wakes::EVENT_OBJECT_LOCATIONCHANGE == ::windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_LOCATIONCHANGE);
 const _: () = assert!(wakes::OBJID_CLIENT == ::windows::Win32::UI::WindowsAndMessaging::OBJID_CLIENT.0);
 const _: () = assert!(wakes::WTS_SESSION_LOGON as u32 == ::windows::Win32::UI::WindowsAndMessaging::WTS_SESSION_LOGON);
 const _: () = assert!(wakes::WTS_SESSION_UNLOCK as u32 == ::windows::Win32::UI::WindowsAndMessaging::WTS_SESSION_UNLOCK);

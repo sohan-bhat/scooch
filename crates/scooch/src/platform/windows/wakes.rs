@@ -9,8 +9,6 @@ pub const EVENT_OBJECT_CREATE: u32 = 0x8000;
 pub const EVENT_OBJECT_DESTROY: u32 = 0x8001;
 pub const EVENT_OBJECT_SHOW: u32 = 0x8002;
 pub const EVENT_OBJECT_HIDE: u32 = 0x8003;
-pub const EVENT_OBJECT_REORDER: u32 = 0x8004;
-pub const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800B;
 pub const OBJID_WINDOW: i32 = 0;
 pub const OBJID_CLIENT: i32 = -4;
 
@@ -21,12 +19,7 @@ pub const PBT_APMRESUMEAUTOMATIC: usize = 0x12;
 pub const TRIES: u32 = 10;
 pub const OWN_ECHO_MS: u64 = 1000;
 
-pub const HOOKS: [(u32, u32); 4] = [
-    (EVENT_SYSTEM_CAPTUREEND, EVENT_SYSTEM_CAPTUREEND),
-    (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE),
-    (EVENT_OBJECT_REORDER, EVENT_OBJECT_REORDER),
-    (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE),
-];
+pub const HOOKS: [(u32, u32); 2] = [(EVENT_SYSTEM_CAPTUREEND, EVENT_SYSTEM_CAPTUREEND), (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE)];
 
 pub fn setting(action: usize, own_echo: bool) -> bool {
     match u32::try_from(action) {
@@ -39,9 +32,8 @@ pub fn setting(action: usize, own_echo: bool) -> bool {
 pub fn event(kind: u32, on_list: bool, on_view: bool, object: i32, child: i32) -> bool {
     match kind {
         EVENT_SYSTEM_CAPTUREEND => true,
-        EVENT_OBJECT_CREATE | EVENT_OBJECT_DESTROY | EVENT_OBJECT_REORDER => on_list && object == OBJID_CLIENT,
+        EVENT_OBJECT_CREATE | EVENT_OBJECT_DESTROY => on_list && object == OBJID_CLIENT,
         EVENT_OBJECT_SHOW | EVENT_OBJECT_HIDE => (on_list || on_view) && object == OBJID_WINDOW && child == 0,
-        EVENT_OBJECT_LOCATIONCHANGE => on_list && object == OBJID_CLIENT && child > 0,
         _ => false,
     }
 }
@@ -117,16 +109,15 @@ mod tests {
     fn list_events_wake_only_for_the_desktop_list() {
         assert!(event(EVENT_OBJECT_CREATE, true, false, OBJID_CLIENT, 3));
         assert!(event(EVENT_OBJECT_DESTROY, true, false, OBJID_CLIENT, 0));
-        assert!(event(EVENT_OBJECT_REORDER, true, false, OBJID_CLIENT, 0));
         assert!(!event(EVENT_OBJECT_CREATE, false, true, OBJID_CLIENT, 3));
-        assert!(!event(EVENT_OBJECT_REORDER, true, false, 0, 0));
+        assert!(!event(EVENT_OBJECT_DESTROY, true, false, OBJID_WINDOW, 0));
     }
 
     #[test]
-    fn a_location_change_needs_an_item() {
-        assert!(event(EVENT_OBJECT_LOCATIONCHANGE, true, false, OBJID_CLIENT, 1));
-        assert!(!event(EVENT_OBJECT_LOCATIONCHANGE, true, false, OBJID_CLIENT, 0));
-        assert!(!event(EVENT_OBJECT_LOCATIONCHANGE, true, false, -9, 1));
+    fn cursor_moves_and_reorders_never_wake() {
+        assert!(!event(0x800B, false, false, -9, 0));
+        assert!(!event(0x800B, true, false, OBJID_CLIENT, 1));
+        assert!(!event(0x8004, true, false, OBJID_CLIENT, 0));
     }
 
     #[test]
@@ -156,10 +147,7 @@ mod tests {
     #[test]
     fn the_hooks_cover_each_event_once() {
         let covered: Vec<u32> = HOOKS.iter().flat_map(|(low, high)| *low..=*high).collect();
-        assert_eq!(
-            covered,
-            vec![EVENT_SYSTEM_CAPTUREEND, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE, EVENT_OBJECT_REORDER, EVENT_OBJECT_LOCATIONCHANGE]
-        );
+        assert_eq!(covered, vec![EVENT_SYSTEM_CAPTUREEND, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE]);
     }
 
     #[test]
