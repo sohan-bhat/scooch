@@ -63,6 +63,7 @@ impl Method {
 pub enum Layout {
     InProgman { progman: isize, icons: isize, wallpaper: isize },
     InWorkerW { progman: isize, icons: isize, wallpaper: isize },
+    ProgmanOnly { progman: isize, icons: isize },
 }
 
 impl Layout {
@@ -70,26 +71,27 @@ impl Layout {
         match self {
             Layout::InProgman { .. } => "icons and the wallpaper WorkerW are both children of Progman",
             Layout::InWorkerW { .. } => "icons live in a top level WorkerW with the wallpaper WorkerW behind it",
+            Layout::ProgmanOnly { .. } => "icons are a child of Progman and Progman paints the wallpaper itself, with no WorkerW",
         }
     }
 
     fn parent(&self) -> isize {
         match self {
-            Layout::InProgman { progman, .. } => *progman,
+            Layout::InProgman { progman, .. } | Layout::ProgmanOnly { progman, .. } => *progman,
             Layout::InWorkerW { wallpaper, .. } => *wallpaper,
         }
     }
 
     fn above(&self) -> Option<isize> {
         match self {
-            Layout::InProgman { icons, .. } => Some(*icons),
+            Layout::InProgman { icons, .. } | Layout::ProgmanOnly { icons, .. } => Some(*icons),
             Layout::InWorkerW { .. } => None,
         }
     }
 
     pub fn explorer(&self) -> u32 {
         let progman = match self {
-            Layout::InProgman { progman, .. } | Layout::InWorkerW { progman, .. } => *progman,
+            Layout::InProgman { progman, .. } | Layout::InWorkerW { progman, .. } | Layout::ProgmanOnly { progman, .. } => *progman,
         };
         let mut process = 0u32;
         unsafe { GetWindowThreadProcessId(hwnd(progman), Some(&mut process)) };
@@ -108,11 +110,24 @@ pub struct Stats {
 pub struct Layer {
     pub window: isize,
     pub layout: Layout,
-    pub sent_spawn: bool,
+    pub notes: Vec<String>,
     pub stats: Arc<Mutex<Stats>>,
     stop: Arc<AtomicBool>,
-    window_thread: Option<JoinHandle<()>>,
-    render_thread: Option<JoinHandle<()>>,
+    window_thread: Option<(JoinHandle<()>, mpsc::Receiver<()>)>,
+    render_thread: Option<(JoinHandle<()>, mpsc::Receiver<()>)>,
+}
+
+const STOP_WAIT: Duration = Duration::from_secs(3);
+
+fn finish(thread: Option<(JoinHandle<()>, mpsc::Receiver<()>)>) -> bool {
+    let Some((handle, done)) = thread else { return true };
+    match done.recv_timeout(STOP_WAIT) {
+        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = handle.join();
+            true
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => false,
+    }
 }
 
 static REPAIRS: AtomicU32 = AtomicU32::new(0);
@@ -192,8 +207,18 @@ fn icons_host() -> Option<HWND> {
 }
 
 fn wallpaper_behind(host: HWND) -> Option<HWND> {
-    let next = unsafe { GetWindow(host, GW_HWNDNEXT) }.ok()?;
-    (class_of(next) == "WorkerW" && child_of_class(next, "SHELLDLL_DefView").is_none()).then_some(next)
+    let mut next = unsafe { GetWindow(host, GW_HWNDNEXT) }.ok();
+    while let Some(window) = next {
+        let class = class_of(window);
+        if class == "Progman" {
+            return None;
+        }
+        if class == "WorkerW" && child_of_class(window, "SHELLDLL_DefView").is_none() && unsafe { IsWindowVisible(window) }.as_bool() {
+            return Some(window);
+        }
+        next = unsafe { GetWindow(window, GW_HWNDNEXT) }.ok();
+    }
+    None
 }
 
 fn seen(progman: HWND) -> Option<Layout> {
@@ -206,21 +231,38 @@ fn seen(progman: HWND) -> Option<Layout> {
     Some(Layout::InWorkerW { progman: progman.0 as isize, icons: host.0 as isize, wallpaper: wallpaper.0 as isize })
 }
 
-pub fn layout() -> Result<(Layout, bool)> {
-    let progman = unsafe { FindWindowW(w!("Progman"), PCWSTR::null()) }.context("Explorer has no Progman window")?;
-    if let Some(found) = seen(progman) {
-        return Ok((found, false));
-    }
+fn spawn(progman: HWND, wparam: usize, lparam: isize, notes: &mut Vec<String>) -> Option<Layout> {
     let mut result = 0usize;
-    unsafe { SendMessageTimeoutW(progman, SPAWN_MESSAGE, WPARAM(0), LPARAM(0), SMTO_NORMAL, 1000, Some(&mut result)) };
+    let sent = unsafe { SendMessageTimeoutW(progman, SPAWN_MESSAGE, WPARAM(wparam), LPARAM(lparam), SMTO_NORMAL, 1000, Some(&mut result)) };
     let started = Instant::now();
     while started.elapsed() < LOOK_FOR {
         if let Some(found) = seen(progman) {
-            return Ok((found, true));
+            notes.push(format!("sent 0x052C with {wparam:#x} and {lparam:#x}, returned {} with result {result}, a wallpaper WorkerW appeared after {} ms", sent.0, started.elapsed().as_millis()));
+            return Some(found);
         }
         std::thread::sleep(LOOK_AGAIN);
     }
-    bail!("no wallpaper WorkerW appeared within two seconds of message 0x052C")
+    notes.push(format!("sent 0x052C with {wparam:#x} and {lparam:#x}, returned {} with result {result}, no wallpaper WorkerW within two seconds", sent.0));
+    None
+}
+
+pub fn layout() -> Result<(Layout, Vec<String>)> {
+    let progman = unsafe { FindWindowW(w!("Progman"), PCWSTR::null()) }.context("Explorer has no Progman window")?;
+    let mut notes = Vec::new();
+    if let Some(found) = seen(progman) {
+        return Ok((found, notes));
+    }
+    for (wparam, lparam) in [(0usize, 0isize), (0xD, 0x1)] {
+        if let Some(found) = spawn(progman, wparam, lparam, &mut notes) {
+            return Ok((found, notes));
+        }
+        if child_of_class(progman, "SHELLDLL_DefView").is_none() && icons_host().is_some() {
+            break;
+        }
+    }
+    let icons = child_of_class(progman, "SHELLDLL_DefView").context("the desktop icons are neither in Progman nor in a WorkerW")?;
+    notes.push("attaching under Progman directly, below the icons".into());
+    Ok((Layout::ProgmanOnly { progman: progman.0 as isize, icons: icons.0 as isize }, notes))
 }
 
 fn in_place(ours: HWND, icons: HWND) -> bool {
@@ -510,15 +552,19 @@ pub fn repairs() -> u32 {
 
 pub fn open(screen: &Screen, method: Method, pattern: Pattern, cycle: Duration) -> Result<Layer> {
     com::aware();
-    let (layout, sent_spawn) = layout()?;
+    let (layout, notes) = layout()?;
     let area = frame_in_parent(screen, hwnd(layout.parent()));
     let (window_ready, window_wait) = mpsc::channel();
     let no_redirection = method == Method::VisualNoRedirection;
-    let window_thread = std::thread::Builder::new().name("scooch-layer-window".into()).spawn(move || window_thread(layout, area, no_redirection, window_ready))?;
+    let (window_done, window_finished) = mpsc::channel();
+    let window_thread = std::thread::Builder::new().name("scooch-layer-window".into()).spawn(move || {
+        window_thread(layout, area, no_redirection, window_ready);
+        let _ = window_done.send(());
+    })?;
     let window = match window_wait.recv_timeout(READY_WAIT) {
         Ok(Ok(window)) => window,
         Ok(Err(error)) => {
-            let _ = window_thread.join();
+            finish(Some((window_thread, window_finished)));
             return Err(error.context("the layer window could not be made"));
         }
         Err(_) => bail!("the layer window took over ten seconds to appear"),
@@ -527,8 +573,12 @@ pub fn open(screen: &Screen, method: Method, pattern: Pattern, cycle: Duration) 
     let stop = Arc::new(AtomicBool::new(false));
     let (render_ready, render_wait) = mpsc::channel();
     let (render_stop, render_stats) = (stop.clone(), stats.clone());
-    let render_thread = std::thread::Builder::new().name("scooch-layer-render".into()).spawn(move || render_thread(method, window, pattern, cycle, render_stop, render_stats, render_ready));
-    let mut layer = Layer { window, layout, sent_spawn, stats, stop, window_thread: Some(window_thread), render_thread: render_thread.ok() };
+    let (render_done, render_finished) = mpsc::channel();
+    let render_thread = std::thread::Builder::new().name("scooch-layer-render".into()).spawn(move || {
+        render_thread(method, window, pattern, cycle, render_stop, render_stats, render_ready);
+        let _ = render_done.send(());
+    });
+    let mut layer = Layer { window, layout, notes, stats, stop, window_thread: Some((window_thread, window_finished)), render_thread: render_thread.ok().map(|handle| (handle, render_finished)) };
     match render_wait.recv_timeout(READY_WAIT) {
         Ok(Ok(())) => Ok(layer),
         Ok(Err(error)) => {
@@ -562,18 +612,19 @@ pub fn ours_left() -> usize {
 impl Layer {
     pub fn close(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(thread) = self.render_thread.take() {
-            let _ = thread.join();
-        }
+        let rendered = finish(self.render_thread.take());
         let _ = unsafe { PostMessageW(Some(hwnd(self.window)), CLOSE, WPARAM(0), LPARAM(0)) };
-        if let Some(thread) = self.window_thread.take() {
-            let _ = thread.join();
+        let windowed = finish(self.window_thread.take());
+        if !rendered || !windowed {
+            if let Ok(mut stats) = self.stats.lock() {
+                stats.error.get_or_insert(format!("a layer thread did not stop within three seconds, render {rendered} window {windowed}"));
+            }
         }
     }
 
     pub fn in_place(&self) -> bool {
         match self.layout {
-            Layout::InProgman { icons, .. } => in_place(hwnd(self.window), hwnd(icons)),
+            Layout::InProgman { icons, .. } | Layout::ProgmanOnly { icons, .. } => in_place(hwnd(self.window), hwnd(icons)),
             Layout::InWorkerW { .. } => unsafe { IsWindow(Some(hwnd(self.window))) }.as_bool(),
         }
     }
