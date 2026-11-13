@@ -125,10 +125,22 @@ function Sharpener() {
   useEffect(() => {
     if (!lite) return;
     return whenReady(
-      () => setIndex(0),
+      () => {
+        runtime.sharpening = true;
+        setIndex(0);
+      },
       () => runtime.props && quality.tier === 'full' && layoutFor(window.innerWidth, window.innerHeight) !== 'phone',
     );
   }, []);
+  useEffect(() => {
+    if (index >= heroes.length) runtime.sharpening = false;
+  }, [index]);
+  useEffect(
+    () => () => {
+      runtime.sharpening = false;
+    },
+    [],
+  );
   if (index < 0 || index >= heroes.length) return null;
   return (
     <Suspense fallback={null}>

@@ -34,22 +34,25 @@ class Ring {
     this.count = 0;
   }
 
-  result = { mean: 0, max: 0, n: 0 };
+  result = { mean: 0, max: 0, n: 0, over: 0 };
 
-  stats(now: number, window: number) {
+  stats(now: number, window: number, limit = Infinity) {
     let sum = 0;
     let max = 0;
     let n = 0;
+    let over = 0;
     for (let i = 1; i <= this.count; i++) {
       const at = (this.head - i + SIZE) % SIZE;
       if (now - this.times[at] > window) break;
       sum += this.values[at];
       max = Math.max(max, this.values[at]);
+      if (this.values[at] > limit) over += 1;
       n += 1;
     }
     this.result.mean = n ? sum / n : 0;
     this.result.max = max;
     this.result.n = n;
+    this.result.over = over;
     return this.result;
   }
 }
@@ -117,17 +120,17 @@ export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | n
         fade.current.style.opacity = '0';
       }
     }
-    if (!runtime.ready || !runtime.props || !runtime.scenery) {
+    if (!runtime.ready || !runtime.props || !runtime.scenery || runtime.sharpening) {
       state.start = now;
       state.frames.clear();
       state.gpu.clear();
       return;
     }
     if (now - state.start < WARMUP || now - state.changed < SETTLE) return;
-    const frames = state.frames.stats(now, DOWN_WINDOW);
-    const slowFrames = frames.n >= 8 && frames.mean > DOWN_LIMIT;
-    const gpuShort = state.gpu.stats(now, DOWN_WINDOW);
-    const slow = slowFrames || (gpuShort.n >= 8 && gpuShort.mean > DOWN_LIMIT);
+    const frames = state.frames.stats(now, DOWN_WINDOW, DOWN_LIMIT);
+    const slowFrames = frames.n >= 8 && frames.over * 2 >= frames.n;
+    const gpuShort = state.gpu.stats(now, DOWN_WINDOW, DOWN_LIMIT);
+    const slow = slowFrames || (gpuShort.n >= 8 && gpuShort.over * 2 >= gpuShort.n);
     if (slow && quality.canDown()) {
       state.failedAt[quality.level] = now;
       state.failures[quality.level] += 1;
@@ -139,7 +142,7 @@ export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | n
     const quiet = gpuLong.n >= 90 && gpuLong.max < UP_LIMIT;
     const framesLong = state.frames.stats(now, UP_WINDOW);
     const target = quality.level - 1;
-    const allowed = state.failures[target] < 2 && now - state.failedAt[target] > RETRY;
+    const allowed = state.failures[target] < 1 && now - state.failedAt[target] > RETRY;
     const roomy = allowed && quiet && framesLong.mean < 17.5 && now - state.changed > UP_WINDOW;
     if (roomy) change(() => quality.up());
   }, 2);
