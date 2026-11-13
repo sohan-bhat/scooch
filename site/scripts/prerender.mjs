@@ -28,7 +28,7 @@ try {
     `<link rel="preload" as="image" href="/scooch/stills/hero-desktop.webp" media="${wide}" fetchpriority="high" />`,
     `<link rel="preload" as="image" href="/scooch/stills/hero-square.webp" media="${square}" fetchpriority="high" />`,
     `<link rel="preload" as="image" href="/scooch/stills/hero-phone.webp" media="${tall}" fetchpriority="high" />`,
-    stage ? `<link rel="modulepreload" crossorigin href="/scooch/assets/${stage}" fetchpriority="high" />` : '',
+    stage ? `<link rel="modulepreload" crossorigin href="/scooch/assets/${stage}" media="${story}" fetchpriority="high" />` : '',
     `<link rel="preload" as="fetch" crossorigin href="/scooch/demo/manifest.json" media="${story}" />`,
     ...['laptop', 'desk', 'lamp', 'notepads', 'stationery'].map((model) => `<link rel="preload" as="fetch" crossorigin href="/scooch/models/lite/${model}.glb" media="${story}" />`),
     ...['basis_transcoder.js', 'basis_transcoder.wasm'].map((file) => `<link rel="preload" as="fetch" crossorigin href="/scooch/basis/${file}" media="${story}" />`),
