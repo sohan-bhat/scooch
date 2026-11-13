@@ -71,14 +71,23 @@ pub fn set_wallpaper(marker: MainThreadMarker, id: &str, path: &Path) -> Result<
 }
 
 pub fn decode(path: &Path) -> Result<RgbImage> {
+    match matched(path) {
+        Ok(image) => Ok(image),
+        Err(error) => scooch_core::open(path).map_err(|_| error),
+    }
+}
+
+pub fn profile() -> Option<Vec<u8>> {
+    let space = Owned::new(unsafe { sys::CGColorSpaceCreateWithName(sys::kCGColorSpaceSRGB) })?;
+    let data = Owned::new(unsafe { sys::CGColorSpaceCopyICCData(space.0) })?;
+    let length = usize::try_from(unsafe { sys::CFDataGetLength(data.0) }).ok()?;
+    let bytes = unsafe { sys::CFDataGetBytePtr(data.0) };
+    (!bytes.is_null() && length > 0).then(|| unsafe { std::slice::from_raw_parts(bytes, length) }.to_vec())
+}
+
+fn matched(path: &Path) -> Result<RgbImage> {
     let url = NSURL::from_file_path(path).ok_or_else(|| anyhow!("{} is not a usable path.", path.display()))?;
     let source = Owned::new(unsafe { sys::CGImageSourceCreateWithURL(&*url as *const NSURL as Ref, null()) });
-    let upright = source.as_ref().and_then(orientation).is_none_or(|turn| turn == 1);
-    if upright {
-        if let Ok(image) = scooch_core::open(path) {
-            return Ok(image);
-        }
-    }
     let source = source.with_context(|| format!("{} is not a picture macOS can read.", path.display()))?;
     let (wide, tall) = size(&source).with_context(|| format!("{} has no readable size.", path.display()))?;
     let longest: Retained<AnyObject> = NSNumber::new_usize(wide.max(tall)).into();
@@ -100,10 +109,6 @@ fn property(source: &Owned, name: Ref) -> Option<usize> {
     let properties = unsafe { &*(properties.0 as *const AnyObject) };
     let value: Option<Retained<AnyObject>> = unsafe { msg_send![properties, objectForKey: key(name)] };
     value?.downcast_ref::<NSNumber>().map(|number| number.as_usize())
-}
-
-fn orientation(source: &Owned) -> Option<usize> {
-    property(source, unsafe { sys::kCGImagePropertyOrientation })
 }
 
 fn size(source: &Owned) -> Option<(usize, usize)> {
@@ -139,7 +144,46 @@ pub fn pack(canvas: &mut Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
-    use super::pack;
+    use super::*;
+
+    fn p3_strip(path: &Path, colors: &[[u8; 3]]) {
+        let space = Owned::new(unsafe { sys::CGColorSpaceCreateWithName(sys::kCGColorSpaceDisplayP3) }).unwrap();
+        let wide = colors.len();
+        let mut canvas: Vec<u8> = colors.iter().flat_map(|[red, green, blue]| [*red, *green, *blue, 255]).collect();
+        let context = Owned::new(unsafe { sys::CGBitmapContextCreate(canvas.as_mut_ptr().cast(), wide, 1, 8, wide * 4, space.0, sys::BITMAP_RGBX) }).unwrap();
+        let image = Owned::new(unsafe { sys::CGBitmapContextCreateImage(context.0) }).unwrap();
+        let url = NSURL::from_file_path(path).unwrap();
+        let kind = NSString::from_str("public.png");
+        let destination = Owned::new(unsafe { sys::CGImageDestinationCreateWithURL(&*url as *const NSURL as Ref, &*kind as *const NSString as Ref, 1, null()) }).unwrap();
+        unsafe {
+            sys::CGImageDestinationAddImage(destination.0, image.0, null());
+            assert_eq!(sys::CGImageDestinationFinalize(destination.0), 1);
+        }
+    }
+
+    fn near(found: &[u8], wanted: [u8; 3], slack: u8) -> bool {
+        found.iter().zip(wanted).all(|(a, b)| a.abs_diff(b) <= slack)
+    }
+
+    #[test]
+    fn display_p3_pictures_are_matched_into_srgb() {
+        let folder = crate::state::scratch("p3");
+        let path = folder.join("p3.png");
+        p3_strip(&path, &[[128, 128, 128], [204, 77, 51], [255, 0, 0]]);
+        let image = decode(&path).unwrap();
+        let raw = image.as_raw();
+        assert_eq!(image.dimensions(), (3, 1));
+        assert!(near(&raw[0..3], [128, 128, 128], 2), "{:?}", &raw[0..3]);
+        assert!(near(&raw[3..6], [221, 64, 37], 4), "{:?}", &raw[3..6]);
+        assert!(raw[6] >= 250 && raw[7] <= 20 && raw[8] <= 20, "{:?}", &raw[6..9]);
+    }
+
+    #[test]
+    fn the_srgb_profile_is_available_to_embed() {
+        let profile = profile().unwrap();
+        assert!(profile.len() > 128);
+        assert_eq!(&profile[36..40], b"acsp");
+    }
 
     #[test]
     fn packing_drops_the_fourth_byte_in_place() {

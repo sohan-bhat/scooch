@@ -147,6 +147,10 @@ impl Desktop for Mac {
     fn gallery(&self) -> Vec<PathBuf> {
         GALLERY.iter().map(PathBuf::from).collect()
     }
+
+    fn profile(&self) -> Option<Vec<u8>> {
+        picture::profile()
+    }
 }
 
 impl Mac {

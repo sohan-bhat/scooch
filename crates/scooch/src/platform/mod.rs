@@ -64,6 +64,9 @@ pub trait Desktop: Send + Sync {
     fn gallery(&self) -> Vec<PathBuf> {
         Vec::new()
     }
+    fn profile(&self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 pub fn folder_and_children(root: &Path) -> Vec<PathBuf> {

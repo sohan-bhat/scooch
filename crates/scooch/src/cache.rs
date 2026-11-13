@@ -30,7 +30,7 @@ fn stir(value: u64) -> u64 {
 
 pub fn key(source: &Path) -> Result<u64> {
     let bytes = fs::read(source).with_context(|| format!("Scooch could not read {}, so check that the picture is still there.", source.display()))?;
-    Ok(digest(&bytes) ^ digest(env!("CARGO_PKG_VERSION").as_bytes()).rotate_left(17))
+    Ok(digest(&bytes) ^ digest(concat!(env!("CARGO_PKG_VERSION"), "-srgb").as_bytes()).rotate_left(17))
 }
 
 pub fn entry(store: &Store, key: u64) -> PathBuf {

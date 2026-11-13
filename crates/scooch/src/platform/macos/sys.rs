@@ -68,12 +68,15 @@ extern "C" {
     pub fn CFPreferencesAppSynchronize(application: Ref) -> u8;
     pub fn CFUUIDCreateString(allocator: Ref, uuid: Ref) -> Ref;
     pub fn CFDataCreate(allocator: Ref, bytes: *const u8, length: isize) -> Ref;
+    pub fn CFDataGetLength(data: Ref) -> isize;
+    pub fn CFDataGetBytePtr(data: Ref) -> *const u8;
     pub fn CFPropertyListCreateWithData(allocator: Ref, data: Ref, options: usize, format: *mut isize, error: *mut Ref) -> Ref;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     pub static kCGColorSpaceSRGB: Ref;
+    pub fn CGColorSpaceCopyICCData(space: Ref) -> Ref;
     pub fn CGDisplayBounds(display: u32) -> CGRect;
     pub fn CGColorSpaceCreateWithName(name: Ref) -> Ref;
     pub fn CGBitmapContextCreate(data: *mut c_void, width: usize, height: usize, bits: usize, row: usize, space: Ref, info: u32) -> Ref;
@@ -90,12 +93,26 @@ extern "C" {
     pub static kCGImageSourceThumbnailMaxPixelSize: Ref;
     pub static kCGImagePropertyPixelWidth: Ref;
     pub static kCGImagePropertyPixelHeight: Ref;
-    pub static kCGImagePropertyOrientation: Ref;
     pub fn CGImageSourceCreateWithURL(url: Ref, options: Ref) -> Ref;
     pub fn CGImageSourceCopyPropertiesAtIndex(source: Ref, index: usize, options: Ref) -> Ref;
     pub fn CGImageSourceCreateThumbnailAtIndex(source: Ref, index: usize, options: Ref) -> Ref;
     pub fn CGImageSourceGetCount(source: Ref) -> usize;
     pub fn CGImageSourceGetType(source: Ref) -> Ref;
+}
+
+#[cfg(test)]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    pub static kCGColorSpaceDisplayP3: Ref;
+    pub fn CGBitmapContextCreateImage(context: Ref) -> Ref;
+}
+
+#[cfg(test)]
+#[link(name = "ImageIO", kind = "framework")]
+extern "C" {
+    pub fn CGImageDestinationCreateWithURL(url: Ref, kind: Ref, count: usize, options: Ref) -> Ref;
+    pub fn CGImageDestinationAddImage(destination: Ref, image: Ref, properties: Ref);
+    pub fn CGImageDestinationFinalize(destination: Ref) -> u8;
 }
 
 #[link(name = "CoreServices", kind = "framework")]

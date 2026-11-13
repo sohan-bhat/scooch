@@ -242,7 +242,7 @@ impl Daemon {
         drop(analysis);
         lap("render", &mut clock);
         let format = self.desktop.format();
-        let bytes = encode(&picture, format)?;
+        let bytes = encode(&picture, format, self.desktop.profile().as_deref())?;
         drop(picture);
         lap("encode", &mut clock);
         entry.placement = Some(placement);
@@ -353,20 +353,23 @@ fn flip_check(analysis: &Analysis, scene: &Scene, options: &Options, placement: 
     flip_helps(hidden, scooch_core::hidden_share(analysis, scene, &flipped))
 }
 
-pub fn encode(picture: &RgbImage, format: Format) -> Result<Vec<u8>> {
+pub fn encode(picture: &RgbImage, format: Format, profile: Option<&[u8]>) -> Result<Vec<u8>> {
     Ok(match format {
-        Format::Jpeg => jpeg(picture)?,
+        Format::Jpeg => jpeg(picture, profile)?,
         Format::Png => scooch_core::encode_png(picture)?,
     })
 }
 
-fn jpeg(picture: &RgbImage) -> Result<Vec<u8>> {
+fn jpeg(picture: &RgbImage, profile: Option<&[u8]>) -> Result<Vec<u8>> {
     let (Ok(width), Ok(height)) = (u16::try_from(picture.width()), u16::try_from(picture.height())) else {
         return Ok(scooch_core::encode_jpeg(picture, QUALITY)?);
     };
     let mut out = Vec::with_capacity(picture.as_raw().len() / 6);
     let mut encoder = jpeg_encoder::Encoder::new(&mut out, QUALITY);
     encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+    if let Some(profile) = profile {
+        encoder.add_icc_profile(profile)?;
+    }
     encoder.encode(picture.as_raw(), width, height, jpeg_encoder::ColorType::Rgb)?;
     Ok(out)
 }
@@ -982,7 +985,10 @@ pub mod tests {
     #[test]
     fn jpeg_output_decodes_to_the_same_size_and_close_colors() {
         let picture = scene::sample(301, 157);
-        let bytes = encode(&picture, Format::Jpeg).unwrap();
+        let bytes = encode(&picture, Format::Jpeg, None).unwrap();
+        assert!(!bytes.windows(12).any(|window| window == b"ICC_PROFILE\0"));
+        let marked = encode(&picture, Format::Jpeg, Some(&[7u8; 300])).unwrap();
+        assert!(marked.windows(12).any(|window| window == b"ICC_PROFILE\0"));
         let folder = scratch("jpeg");
         std::fs::write(folder.join("a.jpg"), &bytes).unwrap();
         let back = scooch_core::open(&folder.join("a.jpg")).unwrap();
