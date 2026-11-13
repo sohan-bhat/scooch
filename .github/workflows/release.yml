@@ -8,7 +8,22 @@ permissions:
   contents: write
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          want="${TAG#v}"
+          have=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$want" != "$have" ]; then
+            echo "The tag says $want and Cargo.toml says $have."
+            exit 1
+          fi
+
   macos:
+    needs: version
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +50,7 @@ jobs:
             arch: x86_64
           - runner: ubuntu-24.04-arm
             arch: aarch64
+    needs: version
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +69,7 @@ jobs:
     strategy:
       matrix:
         arch: [x86_64, aarch64]
+    needs: version
     runs-on: windows-latest
     env:
       RUSTFLAGS: -C target-feature=+crt-static
@@ -92,3 +109,7 @@ jobs:
           else
             gh release create "$TAG" dist/* --title "Scooch ${TAG#v}" --generate-notes
           fi
+
+  install-check:
+    needs: publish
+    uses: ./.github/workflows/install-check.yml

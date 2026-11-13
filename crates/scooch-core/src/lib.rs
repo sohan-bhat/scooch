@@ -29,11 +29,16 @@ pub struct Scene {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Options {
     pub strength: f32,
     pub max_zoom: f32,
     pub mirror: bool,
     pub pads: f32,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 impl Default for Options {
@@ -59,9 +64,13 @@ pub struct Analysis {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Placement {
+    #[serde(default)]
     pub fx: Vec<f32>,
+    #[serde(default)]
     pub fy: Vec<f32>,
+    #[serde(default = "one")]
     pub zoom: f32,
+    #[serde(default)]
     pub mirrored: bool,
     #[serde(default)]
     pub crop: [f32; 4],

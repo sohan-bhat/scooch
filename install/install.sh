@@ -65,10 +65,16 @@ remember() {
       line="export PATH=\"$dir:\$PATH\""
       ;;
     bash)
-      if [ "$(uname -s)" = "Darwin" ]; then
-        file="$HOME/.bash_profile"
-      else
+      if [ "$(uname -s)" != "Darwin" ]; then
         file="$HOME/.bashrc"
+      elif [ -f "$HOME/.bash_profile" ]; then
+        file="$HOME/.bash_profile"
+      elif [ -f "$HOME/.bash_login" ]; then
+        file="$HOME/.bash_login"
+      elif [ -f "$HOME/.profile" ]; then
+        file="$HOME/.profile"
+      else
+        file="$HOME/.bash_profile"
       fi
       line="export PATH=\"$dir:\$PATH\""
       ;;
