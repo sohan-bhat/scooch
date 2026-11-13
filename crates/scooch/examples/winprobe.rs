@@ -2130,116 +2130,204 @@ mod probe {
     const PATTERN: TestPattern = TestPattern { cycle_ms: 500 };
     const ANSWER: Duration = Duration::from_secs(3);
 
-    fn rung(p: &mut Probe, screen: &Screen, method: Method, field: &RgbImage, sight: &Sight, save: Option<&str>) -> Result<Verdict> {
+    struct Stage<'a> {
+        screen: &'a Screen,
+        picture: &'a Path,
+        field: &'a RgbImage,
+        sight: &'a Sight,
+    }
+
+    fn rung(p: &mut Probe, helper: &mut Helper, id: u32, stage: &Stage, save: &str) -> Result<Verdict> {
+        let Stage { screen, picture, field, sight } = *stage;
         let area = screen_rect(screen);
-        let opened = Instant::now();
-        let layer = layer::open(screen, method, pattern_of(field), Duration::from_millis(500))?;
-        let open_ms = opened.elapsed().as_millis();
+        let asked = Instant::now();
+        helper.ask_open(id, screen, Some(picture))?;
+        let mut opening: Vec<(u128, bool, f32)> = Vec::new();
+        let mut shown: Option<(u64, u128)> = None;
+        while asked.elapsed() < Duration::from_secs(4) {
+            if let Ok(shot) = capture(area) {
+                let at = asked.elapsed().as_millis();
+                let marker = shot.get_pixel(shot.width().saturating_sub(16), 16).0;
+                opening.push((at, green(&marker), mean_gap(&shot, field)));
+            }
+            match shown {
+                Some((_, at)) if asked.elapsed().as_millis() > at + 200 => break,
+                Some(_) => {}
+                None => match helper.next(Duration::from_millis(1)) {
+                    Some(Reply::Shown { id: seen, ms }) if seen == id => shown = Some((ms, asked.elapsed().as_millis())),
+                    Some(Reply::Failed { why, .. }) => bail!("the helper could not open the layer {why}"),
+                    _ => {}
+                },
+            }
+        }
+        let (shown_ms, _) = shown.context("the helper never said the layer was shown")?;
+        let seen = opening.iter().find(|(_, marker, _)| *marker).map(|(at, ..)| *at);
+        let flashes = opening.iter().filter(|(_, _, gap)| *gap > 8.0).count();
+        let largest = opening.iter().map(|(_, _, gap)| *gap).fold(0.0f32, f32::max);
         let length = Duration::from_millis(1500);
-        let looks = watch_screen(area, sight, length, |_| {});
-        let kept = save.and_then(|_| capture(area).ok());
-        let verdict = judge(&looks, length);
-        let seen = looks.iter().find(|look| look.marker).map(|look| look.at);
-        let (presents, rate, first, adapter, error) = present_rate(&layer);
-        let in_place = layer.in_place();
-        drop(layer);
-        pump(Duration::from_millis(400));
+        helper.ask_play(id, PATTERN, 1500)?;
+        let (looks, worst) = watch(area, sight, length, |_| {});
+        let (frames, slow) = helper.played(id, ANSWER)?;
+        let mut verdict = judge(&looks, length);
+        verdict.flashes = flashes;
+        let ordered = layer::layers().first().is_some_and(|window| layer::under_icons(*window));
+        let closing = Instant::now();
+        helper.close(id, ANSWER)?;
+        let closed = closing.elapsed().as_millis();
+        pump(Duration::from_millis(300));
         let left = layer::ours_left();
         let after = capture(area).ok().map(|shot| mean_gap(&shot, field));
-        if let (Some(name), Some(shot)) = (save, kept) {
-            let _ = fs::write(p.out.join(format!("{name}.png")), scooch_core::encode_png(&shot)?);
+        if let Some(shot) = worst {
+            let _ = fs::write(p.out.join(format!("{save}.png")), scooch_core::encode_png(&shot)?);
         }
         p.line(format!(
-            "  - opened in {open_ms} ms, first frame after {first:?} ms on {adapter}, first seen on screen {seen:?} ms after the open returned, {presents} presents at {rate:.1} per second, present error {error:?}"
+            "  - shown {shown_ms} ms after open by the helper's clock, marker first captured {seen:?} ms after open was sent, {flashes} of {} captures during the open differ from the picture, largest gap {largest:.2}",
+            opening.len()
         ));
         p.line(format!(
-            "  - {} captures at {:.1} per second, bar seen in {}, steps forward {} backward {}, marker in {}, marker gaps {}, most changed icon pixels away from the bar {}, other changed pixels {}, ordered under the icons {in_place}",
+            "  - played {frames} frames with {slow} slower than 25 ms, {} captures at {:.1} per second, bar seen in {}, steps forward {} backward {}, marker in {}, marker gaps {}, most changed icon pixels {}, other changed pixels {}, ordered under the icons {ordered}",
             verdict.captures, verdict.rate, verdict.bars, verdict.forward, verdict.backward, verdict.markers, verdict.gaps, verdict.icons_changed, verdict.others_changed
         ));
-        p.line(format!("  - after closing, windows of ours left {left}, screen gap to the wallpaper {after:?}"));
+        p.line(format!("  - closed {closed} ms after close was sent, windows of ours left {left}, screen gap to the picture {after:?}"));
         if left > 0 {
-            p.failed.push(format!("{} left {left} windows behind", method.name()));
+            p.failed.push(format!("{save} left {left} windows behind"));
         }
         Ok(verdict)
     }
 
-    fn works(verdict: &Verdict, watched: usize) -> bool {
-        watched > 0 && verdict.bars >= 3 && verdict.forward > verdict.backward && verdict.markers > 0 && verdict.icons_changed * 50 < watched
+    fn median(mut values: Vec<u128>) -> Option<u128> {
+        values.sort_unstable();
+        values.get(values.len() / 2).copied()
     }
 
-    fn icon_rects() -> Result<Vec<Rect>> {
-        let view = shell::view()?;
-        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
-        Ok(automation_rects(&automation, view.list)?.into_iter().map(|(_, rect)| rect).collect())
+    fn latency(p: &mut Probe, helper: &mut Helper, id: &mut u32, screen: &Screen, picture: &Path) -> Result<()> {
+        let spot = spot_of(screen_rect(screen));
+        let (mut seen, mut told) = (Vec::new(), Vec::new());
+        for _ in 0..7 {
+            *id += 1;
+            let asked = Instant::now();
+            helper.ask_open(*id, screen, Some(picture))?;
+            let on = marker_until(spot, true, Duration::from_secs(2));
+            told.push(u128::from(helper.shown(*id, ANSWER)?));
+            if let Some(on) = on {
+                seen.push(on.as_millis().min(asked.elapsed().as_millis()));
+            }
+            helper.close(*id, ANSWER)?;
+            let _ = marker_until(spot, false, Duration::from_secs(1));
+            pump(Duration::from_millis(150));
+        }
+        let middle = median(seen.clone());
+        p.line(format!("- warm helper, open sent to first frame captured on screen {seen:?} ms, median {middle:?} ms, helper said shown after {told:?} ms"));
+        p.line(format!("- target under 80 ms {}", if middle.is_some_and(|middle| middle < 80) { "met" } else { "not met" }));
+        Ok(())
     }
 
-    fn settle(area: RECT, limit: Duration) -> Result<RgbImage> {
+    fn while_set(p: &mut Probe, helper: &mut Helper, id: u32, stage: &Stage, label: &str, set: impl FnOnce() -> Result<()>) -> Result<()> {
+        let Stage { screen, picture, sight, .. } = *stage;
+        let area = screen_rect(screen);
+        helper.open(id, screen, Some(picture), ANSWER)?;
+        let showing = marker_until(spot_of(area), true, Duration::from_secs(1));
+        helper.ask_play(id, PATTERN, 2500)?;
         let started = Instant::now();
-        let bottom = work_area().map_or(area.bottom, |work| work.bottom.min(area.bottom)) - area.top;
-        let mut last = capture(area)?;
-        while started.elapsed() < limit {
-            pump(Duration::from_millis(300));
-            let shot = capture(area)?;
-            let rows = (bottom.max(0) as usize * shot.width() as usize * 3).min(shot.as_raw().len());
-            let still = shot.dimensions() == last.dimensions() && shot.as_raw()[..rows] == last.as_raw()[..rows];
-            last = shot;
-            if still {
-                break;
-            }
-        }
-        Ok(last)
-    }
-
-    fn sight_of(p: &mut Probe, area: RECT, field: &RgbImage, name: &str) -> Result<Sight> {
-        park_cursor();
-        let baseline = settle(area, Duration::from_secs(6))?;
-        let _ = fs::write(p.out.join(format!("{name}.png")), scooch_core::encode_png(&baseline)?);
-        let rects = icon_rects().unwrap_or_default();
-        let sight = Sight::new(baseline, field, (area.left, area.top), &rects);
-        p.line(format!(
-            "- {} icon pixels watched inside {} icon rectangles, {} other pixels differ from the wallpaper, bar row {}, screen gap to the wallpaper {}",
-            sight.icons.len(),
-            rects.len(),
-            sight.others.len(),
-            sight.row,
-            mean_gap(&sight.baseline, field)
-        ));
-        if sight.icons.is_empty() {
-            p.failed.push(format!("no icon pixels to watch for {name}"));
-        }
-        Ok(sight)
-    }
-
-    fn cycles(p: &mut Probe, screen: &Screen, method: Method, field: &RgbImage, gpu: Option<layer::Gpu>, label: &str) {
-        let start = own_counts();
-        let mut firsts = Vec::new();
-        let mut megabytes = Vec::new();
-        for _ in 0..20 {
-            let opened = Instant::now();
-            match layer::open_on(screen, method, pattern_of(field), Duration::from_millis(500), gpu.clone()) {
-                Ok(layer) => {
-                    firsts.push(layer.stats.lock().ok().and_then(|stats| stats.first).map_or(opened.elapsed().as_millis(), |first| first.as_millis()));
-                    pump(Duration::from_millis(50));
-                    drop(layer);
+        let (mut looks, mut through, mut set) = (Vec::new(), None, Some(set));
+        while started.elapsed() < Duration::from_millis(2500) {
+            let at = started.elapsed().as_millis();
+            if at > 300 {
+                if let Some(set) = set.take() {
+                    let _ = set();
                 }
-                Err(error) => p.line(format!("- an open in the loop failed {error:#}")),
             }
-            megabytes.push(own_counts().4 / 1_000_000);
+            if let Ok(shot) = capture(area) {
+                let look = sight.look(&shot, at);
+                if through.is_none() && !look.marker && look.bar.is_none() {
+                    through = Some(shot);
+                }
+                looks.push(look);
+            }
+            drain();
         }
-        pump(Duration::from_millis(500));
-        let end = own_counts();
-        pump(Duration::from_secs(2));
-        let later = own_counts();
-        firsts.sort_unstable();
+        let played = helper.played(id, ANSWER);
+        let ordered = layer::layers().first().is_some_and(|window| layer::under_icons(*window));
+        helper.close(id, ANSWER)?;
+        let verdict = judge(&looks, Duration::from_millis(2500));
+        let missing: Vec<u128> = looks.iter().filter(|look| !look.marker && look.bar.is_none()).map(|look| look.at).collect();
+        let partial: Vec<u128> = looks.iter().filter(|look| look.marker != look.bar.is_some()).map(|look| look.at).collect();
+        if let Some(shot) = through {
+            let _ = fs::write(p.out.join(format!("through-{}.png", label.replace(' ', "-"))), scooch_core::encode_png(&shot)?);
+        }
         p.line(format!(
-            "- twenty opens and closes {label}, windows {} to {}, GDI objects {} to {}, user objects {} to {}, handles {} to {}, private bytes {} to {} and {} two seconds later",
-            start.0, end.0, start.1, end.1, start.2, end.2, start.3, end.3, start.4, end.4, later.4
+            "- wallpaper set through {label} at 300 ms while open, layer captured after {:?} ms, {} captures, system layer showed through in {} at {:?} ms, bar or marker alone in {} at {:?} ms, still under the icons {ordered}, bar steps forward {} backward {}, helper played {:?}",
+            showing.map(|took| took.as_millis()),
+            verdict.captures,
+            missing.len(),
+            missing.iter().take(12).collect::<Vec<_>>(),
+            partial.len(),
+            partial.iter().take(12).collect::<Vec<_>>(),
+            verdict.forward,
+            verdict.backward,
+            played.map_err(|error| error.to_string())
         ));
-        p.line(format!("  - private megabytes after each close {megabytes:?}"));
-        p.line(format!("  - first frame median {:?} ms, slowest {:?} ms", firsts.get(firsts.len() / 2), firsts.last()));
-        if end.0 > 0 || end.1 > start.1 + 4 || end.2 > start.2 + 4 || end.3 > start.3 + 16 {
-            p.failed.push(format!("twenty opens and closes {label} leaked windows, GDI or user objects or handles"));
+        if !missing.is_empty() {
+            p.failed.push(format!("the system wallpaper showed through the layer {} times after a set through {label}", missing.len()));
         }
+        Ok(())
+    }
+
+    fn cycles(p: &mut Probe, helper: &mut Helper, id: &mut u32, screen: &Screen, picture: &Path) -> Result<()> {
+        let pid = helper.pid;
+        let mut marks: Vec<(u32, Option<(usize, u32)>)> = Vec::new();
+        let (mut first, mut last) = (None, None);
+        for cycle in 1..=100u32 {
+            *id += 1;
+            helper.open(*id, screen, Some(picture), ANSWER)?;
+            helper.play(*id, PATTERN, 100, ANSWER)?;
+            helper.close(*id, ANSWER)?;
+            drain();
+            if [1, 20, 50, 100].contains(&cycle) {
+                std::thread::sleep(Duration::from_millis(300));
+                marks.push((cycle, process_numbers(pid)));
+                if cycle == 1 {
+                    first = handle_types(pid);
+                }
+                if cycle == 100 {
+                    last = handle_types(pid);
+                }
+            }
+        }
+        let shown: Vec<String> = marks.iter().map(|(cycle, numbers)| format!("after {cycle}: {}", numbers.map_or("unreadable".to_string(), |(private, handles)| format!("{} MB private, {handles} handles", private / 1_000_000)))).collect();
+        p.line(format!("- a hundred opens, plays and closes in one helper, {}", shown.join(", ")));
+        match (&first, &last) {
+            (Some(first), Some(last)) => {
+                let mut kinds: Vec<String> = first.keys().chain(last.keys()).cloned().collect();
+                kinds.sort();
+                kinds.dedup();
+                let moved: Vec<String> = kinds
+                    .iter()
+                    .filter_map(|kind| {
+                        let (before, after) = (first.get(kind).copied().unwrap_or(0), last.get(kind).copied().unwrap_or(0));
+                        (before != after).then(|| format!("{kind} {before} to {after}"))
+                    })
+                    .collect();
+                p.line(format!("  - helper handles by type after cycle 1 {first:?}"));
+                p.line(format!("  - handle types that changed by cycle 100 {}", if moved.is_empty() { "none".to_string() } else { moved.join(", ") }));
+            }
+            _ => p.line("  - the system handle table could not be read".to_string()),
+        }
+        let at = |cycle: u32| marks.iter().find(|(seen, _)| *seen == cycle).and_then(|(_, numbers)| *numbers);
+        if let (Some(one), Some(twenty)) = (at(1), at(20)) {
+            if twenty.0 > one.0 + 15_000_000 {
+                p.failed.push(format!("helper private bytes grew {} MB over twenty cycles", (twenty.0 - one.0) / 1_000_000));
+            }
+        }
+        if let (Some(fifty), Some(hundred)) = (at(50), at(100)) {
+            if hundred.1 > fifty.1 + 2 {
+                p.failed.push(format!("helper handles kept climbing from {} after cycle 50 to {} after cycle 100", fifty.1, hundred.1));
+            }
+        }
+        if layer::ours_left() > 0 {
+            p.failed.push("windows were left after the hundred cycles".into());
+        }
+        Ok(())
     }
 
     fn live(p: &mut Probe) -> Result<()> {
