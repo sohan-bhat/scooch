@@ -2151,41 +2151,39 @@ mod probe {
 
     struct Seen {
         at: f64,
-        disc: Option<(f32, f32)>,
+        half: RgbImage,
         inked: f32,
         step: u8,
-        thumb: RgbImage,
     }
 
     struct Dragged {
         dropped: f64,
         seen: Vec<Seen>,
         log: Vec<String>,
+        old: Option<PathBuf>,
+        old_tables: Option<Vec<u8>>,
     }
 
-    fn disc(shot: &Shot) -> Option<(f32, f32)> {
-        let (mut sx, mut sy, mut count) = (0f64, 0f64, 0usize);
-        for y in (0..shot.height).step_by(2) {
-            for x in (0..shot.width).step_by(2) {
-                if near(shot.at(x, y), [245, 196, 92]) {
-                    sx += x as f64;
-                    sy += y as f64;
-                    count += 1;
-                }
-            }
-        }
-        (count > 30).then(|| ((sx / count as f64) as f32, (sy / count as f64) as f32))
-    }
-
-    fn thumb(shot: &Shot) -> RgbImage {
-        let (width, height) = (shot.width / 4, shot.height / 4);
+    fn half_shot(shot: &Shot) -> RgbImage {
+        let (width, height) = (shot.width / 2, shot.height / 2);
         let mut rgb = Vec::with_capacity(width * height * 3);
         for y in 0..height {
             for x in 0..width {
-                rgb.extend_from_slice(&shot.at(x * 4, y * 4));
+                rgb.extend_from_slice(&shot.at(x * 2, y * 2));
             }
         }
         RgbImage::from_raw(width as u32, height as u32, rgb).unwrap_or_default()
+    }
+
+    fn halved(image: &RgbImage) -> RgbImage {
+        let (width, height) = (image.width() / 2, image.height() / 2);
+        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                rgb.extend_from_slice(&image.get_pixel(x * 2, y * 2).0);
+            }
+        }
+        RgbImage::from_raw(width, height, rgb).unwrap_or_default()
     }
 
     fn stamp_of(line: &str) -> Option<f64> {
@@ -2210,8 +2208,16 @@ mod probe {
         ink
     }
 
+    fn tables_of(p: &Probe, output: &Path) -> Option<Vec<u8>> {
+        let name = output.file_name()?.to_string_lossy().into_owned();
+        let found = fs::read_dir(p.home.join("cache").join("tables")).ok()?.flatten().find(|file| file.file_name().to_string_lossy().starts_with(&format!("{name}.")))?;
+        fs::read(found.path()).ok()
+    }
+
     fn watch_drag(p: &mut Probe, display: u32, screen: &Screen, from: (f32, f32), to: (f32, f32), masks: &[Vec<(usize, usize)>]) -> Option<Dragged> {
         let baseline = grab(display)?;
+        let old = platform::current().ok().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
+        let old_tables = old.as_deref().and_then(|old| tables_of(p, old));
         let menu = (30.0 * screen.scale) as usize;
         let lines = daemon_log(p).lines().count();
         drag(from, to);
@@ -2226,7 +2232,7 @@ mod probe {
             let Some(shot) = grab(display) else { continue };
             let inked = masks.iter().map(|ink| ink.iter().filter(|(x, y)| !near(shot.at(*x, *y), baseline.at(*x, *y))).count() as f32 / ink.len().max(1) as f32).fold(0.0, f32::max);
             let step = previous.as_ref().map_or(0, |previous| difference(previous, &shot, &|_, y| y >= menu).max);
-            seen.push(Seen { at, disc: disc(&shot), inked, step, thumb: thumb(&shot) });
+            seen.push(Seen { at, half: half_shot(&shot), inked, step });
             previous = Some(shot);
             checks += 1;
             if done.is_none() && checks % 3 == 0 && new_lines(&daemon_log(p), lines).iter().any(|line| line.contains(" tick ")) {
@@ -2237,66 +2243,149 @@ mod probe {
             }
         }
         let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).collect();
-        Some(Dragged { dropped, seen, log })
+        Some(Dragged { dropped, seen, log, old, old_tables })
     }
 
     fn logged(dragged: &Dragged, word: &str) -> Option<f64> {
         dragged.log.iter().find(|line| line.contains(word)).and_then(|line| stamp_of(line))
     }
 
-    fn judge_glide(p: &mut Probe, dragged: &Dragged, label: &str, strip: Option<&Path>) -> bool {
-        let first = dragged.seen.first().and_then(|seen| seen.disc);
-        let last = dragged.seen.last().and_then(|seen| seen.disc);
-        let (Some(a), Some(b)) = (first, last) else {
-            p.line(format!("- {label}: the subject could not be found in the captures"));
+    fn mean_gap(a: &RgbImage, b: &RgbImage, region: &[usize]) -> f32 {
+        if region.is_empty() || a.dimensions() != b.dimensions() {
+            return f32::MAX;
+        }
+        let (x, y) = (a.as_raw(), b.as_raw());
+        let total: u64 = region.iter().map(|index| (0..3).map(|channel| u64::from(x[index * 3 + channel].abs_diff(y[index * 3 + channel]))).sum::<u64>()).sum();
+        total as f32 / (region.len() * 3) as f32
+    }
+
+    fn side(shot: &RgbImage, old: &RgbImage, new: &RgbImage, apart: &[usize]) -> char {
+        if apart.is_empty() {
+            return '=';
+        }
+        let (a, b) = (mean_gap(shot, old, apart), mean_gap(shot, new, apart));
+        if a < 3.0 && a * 3.0 < b {
+            'A'
+        } else if b < 3.0 && b * 3.0 < a {
+            'B'
+        } else {
+            '~'
+        }
+    }
+
+    fn judge_glide(p: &mut Probe, dragged: &Dragged, screen: &Screen, label: &str, evidence: Option<&str>) -> bool {
+        let desktop = platform::current().ok();
+        let new = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
+        let decode = |path: &Option<PathBuf>| path.as_deref().and_then(|path| objc2::rc::autoreleasepool(|_| picture::decode(path)).ok()).map(|image| halved(&image));
+        let (Some(old_still), Some(new_still)) = (decode(&dragged.old), decode(&new)) else {
+            p.line(format!("- {label}: the two stills could not be read, old {:?} new {new:?}", dragged.old));
             return false;
         };
-        let distance = |one: (f32, f32), two: (f32, f32)| ((one.0 - two.0).powi(2) + (one.1 - two.1).powi(2)).sqrt();
-        let span = distance(a, b).max(1.0);
-        let along = |point: (f32, f32)| ((point.0 - a.0) * (b.0 - a.0) + (point.1 - a.1) * (b.1 - a.1)) / (span * span);
-        let positions: Vec<(f64, f32)> = dragged.seen.iter().filter_map(|seen| seen.disc.map(|disc| (seen.at - dragged.dropped, along(disc)))).collect();
-        let moving: Vec<&(f64, f32)> = positions.iter().filter(|(_, t)| *t > 2.0 / span && *t < 1.0 - 2.0 / span).collect();
-        let steady = positions.windows(2).all(|pair| pair[1].1 >= pair[0].1 - 0.03);
-        let reached = positions.iter().position(|(_, t)| *t >= 1.0 - 2.0 / span);
-        let back = reached.is_some_and(|reached| positions[reached..].iter().any(|(_, t)| *t <= 2.0 / span));
-        let first_move = positions.iter().find(|(_, t)| *t > 2.0 / span).map(|(at, _)| at * 1000.0);
-        let inked = dragged.seen.iter().map(|seen| seen.inked).fold(0.0, f32::max);
+        let (width, height) = (old_still.width() as usize, old_still.height() as usize);
+        let icons: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().map(|(_, rect)| rect).collect();
+        let half = screen.scale / 2.0;
+        let keep: Vec<usize> = (0..height)
+            .step_by(2)
+            .flat_map(|y| (0..width).step_by(2).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let (px, py) = (*x as f32 / half + screen.frame.x, *y as f32 / half + screen.frame.y);
+                py - screen.frame.y >= 30.0 && !icons.iter().any(|icon| px >= icon.x - 12.0 && px < icon.x + icon.w + 12.0 && py >= icon.y - 12.0 && py < icon.y + icon.h + 12.0)
+            })
+            .map(|(x, y)| y * width + x)
+            .collect();
+        let (o, n) = (old_still.as_raw(), new_still.as_raw());
+        let apart: Vec<usize> = keep.iter().copied().filter(|index| (0..3).any(|channel| o[index * 3 + channel].abs_diff(n[index * 3 + channel]) > 24)).collect();
+        let new_tables = new.as_deref().and_then(|new| tables_of(p, new));
+        let frames: Vec<(f32, RgbImage)> = match (&dragged.old_tables, &new_tables, p.subject.clone()) {
+            (Some(old_tables), Some(new_tables), Some(subject)) => objc2::rc::autoreleasepool(|_| picture::decode(&subject)).ok().map_or(Vec::new(), |image| {
+                let canvas = scooch_core::canvas(&image, (width * 2) as u32, (height * 2) as u32);
+                match (scooch_core::Bundle::tables_from_bytes(old_tables, canvas.clone()), scooch_core::Bundle::tables_from_bytes(new_tables, canvas)) {
+                    (Ok(a), Ok(b)) => (0..=20).map(|step| step as f32 / 20.0).map(|s| (s, halved(&scooch_core::frame(&a, &b, s)))).collect(),
+                    _ => Vec::new(),
+                }
+            }),
+            _ => Vec::new(),
+        };
+        let classes: Vec<char> = dragged.seen.iter().map(|seen| side(&seen.half, &old_still, &new_still, &apart)).collect();
+        let fitted: Vec<Option<(f32, f32)>> = dragged.seen.iter().map(|seen| frames.iter().map(|(s, frame)| (*s, mean_gap(&seen.half, frame, &keep))).min_by(|a, b| a.1.total_cmp(&b.1))).collect();
+        let glide_at = logged(dragged, " glide open");
         let settled = logged(dragged, " glide settled");
         let closed = logged(dragged, " glide closed");
         let set = logged(dragged, " glide settle ");
+        let glided = logged(dragged, " glide glided");
+        let appeared = classes.iter().position(|class| *class == 'B');
+        let returned = appeared.map_or(0, |first| classes[first..].iter().filter(|class| **class == 'A').count());
+        let moving: Vec<usize> = (0..classes.len()).filter(|index| classes[*index] == '~' && fitted[*index].is_some_and(|(s, _)| s > 0.04 && s < 0.96)).collect();
+        let window: Vec<f32> = (0..classes.len()).filter(|index| glide_at.is_some_and(|at| dragged.seen[*index].at >= at) && settled.is_none_or(|settled| dragged.seen[*index].at <= settled)).filter_map(|index| fitted[index].map(|(s, _)| s)).collect();
+        let steady = window.windows(2).all(|pair| pair[1] >= pair[0] - 0.1);
+        let first_move = (0..classes.len()).find(|index| classes[*index] != 'A' && classes[*index] != '=').map(|index| (dragged.seen[index].at - dragged.dropped) * 1000.0);
+        let span = glide_at.zip(glided).map(|(from, to)| to - from);
+        let rate = span.map(|span| dragged.seen.iter().filter(|seen| glide_at.is_some_and(|at| seen.at >= at) && seen.at <= glide_at.unwrap_or(0.0) + span).count() as f64 / span.max(0.001));
+        let expected = rate.map(|rate| rate * 0.45 * 0.64);
+        let inked = dragged.seen.iter().map(|seen| seen.inked).fold(0.0, f32::max);
         let hand_over = settled.map(|settled| dragged.seen.iter().filter(|seen| seen.at > settled && closed.is_none_or(|closed| seen.at <= closed + 1.0)).map(|seen| seen.step).max().unwrap_or(0));
-        p.line(format!("- {label}: subject moved {span:.0} pixels, {} captures in {:.0} ms, {} between the old and new place, steady {steady}, old picture after the new {back}", dragged.seen.len(), dragged.seen.last().map_or(0.0, |seen| (seen.at - dragged.dropped) * 1000.0), moving.len()));
+        let at = |time: Option<f64>| time.map(|time| ((time - dragged.dropped) * 1000.0).round());
         p.line(format!(
-            "  - drop to first moving frame on screen {:?} ms, drop to wallpaper set {:?} ms, drop to settled {:?} ms, drop to closed {:?} ms",
-            first_move.map(f64::round),
-            set.map(|at| ((at - dragged.dropped) * 1000.0).round()),
-            settled.map(|at| ((at - dragged.dropped) * 1000.0).round()),
-            closed.map(|at| ((at - dragged.dropped) * 1000.0).round())
+            "- {label}: {} captures in {:.0} ms, {} pixels differ between the two stills, classes {}, {} moving between the two places, old picture after the new {returned}, glide progress steady {steady} over {} captures",
+            dragged.seen.len(),
+            dragged.seen.last().map_or(0.0, |seen| (seen.at - dragged.dropped) * 1000.0),
+            apart.len(),
+            classes.iter().collect::<String>(),
+            moving.len(),
+            window.len()
         ));
-        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255"));
-        p.line(format!("  - daemon log {:?}", dragged.log.iter().map(|line| line.chars().take(180).collect::<String>()).collect::<Vec<_>>()));
-        if let Some(path) = strip {
-            let until = settled.or(closed).unwrap_or(dragged.dropped + 2.0);
-            let picked: Vec<&Seen> = dragged.seen.iter().filter(|seen| seen.at <= until + 0.1).collect();
+        p.line(format!("  - captures a second during the glide {:?}, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95", rate.map(|rate| rate.round()), expected.map(|value| value.round())));
+        p.line(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(closed)));
+        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255, CPU frames to fit {}", frames.len()));
+        p.line(format!("  - daemon log {:?}", dragged.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
+        if let Some(name) = evidence {
+            let folder = p.out.join(name);
+            let _ = fs::create_dir_all(&folder);
+            let mut table = vec!["| capture | ms after drop | class | fitted progress | gap to it | gap to old | gap to new |".to_string(), "|---|---|---|---|---|---|---|".to_string()];
+            for (index, seen) in dragged.seen.iter().enumerate() {
+                let ms = ((seen.at - dragged.dropped) * 1000.0).round();
+                let fit = fitted[index];
+                let _ = scooch_core::encode_jpeg(&seen.half, 85).map(|bytes| fs::write(folder.join(format!("{index:03}-{ms}ms-{}.jpg", classes[index])), bytes));
+                table.push(format!("| {index} | {ms} | {} | {} | {} | {:.2} | {:.2} |", classes[index], fit.map_or("none".into(), |(s, _)| format!("{s:.2}")), fit.map_or("none".into(), |(_, gap)| format!("{gap:.2}")), mean_gap(&seen.half, &old_still, &apart), mean_gap(&seen.half, &new_still, &apart)));
+            }
+            let _ = fs::write(folder.join("captures.md"), table.join("\n") + "\n");
+            let picked: Vec<&Seen> = dragged.seen.iter().filter(|seen| settled.is_none_or(|settled| seen.at <= settled + 0.1)).collect();
             if picked.len() >= 9 {
-                let chosen: Vec<&RgbImage> = (0..9).map(|index| &picked[index * (picked.len() - 1) / 8].thumb).collect();
-                let (width, height) = (chosen[0].width(), chosen[0].height());
-                let mut rgb = vec![0u8; (width * 9 * height * 3) as usize];
+                let chosen: Vec<RgbImage> = (0..9).map(|index| halved(&picked[index * (picked.len() - 1) / 8].half)).collect();
+                let (w, h) = (chosen[0].width(), chosen[0].height());
+                let mut rgb = vec![0u8; (w * 9 * h * 3) as usize];
                 for (index, image) in chosen.iter().enumerate() {
-                    for y in 0..height.min(image.height()) {
-                        for x in 0..width.min(image.width()) {
-                            let at = ((y * width * 9 + index as u32 * width + x) * 3) as usize;
+                    for y in 0..h.min(image.height()) {
+                        for x in 0..w.min(image.width()) {
+                            let at = ((y * w * 9 + index as u32 * w + x) * 3) as usize;
                             rgb[at..at + 3].copy_from_slice(&image.get_pixel(x, y).0);
                         }
                     }
                 }
-                if let Some(strip) = RgbImage::from_raw(width * 9, height, rgb) {
-                    let _ = scooch_core::encode_png(&strip).map(|bytes| fs::write(path, bytes));
-                    p.line(format!("  - nine frame strip saved as {}", path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+                if let Some(strip) = RgbImage::from_raw(w * 9, h, rgb) {
+                    let _ = scooch_core::encode_png(&strip).map(|bytes| fs::write(p.out.join(format!("{name}-strip.png")), bytes));
                 }
             }
+            p.line(format!("  - every capture saved in {name} with captures.md, nine frame strip {name}-strip.png"));
         }
-        moving.len() >= 2 && steady && !back && inked <= 0.1 && hand_over.is_some_and(|value| value <= 2) && settled.is_some()
+        returned == 0 && steady && moving.len() >= 2 && inked <= 0.1 && hand_over.is_some_and(|value| value <= 2) && settled.is_some()
+    }
+
+    fn quiet_log(p: &Probe, quiet: Duration, limit: Duration) -> bool {
+        let started = Instant::now();
+        let mut count = daemon_log(p).lines().count();
+        let mut since = Instant::now();
+        while started.elapsed() < limit {
+            std::thread::sleep(Duration::from_millis(100));
+            let now = daemon_log(p).lines().count();
+            if now != count {
+                count = now;
+                since = Instant::now();
+            } else if since.elapsed() >= quiet {
+                return true;
+            }
+        }
+        false
     }
 
     fn wallpaper_after(p: &mut Probe, screen: &Screen, act: impl FnOnce(&mut Probe)) -> (Option<u128>, Vec<String>) {
@@ -2377,22 +2466,38 @@ mod probe {
             return Ok(());
         };
         p.line(format!("- glide setting `{}`, scenery `{}`, daemon {daemon}", state(p)["glide"], state(p)["options"]["scenery"].as_str().unwrap_or("missing")));
+        let calm = quiet_log(p, Duration::from_millis(1500), Duration::from_secs(15));
         let found = motion_now(p);
         let wrote = set_motion(p, false);
         let now = motion_now(p);
-        p.line(format!("- reduce motion found as {found:?}, turned off for the glide checks {wrote}, now {now:?}"));
-        let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
-        let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
-        let (setup, setup_log) = wallpaper_after(p, &screen, |p| {
-            let _ = place(p, name, subject);
-            poke(p);
-        });
-        std::thread::sleep(Duration::from_millis(1500));
-        p.line(format!("- set up with {name} on the subject, new wallpaper after {setup:?} ms, daemon log {setup_log:?}"));
-        if setup_log.iter().any(|line| line.contains("glide skipped, reduce motion")) {
-            p.fail("the daemon still read reduce motion as on after the probe turned it off");
+        let lines = daemon_log(p).lines().count();
+        poke(p);
+        let home = p.home.clone();
+        let read = wait_until(Duration::from_secs(6), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains("glide reduce motion off")));
+        let last_reading = daemon_log(p).lines().rev().find(|line| line.contains(" glide reduce motion ")).map(str::to_string);
+        p.line(format!("- daemon log quiet before the setup {calm}, reduce motion found as {found:?}, turned off {wrote}, now {now:?}, the daemon logged reading it as off after {:?} ms, its last reading `{}`", read.map(|time| time.as_millis()), last_reading.clone().unwrap_or_default()));
+        if !last_reading.is_some_and(|line| line.ends_with(" off")) {
+            p.fail("the daemon never logged reduce motion as off after the probe turned it off");
             return Ok(());
         }
+        let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
+        let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
+        let mut setup_log = Vec::new();
+        for (step, target) in [(1, aside), (2, subject)] {
+            quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
+            let (setup, log) = wallpaper_after(p, &screen, |p| {
+                let _ = place(p, name, target);
+                poke(p);
+            });
+            p.line(format!("- setup move {step} of {name} to {:.0},{:.0}, new wallpaper {setup:?} ms after the Apple Event returned, daemon log {log:?}", target.0, target.1));
+            setup_log = log;
+        }
+        let tables = setup_log.iter().any(|line| line.contains(" tick ") && line.contains("Rendered") && line.contains("tables "));
+        p.line(format!("- the last setup move rendered and wrote tables {tables}"));
+        if !tables {
+            p.fail("the setup moves wrote no tables, so the timed drag could not glide");
+        }
+        quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
         let paper = picture_window(&screen).and_then(|window| grab_window(window.number));
         let baseline = grab(display).context("the desktop could not be captured")?;
         let still: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().filter(|(found, _)| found.starts_with("scooch") && found != name).map(|(_, rect)| rect).collect();
@@ -2400,7 +2505,7 @@ mod probe {
         p.line(format!("- solid icon ink pixels of the still icons {:?}", masks.iter().map(Vec::len).collect::<Vec<_>>()));
         let start = position(p, name).unwrap_or(subject);
         let dragged = watch_drag(p, display, &screen, start, aside, &masks).context("the glide drag could not be watched")?;
-        let good = judge_glide(p, &dragged, "glide on, CGEvent drag", Some(&p.out.join("glide-strip.png")));
+        let good = judge_glide(p, &dragged, &screen, "glide on, CGEvent drag", Some("glide"));
         std::thread::sleep(Duration::from_millis(1000));
         let pids = helper_pids(p);
         let left = layer::every_window().into_iter().filter(|window| pids.contains(&(window.pid as i32))).count();
