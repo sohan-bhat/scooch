@@ -652,8 +652,8 @@ impl Daemon {
             Ok(made)
         })?;
         lap("analysis", &mut clock);
-        let painted = crate::state::scenery_on(options) && !scene.icons.is_empty();
-        let previous = entry.placement.as_ref().filter(|_| entry.painted == painted);
+        let wanted = crate::state::scenery_on(options) && !scene.icons.is_empty();
+        let previous = entry.placement.as_ref().filter(|_| wanted || !entry.painted);
         let placement = scooch_core::solve(&analysis, scene, options, previous);
         lap("solve", &mut clock);
         entry.flip_helps = flip_check(&analysis, scene, options, &placement);
@@ -673,9 +673,10 @@ impl Daemon {
             entry.painted = false;
             return Ok(Outcome::Plain);
         }
-        if options.pads <= 0.0 && !painted && !entry.painted && showing_output && entry.placement.as_ref() == Some(&placement) {
+        if options.pads <= 0.0 && !wanted && !entry.painted && showing_output && entry.placement.as_ref() == Some(&placement) {
             return Ok(Outcome::Kept);
         }
+        let painted = wanted && scooch_core::scenery_active(&analysis, &placement, scene, options);
         let decoded = match image.take() {
             Some(decoded) => decoded,
             None => self.pixels(&source, key)?,
@@ -684,14 +685,15 @@ impl Daemon {
         let format = self.desktop.format();
         let mut flight = None;
         let mut tables = None;
-        if let Some(glider) = glider.as_deref_mut() {
+        let picture = if let Some(glider) = glider.as_deref_mut() {
             let tables_key = tables_key(&source, options)?;
             let (_, next) = self.fresh_name(&screen.id, entry.counter, format.extension(), current);
             let made = self.store.tables_for(&next, tables_key);
-            let bundle = scooch_core::bundle(&decoded, &analysis, &placement, scene, options);
+            let (bundle, picture) = scooch_core::still(&decoded, &analysis, &placement, scene, options);
+            lap("render", &mut clock);
             let written = std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| write_atomic(&made, &bundle.tables_to_bytes()));
             drop(bundle);
-            lap("bundle", &mut clock);
+            lap("tables", &mut clock);
             if written.is_ok() {
                 let from = output.as_ref().filter(|_| showing_output).map(|output| self.store.tables_for(output, tables_key)).filter(|from| from.is_file());
                 if let (Some(from), Some(still)) = (from, output.as_deref().filter(|_| showing_output)) {
@@ -700,7 +702,12 @@ impl Daemon {
                 }
                 tables = Some(made);
             }
-        }
+            picture
+        } else {
+            let picture = scooch_core::render_with(&decoded, &analysis, &placement, scene, options);
+            lap("render", &mut clock);
+            picture
+        };
         let undo = |glider: Option<&mut Glider>, flight: Option<u32>, tables: &Option<PathBuf>| {
             if let (Some(glider), Some(id)) = (glider, flight) {
                 glider.abort(id);
@@ -709,10 +716,8 @@ impl Daemon {
                 let _ = std::fs::remove_file(tables);
             }
         };
-        let picture = scooch_core::render_with(&decoded, &analysis, &placement, scene, options);
         drop(decoded);
         drop(analysis);
-        lap("render", &mut clock);
         let bytes = match encode(&picture, format, self.desktop.profile().as_deref()) {
             Ok(bytes) => bytes,
             Err(error) => {
