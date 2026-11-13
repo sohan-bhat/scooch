@@ -30,7 +30,7 @@ mod probe {
     use ::windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, FILETIME, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use ::windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW, MapWindowPoints, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
-        BI_RGB, DIB_RGB_COLORS, HDC, HMONITOR, LOGFONTW, MONITORINFO, SRCCOPY, ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH,
+        BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HDC, HMONITOR, LOGFONTW, MONITORINFO, SRCCOPY, ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH,
         ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE,
     };
     use ::windows::core::Interface;
@@ -40,7 +40,8 @@ mod probe {
     use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use ::windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
     use ::windows::Win32::System::Registry::{RegCloseKey, RegDeleteKeyValueW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_BINARY, REG_DWORD, RRF_RT_REG_DWORD};
-    use ::windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    use ::windows::Win32::System::Threading::{GetCurrentProcess, GetGuiResources, GetProcessHandleCount, GetProcessTimes, OpenProcess, TerminateProcess, GR_GDIOBJECTS, GR_USEROBJECTS, PROCESS_TERMINATE};
+    use scooch::platform::windows::layer::{self, Method};
     use ::windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK, TreeScope_Children};
     use ::windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow, SystemParametersInfoForDpi, MDT_EFFECTIVE_DPI};
     use ::windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -49,7 +50,7 @@ mod probe {
     };
     use ::windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use ::windows::Win32::UI::Shell::{
-        IDesktopWallpaper, IFolderView2, IShellBrowser, IShellDispatch, Shell, IShellItem, IShellItemArray, IShellWindows, SHCreateItemFromParsingName, SHCreateShellItemArrayFromShellItem, ShellWindows, FWF_NOICONS,
+        IDesktopWallpaper, IFolderView2, IShellBrowser, IShellDispatch, Shell, SVSI_SELECT, IShellItem, IShellItemArray, IShellWindows, SHCreateItemFromParsingName, SHCreateShellItemArrayFromShellItem, ShellWindows, FWF_NOICONS,
         SID_STopLevelBrowser, SVGIO_ALLVIEW, SWC_DESKTOP, SWFO_NEEDDISPATCH,
         SHChangeNotification_Lock, SHChangeNotification_Unlock, SHChangeNotifyDeregister, SHChangeNotifyEntry, SHChangeNotifyRegister, SHGetSpecialFolderLocation, CSIDL_DESKTOP, CSIDL_DESKTOPDIRECTORY, FOLDERVIEWMODE,
         FVM_ICON, FWF_AUTOARRANGE, FWF_SNAPTOGRID, SHCNE_ALLEVENTS, SHCNE_CREATE, SHCNE_DELETE, SHCNE_MKDIR, SHCNE_RENAMEFOLDER, SHCNE_RENAMEITEM, SHCNE_RMDIR, SHCNE_UPDATEDIR, SHCNRF_InterruptLevel,
@@ -219,6 +220,7 @@ mod probe {
         probe.section("5 Wallpaper", wallpaper);
         probe.section("5b Solid color and slideshow", modes);
         probe.section("6 End to end", end_to_end);
+        probe.section("9 Live layer", live);
         probe.section("8 Display scaling", scaling);
         probe.section("7 Cleanup", cleanup);
         probe.line(String::new());
@@ -621,7 +623,7 @@ mod probe {
         let memory = unsafe { CreateCompatibleDC(Some(screen)) };
         let bitmap = unsafe { CreateCompatibleBitmap(screen, width, height) };
         let old = unsafe { SelectObject(memory, bitmap.into()) };
-        let copied = unsafe { BitBlt(memory, 0, 0, width, height, Some(screen), area.left, area.top, SRCCOPY) };
+        let copied = unsafe { BitBlt(memory, 0, 0, width, height, Some(screen), area.left, area.top, SRCCOPY | CAPTUREBLT) };
         unsafe { SelectObject(memory, old) };
         let header = BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: width, biHeight: -height, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() };
         let mut info = BITMAPINFO { bmiHeader: header, ..Default::default() };
@@ -1751,6 +1753,376 @@ mod probe {
         if !took {
             p.line("- no method changed the display scale on this runner".to_string());
         }
+        Ok(())
+    }
+
+    struct Look {
+        at: u128,
+        bar: Option<f32>,
+        marker: bool,
+        icons_changed: usize,
+    }
+
+    struct Sight {
+        width: usize,
+        row: usize,
+        baseline: RgbImage,
+        icons: Vec<usize>,
+    }
+
+    impl Sight {
+        fn new(baseline: RgbImage, field: &RgbImage, origin: (i32, i32)) -> Self {
+            let (width, height) = (baseline.width() as usize, baseline.height() as usize);
+            let work_bottom = work_area().map_or(height, |area| (area.bottom - origin.1).clamp(0, height as i32) as usize);
+            let mut icons = Vec::new();
+            if field.dimensions() == baseline.dimensions() {
+                for (index, (a, b)) in baseline.as_raw().as_chunks::<3>().0.iter().zip(field.as_raw().as_chunks::<3>().0.iter()).enumerate() {
+                    let (x, y) = (index % width, index / width);
+                    if y < work_bottom && x + 40 < width && a.iter().zip(b.iter()).any(|(p, q)| p.abs_diff(*q) > 60) {
+                        icons.push(index);
+                    }
+                }
+            }
+            Sight { width, row: height * 6 / 10, baseline, icons }
+        }
+
+        fn look(&self, shot: &RgbImage, at: u128) -> Look {
+            let raw = shot.as_raw();
+            let mut columns = Vec::new();
+            for x in 200.min(self.width)..self.width {
+                let at = (self.row * self.width + x) * 3;
+                if raw.get(at..at + 3).is_some_and(|pixel| pixel[0] > 200 && pixel[1] < 70 && pixel[2] > 200) {
+                    columns.push(x);
+                }
+            }
+            let bar = (!columns.is_empty()).then(|| columns.iter().sum::<usize>() as f32 / columns.len() as f32 / self.width as f32);
+            let spot = (16 * self.width + self.width.saturating_sub(16)) * 3;
+            let marker = raw.get(spot..spot + 3).is_some_and(|pixel| pixel[0] < 60 && pixel[1] > 200 && pixel[2] < 60);
+            let base = self.baseline.as_raw();
+            let icons_changed = self.icons.iter().filter(|index| {
+                let at = *index * 3;
+                (0..3).any(|channel| raw.get(at + channel).zip(base.get(at + channel)).is_some_and(|(a, b)| a.abs_diff(*b) > 40))
+            }).count();
+            Look { at, bar, marker, icons_changed }
+        }
+    }
+
+    fn screen_rect(screen: &Screen) -> RECT {
+        RECT { left: screen.frame.x as i32, top: screen.frame.y as i32, right: (screen.frame.x + screen.frame.w) as i32, bottom: (screen.frame.y + screen.frame.h) as i32 }
+    }
+
+    fn watch_screen(area: RECT, sight: &Sight, length: Duration, mut during: impl FnMut(u128)) -> Vec<Look> {
+        let started = Instant::now();
+        let mut looks = Vec::new();
+        while started.elapsed() < length {
+            let at = started.elapsed().as_millis();
+            during(at);
+            if let Ok(shot) = capture(area) {
+                looks.push(sight.look(&shot, at));
+            }
+            drain();
+        }
+        looks
+    }
+
+    struct Verdict {
+        captures: usize,
+        rate: f32,
+        bars: usize,
+        forward: usize,
+        backward: usize,
+        markers: usize,
+        gaps: usize,
+        icons_changed: usize,
+    }
+
+    fn judge(looks: &[Look], length: Duration) -> Verdict {
+        let bars: Vec<f32> = looks.iter().filter_map(|look| look.bar).collect();
+        let (mut forward, mut backward) = (0, 0);
+        for pair in bars.windows(2) {
+            let step = pair[1] - pair[0];
+            if step > 0.0 {
+                forward += 1;
+            } else if step > -0.5 && step < 0.0 {
+                backward += 1;
+            }
+        }
+        let first = looks.iter().position(|look| look.marker);
+        let last = looks.iter().rposition(|look| look.marker);
+        let gaps = match (first, last) {
+            (Some(first), Some(last)) => looks[first..=last].iter().filter(|look| !look.marker).count(),
+            _ => 0,
+        };
+        Verdict {
+            captures: looks.len(),
+            rate: looks.len() as f32 / length.as_secs_f32().max(0.001),
+            bars: bars.len(),
+            forward,
+            backward,
+            markers: looks.iter().filter(|look| look.marker).count(),
+            gaps,
+            icons_changed: looks.iter().map(|look| look.icons_changed).max().unwrap_or(0),
+        }
+    }
+
+    fn present_rate(layer: &layer::Layer) -> (usize, f32, Option<u128>, String, Option<String>) {
+        let Ok(stats) = layer.stats.lock() else { return (0, 0.0, None, String::new(), None) };
+        let span = stats.presents.last().copied().unwrap_or_default();
+        let rate = if span.is_zero() { 0.0 } else { (stats.presents.len().saturating_sub(1)) as f32 / span.as_secs_f32() };
+        (stats.presents.len(), rate, stats.first.map(|first| first.as_millis()), stats.adapter.clone(), stats.error.clone())
+    }
+
+    fn pattern_of(picture: &RgbImage) -> scooch_live::Pattern {
+        let rgba = picture.as_raw().as_chunks::<3>().0.iter().flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255]).collect();
+        scooch_live::Pattern { width: picture.width(), height: picture.height(), rgba }
+    }
+
+    fn mean_gap(shot: &RgbImage, target: &RgbImage) -> f32 {
+        if shot.dimensions() != target.dimensions() {
+            return f32::MAX;
+        }
+        let (width, height) = (shot.width(), shot.height());
+        let mut total = 0u64;
+        let mut count = 0u64;
+        for y in (height / 10..height * 8 / 10).step_by(7) {
+            for x in (width / 4..width * 9 / 10).step_by(7) {
+                let (a, b) = (shot.get_pixel(x, y).0, target.get_pixel(x, y).0);
+                total += a.iter().zip(b.iter()).map(|(p, q)| u64::from(p.abs_diff(*q))).sum::<u64>();
+                count += 3;
+            }
+        }
+        total as f32 / count.max(1) as f32
+    }
+
+    fn fade(p: &mut Probe, label: &str, area: RECT, old: &RgbImage, new: &RgbImage, set: impl FnOnce() -> Result<()>) {
+        let mut samples = Vec::new();
+        let started = Instant::now();
+        let result = set();
+        let returned = started.elapsed().as_millis();
+        while started.elapsed() < Duration::from_millis(2500) {
+            if let Ok(shot) = capture(area) {
+                samples.push((started.elapsed().as_millis(), mean_gap(&shot, old), mean_gap(&shot, new)));
+            }
+        }
+        let first = samples.iter().find(|(_, to_old, _)| *to_old > 3.0).map(|(at, _, _)| *at);
+        let settled = samples.iter().position(|(_, _, to_new)| *to_new < 3.0).map(|index| samples[index].0);
+        p.line(format!(
+            "- {label} set returned {:?} after {returned} ms, screen first changed at {first:?} ms, showed the new picture at {settled:?} ms, fade {:?} ms over {} captures",
+            result.map_err(|error| error.to_string()),
+            settled.zip(first).map(|(settled, first)| settled.saturating_sub(first)),
+            samples.len()
+        ));
+    }
+
+    fn own_counts() -> (usize, u32, u32, u32, usize) {
+        let process = unsafe { GetCurrentProcess() };
+        let gdi = unsafe { GetGuiResources(process, GR_GDIOBJECTS) };
+        let user = unsafe { GetGuiResources(process, GR_USEROBJECTS) };
+        let mut handles = 0u32;
+        let _ = unsafe { GetProcessHandleCount(process, &mut handles) };
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+        let _ = unsafe { GetProcessMemoryInfo(process, &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS, counters.cb) };
+        (layer::ours_left(), gdi, user, handles, counters.PrivateUsage)
+    }
+
+    fn rung(p: &mut Probe, screen: &Screen, method: Method, field: &RgbImage, sight: &Sight, save: bool) -> Result<Verdict> {
+        let area = screen_rect(screen);
+        let opened = Instant::now();
+        let layer = layer::open(screen, method, pattern_of(field), Duration::from_millis(500))?;
+        let open_ms = opened.elapsed().as_millis();
+        let length = Duration::from_millis(1500);
+        let mut kept = None;
+        let looks = watch_screen(area, sight, length, |_| {});
+        if save {
+            if let Ok(shot) = capture(area) {
+                kept = Some(shot);
+            }
+        }
+        let verdict = judge(&looks, length);
+        let (presents, rate, first, adapter, error) = present_rate(&layer);
+        let in_place = layer.in_place();
+        drop(layer);
+        pump(Duration::from_millis(400));
+        let left = layer::ours_left();
+        let after = capture(area).ok().map(|shot| mean_gap(&shot, field));
+        if let Some(shot) = kept {
+            let _ = fs::write(p.out.join(format!("layer-{}.png", method.name().split_whitespace().next().unwrap_or("x").to_lowercase())), scooch_core::encode_png(&shot)?);
+        }
+        p.line(format!(
+            "  - opened in {open_ms} ms, first frame after {first:?} ms on {adapter}, {presents} presents at {rate:.1} per second, present error {error:?}"
+        ));
+        p.line(format!(
+            "  - {} captures at {:.1} per second, bar seen in {}, steps forward {} backward {}, marker in {}, marker gaps {}, most changed icon pixels {}, ordered under the icons {in_place}",
+            verdict.captures, verdict.rate, verdict.bars, verdict.forward, verdict.backward, verdict.markers, verdict.gaps, verdict.icons_changed
+        ));
+        p.line(format!("  - after closing, windows of ours left {left}, screen gap to the wallpaper {after:?}"));
+        if left > 0 {
+            p.failed.push(format!("{} left {left} windows behind", method.name()));
+        }
+        Ok(verdict)
+    }
+
+    fn works(verdict: &Verdict) -> bool {
+        verdict.bars >= 3 && verdict.forward > verdict.backward && verdict.markers > 0 && verdict.icons_changed < 50
+    }
+
+    fn live(p: &mut Probe) -> Result<()> {
+        uncover(p);
+        let desktop = platform::current()?;
+        let screen = desktop.screens()?.first().context("no screen")?.clone();
+        let area = screen_rect(&screen);
+        p.line("- Progman and WorkerW windows before".to_string());
+        for line in layer::tree() {
+            p.line(format!("  - `{line}`"));
+        }
+        let (layout, sent) = layer::layout()?;
+        p.line(format!("- layout {}, message 0x052C sent {sent}", layout.describe()));
+        p.line("- Progman and WorkerW windows after".to_string());
+        for line in layer::tree() {
+            p.line(format!("  - `{line}`"));
+        }
+        let original = desktop.wallpaper(&screen).ok().flatten();
+        p.line(format!("- wallpaper before {original:?}"));
+        let (width, height) = (screen.frame.w as u32, screen.frame.h as u32);
+        let field = subject_picture(width, height);
+        let other = RgbImage::from_raw(width, height, field.as_raw().iter().map(|value| value / 2 + 60).collect()).context("no second picture")?;
+        let field_path = p.home.join("layer-field.png");
+        let other_path = p.home.join("layer-other.png");
+        fs::write(&field_path, scooch_core::encode_png(&field)?)?;
+        fs::write(&other_path, scooch_core::encode_png(&other)?)?;
+        let previous = capture(area)?;
+        fade(p, "with no layer, the adapter", area, &previous, &field, || desktop.set_wallpaper(&screen, &field_path));
+        fade(p, "with no layer, the adapter", area, &field, &other, || desktop.set_wallpaper(&screen, &other_path));
+        fade(p, "with no layer, SystemParametersInfo", area, &other, &field, || spi_wallpaper(&field_path.to_string_lossy()));
+        pump(Duration::from_millis(800));
+        park_cursor();
+        pump(Duration::from_millis(400));
+        let baseline = capture(area)?;
+        let _ = fs::write(p.out.join("layer-baseline.png"), scooch_core::encode_png(&baseline)?);
+        let sight = Sight::new(baseline, &field, (area.left, area.top));
+        p.line(format!("- {} icon pixels watched, bar row {}", sight.icons.len(), sight.row));
+        let mut kept = None;
+        for method in Method::ALL {
+            p.line(format!("- **{}**", method.name()));
+            match rung(p, &screen, method, &field, &sight, true) {
+                Ok(verdict) => {
+                    let good = works(&verdict);
+                    p.line(format!("  - {}", if good { "shows the pattern under the icons" } else { "does not show the pattern under the icons" }));
+                    if good && kept.is_none() {
+                        kept = Some(method);
+                    }
+                }
+                Err(error) => p.line(format!("  - failed {error:#}")),
+            }
+        }
+        let Some(method) = kept else {
+            p.failed.push("no presentation method showed the pattern under the icons".into());
+            return Ok(());
+        };
+        p.line(format!("- kept {}", method.name()));
+        for (label, set) in [("the adapter", 0), ("SystemParametersInfo", 1)] {
+            let layer = layer::open(&screen, method, pattern_of(&field), Duration::from_millis(500))?;
+            let before_repairs = layer::repairs();
+            let target = if set == 0 { other_path.clone() } else { field_path.clone() };
+            let mut done = false;
+            let looks = watch_screen(area, &sight, Duration::from_millis(2500), |at| {
+                if !done && at > 300 {
+                    done = true;
+                    let _ = if set == 0 { desktop.set_wallpaper(&screen, &target) } else { spi_wallpaper(&target.to_string_lossy()) };
+                }
+            });
+            let verdict = judge(&looks, Duration::from_millis(2500));
+            let missing: Vec<u128> = looks.iter().filter(|look| !look.marker).map(|look| look.at).collect();
+            let in_place = layer.in_place();
+            drop(layer);
+            p.line(format!(
+                "- wallpaper set through {label} while open, {} captures, system layer showed through in {} at {:?} ms, order repairs {}, still under the icons {in_place}, bar steps forward {} backward {}",
+                verdict.captures,
+                missing.len(),
+                missing.iter().take(12).collect::<Vec<_>>(),
+                layer::repairs() - before_repairs,
+                verdict.forward,
+                verdict.backward
+            ));
+            pump(Duration::from_millis(1500));
+        }
+        if desktop.set_wallpaper(&screen, &field_path).is_ok() {
+            pump(Duration::from_millis(1500));
+        }
+        let start_counts = own_counts();
+        let mut warm = Vec::new();
+        for _ in 0..20 {
+            let opened = Instant::now();
+            match layer::open(&screen, method, pattern_of(&field), Duration::from_millis(500)) {
+                Ok(layer) => {
+                    warm.push(layer.stats.lock().ok().and_then(|stats| stats.first).map_or(opened.elapsed().as_millis(), |first| first.as_millis()));
+                    pump(Duration::from_millis(50));
+                    drop(layer);
+                }
+                Err(error) => p.line(format!("- an open in the loop failed {error:#}")),
+            }
+        }
+        pump(Duration::from_millis(500));
+        let end_counts = own_counts();
+        warm.sort_unstable();
+        p.line(format!("- twenty opens and closes, windows {} to {}, GDI objects {} to {}, user objects {} to {}, handles {} to {}, private bytes {} to {}", start_counts.0, end_counts.0, start_counts.1, end_counts.1, start_counts.2, end_counts.2, start_counts.3, end_counts.3, start_counts.4, end_counts.4));
+        p.line(format!("- warm first frame median {:?} ms, slowest {:?} ms", warm.get(warm.len() / 2), warm.last()));
+        if end_counts.0 > 0 || end_counts.1 > start_counts.1 + 4 || end_counts.2 > start_counts.2 + 4 {
+            p.failed.push("the layer leaked windows or GDI or user objects".into());
+        }
+        input_check(p, &screen, method, &field)?;
+        restart_explorer(p)?;
+        pump(Duration::from_secs(1));
+        park_cursor();
+        pump(Duration::from_millis(400));
+        let baseline = capture(area)?;
+        let sight = Sight::new(baseline, &field, (area.left, area.top));
+        p.line("- **after an Explorer restart**".to_string());
+        p.line(format!("- layout now {}", layer::layout().map(|(layout, sent)| format!("{}, 0x052C sent {sent}", layout.describe())).unwrap_or_else(|error| error.to_string())));
+        match rung(p, &screen, method, &field, &sight, false) {
+            Ok(verdict) if works(&verdict) => p.line("  - shows the pattern under the icons after the restart".to_string()),
+            Ok(_) => p.failed.push("the layer did not show under the icons after an Explorer restart".into()),
+            Err(error) => p.failed.push(format!("the layer did not open after an Explorer restart {error:#}")),
+        }
+        if let Some(path) = original {
+            let _ = desktop.set_wallpaper(&screen, &path);
+        }
+        Ok(())
+    }
+
+    fn input_check(p: &mut Probe, screen: &Screen, method: Method, field: &RgbImage) -> Result<()> {
+        let view = shell::view()?;
+        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
+        let layer = layer::open(screen, method, pattern_of(field), Duration::from_millis(500))?;
+        let (name, folder) = PROBES[5];
+        let shown = shown_name(name, folder);
+        let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect).context("no rect for the click target")?;
+        let pidl = pidl_of(&view, name, folder)?;
+        let target = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 };
+        let clicked = Instant::now();
+        let sent = click(target, false);
+        let selected = wait_until(Duration::from_millis(1000), || unsafe { view.folder.GetSelectionState(pidl.0) }.is_ok_and(|state| state & SVSI_SELECT.0 as u32 != 0));
+        let took = selected.map(|_| clicked.elapsed().as_millis());
+        p.line(format!("- with the layer open, a click on `{shown}` sent {sent} selected it after {took:?} ms"));
+        if took.is_none_or(|took| took > 200) {
+            p.failed.push(format!("a click on an icon with the layer open selected it after {took:?} ms"));
+        }
+        let (moved_name, moved_folder) = PROBES[6];
+        let moved = shown_name(moved_name, moved_folder);
+        let moved_pidl = pidl_of(&view, moved_name, moved_folder)?;
+        let (_, before) = position(&view, &moved_pidl)?;
+        let rect = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == moved).map(|(_, rect)| rect).context("no rect for the drag target")?;
+        let from = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 };
+        let to = POINT { x: (screen.frame.x + screen.frame.w * 0.7) as i32, y: (screen.frame.y + screen.frame.h * 0.7) as i32 };
+        let dragged = drag_to(from, to);
+        pump(Duration::from_millis(600));
+        let (_, after) = position(&view, &moved_pidl)?;
+        p.line(format!("- with the layer open, a drag of `{moved}` sent {dragged} moved it from {},{} to {},{}", before.x, before.y, after.x, after.y));
+        if before.x == after.x && before.y == after.y {
+            p.failed.push("a drag with the layer open did not move the icon".into());
+        }
+        drop(layer);
+        park_cursor();
         Ok(())
     }
 

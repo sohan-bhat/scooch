@@ -34,6 +34,27 @@ jobs:
         shell: pwsh
         run: ./target/release/examples/winprobe.exe winprobe
 
+      - name: Sizes
+        if: ${{ !cancelled() && matrix.image == 'windows-2025' }}
+        shell: pwsh
+        run: |
+          git fetch --depth 1 origin b6c02dc2fc0ee9da7a21132884e65f869f39375b
+          git worktree add ../base b6c02dc2fc0ee9da7a21132884e65f869f39375b
+          $started = Get-Date
+          cargo build --release -p scooch --bins --manifest-path ../base/Cargo.toml --target-dir ../base-target
+          $took = [int]((Get-Date) - $started).TotalSeconds
+          New-Item -ItemType Directory -Force winprobe | Out-Null
+          $lines = @("## Program sizes", "", "| program | before b6c02dc | after |", "|---|---|---|")
+          foreach ($name in @("scooch.exe", "scoochw.exe")) {
+            $before = (Get-Item "../base-target/release/$name").Length
+            $after = (Get-Item "target/release/$name").Length
+            $lines += "| $name | $before | $after |"
+          }
+          $lines += ""
+          $lines += "- base release build of the programs from a cold target folder took $took s"
+          $lines | Set-Content winprobe/sizes.md
+          $lines | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+
       - name: Upload
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
