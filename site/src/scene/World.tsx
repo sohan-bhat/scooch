@@ -6,6 +6,7 @@ import {
   DirectionalLight,
   FogExp2,
   Group,
+  HalfFloatType,
   Matrix4,
   Mesh,
   MeshStandardMaterial,
@@ -17,6 +18,7 @@ import {
   SpotLight,
   Vector2,
   Vector3,
+  WebGLRenderTarget,
 } from 'three';
 import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import { asset } from '@/lib/base';
@@ -157,6 +159,36 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
 
   const stage = useMemo(() => (built ? stageFor(built.television) : null), [built]);
   const inside = useInside(manifest, screens.photo, screens.saliency, screens.atlas, stage);
+  const [insideIn, setInsideIn] = useState(runtime.still >= 0);
+
+  useEffect(() => {
+    if (!inside || insideIn) return;
+    let stopped = false;
+    let timer = 0;
+    const begin = () => {
+      if (stopped) return;
+      if (!runtime.ready) {
+        timer = window.setTimeout(begin, 200);
+        return;
+      }
+      const target = new WebGLRenderTarget(1, 1, { type: HalfFloatType });
+      const previous = gl.getRenderTarget();
+      gl.setRenderTarget(target);
+      const pending = gl.compileAsync(inside.group, camera, scene);
+      gl.setRenderTarget(previous);
+      void pending
+        .catch(() => undefined)
+        .then(() => {
+          target.dispose();
+          if (!stopped) setInsideIn(true);
+        });
+    };
+    timer = window.setTimeout(begin, 0);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [inside, insideIn, gl, camera, scene]);
 
   const rig = useMemo(() => {
     if (!built || !stage) return null;
@@ -400,7 +432,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       <mesh rotation-x={-Math.PI / 2} position={[0, 0, 0.6]} material={floor}>
         <planeGeometry args={[9, 4]} />
       </mesh>
-      {inside ? <primitive object={inside.group} /> : null}
+      {inside && insideIn ? <primitive object={inside.group} /> : null}
     </>
   );
 }
