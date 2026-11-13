@@ -2,11 +2,11 @@ use super::store::{convert, Plist};
 use super::sys::{self, Ref};
 use crate::platform::Screen;
 use anyhow::{Context, Result};
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
-use objc2::{MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSBackingStoreType, NSColor, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowStyleMask};
-use objc2_foundation::{NSPoint, NSRect};
+use objc2::{MainThreadMarker, MainThreadOnly, Message};
+use objc2_app_kit::{NSApplication, NSBackingStoreType, NSColor, NSEventMask, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowStyleMask};
+use objc2_foundation::{ns_string, NSDate, NSPoint, NSRect};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 use scooch_core::Rect;
 use std::ffi::c_void;
@@ -96,6 +96,7 @@ extern "C" {
 
 extern "C" {
     fn mach_timebase_info(info: *mut Timebase) -> i32;
+    fn mach_absolute_time() -> u64;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -165,6 +166,36 @@ pub fn choose(seen: &[Seen], screen: &Rect, desktop: i64, ours: i64) -> Option<i
     (picture && icons).then_some(desktop)
 }
 
+pub struct Traces {
+    window: Weak<NSWindow>,
+    view: Weak<NSView>,
+    metal: Weak<CAMetalLayer>,
+}
+
+fn held<T: Message>(weak: &Weak<T>) -> Option<usize> {
+    weak.load().map(|object| {
+        let count: usize = unsafe { objc2::msg_send![&*object, retainCount] };
+        count.saturating_sub(1)
+    })
+}
+
+impl Traces {
+    pub fn held(&self) -> [Option<usize>; 3] {
+        [held(&self.window), held(&self.view), held(&self.metal)]
+    }
+}
+
+pub fn settle(marker: MainThreadMarker) {
+    let application = NSApplication::sharedApplication(marker);
+    objc2::rc::autoreleasepool(|_| {
+        let past = NSDate::distantPast();
+        while let Some(event) = application.nextEventMatchingMask_untilDate_inMode_dequeue(NSEventMask::Any, Some(&past), ns_string!("kCFRunLoopDefaultMode"), true) {
+            application.sendEvent(&event);
+        }
+    });
+    spin(0.0);
+}
+
 pub struct Layer {
     window: Retained<NSWindow>,
     _view: Retained<NSView>,
@@ -181,6 +212,15 @@ impl Layer {
 
     pub fn number(&self) -> i64 {
         self.window.windowNumber() as i64
+    }
+
+    pub fn traces(&self) -> Traces {
+        Traces { window: Weak::from_retained(&self.window), view: Weak::from_retained(&self._view), metal: Weak::from_retained(&self.metal) }
+    }
+
+    pub fn close(self, marker: MainThreadMarker) {
+        drop(self);
+        settle(marker);
     }
 
     pub fn commit(&self) {
@@ -263,7 +303,7 @@ pub fn seconds(host: u64) -> f64 {
     host as f64 * base.numer as f64 / base.denom as f64 / 1e9
 }
 
-type Ticks = Mutex<Vec<u64>>;
+type Ticks = Mutex<Vec<(u64, u64)>>;
 
 const HOST_VALID: u64 = 1 << 1;
 
@@ -272,13 +312,19 @@ extern "C" fn tick(_link: *mut c_void, _now: *const TimeStamp, output: *const Ti
         return 0;
     }
     let ticks = unsafe { &*(context as *const Ticks) };
+    let arrived = unsafe { mach_absolute_time() };
     let (host, flags) = unsafe { ((*output).host, (*output).flags) };
-    if flags & HOST_VALID != 0 && host != 0 {
-        if let Ok(mut ticks) = ticks.lock() {
-            ticks.push(host);
-        }
+    let host = if flags & HOST_VALID != 0 { host } else { 0 };
+    if let Ok(mut ticks) = ticks.lock() {
+        ticks.push((arrived, host));
     }
     0
+}
+
+pub struct Paced {
+    pub arrivals: Vec<f64>,
+    pub outputs: Vec<f64>,
+    pub callbacks: usize,
 }
 
 pub struct Pace {
@@ -303,16 +349,17 @@ impl Pace {
         Some(Pace { link, ticks, rate })
     }
 
-    pub fn stop(self) -> Vec<f64> {
+    pub fn stop(self) -> Paced {
         unsafe {
             CVDisplayLinkStop(self.link);
             CVDisplayLinkRelease(self.link);
         }
-        let ticks = unsafe { Box::from_raw(self.ticks) };
-        let mut hosts = ticks.into_inner().unwrap_or_default();
+        let ticks = unsafe { Box::from_raw(self.ticks) }.into_inner().unwrap_or_default();
+        let gaps = |values: Vec<u64>| values.windows(2).map(|pair| seconds(pair[1].saturating_sub(pair[0]))).collect();
+        let mut hosts: Vec<u64> = ticks.iter().map(|(_, host)| *host).filter(|host| *host != 0).collect();
         hosts.sort_unstable();
         hosts.dedup();
-        hosts.windows(2).map(|pair| seconds(pair[1].saturating_sub(pair[0]))).collect()
+        Paced { arrivals: gaps(ticks.iter().map(|(arrived, _)| *arrived).collect()), outputs: gaps(hosts), callbacks: ticks.len() }
     }
 }
 

@@ -1373,7 +1373,9 @@ mod probe {
 
     struct Run {
         frames: Vec<Instant>,
-        ticks: Vec<f64>,
+        arrivals: Vec<f64>,
+        outputs: Vec<f64>,
+        callbacks: usize,
         rate: f64,
         hidden: usize,
     }
@@ -1404,9 +1406,19 @@ mod probe {
                     Err(_) => break,
                 }
             }
-            let ticks = pace.map(|pace| pace.stop()).unwrap_or_default().into_iter().map(|seconds| seconds * 1000.0).collect();
-            (renderer, Run { frames, ticks, rate, hidden })
+            let paced = pace.map(|pace| pace.stop());
+            let millis = |values: Vec<f64>| values.into_iter().map(|seconds| seconds * 1000.0).collect::<Vec<f64>>();
+            let (arrivals, outputs, callbacks) = paced.map_or((Vec::new(), Vec::new(), 0), |paced| (millis(paced.arrivals), millis(paced.outputs), paced.callbacks));
+            (renderer, Run { frames, arrivals, outputs, callbacks, rate, hidden })
         })
+    }
+
+    struct Look {
+        at: f64,
+        bar: Option<f32>,
+        changed: Vec<f32>,
+        covered: Vec<f32>,
+        through: usize,
     }
 
     fn intervals(frames: &[Instant]) -> Vec<f64> {
@@ -1416,7 +1428,8 @@ mod probe {
     fn report_run(p: &mut Probe, run: &Run) {
         let period = if run.rate > 0.0 { 1000.0 / run.rate } else { 16.67 };
         let presents = intervals(&run.frames);
-        p.line(format!("- display link nominal rate {:.2} Hz, its callbacks {}, longer than 1.5 periods {}", run.rate, stats(&run.ticks), over(&run.ticks, period)));
+        p.line(format!("- display link nominal rate {:.2} Hz, {} callbacks, arrival intervals {}, longer than 1.5 periods {}", run.rate, run.callbacks, stats(&run.arrivals), over(&run.arrivals, period)));
+        p.line(format!("- display link output times {}, longer than 1.5 periods {}", stats(&run.outputs), over(&run.outputs, period)));
         p.line(format!("- frames presented {}, skipped while macOS called the window occluded {}, intervals {}, longer than 1.5 periods {}", run.frames.len(), run.hidden, stats(&presents), over(&presents, period)));
     }
 
@@ -1426,7 +1439,9 @@ mod probe {
         let before = (ours().len(), ports(), threads(pid).len(), rusage(pid));
         let mut opens = Vec::new();
         let mut shown = Vec::new();
-        for _ in 0..20 {
+        let mut stages = [0usize; 3];
+        let mut first: Vec<String> = Vec::new();
+        for index in 0..20 {
             let started = Instant::now();
             let layer = layer::open(marker, screen)?;
             shown.push(started.elapsed().as_secs_f64() * 1000.0);
@@ -1440,10 +1455,32 @@ mod probe {
             opens.push(started.elapsed().as_secs_f64() * 1000.0);
             layer::present(|| renderer.frame(Some(0.5))).map_err(anyhow::Error::msg)?;
             layer::present(|| renderer.frame(Some(0.8))).map_err(anyhow::Error::msg)?;
+            let traces = layer.traces();
+            let open_held = traces.held();
             drop(renderer);
             drop(gpu);
+            let rendered_held = traces.held();
             drop(layer);
+            let dropped = traces.held();
+            let windows_dropped = ours().len();
             layer::spin(0.05);
+            let spun = traces.held();
+            layer::settle(marker);
+            let settled = traces.held();
+            for (slot, held) in [dropped, spun, settled].iter().enumerate() {
+                if held[0].is_some() {
+                    stages[slot] += 1;
+                }
+            }
+            if index == 0 {
+                first = vec![
+                    format!("open {open_held:?}"),
+                    format!("renderer dropped {rendered_held:?}"),
+                    format!("layer dropped {dropped:?} with our windows {windows_dropped}"),
+                    format!("run loop spun {spun:?}"),
+                    format!("events pumped {settled:?} with our windows {}", ours().len()),
+                ];
+            }
         }
         std::thread::sleep(Duration::from_millis(500));
         let after = (ours().len(), ports(), threads(pid).len(), rusage(pid));
@@ -1461,6 +1498,8 @@ mod probe {
             memory(after.3)
         ));
         p.line(format!("- open to visible {}, open to first frame {}", stats(&shown), stats(&opens)));
+        p.line(format!("- references still held on the window, view and Metal layer in the first cycle, beyond the probe's own {first:?}"));
+        p.line(format!("- of twenty windows, still alive after the layer dropped {}, after the run loop spun {}, after AppKit events were pumped {}", stages[0], stages[1], stages[2]));
         Ok(())
     }
 
@@ -1479,6 +1518,11 @@ mod probe {
         p.line(format!("- widget windows {widgets:?}"));
         let (_, display) = picture::screen_for(marker, &screen.id)?;
         let baseline = grab(display).context("CGDisplayCreateImage gave nothing")?;
+        let timed = Instant::now();
+        let _ = grab(display);
+        let grab_ms = timed.elapsed().as_secs_f64() * 1000.0;
+        let cross = (grab_ms * 8.0 / 1000.0).clamp(0.5, 4.0);
+        p.line(format!("- one screen capture takes {grab_ms:.0} ms here, so the bar crosses in {cross:.2} s to be caught about eight times"));
         let _ = scooch_core::encode_png(&baseline.image()).map(|bytes| fs::write(p.out.join("live-before.png"), bytes));
         let paper = picture_window(&screen).context("no wallpaper window was found for this screen")?;
         let field = grab_window(paper.number).context("the wallpaper window could not be captured")?;
@@ -1513,22 +1557,24 @@ mod probe {
         p.line(format!("- layer number {} at level {}, {}x{} pixels, adapter {}, device ready after {} ms", layer.number(), layer.level, width, height, gpu.name, device_ready.as_millis()));
         let row = (height as f32 * 0.55) as usize;
         let samples: Vec<(usize, usize)> = [(0.1, 0.7), (0.5, 0.7), (0.7, 0.7), (0.9, 0.7), (0.55, 0.45), (0.85, 0.45)].iter().map(|(x, y)| ((width as f32 * x) as usize, (height as f32 * y) as usize)).collect();
-        let worker = animate(renderer, layer.display, 0.5, 4.0, Some(0.3));
-        let mut looks: Vec<(f64, Option<f32>, Vec<f32>, usize)> = Vec::new();
+        let worker = animate(renderer, layer.display, cross, 4.0, Some(0.3));
+        let mut looks: Vec<Look> = Vec::new();
         let mut set_at: Option<Instant> = None;
         let mut system_shows: Option<f64> = None;
         let mut saved = 0;
         while !worker.is_finished() {
-            let Some(shot) = grab(display) else { continue };
             let at = opened.elapsed().as_secs_f64() * 1000.0;
+            let Some(shot) = grab(display) else { continue };
             let bar = bar_at(&shot, row);
-            let changed: Vec<f32> = masks.iter().map(|(_, ink)| ink.iter().filter(|(x, y)| !near(shot.at(*x, *y), baseline.at(*x, *y))).count() as f32 / ink.len().max(1) as f32).collect();
+            let share = |test: &dyn Fn(usize, usize) -> bool| -> Vec<f32> { masks.iter().map(|(_, ink)| ink.iter().filter(|(x, y)| test(*x, *y)).count() as f32 / ink.len().max(1) as f32).collect() };
+            let changed = share(&|x, y| !near(shot.at(x, y), baseline.at(x, y)));
+            let covered = share(&|x, y| near(shot.at(x, y), field.at(x, y)) || magenta(shot.at(x, y)));
             let through = samples.iter().filter(|(x, y)| near(shot.at(*x, *y), [40, 200, 220])).count();
             if (saved == 0 && at > 250.0) || (saved == 1 && set_at.is_some_and(|set| set.elapsed().as_millis() > 1500)) {
                 let _ = scooch_core::encode_png(&shot.image()).map(|bytes| fs::write(p.out.join(format!("live-during-{saved}.png")), bytes));
                 saved += 1;
             }
-            looks.push((at, bar, changed, through));
+            looks.push(Look { at, bar, changed, covered, through });
             if set_at.is_none() && at > 900.0 {
                 desktop.set_wallpaper(&screen, &cyan)?;
                 set_at = Some(Instant::now());
@@ -1542,40 +1588,44 @@ mod probe {
         }
         let (renderer, run) = worker.join().map_err(|_| anyhow::anyhow!("the render thread panicked"))?;
         drop(renderer);
-        drop(layer);
+        let traces = layer.traces();
+        layer.close(marker);
         let closed = Instant::now();
         layer::spin(0.4);
         let after = grab(display);
         let leftover = ours();
+        let held = traces.held();
         let first = run.frames.first().map(|frame| (*frame - opened).as_secs_f64() * 1000.0);
         let last = run.frames.last().map(|frame| (*frame - opened).as_secs_f64() * 1000.0);
         p.line(format!("- cold open to first presented frame {:?} ms, last frame at {:?} ms, captures used the screencapture tool as a fallback {}", first.map(|value| value.round()), last.map(|value| value.round()), SLOW.load(std::sync::atomic::Ordering::SeqCst)));
         report_run(p, &run);
-        let crossing: Vec<(f64, f32)> = looks.iter().filter(|(at, _, _, _)| first.is_some_and(|first| *at >= first && *at <= first + 500.0)).filter_map(|(at, bar, _, _)| bar.map(|bar| (*at, bar))).collect();
+        let period = if run.rate > 0.0 { 1000.0 / run.rate } else { 1000.0 / 60.0 };
+        let crossing: Vec<(f64, f32)> = looks.iter().filter(|look| first.is_some_and(|first| look.at >= first && look.at <= first + cross * 1000.0)).filter_map(|look| look.bar.map(|bar| (look.at, bar))).collect();
         let steady = crossing.windows(2).all(|pair| pair[1].1 >= pair[0].1 - 2.0);
-        p.line(format!("- {} captures in all, {} during the 500 ms crossing, bar centres in pixels {:?}, increasing {steady}", looks.len(), crossing.len(), crossing.iter().map(|(at, bar)| format!("{:.0} ms {:.0}", at, bar)).collect::<Vec<_>>()));
-        let inside: Vec<&(f64, Option<f32>, Vec<f32>, usize)> = looks.iter().filter(|(at, _, _, _)| first.zip(last).is_some_and(|(first, last)| *at >= first && *at <= last)).collect();
-        let settled_from = first.map(|first| first + 50.0);
-        let bare_times: Vec<f64> = inside.iter().filter(|(_, bar, _, _)| bar.is_none()).map(|(at, _, _, _)| *at).collect();
+        p.line(format!("- {} captures in all, {} during the {:.0} ms crossing, bar centres in pixels {:?}, increasing {steady}", looks.len(), crossing.len(), cross * 1000.0, crossing.iter().map(|(at, bar)| format!("{:.0} ms {:.0}", at, bar)).collect::<Vec<_>>()));
+        let inside: Vec<&Look> = looks.iter().filter(|look| first.zip(last).is_some_and(|(first, last)| look.at >= first && look.at <= last)).collect();
+        let settled_from = first.map(|first| first + 4.0 * period);
+        let bare_times: Vec<f64> = inside.iter().filter(|look| look.bar.is_none()).map(|look| look.at).collect();
         let bare = bare_times.iter().filter(|at| settled_from.is_some_and(|from| **at > from)).count();
-        p.line(format!("- captures between the first and last pattern frame {}, without the layer {} at {:?} ms, of which later than 50 ms after the first frame {bare}", inside.len(), bare_times.len(), bare_times.iter().map(|at| at.round()).collect::<Vec<_>>()));
-        let worst: Vec<String> = masks.iter().enumerate().map(|(index, (name, _))| format!("{name} {:.3}", looks.iter().map(|look| look.2.get(index).copied().unwrap_or_default()).fold(0.0f32, f32::max))).collect();
-        p.line(format!("- largest share of icon ink that changed in any capture {worst:?}"));
-        let marked: Vec<String> = looks.iter().filter(|look| look.2.iter().any(|share| *share > 0.05)).map(|look| format!("{:.0} ms {:?}", look.0, look.2.iter().map(|share| (share * 1000.0).round() / 1000.0).collect::<Vec<_>>())).collect();
-        p.line(format!("- captures where more than 5% of an icon's ink changed {} {:?}, the first frame came at {:?} ms", marked.len(), marked.iter().take(6).collect::<Vec<_>>(), first.map(|value| value.round())));
-        let through = looks.iter().filter(|look| look.3 > 0 && first.zip(last).is_some_and(|(first, last)| look.0 >= first && look.0 <= last)).count();
+        p.line(format!("- captures started between the first and last pattern frame {}, without the layer {} at {:?} ms, of which started more than four refreshes ({:.0} ms) after the first frame was queued {bare}", inside.len(), bare_times.len(), bare_times.iter().map(|at| at.round()).collect::<Vec<_>>(), 4.0 * period));
+        let worst = |pick: fn(&Look) -> &Vec<f32>| -> Vec<String> { masks.iter().enumerate().map(|(index, (name, _))| format!("{name} {:.3}", looks.iter().map(|look| pick(look).get(index).copied().unwrap_or_default()).fold(0.0f32, f32::max))).collect() };
+        p.line(format!("- largest share of icon ink that changed in any capture, edge and shadow pixels blend with whatever lies below so they move with the bar {:?}", worst(|look| &look.changed)));
+        p.line(format!("- largest share of icon ink showing only what the layer drew, as it would if the layer covered the icon {:?}", worst(|look| &look.covered)));
+        let marked: Vec<String> = looks.iter().filter(|look| look.covered.iter().any(|share| *share > 0.5)).map(|look| format!("{:.0} ms {:?}", look.at, look.covered.iter().map(|share| (share * 1000.0).round() / 1000.0).collect::<Vec<_>>())).collect();
+        p.line(format!("- captures where the layer covered more than half of an icon's ink {} {:?}", marked.len(), marked.iter().take(6).collect::<Vec<_>>()));
+        let through = looks.iter().filter(|look| look.through > 0 && first.zip(last).is_some_and(|(first, last)| look.at >= first && look.at <= last)).count();
         p.line(format!("- wallpaper set {:?} ms after open, the system's own window showed it {:?} ms after the set, captures where the new picture showed through or above the layer {through}", set_at.map(|set| (set - opened).as_millis()), system_shows.map(|value| value.round())));
         let after_bar = after.as_ref().and_then(|shot| bar_at(shot, row));
         let after_cyan = after.as_ref().map(|shot| samples.iter().filter(|(x, y)| near(shot.at(*x, *y), [40, 200, 220])).count());
         if let Some(shot) = &after {
             let _ = scooch_core::encode_png(&shot.image()).map(|bytes| fs::write(p.out.join("live-after.png"), bytes));
         }
-        p.line(format!("- after close at +{} ms: bar on screen {after_bar:?}, field samples showing the new picture {after_cyan:?} of {}, windows of ours {}", closed.elapsed().as_millis(), samples.len(), leftover.len()));
+        p.line(format!("- after close at +{} ms: bar on screen {after_bar:?}, field samples showing the new picture {after_cyan:?} of {}, windows of ours {}, window, view and Metal layer still alive {held:?}", closed.elapsed().as_millis(), samples.len(), leftover.len()));
         if !steady || crossing.len() < 2 || bare > 0 || through > 0 || after_bar.is_some() || !leftover.is_empty() || after_cyan != Some(samples.len()) {
             p.fail("the live layer did not sit cleanly under the icons and go");
         }
-        if masks.iter().enumerate().any(|(index, _)| looks.iter().any(|look| look.2.get(index).copied().unwrap_or_default() > 0.05)) {
-            p.fail("icon pixels changed while the layer was open");
+        if !marked.is_empty() {
+            p.fail("the layer covered an icon");
         }
         cycles(p, marker, &screen, true)?;
         cycles(p, marker, &screen, false)?;
@@ -1632,9 +1682,12 @@ mod probe {
             let me = NSRunningApplication::currentApplication();
             say("shown", format!(", front app before {before} after {}, this helper active {}, policy {:?}", front(), me.isActive(), me.activationPolicy()));
             drop(renderer);
+            let traces = layer.traces();
             drop(layer);
             layer::spin(0.3);
-            say("closed", String::new());
+            say("closed", format!(", window, view and Metal layer still alive {:?}, windows of ours {}", traces.held(), ours().len()));
+            layer::settle(marker);
+            say("settled", format!(", after AppKit events were pumped {:?}, windows of ours {}", traces.held(), ours().len()));
             drop(gpu);
             spin(0.5);
             say("dropped", String::new());
@@ -1692,8 +1745,7 @@ mod probe {
         switch(p, 123);
         let back = showing();
         drop(renderer);
-        drop(layer);
-        layer::spin(0.2);
+        layer.close(marker);
         p.line(format!("- the layer on the first Space is listed on screen there {one}, on the second Space {two}, back on the first {back}"));
         if !one || two || !back {
             p.fail("the layer did not stay on its own Space");
@@ -1726,13 +1778,14 @@ mod probe {
                 layer.commit();
                 let (renderer, run) = animate(renderer, layer.display, 0.5, 0.8, None).join().map_err(|_| anyhow::anyhow!("the render thread panicked"))?;
                 drop(renderer);
-                drop(layer);
+                layer.close(marker);
                 layer::spin(0.1);
                 let first = run.frames.first().map(|frame| (*frame - started).as_millis());
                 let period = if run.rate > 0.0 { 1000.0 / run.rate } else { 16.67 };
                 let presents = intervals(&run.frames);
                 lines.push(format!("- open {} level {}, {}x{}, open to first frame {first:?} ms", index + 1, layer::levels().0, width, height));
-                lines.push(format!("  - display link {:.2} Hz, callbacks {}, longer than 1.5 periods {}", run.rate, stats(&run.ticks), over(&run.ticks, period)));
+                lines.push(format!("  - display link {:.2} Hz, {} callbacks, arrival intervals {}, longer than 1.5 periods {}", run.rate, run.callbacks, stats(&run.arrivals), over(&run.arrivals, period)));
+                lines.push(format!("  - display link output times {}, longer than 1.5 periods {}", stats(&run.outputs), over(&run.outputs, period)));
                 lines.push(format!("  - frames {}, skipped while occluded {}, intervals {}, longer than 1.5 periods {}", run.frames.len(), run.hidden, stats(&presents), over(&presents, period)));
                 std::thread::sleep(Duration::from_millis(300));
             }
