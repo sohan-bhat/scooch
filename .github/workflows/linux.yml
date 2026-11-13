@@ -34,6 +34,58 @@ jobs:
           - desktop: mate
             packages: xvfb x11-utils caja marco mate-panel gvfs gvfs-daemons libglib2.0-bin
             extras: mate-desktop-environment-core mate-backgrounds
+          - desktop: xfce-dual
+            script: xfce
+            monitors: 2
+            packages: xvfb x11-utils x11-xserver-utils xfdesktop4 xfwm4 xfce4-panel xfconf
+            extras: xfce4-settings xfdesktop4-data gvfs gvfs-daemons
+          - desktop: kde-dual
+            script: kde
+            monitors: 2
+            packages: xvfb x11-utils x11-xserver-utils plasma-desktop plasma-workspace kwin-x11
+            extras: kde-cli-tools plasma-workspace-wallpapers breeze-icon-theme
+          - desktop: gnome-dual
+            script: gnome
+            monitors: 2
+            packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
+            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli
+          - desktop: mate-dual
+            script: mate
+            monitors: 2
+            packages: xvfb x11-utils x11-xserver-utils caja marco mate-panel gvfs gvfs-daemons libglib2.0-bin
+            extras: mate-desktop-environment-core mate-backgrounds
+          - desktop: kde-arch
+            script: kde
+            container: archlinux:latest
+            packages: plasma-desktop plasma-workspace breeze-icons
+            extras: kwin-x11 openbox plasma-workspace-wallpapers
+          - desktop: kde-arch-dual
+            script: kde
+            container: archlinux:latest
+            monitors: 2
+            packages: plasma-desktop plasma-workspace breeze-icons
+            extras: kwin-x11 openbox plasma-workspace-wallpapers
+          - desktop: xfce-arch
+            script: xfce
+            container: archlinux:latest
+            packages: xfdesktop xfwm4 xfce4-panel xfconf xfce4-settings
+            extras: adwaita-icon-theme
+          - desktop: xfce-arch-dual
+            script: xfce
+            container: archlinux:latest
+            monitors: 2
+            packages: xfdesktop xfwm4 xfce4-panel xfconf xfce4-settings
+            extras: adwaita-icon-theme
+          - desktop: cinnamon-arch
+            script: cinnamon
+            container: archlinux:latest
+            packages: cinnamon nemo python-gobject
+            extras: cinnamon-translations
+          - desktop: mate-arch
+            script: mate
+            container: archlinux:latest
+            packages: caja marco mate-panel mate-desktop
+            extras: mate-backgrounds mate-icon-theme
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -42,6 +94,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Packages
+        if: ${{ !matrix.container }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends dbus dbus-x11 dbus-user-session xdg-user-dirs procps
@@ -54,17 +107,27 @@ jobs:
         run: cargo build --release -p scooch --bins --examples
 
       - name: Test
+        if: ${{ !matrix.container }}
         run: cargo test --release -p scooch
 
       - name: Probe
         if: ${{ !cancelled() }}
         env:
           SCOOCH_SCALE: ${{ matrix.scale || 1 }}
+          SCOOCH_MONITORS: ${{ matrix.monitors || 1 }}
+          PACKAGES: ${{ matrix.packages }}
+          EXTRAS: ${{ matrix.extras }}
+          IMAGE: ${{ matrix.container }}
+          SCRIPT: ${{ matrix.script || matrix.desktop }}
         run: |
-          XDG_RUNTIME_DIR="$(mktemp -d)"
-          chmod 700 "$XDG_RUNTIME_DIR"
-          export XDG_RUNTIME_DIR
-          dbus-run-session -- bash ".github/linux/${{ matrix.script || matrix.desktop }}.sh" ./target/release/examples/linuxprobe linuxprobe
+          if [ -n "$IMAGE" ]; then
+            docker run --rm -v "$PWD:/work" -w /work -e SCOOCH_SCALE -e SCOOCH_MONITORS -e PACKAGES -e EXTRAS -e HOST_UID="$(id -u)" "$IMAGE" bash .github/linux/container.sh "$SCRIPT"
+          else
+            XDG_RUNTIME_DIR="$(mktemp -d)"
+            chmod 700 "$XDG_RUNTIME_DIR"
+            export XDG_RUNTIME_DIR
+            dbus-run-session -- bash ".github/linux/$SCRIPT.sh" ./target/release/examples/linuxprobe linuxprobe
+          fi
 
       - name: Upload
         if: ${{ !cancelled() }}

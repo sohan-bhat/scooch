@@ -8,7 +8,12 @@ export KDE_FULL_SESSION=true
 KDE_SESSION_VERSION="$(plasmashell --version 2>/dev/null | sed -E 's/[^0-9]*([0-9]+).*/\1/')"
 export KDE_SESSION_VERSION
 
-kwin_x11 >"$out/kwin.log" 2>&1 &
+if command -v kwin_x11 >/dev/null 2>&1; then
+    kwin_x11 >"$out/kwin.log" 2>&1 &
+elif command -v openbox >/dev/null 2>&1; then
+    openbox >"$out/kwin.log" 2>&1 &
+    echo "kwin_x11 is missing, so openbox manages the windows" >>"$out/readiness.txt"
+fi
 sleep 2
 plasmashell >"$out/plasmashell.log" 2>&1 &
 

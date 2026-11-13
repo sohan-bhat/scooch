@@ -10,7 +10,11 @@ gsettings set org.gnome.shell disable-user-extensions false
 gsettings set org.gnome.shell enabled-extensions "['ding@rastersoft.com']"
 gsettings set org.gnome.desktop.interface enable-animations false
 
-gnome-shell --headless --wayland --no-x11 --virtual-monitor 1920x1080 >"$out/shell.log" 2>&1 &
+monitors=(--virtual-monitor 1920x1080)
+if [ "${SCOOCH_MONITORS:-1}" = "2" ]; then
+    monitors+=(--virtual-monitor 1920x1080)
+fi
+gnome-shell --headless --wayland --no-x11 "${monitors[@]}" >"$out/shell.log" 2>&1 &
 
 wayland_socket() {
     [ -S "$XDG_RUNTIME_DIR/wayland-0" ]

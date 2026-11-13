@@ -48,13 +48,29 @@ ready() {
     return 1
 }
 
+split_monitors() {
+    {
+        xrandr --output screen --primary
+        xrandr --setmonitor left 1920/508x1080/286+0+0 screen
+        xrandr --setmonitor right 1920/508x1080/286+1920+0 none
+        xrandr --listmonitors
+    } >>"$out/xrandr.log" 2>&1
+    echo "split into $(xrandr --listmonitors 2>/dev/null | tr '\n' ' ')" >>"$out/readiness.txt"
+}
+
 start_xvfb() {
     local size="${1:-1920x1080}"
+    if [ "${SCOOCH_MONITORS:-1}" = "2" ]; then
+        size="3840x1080"
+    fi
     Xvfb :99 -screen 0 "${size}x24" -nolisten tcp >"$out/xvfb.log" 2>&1 &
     export DISPLAY=:99
     export XDG_SESSION_TYPE=x11
     dbus-update-activation-environment DISPLAY XDG_SESSION_TYPE >/dev/null 2>&1 || true
     ready "X display" 30 xdpyinfo >/dev/null 2>&1 || true
+    if [ "${SCOOCH_MONITORS:-1}" = "2" ]; then
+        split_monitors
+    fi
 }
 
 run_probe() {
