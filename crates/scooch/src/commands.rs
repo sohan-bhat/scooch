@@ -83,7 +83,7 @@ pub fn start() -> Result<()> {
     state.problem = None;
     store.save(&state)?;
     begin(desktop.as_ref(), &store)?;
-    wait(&store, desktop.consent_hint());
+    wait(desktop.as_ref(), &store);
     print_status(desktop.as_ref(), &store);
     Ok(())
 }
@@ -184,7 +184,7 @@ fn switch_with(store: &Store, image: Option<PathBuf>) -> Result<()> {
     state.problem = None;
     store.save(&state)?;
     begin(desktop.as_ref(), store)?;
-    wait(store, desktop.consent_hint());
+    wait(desktop.as_ref(), store);
     print_status(desktop.as_ref(), store);
     Ok(())
 }
@@ -345,6 +345,9 @@ pub fn wake_up(state: &mut State) -> bool {
     state.restoring = false;
     state.on = true;
     state.tally = Tally::default();
+    for entry in state.screens.values_mut() {
+        entry.fingerprint = None;
+    }
     true
 }
 
@@ -628,12 +631,14 @@ fn begin(desktop: &dyn Desktop, store: &Store) -> Result<()> {
     desktop.autostart(Some(&state::canonical(&exe).unwrap_or(exe)))
 }
 
-fn wait(store: &Store, hint: Option<&str>) {
+fn wait(desktop: &dyn Desktop, store: &Store) {
+    let hint = desktop.consent_hint();
+    let connected: Vec<String> = desktop.screens().map(|screens| screens.into_iter().map(|screen| screen.id).collect()).unwrap_or_default();
     let started = Instant::now();
     let mut hinted = false;
     while started.elapsed() < PATIENCE {
         let running = store.watcher().is_some();
-        if settled(&store.load()) && running {
+        if settled(&store.load(), &connected) && running {
             return;
         }
         if !running && started.elapsed() > START_PATIENCE {
@@ -647,8 +652,8 @@ fn wait(store: &Store, hint: Option<&str>) {
     }
 }
 
-pub fn settled(state: &State) -> bool {
-    state.problem.is_some() || state.screens.values().all(|entry| entry.fingerprint.is_some())
+pub fn settled(state: &State, connected: &[String]) -> bool {
+    state.problem.is_some() || connected.iter().all(|id| state.screens.get(id).is_some_and(|entry| entry.fingerprint.is_some()))
 }
 
 #[cfg(test)]
@@ -1496,6 +1501,24 @@ mod tests {
     }
 
     #[test]
+    fn turning_on_after_an_off_with_pending_desktops_waits_for_the_tick() {
+        let (fake, store, left, right) = pair("onwait");
+        fake.connect(screens(&["L"]));
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(1, 0, 0, 1, 0)));
+        let mut state = store.load();
+        assert_eq!(turn_on(&mut state, fake.as_ref(), &store, false).unwrap(), FirstRun::Go);
+        store.save(&state).unwrap();
+        let here = ["L".to_string()];
+        assert!(!settled(&store.load(), &here));
+        assert!(store.load().screens.values().all(|entry| entry.fingerprint.is_none()));
+        crate::daemon::Daemon::new(fake.clone(), store.clone()).tick();
+        let state = store.load();
+        assert!(settled(&state, &here));
+        assert_eq!(describe(&state, true, Some(&here)), vec!["Scooch is on.".to_string(), format!("Picture  {}", tilde(&left)), "Icons    0 on 1 screen".to_string()]);
+        assert_eq!(state.screens["R"].original, right);
+    }
+
+    #[test]
     fn tilde_shortens_the_home_folder() {
         let home = dirs::home_dir().unwrap();
         assert_eq!(tilde(&home.join("Pictures/harbor.jpg")), "~/Pictures/harbor.jpg");
@@ -1505,13 +1528,16 @@ mod tests {
     #[test]
     fn waiting_ends_on_a_render_or_a_problem() {
         let mut state = on();
+        let main = ["main".to_string()];
         state.screens.get_mut("main").unwrap().fingerprint = None;
-        assert!(!settled(&state));
+        assert!(!settled(&state, &main));
         state.problem = Some("x".into());
-        assert!(settled(&state));
+        assert!(settled(&state, &main));
         state.problem = None;
         state.screens.get_mut("main").unwrap().fingerprint = Some("f".into());
-        assert!(settled(&state));
+        assert!(settled(&state, &main));
+        assert!(!settled(&state, &["main".to_string(), "other".to_string()]));
+        assert!(settled(&state, &[]));
     }
 
     #[test]
