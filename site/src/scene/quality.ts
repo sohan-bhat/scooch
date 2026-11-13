@@ -56,14 +56,16 @@ export function gpuClass(): Probe {
   const extensions = new Set<string>();
   try {
     const canvas = document.createElement('canvas');
+    canvas.width = 1;
+    canvas.height = 1;
     const gl = canvas.getContext('webgl2', { powerPreference: 'high-performance' });
     if (!gl) return (probed = { gpu: 'low', renderer: 'none', extensions });
-    const info = gl.getExtension('WEBGL_debug_renderer_info');
-    const renderer = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+    const plain = String(gl.getParameter(gl.RENDERER));
+    const info = /^(WebKit WebGL|Mozilla)?$/.test(plain) ? gl.getExtension('WEBGL_debug_renderer_info') : null;
+    const renderer = info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : plain;
     for (const name of compressed) if (gl.getExtension(name)) extensions.add(name);
     const astc = gl.getExtension('WEBGL_compressed_texture_astc');
     if (astc?.getSupportedProfiles().includes('hdr')) extensions.add('astc-hdr');
-    gl.getExtension('WEBGL_lose_context')?.loseContext();
     probed = { gpu: classify(renderer), renderer, extensions };
   } catch {
     probed = { gpu: 'low', renderer: 'unknown', extensions };
