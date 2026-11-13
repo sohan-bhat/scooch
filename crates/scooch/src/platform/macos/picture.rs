@@ -20,7 +20,11 @@ pub fn screens(marker: MainThreadMarker) -> Result<Vec<Screen>> {
         let bounds = unsafe { sys::CGDisplayBounds(display) };
         let frame = Rect { x: bounds.origin.x as f32, y: bounds.origin.y as f32, w: bounds.size.width as f32, h: bounds.size.height as f32 };
         let display = identifier(display);
-        let space = super::spaces::current(&display);
+        let space = match super::spaces::showing(&display) {
+            super::spaces::Showing::FullScreen => continue,
+            super::spaces::Showing::Desktop(space) => Some(space),
+            super::spaces::Showing::Unknown => None,
+        };
         found.push(Screen { id: super::spaces::join(&display, space.as_deref()), frame, scale: screen.backingScaleFactor() as f32 });
     }
     if found.is_empty() {

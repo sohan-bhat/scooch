@@ -3,7 +3,7 @@ use crate::state::{same, Store};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::msg_send;
-use objc2_foundation::{NSArray, NSDictionary, NSString, NSURL};
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -20,6 +20,7 @@ pub enum Plist {
     Dict(Vec<(String, Plist)>),
     Array(Vec<Plist>),
     Text(String),
+    Number(f64),
     Other,
 }
 
@@ -34,6 +35,13 @@ impl Plist {
     pub fn text(&self) -> Option<&str> {
         match self {
             Plist::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn number(&self) -> Option<f64> {
+        match self {
+            Plist::Number(value) => Some(*value),
             _ => None,
         }
     }
@@ -70,6 +78,9 @@ pub fn convert(object: &AnyObject) -> Plist {
     }
     if let Some(array) = object.downcast_ref::<NSArray>() {
         return Plist::Array(elements(array).iter().map(|item| convert(item)).collect());
+    }
+    if let Some(number) = object.downcast_ref::<NSNumber>() {
+        return Plist::Number(number.doubleValue());
     }
     if let Some(dictionary) = object.downcast_ref::<NSDictionary>() {
         let keys: Retained<NSArray> = unsafe { msg_send![dictionary, allKeys] };

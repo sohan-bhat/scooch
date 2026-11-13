@@ -8,13 +8,21 @@ use std::ffi::{c_void, CStr};
 pub struct Monitor {
     pub name: String,
     pub current: Option<String>,
+    pub full_screen: bool,
     pub spaces: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Origin {
-    WindowServer,
-    Preferences,
+#[derive(Clone, Debug, PartialEq)]
+pub enum Showing {
+    Desktop(String),
+    FullScreen,
+    Unknown,
+}
+
+const DESKTOP: f64 = 0.0;
+
+fn desktop_kind(space: &Plist) -> bool {
+    space.get("type").and_then(Plist::number).is_none_or(|kind| kind == DESKTOP)
 }
 
 pub fn monitors(list: &Plist) -> Option<Vec<Monitor>> {
@@ -23,9 +31,11 @@ pub fn monitors(list: &Plist) -> Option<Vec<Monitor>> {
         .iter()
         .filter_map(|monitor| {
             let name = monitor.get("Display Identifier")?.text()?.to_string();
-            let current = monitor.get("Current Space").and_then(|space| space.get("uuid")).and_then(Plist::text).map(str::to_string);
-            let spaces = monitor.get("Spaces").and_then(Plist::items).unwrap_or(&[]).iter().filter_map(|space| space.get("uuid")?.text().map(str::to_string)).collect();
-            Some(Monitor { name, current, spaces })
+            let showing = monitor.get("Current Space");
+            let current = showing.and_then(|space| space.get("uuid")).and_then(Plist::text).map(str::to_string);
+            let full_screen = showing.is_some_and(|space| !desktop_kind(space));
+            let spaces = monitor.get("Spaces").and_then(Plist::items).unwrap_or(&[]).iter().filter(|space| desktop_kind(space)).filter_map(|space| space.get("uuid")?.text().map(str::to_string)).collect();
+            Some(Monitor { name, current, full_screen, spaces })
         })
         .collect();
     (!found.is_empty()).then_some(found)
@@ -36,25 +46,32 @@ pub fn pick<'a>(monitors: &'a [Monitor], display: &str) -> Option<&'a Monitor> {
     named(display).or_else(|| named("Main"))
 }
 
-pub fn read() -> Option<(Vec<Monitor>, Origin)> {
-    window_server().map(|found| (found, Origin::WindowServer)).or_else(|| preferences().map(|found| (found, Origin::Preferences)))
+pub fn showing_from(server: Option<&[Monitor]>, display: &str) -> Showing {
+    let Some(monitor) = server.and_then(|monitors| pick(monitors, display)) else { return Showing::Unknown };
+    match (&monitor.current, monitor.full_screen) {
+        (_, true) => Showing::FullScreen,
+        (Some(space), false) => Showing::Desktop(space.clone()),
+        (None, false) => Showing::Unknown,
+    }
+}
+
+pub fn showing(display: &str) -> Showing {
+    showing_from(window_server().as_deref(), display)
 }
 
 pub fn current(display: &str) -> Option<String> {
-    let (monitors, _) = read()?;
-    pick(&monitors, display)?.current.clone()
+    match showing(display) {
+        Showing::Desktop(space) => Some(space),
+        _ => None,
+    }
+}
+
+pub fn all_from(monitors: &[Monitor], display: &str) -> Option<Vec<String>> {
+    Some(pick(monitors, display)?.spaces.clone())
 }
 
 pub fn all(display: &str) -> Option<Vec<String>> {
-    let (monitors, _) = read()?;
-    let monitor = pick(&monitors, display)?;
-    let mut spaces = monitor.spaces.clone();
-    if let Some(current) = &monitor.current {
-        if !spaces.contains(current) {
-            spaces.push(current.clone());
-        }
-    }
-    Some(spaces)
+    window_server().and_then(|monitors| all_from(&monitors, display)).or_else(|| preferences().and_then(|monitors| all_from(&monitors, display)))
 }
 
 fn symbol(name: &CStr) -> *mut c_void {
@@ -100,8 +117,10 @@ mod tests {
     fn fixture() -> Plist {
         parse(
             b"<?xml version=\"1.0\"?><plist version=\"1.0\"><array>\
-              <dict><key>Display Identifier</key><string>Main</string><key>Current Space</key><dict><key>uuid</key><string>S1</string></dict>\
-              <key>Spaces</key><array><dict><key>uuid</key><string>S1</string></dict><dict><key>uuid</key><string>S2</string></dict></array></dict>\
+              <dict><key>Display Identifier</key><string>Main</string><key>Current Space</key><dict><key>uuid</key><string>S1</string><key>type</key><integer>0</integer></dict>\
+              <key>Spaces</key><array><dict><key>uuid</key><string>S1</string><key>type</key><integer>0</integer></dict><dict><key>uuid</key><string>S2</string></dict><dict><key>uuid</key><string>F1</string><key>type</key><integer>4</integer></dict></array></dict>\
+              <dict><key>Display Identifier</key><string>WIDE</string><key>Current Space</key><dict><key>uuid</key><string>F2</string><key>type</key><integer>4</integer></dict>\
+              <key>Spaces</key><array><dict><key>uuid</key><string>S5</string></dict><dict><key>uuid</key><string>F2</string><key>type</key><integer>4</integer></dict></array></dict>\
               <dict><key>Display Identifier</key><string>SIDE</string><key>Current Space</key><dict><key>uuid</key><string>S9</string></dict>\
               <key>Spaces</key><array><dict><key>uuid</key><string>S9</string></dict></array></dict>\
               <dict><key>Display Identifier</key><string>GONE</string></dict>\
@@ -113,11 +132,28 @@ mod tests {
     #[test]
     fn monitors_list_their_current_and_every_space() {
         let found = monitors(&fixture()).unwrap();
-        assert_eq!(found[0], Monitor { name: "Main".into(), current: Some("S1".into()), spaces: vec!["S1".into(), "S2".into()] });
+        assert_eq!(found[0], Monitor { name: "Main".into(), current: Some("S1".into()), full_screen: false, spaces: vec!["S1".into(), "S2".into()] });
         assert_eq!(pick(&found, "SIDE").unwrap().current.as_deref(), Some("S9"));
         assert_eq!(pick(&found, "BUILT-IN").unwrap().name, "Main");
         assert_eq!(pick(&found, "GONE").unwrap().name, "Main");
         assert!(monitors(&Plist::Other).is_none());
+    }
+
+    #[test]
+    fn full_screen_spaces_show_no_desktop_and_are_not_listed() {
+        let found = monitors(&fixture()).unwrap();
+        assert_eq!(showing_from(Some(&found), "WIDE"), Showing::FullScreen);
+        assert_eq!(all_from(&found, "WIDE"), Some(vec!["S5".to_string()]));
+        assert_eq!(all_from(&found, "Main"), Some(vec!["S1".to_string(), "S2".to_string()]));
+        assert_eq!(showing_from(Some(&found), "BUILT-IN"), Showing::Desktop("S1".into()));
+    }
+
+    #[test]
+    fn without_the_window_server_the_showing_space_is_unknown() {
+        assert_eq!(showing_from(None, "Main"), Showing::Unknown);
+        let found = monitors(&fixture()).unwrap();
+        let nameless: Vec<Monitor> = found.iter().cloned().map(|monitor| Monitor { current: None, ..monitor }).collect();
+        assert_eq!(showing_from(Some(&nameless), "Main"), Showing::Unknown);
     }
 
     #[test]
