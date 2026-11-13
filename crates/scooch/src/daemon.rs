@@ -597,10 +597,17 @@ pub fn after(report: &Report) -> Next {
     }
 }
 
+pub fn retire(store: &Store, stop: &Stop) {
+    stop.request();
+    if store.recorded_pid() == Some(std::process::id()) {
+        let _ = std::fs::remove_file(store.pid_file());
+    }
+}
+
 fn finish(store: &Store, stop: &Stop) -> ! {
+    retire(store, stop);
     if stop.wait_idle(STOP_CAP) {
         let _ = store.mark(None);
-        let _ = std::fs::remove_file(store.pid_file());
     }
     std::process::exit(0)
 }
@@ -613,7 +620,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     poke::listen(
         move || poked.wake(),
         move || {
-            stopper.request();
+            retire(&stopped, &stopper);
             stopping.wake();
             finish(&stopped, &stopper);
         },
@@ -650,18 +657,16 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             }
             if after(&report) == Next::Quit {
                 eprintln!("Scooch could not save its settings, so it stopped until the disk has room.");
-                stop.request();
                 finish(&daemon.store, &stop);
             }
             if report.unload {
-                stop.request();
+                retire(&daemon.store, &stop);
                 if let Err(error) = daemon.desktop.autostart(None) {
                     eprintln!("{error}");
                 }
                 finish(&daemon.store, &stop);
             }
             if report.exit {
-                stop.request();
                 finish(&daemon.store, &stop);
             }
             if report.retry {
@@ -1385,6 +1390,18 @@ pub mod tests {
         assert!(started.elapsed() >= Duration::from_millis(150));
         assert!(!stop.begin());
         tick.join().unwrap();
+    }
+
+    #[test]
+    fn a_daemon_asked_to_stop_is_never_found_as_the_running_one() {
+        let store = Store::at(scratch("retire"));
+        let held = store.lock().unwrap();
+        assert!(held.is_some());
+        assert_eq!(store.watcher(), Some(std::process::id()));
+        let stop = Stop::default();
+        retire(&store, &stop);
+        assert!(stop.requested());
+        assert_eq!(store.watcher(), None);
     }
 
     #[test]

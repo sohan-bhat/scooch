@@ -13,7 +13,9 @@ const PATIENCE: Duration = Duration::from_secs(60);
 const HINT_AFTER: Duration = Duration::from_secs(4);
 const START_PATIENCE: Duration = Duration::from_secs(8);
 const POLL: Duration = Duration::from_millis(100);
-const STOP_PATIENCE: Duration = Duration::from_secs(3);
+pub const STOP_PATIENCE: Duration = daemon::STOP_CAP.saturating_add(Duration::from_secs(2));
+pub const STOP_FAILED: &str = "Scooch could not stop its background program, so run scooch off again in a moment.";
+pub const NO_RESTORER: &str = "Nothing is running to switch them back, so run scooch off again to give up on them or scooch to turn Scooch back on.";
 const PICTURE_KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", "tiff", "bmp", "avif"];
 pub const FLIP_HINT: &str = "Icons still cover part of the picture. Run scooch flip to let Scooch flip it.";
 pub const FLIP_ON: &str = "Scooch may now flip your picture when that clears your icons.";
@@ -44,7 +46,7 @@ fn replace_outdated(store: &Store) -> Result<()> {
     if !outdated(&store.load(), store.watcher().is_some(), state::PROGRAM) {
         return Ok(());
     }
-    stop(store);
+    stop(store)?;
     store.mark(None)?;
     println!("Scooch was updated to {}.", state::PROGRAM);
     Ok(())
@@ -107,7 +109,11 @@ fn print(lines: &[String]) {
 
 pub fn describe(state: &State, running: bool, connected: Option<&[String]>) -> Vec<String> {
     if state.restoring && !state.on {
-        return vec![restoring_line(state.screens.len())];
+        let mut lines = vec![restoring_line(state.screens.len())];
+        if !running {
+            lines.push(NO_RESTORER.into());
+        }
+        return lines;
     }
     if !state.on {
         return vec!["Scooch is off. Run scooch to turn it on.".into()];
@@ -242,7 +248,7 @@ pub fn off() -> Result<()> {
     let store = Store::open();
     let desktop = desktop()?;
     desktop.screens()?;
-    stop(&store);
+    stop(&store)?;
     match wind_down(desktop.as_ref(), &store)? {
         Off::Done { lost } => {
             desktop.autostart(None)?;
@@ -324,13 +330,25 @@ pub fn off_line(back: bool) -> &'static str {
     }
 }
 
-fn stop(store: &Store) {
-    let Some(process) = store.watcher() else { return };
+fn stop(store: &Store) -> Result<()> {
+    let Some(process) = store.watcher() else { return Ok(()) };
     poke::stop(process);
-    let started = Instant::now();
-    while store.watcher().is_some() && started.elapsed() < STOP_PATIENCE {
-        std::thread::sleep(POLL);
+    if !wait_gone(|| poke::alive(process), STOP_PATIENCE, POLL, std::thread::sleep) {
+        bail!(STOP_FAILED);
     }
+    Ok(())
+}
+
+pub fn wait_gone(mut alive: impl FnMut() -> bool, patience: Duration, poll: Duration, mut pause: impl FnMut(Duration)) -> bool {
+    let mut waited = Duration::ZERO;
+    while alive() {
+        if waited >= patience {
+            return false;
+        }
+        pause(poll);
+        waited += poll;
+    }
+    true
 }
 
 pub fn watch() -> Result<()> {
@@ -867,7 +885,7 @@ mod tests {
         let state = store.load();
         assert!(state.restoring && !state.on && state.screens.contains_key("R") && !state.screens.contains_key("L"));
         assert!(store.output("R", 1, "jpg").exists() && !store.output("L", 1, "jpg").exists() && !store.cache().exists());
-        assert_eq!(describe(&state, false, None), vec!["Scooch is off. 1 desktops or screens switch back the next time they show."]);
+        assert_eq!(describe(&state, true, None), vec!["Scooch is off. 1 desktops or screens switch back the next time they show."]);
         fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0), crate::daemon::tests::screen("R", 160.0, 1.0)]);
         let daemon = crate::daemon::Daemon::new(fake.clone(), store.clone());
         let report = daemon.tick();
@@ -985,6 +1003,26 @@ mod tests {
         let found = picture_file(&folder.join(".").join("a.jpg")).unwrap();
         assert_eq!(found, state::canonical(&picture).unwrap());
         assert!(!found.to_string_lossy().starts_with(r"\\?\"), "{}", found.display());
+    }
+
+    #[test]
+    fn off_waits_out_the_daemon_and_gives_up_on_one_that_lives_on() {
+        assert!(STOP_PATIENCE >= daemon::STOP_CAP + Duration::from_secs(2));
+        let mut lives = 5;
+        let mut paused = Duration::ZERO;
+        assert!(wait_gone(|| { lives -= 1; lives > 0 }, STOP_PATIENCE, POLL, |length| paused += length));
+        assert_eq!(paused, POLL * 4);
+        let mut stubborn = Duration::ZERO;
+        assert!(!wait_gone(|| true, STOP_PATIENCE, POLL, |length| stubborn += length));
+        assert!(stubborn >= STOP_PATIENCE);
+    }
+
+    #[test]
+    fn status_while_restoring_says_when_nothing_is_running() {
+        let mut state = State { restoring: true, ..State::default() };
+        state.screens.insert("R".into(), Entry::new(Path::new("/p/a.jpg")));
+        assert_eq!(describe(&state, true, None), vec!["Scooch is off. 1 desktops or screens switch back the next time they show."]);
+        assert_eq!(describe(&state, false, None)[1], NO_RESTORER);
     }
 
     #[test]
