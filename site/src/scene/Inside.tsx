@@ -18,7 +18,8 @@ import {
 import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
 import { story } from '@/story/state';
-import { ICON_SLOTS, pictureBody, pictureHead, pictureUniforms, tablesTexture } from './screen/picture';
+import { ICON_SLOTS, pictureBody, pictureHead, pictureUniforms } from './screen/picture';
+import type { Frame } from './screen/scenery';
 
 const planeVertex = `
 ${pictureHead}
@@ -56,7 +57,7 @@ void main() {
   float e = 1.0 / 128.0;
   float hx = relief(uv + vec2(e, 0.0)) - relief(uv - vec2(e, 0.0));
   float hy = relief(uv + vec2(0.0, e)) - relief(uv - vec2(0.0, e));
-  float height = uRelief * uSize.y * 0.07;
+  float height = uRelief * uSize.y * 0.055;
   vec3 displaced = position + vec3(0.0, 0.0, h * height);
   vec3 n = normalize(vec3(-hx * height / (2.0 * e * uSize.x), hy * height / (2.0 * e * uSize.y), 1.0));
   vUv = uv;
@@ -183,7 +184,7 @@ export type Stage = {
   height: number;
 };
 
-export function createInside(manifest: DemoManifest, photo: Texture, saliency: Texture, atlas: Texture, stage: Stage) {
+export function createInside(frame: Frame, saliency: Texture, atlas: Texture, stage: Stage) {
   const geometry = new PlaneGeometry(stage.width, stage.height, 192, 144);
   const uniforms = {
     ...pictureUniforms(),
@@ -201,9 +202,7 @@ export function createInside(manifest: DemoManifest, photo: Texture, saliency: T
     uTileHeight: { value: new Array(ICON_SLOTS).fill(0) },
     uShadowDir: { value: [0.18, 0.26] },
   };
-  uniforms.uPhoto.value = photo;
-  uniforms.uTables.value = tablesTexture(manifest.order, manifest.tables);
-  uniforms.uStates.value = manifest.order.length;
+  uniforms.uFrame.value = frame.texture;
   uniforms.uAtlas.value = atlas;
   const plane = new Mesh(
     geometry,
@@ -229,8 +228,8 @@ export function createInside(manifest: DemoManifest, photo: Texture, saliency: T
 
 const scratch = { matrix: new Matrix4(), position: new Vector3(), quaternion: new Quaternion(), scale: new Vector3(), color: new Color() };
 
-export function useInside(manifest: DemoManifest, photo: Texture, saliency: Texture, atlas: Texture, stage: Stage | null) {
-  const inside = useMemo(() => (stage ? createInside(manifest, photo, saliency, atlas, stage) : null), [manifest, photo, saliency, atlas, stage]);
+export function useInside(manifest: DemoManifest, frame: Frame, saliency: Texture, atlas: Texture, stage: Stage | null) {
+  const inside = useMemo(() => (stage ? createInside(frame, saliency, atlas, stage) : null), [frame, saliency, atlas, stage]);
 
   useFrame((state) => {
     if (!inside || !stage) return;
@@ -244,14 +243,17 @@ export function useInside(manifest: DemoManifest, photo: Texture, saliency: Text
 
     const u = inside.uniforms;
     u.uTime.value = state.clock.elapsedTime;
-    u.uPlace.value = story.place;
+    const { from, to, s } = frame.select(story.place);
+    u.uMapA.value = frame.states[from].map;
+    u.uMapB.value = frame.states[to].map;
+    u.uMix.value = s;
     u.uSweep.value = story.sweep;
     u.uRelief.value = story.relief;
     u.uFade.value = 1;
     inside.tileUniforms.uOutline.value = story.relief * 0.0;
 
     const { frames, drag } = manifest;
-    const tileHeight = Math.min(Math.max((lift - 0.15) / 0.5, 0), 1) * 0.06;
+    const tileHeight = Math.min(Math.max((lift - 0.15) / 0.5, 0), 1) * 0.1;
     for (let i = 0; i < manifest.icons.length && i < ICON_SLOTS; i++) {
       const id = manifest.icons[i].id;
       let [x, y, w, h] = frames.before.icons[id];

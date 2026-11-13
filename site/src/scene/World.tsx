@@ -31,6 +31,7 @@ import { useInside, type Stage } from './Inside';
 import { quality } from './quality';
 import { useRoomMaterial } from './Room';
 import { Rig, type ScreenFrame } from './rig';
+import { createFrame, loadScenery, streamScenery, type Frame } from './screen/scenery';
 import { measureScreen, useScreens } from './screen/useScreen';
 import { keys, layoutFor } from './shots';
 import { applyEnvironment, environmentReady, precompile } from './warm';
@@ -158,8 +159,33 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   );
 
   const stage = useMemo(() => (built ? stageFor(built.television) : null), [built]);
-  const inside = useInside(manifest, screens.photo, screens.saliency, screens.atlas, stage);
+  const inside = useInside(manifest, screens.main, screens.saliency, screens.atlas, stage);
   const [insideIn, setInsideIn] = useState(runtime.still >= 0);
+  const second = useRef<Frame | null>(null);
+
+  useEffect(() => {
+    let stopped = false;
+    let timer = 0;
+    const begin = async () => {
+      if (stopped) return;
+      if (!runtime.ready && runtime.still < 0) {
+        timer = window.setTimeout(() => void begin(), 200);
+        return;
+      }
+      await streamScenery(screens.main.scenery);
+      const loaded = await loadScenery(manifest.pictures[0].scenery, false);
+      if (stopped) return;
+      const frame = createFrame(loaded);
+      second.current = frame;
+      screens.lcd.uniforms.uFrame.value = frame.texture;
+      runtime.scenery = true;
+    };
+    timer = window.setTimeout(() => void begin(), 0);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [screens, manifest]);
 
   useEffect(() => {
     if (!inside || insideIn) return;
@@ -332,7 +358,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const tubeOn = Math.min(story.tubeOn, introTube);
     const crt = screens.crt.uniforms;
     crt.uTime.value = time;
-    crt.uPlace.value = story.place;
+    screens.main.render(gl, story.place);
+    second.current?.render(gl, 0);
     crt.uOn.value = tubeOn;
     crt.uOff.value = story.tubeOff;
     crt.uLampLevel.value = lamp;
@@ -347,10 +374,9 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       }
     }
 
-    const lcdPower = introLcd * away * away;
+    const lcdPower = second.current ? introLcd * away * away : 0;
     const lcd = screens.lcd.uniforms;
     lcd.uTime.value = time;
-    lcd.uPlace.value = story.frost;
     lcd.uPower.value = lcdPower;
     lcd.uLampLevel.value = lamp;
 
@@ -362,7 +388,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const tubeLight = tubeOn * (1 - Math.min(story.tubeOff * 1.4, 1));
     const laptopLight = laptopRect.current ?? laptopSpot.current;
     if (laptopLight) {
-      laptopLight.color.copy(lightFor(screens.frost, story.frost));
+      laptopLight.color.copy(lightFor(screens.secondColor, 0));
       laptopLight.intensity = (laptopRect.current ? RECT : SCREEN_SPOT) * (1.5 - 0.5 * Math.min(story.lamp, 1)) * lcdPower;
     }
     const televisionLight = televisionRect.current ?? televisionSpot.current;

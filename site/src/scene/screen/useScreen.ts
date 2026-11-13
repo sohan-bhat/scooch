@@ -1,5 +1,6 @@
 import { useTexture } from '@react-three/drei';
 import { useMemo } from 'react';
+import { suspend } from 'suspend-react';
 import { ClampToEdgeWrapping, Color, Group, LinearMipmapLinearFilter, Matrix4, Mesh, SRGBColorSpace, Texture, Vector3 } from 'three';
 import { asset } from '@/lib/base';
 import { tokenColor } from '@/lib/tokens';
@@ -7,7 +8,7 @@ import type { DemoManifest } from '@/story/demo';
 import type { ScreenFrame } from '../rig';
 import { createCrtMaterial } from './crt';
 import { createLcdMaterial } from './material';
-import { tablesTexture } from './picture';
+import { createFrame, loadScenery } from './scenery';
 
 function prepareTexture(texture: Texture, srgb: boolean, anisotropy: number) {
   if (texture.userData.prepared) return;
@@ -23,17 +24,11 @@ function prepareTexture(texture: Texture, srgb: boolean, anisotropy: number) {
 }
 
 function useScreenTextures(manifest: DemoManifest) {
-  const second = manifest.pictures[0];
-  const textures = useTexture([
-    asset(`demo/${manifest.photo.file}`),
-    asset(`demo/${manifest.photo.saliency}`),
-    asset(`demo/${second.photo.file}`),
-    asset('demo/atlas.png'),
-  ]);
-  const [photo, saliency, frost, atlas] = textures;
-  for (const texture of [photo, frost, atlas]) prepareTexture(texture, true, 8);
+  const [saliency, atlas] = useTexture([asset(`demo/${manifest.photo.saliency}`), asset('demo/atlas.png')]);
+  prepareTexture(atlas, true, 8);
   prepareTexture(saliency, false, 1);
-  return textures;
+  const main = suspend(() => loadScenery(manifest.scenery, true), ['scooch-scenery-main']);
+  return { saliency, atlas, main };
 }
 
 export function ScreenTextures({ manifest }: { manifest: DemoManifest }) {
@@ -46,36 +41,33 @@ function colors(averages: [number, number, number][]) {
 }
 
 export function useScreens(manifest: DemoManifest) {
-  const [photo, saliency, frost, atlas] = useScreenTextures(manifest);
+  const { saliency, atlas, main } = useScreenTextures(manifest);
 
   return useMemo(() => {
-    const second = manifest.pictures[0];
+    const mainFrame = createFrame(main);
     const crt = createCrtMaterial();
-    crt.uniforms.uPhoto.value = photo;
-    crt.uniforms.uTables.value = tablesTexture(manifest.order, manifest.tables);
-    crt.uniforms.uStates.value = manifest.order.length;
+    crt.uniforms.uFrame.value = mainFrame.texture;
     crt.uniforms.uAtlas.value = atlas;
     crt.uniforms.uRim.value = tokenColor('rim');
     const lcd = createLcdMaterial();
-    lcd.uniforms.uPhoto.value = frost;
-    lcd.uniforms.uTables.value = tablesTexture(second.order, second.tables);
-    lcd.uniforms.uStates.value = second.order.length;
     lcd.uniforms.uAtlas.value = atlas;
     lcd.uniforms.uRim.value = tokenColor('rim');
+    const picture = manifest.pictures[0];
     manifest.icons.forEach((icon, index) => {
-      const [x, y, w, h] = second.icons[icon.id];
+      const [x, y, w, h] = picture.icons[icon.id];
       lcd.uniforms.uIcons.value[index]?.set(x, y, w, h);
     });
+    const { before, fixed, moved } = manifest.frames;
     return {
       crt,
       lcd,
       saliency,
       atlas,
-      photo,
-      balloon: colors(manifest.order.map((id) => manifest.frames[id].average)),
-      frost: colors(second.order.map((id) => second.frames[id].average)),
+      main: mainFrame,
+      balloon: colors([before.average, fixed.average, fixed.average, moved.average]),
+      secondColor: colors([picture.frames.fixed.average, picture.frames.fixed.average]),
     };
-  }, [photo, saliency, frost, atlas, manifest]);
+  }, [saliency, atlas, main, manifest]);
 }
 
 export function measureScreen(mesh: Mesh, frame: Group, aspect: number, fill = [0.95, 0.93]) {

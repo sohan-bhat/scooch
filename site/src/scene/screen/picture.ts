@@ -1,4 +1,4 @@
-import { DataTexture, FloatType, NearestFilter, RedFormat, Texture, Vector2, Vector3, Vector4 } from 'three';
+import { Texture, Vector2, Vector3, Vector4 } from 'three';
 
 export const ICON_SLOTS = 6;
 export const ATLAS_GRID = 4;
@@ -9,11 +9,12 @@ export const pictureHead = `
 #define ICON_SLOTS ${ICON_SLOTS}
 #define GRID ${ATLAS_GRID}.0
 
-uniform sampler2D uPhoto;
-uniform highp sampler2D uTables;
+uniform sampler2D uFrame;
+uniform highp sampler2D uMapA;
+uniform highp sampler2D uMapB;
+uniform float uMix;
+uniform vec2 uScreen;
 uniform sampler2D uAtlas;
-uniform float uPlace;
-uniform float uStates;
 uniform float uTime;
 uniform vec4 uIcons[ICON_SLOTS];
 uniform float uGhost[ICON_SLOTS];
@@ -47,31 +48,21 @@ float fbm(vec2 p) {
   return sum;
 }
 
-float lookup(int row, float at) {
-  float k = clamp(at, 0.0, 1.0) * 256.0;
-  int i = int(min(floor(k), 255.0));
-  float a = texelFetch(uTables, ivec2(i, row), 0).r;
-  float b = texelFetch(uTables, ivec2(i + 1, row), 0).r;
-  return mix(a, b, k - float(i));
-}
-
 vec2 place(vec2 uv) {
-  float clamped = clamp(uPlace, 0.0, uStates - 1.0);
-  float from = min(floor(clamped), uStates - 2.0);
-  float t = clamped - from;
-  int a = int(from) * 2;
-  int b = a + 2;
-  vec2 start = vec2(lookup(a, uv.x), lookup(a + 1, uv.y));
-  vec2 end = vec2(lookup(b, uv.x), lookup(b + 1, uv.y));
-  return mix(start, end, t);
+  ivec2 pixel = ivec2(clamp(uv, 0.0, 0.9999) * uScreen);
+  vec2 a = vec2(texelFetch(uMapA, ivec2(pixel.x, 0), 0).r, texelFetch(uMapA, ivec2(pixel.y, 1), 0).r);
+  vec2 b = vec2(texelFetch(uMapB, ivec2(pixel.x, 0), 0).r, texelFetch(uMapB, ivec2(pixel.y, 1), 0).r);
+  return mix(a, b, uMix);
 }
 
 vec3 picture(vec2 uv) {
-  return texture(uPhoto, place(clamp(uv, 0.0, 1.0))).rgb;
+  vec2 at = clamp(uv, 0.0, 1.0);
+  return texture(uFrame, vec2(at.x, 1.0 - at.y)).rgb;
 }
 
 vec3 pictureSoft(vec2 uv, float lod) {
-  return textureLod(uPhoto, place(clamp(uv, 0.0, 1.0)), lod).rgb;
+  vec2 at = clamp(uv, 0.0, 1.0);
+  return textureLod(uFrame, vec2(at.x, 1.0 - at.y), lod).rgb;
 }
 
 vec4 atlasCell(float index, float row, vec2 q, vec2 dx, vec2 dy, vec2 scale) {
@@ -113,11 +104,12 @@ vec3 cursor(vec3 color, vec2 uv, vec2 dx, vec2 dy) {
 `;
 
 export type PictureUniforms = {
-  uPhoto: { value: Texture | null };
-  uTables: { value: Texture | null };
+  uFrame: { value: Texture | null };
+  uMapA: { value: Texture | null };
+  uMapB: { value: Texture | null };
+  uMix: { value: number };
+  uScreen: { value: Vector2 };
   uAtlas: { value: Texture | null };
-  uPlace: { value: number };
-  uStates: { value: number };
   uTime: { value: number };
   uIcons: { value: Vector4[] };
   uGhost: { value: number[] };
@@ -128,11 +120,12 @@ export type PictureUniforms = {
 
 export function pictureUniforms(): PictureUniforms {
   return {
-    uPhoto: { value: null },
-    uTables: { value: null },
+    uFrame: { value: null },
+    uMapA: { value: null },
+    uMapB: { value: null },
+    uMix: { value: 0 },
+    uScreen: { value: new Vector2(1280, 960) },
     uAtlas: { value: null },
-    uPlace: { value: 0 },
-    uStates: { value: 3 },
     uTime: { value: 0 },
     uIcons: { value: Array.from({ length: ICON_SLOTS }, () => new Vector4(-1, -1, 0.01, 0.01)) },
     uGhost: { value: new Array(ICON_SLOTS).fill(0) },
@@ -140,17 +133,4 @@ export function pictureUniforms(): PictureUniforms {
     uCursor: { value: new Vector3(0.5, 0.5, 0) },
     uCursorSize: { value: new Vector2(0.06, 0.08) },
   };
-}
-
-export function tablesTexture(order: string[], tables: Record<string, { fx: number[]; fy: number[] }>) {
-  const rows = order.flatMap((id) => [tables[id].fx, tables[id].fy]);
-  const width = rows[0].length;
-  const data = new Float32Array(width * rows.length);
-  rows.forEach((row, index) => data.set(row, index * width));
-  const texture = new DataTexture(data, width, rows.length, RedFormat, FloatType);
-  texture.minFilter = NearestFilter;
-  texture.magFilter = NearestFilter;
-  texture.generateMipmaps = false;
-  texture.needsUpdate = true;
-  return texture;
 }

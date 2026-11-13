@@ -12,7 +12,6 @@ export const story = {
   inside: 0,
   tubeOn: 1,
   tubeOff: 0,
-  frost: 0,
   blinds: 1,
   progress: 0,
 };
@@ -29,6 +28,7 @@ export const runtime = {
   posed: false,
   compiled: false,
   props: false,
+  scenery: false,
   introAt: null as number | null,
   resume: null as (() => void) | null,
 };
