@@ -26,7 +26,7 @@ mod probe {
     use std::process::{Child, Command, ExitCode, Stdio};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-    use ::windows::core::{w, PCWSTR};
+    use ::windows::core::{w, HSTRING, PCWSTR};
     use ::windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, FILETIME, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use ::windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW, MapWindowPoints, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
@@ -36,24 +36,27 @@ mod probe {
     use ::windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First, Thread32Next, PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32};
     use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use ::windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
-    use ::windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_READ};
+    use ::windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_BINARY};
     use ::windows::Win32::System::Threading::GetProcessTimes;
     use ::windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK, TreeScope_Children};
     use ::windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow, SystemParametersInfoForDpi, MDT_EFFECTIVE_DPI};
     use ::windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, MOUSE_EVENT_FLAGS};
     use ::windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use ::windows::Win32::UI::Shell::{
+        IDesktopWallpaper, IShellItem, IShellItemArray, SHCreateItemFromParsingName, SHCreateShellItemArrayFromShellItem, FWF_NOICONS,
         SHChangeNotification_Lock, SHChangeNotification_Unlock, SHChangeNotifyDeregister, SHChangeNotifyEntry, SHChangeNotifyRegister, SHGetSpecialFolderLocation, CSIDL_DESKTOP, CSIDL_DESKTOPDIRECTORY, FOLDERVIEWMODE,
         FVM_ICON, FWF_AUTOARRANGE, FWF_SNAPTOGRID, SHCNE_ALLEVENTS, SHCNE_CREATE, SHCNE_DELETE, SHCNE_MKDIR, SHCNE_RENAMEFOLDER, SHCNE_RENAMEITEM, SHCNE_RMDIR, SHCNE_UPDATEDIR, SHCNRF_InterruptLevel,
         SHCNRF_NewDelivery, SHCNRF_ShellLevel, SVSI_POSITIONITEM,
     };
     use ::windows::Win32::UI::WindowsAndMessaging::{
+        PostMessageW, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER, WM_COMMAND,
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW, GetClientRect, GetSystemMetrics, GetWindowThreadProcessId, MsgWaitForMultipleObjects, PeekMessageW, RegisterClassExW,
         SetCursorPos, SystemParametersInfoW, TranslateMessage, EVENT_MAX, EVENT_MIN, MSG, PM_REMOVE, QS_ALLINPUT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
         SPI_GETICONTITLELOGFONT, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_SETTINGCHANGE, WNDCLASSEXW,
     };
 
     const ROOT_NOTE: u32 = WM_APP + 11;
+    const TOGGLE_ICONS: usize = 0x7402;
     const FOLDER_NOTE: u32 = WM_APP + 12;
     const SETTLE: Duration = Duration::from_millis(1500);
     const FILE_WAIT: Duration = Duration::from_secs(5);
@@ -94,6 +97,18 @@ mod probe {
         static SEEN: RefCell<Vec<Seen>> = const { RefCell::new(Vec::new()) };
         static NOTES: RefCell<Vec<Note>> = const { RefCell::new(Vec::new()) };
         static SETTINGS: RefCell<Vec<Setting>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct Desk {
+        list: isize,
+        view: isize,
+    }
+
+    impl Desk {
+        fn of(view: &shell::View) -> Self {
+            Desk { list: view.list.0 as isize, view: view.host.0 as isize }
+        }
     }
 
     struct Measure {
@@ -187,6 +202,7 @@ mod probe {
         probe.section("3 Geometry truth", geometry);
         probe.section("4 Move and events", events);
         probe.section("5 Wallpaper", wallpaper);
+        probe.section("5b Solid color and slideshow", modes);
         probe.section("6 End to end", end_to_end);
         probe.section("7 Cleanup", cleanup);
         probe.save();
@@ -403,6 +419,8 @@ mod probe {
         }
         p.line(format!("- VirtualDesktops key present {opened}"));
         p.line(format!("- login entry {:?}", startup::entry()));
+        p.line(format!("- elevated {}, Explorer elevated {:?}, refused {}", startup::own_elevation(), startup::shell_elevation(), startup::refused()));
+        approval_round_trip(p);
         match desktop.snapshot() {
             Ok(snapshot) => {
                 p.line(format!("- adapter snapshot {} icons", snapshot.icons.len()));
@@ -416,6 +434,21 @@ mod probe {
             p.line(format!("- doctor {name} {}", result.map_or_else(|error| format!("fail {error}"), |detail| format!("ok {detail}"))));
         }
         Ok(())
+    }
+
+    fn approval_round_trip(p: &mut Probe) {
+        let before = startup::approval();
+        p.line(format!("- Startup apps switch before {before:?}"));
+        if before.is_some() {
+            p.line("- a real Startup apps switch exists, so the round trip is skipped".to_string());
+            return;
+        }
+        let disabled = [3u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let written = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, startup::APPROVED, startup::VALUE, REG_BINARY.0, Some(disabled.as_ptr() as *const c_void), disabled.len() as u32) };
+        let read = startup::approval();
+        let seen = read.as_deref().is_some_and(layout::startup_disabled);
+        let cleared = startup::clear_approval();
+        p.line(format!("- wrote a disabled switch {written:?}, read back {read:?}, seen as disabled {seen}, cleared {:?}, left {:?}", cleared.map_err(|error| error.to_string()), startup::approval()));
     }
 
     fn names(view: &shell::View) -> Result<Vec<String>> {
@@ -722,20 +755,24 @@ mod probe {
     }
 
     fn rule_names() -> [&'static str; 4] {
-        ["capture end on the desktop thread", "create or destroy on the list client", "reorder on the list client", "location change of an item on the list"]
+        ["capture end on the desktop thread", "create, destroy, show or hide of the list or its view", "reorder on the list client", "location change of an item on the list"]
     }
 
-    fn adapter_rule(seen: &Seen, list: isize) -> Option<usize> {
-        let on_list = seen.window == list;
-        if !wakes::event(seen.kind, on_list, seen.object, seen.child) {
+    fn adapter_rule(seen: &Seen, desk: Desk) -> Option<usize> {
+        let on_list = seen.window == desk.list;
+        let on_view = seen.window == desk.view;
+        if !wakes::event(seen.kind, on_list, on_view, seen.object, seen.child) {
             return None;
         }
         wakes::HOOKS.iter().position(|(low, high)| (*low..=*high).contains(&seen.kind))
     }
 
-    fn candidate(seen: &Seen, list: isize) -> Vec<String> {
+    fn candidate(seen: &Seen, desk: Desk) -> Vec<String> {
         let mut found = vec![format!("{:#06x} any window", seen.kind)];
-        if seen.window == list {
+        if seen.window == desk.view {
+            found.push(format!("{:#06x} view object {}", seen.kind, seen.object));
+        }
+        if seen.window == desk.list {
             found.push(format!("{:#06x} list object {}", seen.kind, seen.object));
             if seen.child > 0 {
                 found.push(format!("{:#06x} list object {} item", seen.kind, seen.object));
@@ -771,13 +808,19 @@ mod probe {
         Action { name: name.into(), seen, notes, settings }
     }
 
-    fn summarize(p: &mut Probe, action: &Action, list: isize) {
+    fn summarize(p: &mut Probe, action: &Action, desk: Desk) {
         let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
         for seen in &action.seen {
-            let target = if seen.window == list { "list" } else { seen.class.as_str() };
+            let target = if seen.window == desk.list {
+                "list"
+            } else if seen.window == desk.view {
+                "view"
+            } else {
+                seen.class.as_str()
+            };
             *kinds.entry(format!("{:#06x} {} obj {} {}", seen.kind, target, seen.object, if seen.child > 0 { "item" } else { "self" })).or_default() += 1;
         }
-        let rules: Vec<&str> = (0..4).filter(|rule| action.seen.iter().any(|seen| adapter_rule(seen, list) == Some(*rule))).map(|rule| rule_names()[rule]).collect();
+        let rules: Vec<&str> = (0..4).filter(|rule| action.seen.iter().any(|seen| adapter_rule(seen, desk) == Some(*rule))).map(|rule| rule_names()[rule]).collect();
         let shell_hits = action.notes.iter().filter(|note| note.1 == "root" && (note.2 as u32) & ADAPTER_EVENTS != 0).count();
         let settings: Vec<String> = action.settings.iter().map(|(_, value)| format!("{value:#x}")).collect();
         p.line(format!("  - events {}", if kinds.is_empty() { "none".into() } else { kinds.iter().map(|(kind, count)| format!("{kind} x{count}")).collect::<Vec<_>>().join(", ") }));
@@ -786,6 +829,21 @@ mod probe {
         if !settings.is_empty() {
             p.line(format!("  - setting changes {}", settings.join(" ")));
         }
+    }
+
+    fn toggle_icons(view: &shell::View, show: bool) -> Result<String> {
+        let before = shell::visible(view);
+        let mask = FWF_NOICONS.0 as u32;
+        let flag = unsafe { view.folder.SetCurrentFolderFlags(mask, if show { 0 } else { mask }) };
+        pump(Duration::from_millis(600));
+        let after_flag = shell::visible(view);
+        let mut detail = format!("visible {before} then {after_flag} through FWF_NOICONS {flag:?}");
+        if after_flag != show {
+            let posted = unsafe { PostMessageW(Some(view.host), WM_COMMAND, WPARAM(TOGGLE_ICONS), LPARAM(0)) };
+            pump(Duration::from_millis(600));
+            detail.push_str(&format!(", then {} through the menu command {posted:?}", shell::visible(view)));
+        }
+        Ok(detail)
     }
 
     fn whole_hook(list: HWND) -> Option<HWINEVENTHOOK> {
@@ -800,7 +858,7 @@ mod probe {
 
     fn events(p: &mut Probe) -> Result<()> {
         let view = shell::view()?;
-        let list = view.list.0 as isize;
+        let desk = Desk::of(&view);
         let hook = whole_hook(view.list).context("could not hook the desktop thread")?;
         let spot = p.target.unwrap_or(target(&view)?);
         let (name, folder) = PROBES[0];
@@ -852,9 +910,15 @@ mod probe {
             unsafe { view.folder.SetViewModeAndIconSize(original.0, original.1) }?;
             Ok(format!("to {}", original.1))
         }));
+        actions.push(act(p, "hide desktop icons", |_| toggle_icons(&view, false)));
+        actions.push(act(p, "show desktop icons", |_| toggle_icons(&view, true)));
+        if !shell::visible(&view) {
+            let again = toggle_icons(&view, true);
+            p.line(format!("- icons were still hidden, showing them again gave {:?}", again.map_err(|error| error.to_string())));
+        }
         for action in &actions {
             p.line(format!("- **{}**", action.name));
-            summarize(p, action, list);
+            summarize(p, action, desk);
         }
         park_cursor();
         pump(SETTLE);
@@ -862,7 +926,7 @@ mod probe {
             pump(Duration::from_secs(20));
             Ok("no input".into())
         });
-        summarize(p, &rest, list);
+        summarize(p, &rest, desk);
         let moving = act(p, "move the mouse for 5 s over empty desktop", |_| {
             let area = work_area().context("no work area")?;
             let width = area.right - area.left;
@@ -878,18 +942,18 @@ mod probe {
             }
             Ok(format!("{step} moves"))
         });
-        summarize(p, &moving, list);
+        summarize(p, &moving, desk);
         let _ = unsafe { UnhookWinEvent(hook) };
-        smallest(p, &actions, &[&rest, &moving], list);
+        smallest(p, &actions, &[&rest, &moving], desk);
         Ok(())
     }
 
-    fn smallest(p: &mut Probe, actions: &[Action], quiet: &[&Action], list: isize) {
-        let noisy: std::collections::BTreeSet<String> = quiet.iter().flat_map(|action| action.seen.iter().flat_map(|seen| candidate(seen, list))).collect();
+    fn smallest(p: &mut Probe, actions: &[Action], quiet: &[&Action], desk: Desk) {
+        let noisy: std::collections::BTreeSet<String> = quiet.iter().flat_map(|action| action.seen.iter().flat_map(|seen| candidate(seen, desk))).collect();
         let mut covers: BTreeMap<String, std::collections::BTreeSet<usize>> = BTreeMap::new();
         for (index, action) in actions.iter().enumerate() {
             for seen in &action.seen {
-                for rule in candidate(seen, list) {
+                for rule in candidate(seen, desk) {
                     if !noisy.contains(&rule) {
                         covers.entry(rule).or_default().insert(index);
                     }
@@ -911,7 +975,7 @@ mod probe {
         p.line(format!("- rules that fired at rest or during mouse moves {}", if noisy.is_empty() { "none".into() } else { noisy.iter().cloned().collect::<Vec<_>>().join(", ") }));
         p.line(format!("- smallest hook set silent at rest {}", if chosen.is_empty() { "none".into() } else { chosen.join(", ") }));
         p.line(format!("- actions no quiet hook catches {}", if missed.is_empty() { "none".into() } else { missed.join(", ") }));
-        let adapter_noise: Vec<&str> = (0..4).filter(|rule| quiet.iter().any(|action| action.seen.iter().any(|seen| adapter_rule(seen, list) == Some(*rule)))).map(|rule| rule_names()[rule]).collect();
+        let adapter_noise: Vec<&str> = (0..4).filter(|rule| quiet.iter().any(|action| action.seen.iter().any(|seen| adapter_rule(seen, desk) == Some(*rule)))).map(|rule| rule_names()[rule]).collect();
         p.line(format!("- adapter hooks that fired at rest or during mouse moves {}", if adapter_noise.is_empty() { "none".into() } else { adapter_noise.join(", ") }));
     }
 
@@ -1010,7 +1074,7 @@ mod probe {
         p.line(format!("- WIC decode of the PNG, largest channel difference {:?}", system.map_err(|error| error.to_string())));
         let view = shell::view().ok();
         let hook = view.as_ref().and_then(|view| whole_hook(view.list));
-        let list = view.as_ref().map_or(0, |view| view.list.0 as isize);
+        let desk = view.as_ref().map(Desk::of).unwrap_or_default();
         let mut scores = Vec::new();
         for (kind, path) in [("JPEG", jpeg_path.clone()), ("PNG", png_path.clone())] {
             let file = scooch_core::open(&path)?;
@@ -1021,7 +1085,7 @@ mod probe {
                 desktop.set_wallpaper(&screen, &path)?;
                 Ok(format!("in {} ms", started.elapsed().as_millis()))
             });
-            summarize(p, &action, list);
+            summarize(p, &action, desk);
             let echo: Vec<String> = action.settings.iter().map(|(at, value)| format!("{value:#x} at +{} ms", at.saturating_sub(base))).collect();
             p.line(format!("  - WM_SETTINGCHANGE {}", if echo.is_empty() { "none".into() } else { echo.join(", ") }));
             let back = desktop.wallpaper(&screen);
@@ -1043,6 +1107,17 @@ mod probe {
                 let _ = fs::write(p.out.join(format!("wallpaper-{}.png", kind.to_lowercase())), scooch_core::encode_png(&shot)?);
             }
         }
+        let classic = act(p, "set the JPEG the way Settings does, through SystemParametersInfo", |_| {
+            spi_wallpaper(&jpeg_path.to_string_lossy())?;
+            Ok("with SPIF_UPDATEINIFILE and SPIF_SENDCHANGE".into())
+        });
+        summarize(p, &classic, desk);
+        let id = (screen.id != layout::SPAN).then(|| screen.id.clone());
+        p.line(format!("  - GetWallpaper for the screen {}", raw_wallpaper(&object, id.as_deref())));
+        p.line(format!("  - GetWallpaper with no screen {}", raw_wallpaper(&object, None)));
+        p.line(format!("  - Control Panel Desktop WallPaper {:?}", startup::read(HKEY_CURRENT_USER, w!(r"Control Panel\Desktop"), w!("WallPaper"))));
+        p.line(format!("  - adapter reads {:?}", desktop.wallpaper(&screen).map_err(|error| error.to_string())));
+        p.line(format!("  - Themes folder {:?}", picture::themes()));
         if let Some(hook) = hook {
             let _ = unsafe { UnhookWinEvent(hook) };
         }
@@ -1060,10 +1135,78 @@ mod probe {
                     let result = desktop.set_wallpaper(&screen, &path);
                     p.line(format!("- restored `{}` to {} {:?}", screen.id, path.display(), result.map_err(|error| error.to_string())));
                 }
-                None => p.line(format!("- `{}` had no picture file, left as it is", screen.id)),
+                None => {
+                    let result = spi_wallpaper("");
+                    p.line(format!("- `{}` had no picture file, set back to a solid color {:?}", screen.id, result.map_err(|error| error.to_string())));
+                }
             }
         }
         pump(Duration::from_millis(500));
+    }
+
+    fn spi_wallpaper(path: &str) -> Result<()> {
+        let mut wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+        unsafe { SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, Some(wide.as_mut_ptr() as *mut c_void), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE) }?;
+        Ok(())
+    }
+
+    fn raw_wallpaper(object: &IDesktopWallpaper, id: Option<&str>) -> String {
+        let id = id.map(HSTRING::from);
+        let pointer = id.as_ref().map_or(PCWSTR::null(), |id| PCWSTR(id.as_ptr()));
+        match unsafe { object.GetWallpaper(pointer) } {
+            Ok(text) => format!("{:?}", com::take(text)),
+            Err(error) => format!("failed with {error}"),
+        }
+    }
+
+    fn report_mode(p: &mut Probe, object: &IDesktopWallpaper, screen: &Screen, label: &str) {
+        let id = (screen.id != layout::SPAN).then(|| screen.id.clone());
+        p.line(format!("- **{label}**"));
+        p.line(format!("  - GetWallpaper for the screen {}", raw_wallpaper(object, id.as_deref())));
+        p.line(format!("  - GetWallpaper with no screen {}", raw_wallpaper(object, None)));
+        p.line(format!("  - GetStatus {:?}", unsafe { object.GetStatus() }.map(|state| state.0)));
+        p.line(format!("  - GetBackgroundColor {:?}", unsafe { object.GetBackgroundColor() }.map(|color| format!("{:#08x}", color.0))));
+        p.line(format!("  - GetPosition {:?}", unsafe { object.GetPosition() }.map(|position| position.0)));
+        if let Ok(desktop) = platform::current() {
+            p.line(format!("  - adapter reads {:?}", desktop.wallpaper(screen).map_err(|error| error.to_string())));
+        }
+    }
+
+    fn modes(p: &mut Probe) -> Result<()> {
+        let object = picture::object()?;
+        let desktop = platform::current()?;
+        let screen = desktop.screens()?.first().context("no screen")?.clone();
+        let color = unsafe { object.GetBackgroundColor() };
+        report_mode(p, &object, &screen, "as found");
+        let solid = act(p, "switch to a solid color", |_| {
+            spi_wallpaper("")?;
+            Ok("through SystemParametersInfo with an empty path".into())
+        });
+        p.line(format!("  - setting changes {}", solid.settings.len()));
+        report_mode(p, &object, &screen, "solid color");
+        let slides = p.home.join("slides");
+        fs::create_dir_all(&slides)?;
+        let (width, height) = (screen.frame.w.max(64.0) as u32, screen.frame.h.max(64.0) as u32);
+        let first = detailed(width, height);
+        let second = RgbImage::from_raw(width, height, first.as_raw().iter().map(|value| 255 - value).collect()).context("no second slide")?;
+        fs::write(slides.join("one.jpg"), jpeg(&first)?)?;
+        fs::write(slides.join("two.jpg"), jpeg(&second)?)?;
+        let started = act(p, "start a two picture slideshow", |_| {
+            let folder: IShellItem = unsafe { SHCreateItemFromParsingName(&HSTRING::from(slides.as_path()), None) }?;
+            let items: IShellItemArray = unsafe { SHCreateShellItemArrayFromShellItem(&folder) }?;
+            unsafe { object.SetSlideshow(&items) }?;
+            Ok(format!("from {}", slides.display()))
+        });
+        p.line(format!("  - setting changes {}", started.settings.len()));
+        pump(Duration::from_secs(2));
+        report_mode(p, &object, &screen, "slideshow");
+        if let Ok(color) = color {
+            let result = unsafe { object.SetBackgroundColor(color) };
+            p.line(format!("- background color put back {result:?}"));
+        }
+        restore(p);
+        report_mode(p, &object, &screen, "restored");
+        Ok(())
     }
 
     fn filetime(time: FILETIME) -> u64 {
@@ -1220,6 +1363,10 @@ mod probe {
             }
         }
         if let Ok(view) = shell::view() {
+            if !shell::visible(&view) {
+                let shown = toggle_icons(&view, true);
+                p.line(format!("- desktop icons shown again {:?}", shown.map_err(|error| error.to_string())));
+            }
             if let Some(flags) = p.flags {
                 let mask = (FWF_AUTOARRANGE.0 | FWF_SNAPTOGRID.0) as u32;
                 let result = unsafe { view.folder.SetCurrentFolderFlags(mask, flags & mask) };

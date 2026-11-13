@@ -1,10 +1,10 @@
-use super::{com, shell, wakes, Wake};
-use anyhow::{Context, Result};
+use super::{com, shell, startup, wakes, Wake};
+use anyhow::{bail, Context, Result};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use ::windows::core::{w, PCWSTR};
 use ::windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM, ERROR_SUCCESS};
@@ -30,7 +30,6 @@ pub const CLASS: PCWSTR = w!("ScoochWatch");
 pub const CHANGED: u32 = WM_APP + 1;
 pub const REATTACH: u32 = WM_APP + 2;
 const DESKTOPS: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops");
-const TRIES: u32 = 10;
 const PAUSE: Duration = Duration::from_secs(1);
 
 const _: () = assert!(wakes::SPI_ICONHORIZONTALSPACING == ::windows::Win32::UI::WindowsAndMessaging::SPI_ICONHORIZONTALSPACING.0);
@@ -41,6 +40,9 @@ const _: () = assert!(wakes::SPI_SETWORKAREA == ::windows::Win32::UI::WindowsAnd
 const _: () = assert!(wakes::EVENT_SYSTEM_CAPTUREEND == ::windows::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_CAPTUREEND);
 const _: () = assert!(wakes::EVENT_OBJECT_CREATE == ::windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_CREATE);
 const _: () = assert!(wakes::EVENT_OBJECT_DESTROY == ::windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_DESTROY);
+const _: () = assert!(wakes::EVENT_OBJECT_SHOW == ::windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_SHOW);
+const _: () = assert!(wakes::EVENT_OBJECT_HIDE == ::windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_HIDE);
+const _: () = assert!(wakes::OBJID_WINDOW == ::windows::Win32::UI::WindowsAndMessaging::OBJID_WINDOW.0);
 const _: () = assert!(wakes::EVENT_OBJECT_REORDER == ::windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_REORDER);
 const _: () = assert!(wakes::EVENT_OBJECT_LOCATIONCHANGE == ::windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_LOCATIONCHANGE);
 const _: () = assert!(wakes::OBJID_CLIENT == ::windows::Win32::UI::WindowsAndMessaging::OBJID_CLIENT.0);
@@ -51,12 +53,15 @@ const _: () = assert!(wakes::PBT_APMRESUMEAUTOMATIC as u32 == ::windows::Win32::
 thread_local! {
     static WAKE: RefCell<Option<Shared>> = const { RefCell::new(None) };
     static LIST: Cell<isize> = const { Cell::new(0) };
+    static VIEW: Cell<isize> = const { Cell::new(0) };
+    static ATTACHING: Cell<bool> = const { Cell::new(false) };
     static TASKBAR: Cell<u32> = const { Cell::new(0) };
     static NOTIFY: Cell<u32> = const { Cell::new(0) };
     static HOOKS: RefCell<Vec<HWINEVENTHOOK>> = const { RefCell::new(Vec::new()) };
 }
 
-static RETRYING: AtomicBool = AtomicBool::new(false);
+static RETRY: Mutex<wakes::Retry> = Mutex::new(wakes::Retry::new());
+static ATTACHED: AtomicBool = AtomicBool::new(false);
 
 fn wake(cause: &str) {
     if crate::daemon::trace() {
@@ -70,6 +75,9 @@ fn wake(cause: &str) {
 }
 
 pub fn run(wake: Wake) -> Result<()> {
+    if startup::refused() {
+        bail!(startup::ADMIN);
+    }
     com::enter(true)?;
     let wake: Shared = Arc::from(wake);
     WAKE.with(|slot| *slot.borrow_mut() = Some(wake.clone()));
@@ -103,23 +111,38 @@ fn window() -> Result<HWND> {
 }
 
 fn attach(window: HWND) -> bool {
+    if ATTACHING.with(|flag| flag.replace(true)) {
+        return ATTACHED.load(Ordering::SeqCst);
+    }
+    let attached = attach_once(window);
+    ATTACHED.store(attached, Ordering::SeqCst);
+    ATTACHING.with(|flag| flag.set(false));
+    attached
+}
+
+fn attach_once(window: HWND) -> bool {
     detach();
     register(window);
     let Ok(view) = shell::view() else { return false };
     LIST.with(|list| list.set(view.list.0 as isize));
+    VIEW.with(|host| host.set(view.host.0 as isize));
     let hooks = hook(view.list);
     let attached = !hooks.is_empty();
-    HOOKS.with(|slot| *slot.borrow_mut() = hooks);
+    replace_hooks(hooks);
     attached
 }
 
+fn replace_hooks(hooks: Vec<HWINEVENTHOOK>) {
+    let old = HOOKS.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), hooks));
+    for hook in old {
+        let _ = unsafe { UnhookWinEvent(hook) };
+    }
+}
+
 fn detach() {
-    HOOKS.with(|slot| {
-        for hook in slot.borrow_mut().drain(..) {
-            let _ = unsafe { UnhookWinEvent(hook) };
-        }
-    });
+    replace_hooks(Vec::new());
     LIST.with(|list| list.set(0));
+    VIEW.with(|host| host.set(0));
     let old = NOTIFY.with(|notify| notify.replace(0));
     if old != 0 {
         let _ = unsafe { SHChangeNotifyDeregister(old) };
@@ -137,22 +160,21 @@ pub fn hook(list: HWND) -> Vec<HWINEVENTHOOK> {
 }
 
 fn retry(window: HWND) {
-    if RETRYING.swap(true, Ordering::SeqCst) {
+    if !RETRY.lock().is_ok_and(|mut retry| retry.begin()) {
         return;
     }
     let target = window.0 as isize;
-    let spawned = std::thread::Builder::new().name("scooch-find".into()).spawn(move || {
-        for _ in 0..TRIES {
-            std::thread::sleep(PAUSE);
-            if !RETRYING.load(Ordering::SeqCst) {
-                break;
-            }
-            let _ = unsafe { PostMessageW(Some(HWND(target as *mut c_void)), REATTACH, WPARAM(0), LPARAM(0)) };
+    let spawned = std::thread::Builder::new().name("scooch-find".into()).spawn(move || loop {
+        std::thread::sleep(PAUSE);
+        if !RETRY.lock().is_ok_and(|mut retry| retry.next(ATTACHED.load(Ordering::SeqCst))) {
+            break;
         }
-        RETRYING.store(false, Ordering::SeqCst);
+        let _ = unsafe { PostMessageW(Some(HWND(target as *mut c_void)), REATTACH, WPARAM(0), LPARAM(0)) };
     });
     if spawned.is_err() {
-        RETRYING.store(false, Ordering::SeqCst);
+        if let Ok(mut retry) = RETRY.lock() {
+            retry.stop();
+        }
     }
 }
 
@@ -163,7 +185,10 @@ fn register(window: HWND) {
     let events = SHCNE_CREATE | SHCNE_DELETE | SHCNE_MKDIR | SHCNE_RMDIR | SHCNE_RENAMEITEM | SHCNE_RENAMEFOLDER | SHCNE_UPDATEDIR;
     let sources = SHCNRF_ShellLevel | SHCNRF_InterruptLevel | SHCNRF_NewDelivery;
     let id = unsafe { SHChangeNotifyRegister(window, sources, events.0 as i32, CHANGED, 1, &entry) };
-    NOTIFY.with(|notify| notify.set(id));
+    let old = NOTIFY.with(|notify| notify.replace(id));
+    if old != 0 && old != id {
+        let _ = unsafe { SHChangeNotifyDeregister(old) };
+    }
 }
 
 fn changed(wparam: WPARAM, lparam: LPARAM) {
@@ -200,8 +225,10 @@ fn desktops(wake: Shared) {
 }
 
 unsafe extern "system" fn event(_hook: HWINEVENTHOOK, kind: u32, window: HWND, object: i32, child: i32, _thread: u32, _time: u32) {
-    let on_list = LIST.with(|list| list.get() != 0 && list.get() == window.0 as isize);
-    if wakes::event(kind, on_list, object, child) {
+    let handle = window.0 as isize;
+    let on_list = LIST.with(|list| list.get() != 0 && list.get() == handle);
+    let on_view = VIEW.with(|host| host.get() != 0 && host.get() == handle);
+    if wakes::event(kind, on_list, on_view, object, child) {
         wake("list");
     }
 }
@@ -248,15 +275,14 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
         }
         REATTACH => {
             if attach(window) {
-                RETRYING.store(false, Ordering::SeqCst);
                 wake("explorer");
-            } else {
-                retry(window);
             }
             LRESULT(0)
         }
         other if other != 0 && other == TASKBAR.with(Cell::get) => {
+            ATTACHED.store(false, Ordering::SeqCst);
             let _ = unsafe { PostMessageW(Some(window), REATTACH, WPARAM(0), LPARAM(0)) };
+            retry(window);
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(window, message, wparam, lparam) },

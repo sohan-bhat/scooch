@@ -20,23 +20,24 @@ use super::Wake;
 
 #[cfg(target_os = "windows")]
 mod system {
-    use super::{com, picture, shell, startup, watch, Wake};
+    use super::{com, layout, picture, shell, startup, wakes, watch, Wake};
     use crate::platform::{Desktop, Format, Screen, Snapshot};
     use anyhow::{anyhow, Result};
     use scooch_core::RgbImage;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::sync::OnceLock;
+    use std::time::Instant;
 
+    static CLOCK: OnceLock<Instant> = OnceLock::new();
     static LAST_SET: AtomicU64 = AtomicU64::new(0);
-    const OWN_ECHO: Duration = Duration::from_secs(1);
 
     fn now_millis() -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
+        CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
     }
 
     pub fn set_recently() -> bool {
-        now_millis().saturating_sub(LAST_SET.load(Ordering::SeqCst)) < OWN_ECHO.as_millis() as u64
+        wakes::echo(now_millis(), LAST_SET.load(Ordering::SeqCst))
     }
 
     pub struct Win;
@@ -94,6 +95,8 @@ mod system {
                 ("Icons".into(), self.check_icons()),
                 ("Wallpaper".into(), self.check_wallpaper()),
                 ("Login item".into(), check_login()),
+                ("Startup".into(), check_startup()),
+                ("Rights".into(), check_rights()),
             ]
         }
 
@@ -141,6 +144,21 @@ mod system {
     fn check_desktop() -> Result<String> {
         let view = shell::view().map_err(|_| anyhow!("not found, so restart Explorer from Task Manager"))?;
         Ok(if shell::visible(&view) { "found".into() } else { "found with icons hidden".into() })
+    }
+
+    fn check_startup() -> Result<String> {
+        match startup::approval() {
+            Some(flag) if layout::startup_disabled(&flag) => Err(anyhow!("turned off under Startup apps, so run scooch to turn it back on")),
+            Some(_) => Ok("allowed under Startup apps".into()),
+            None => Ok("no switch set under Startup apps".into()),
+        }
+    }
+
+    fn check_rights() -> Result<String> {
+        if startup::refused() {
+            return Err(anyhow!("running as administrator, so run scooch from a normal window"));
+        }
+        Ok(if startup::own_elevation() { "administrator like Explorer".into() } else { "normal".into() })
     }
 
     fn check_login() -> Result<String> {
