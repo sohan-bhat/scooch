@@ -14,7 +14,7 @@ mod probe {
     use scooch::platform::windows::layout::{self, Cell, Label, SPACING};
     use scooch::platform::windows::{com, picture, shell, startup, wakes};
     use scooch::platform::{self, Screen};
-    use scooch_core::{Rect, RgbImage};
+    use scooch_core::{Options, Rect, RgbImage, Scene, Scenery};
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::ffi::c_void;
@@ -27,10 +27,10 @@ mod probe {
     use std::sync::OnceLock;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use ::windows::core::{w, HSTRING, PCWSTR};
-    use ::windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, FILETIME, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM};
+    use ::windows::Win32::Foundation::{CloseHandle, COLORREF, ERROR_SUCCESS, FILETIME, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM};
     use ::windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW, MapWindowPoints, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
-        BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HDC, HMONITOR, LOGFONTW, MONITORINFO, SRCCOPY, ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH,
+        BI_RGB, CAPTUREBLT, CreateSolidBrush, UpdateWindow, DIB_RGB_COLORS, HDC, HMONITOR, LOGFONTW, MONITORINFO, SRCCOPY, ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH,
         ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE,
     };
     use ::windows::core::Interface;
@@ -41,7 +41,7 @@ mod probe {
     use ::windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
     use ::windows::Win32::System::Registry::{RegCloseKey, RegDeleteKeyValueW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_BINARY, REG_DWORD, RRF_RT_REG_DWORD};
     use ::windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount, GetProcessTimes, OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, PROCESS_VM_READ};
-    use scooch::live::{Command as LiveCommand, Helper, Hints, Reply, TestPattern};
+    use scooch::live::{Command as LiveCommand, Helper, Hints, Reply};
     use scooch::platform::windows::layer::{self, Method};
     use ::windows::Wdk::Foundation::{NtQueryObject, OBJECT_INFORMATION_CLASS};
     use ::windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SYSTEM_INFORMATION_CLASS};
@@ -63,7 +63,8 @@ mod probe {
         EnumWindows, GetShellWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, IsIconic, IsWindowVisible, ShowWindow, GWL_STYLE, SW_MINIMIZE, WM_CLOSE, WS_CAPTION, PostMessageW, SYSTEM_PARAMETERS_INFO_ACTION, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER, WM_COMMAND,
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW, GetClientRect, GetSystemMetrics, GetWindowThreadProcessId, MsgWaitForMultipleObjects, PeekMessageW, RegisterClassExW,
         SetCursorPos, SystemParametersInfoW, TranslateMessage, EVENT_MAX, EVENT_MIN, MSG, PM_REMOVE, QS_ALLINPUT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-        SPI_GETICONTITLELOGFONT, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_SETTINGCHANGE, WNDCLASSEXW,
+        SPI_GETICONTITLELOGFONT, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_SETTINGCHANGE, WNDCLASSEXW, SW_HIDE, SW_SHOWNOACTIVATE,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
     const ROOT_NOTE: u32 = WM_APP + 11;
@@ -2657,6 +2658,310 @@ mod probe {
         p.line(format!("  - the helper played {:?} during the click and the drag", played.map_err(|error| error.to_string())));
         park_cursor();
         Ok(())
+    }
+
+    struct Kit {
+        picture: PathBuf,
+        size: [u32; 2],
+        stills: Vec<(PathBuf, RgbImage)>,
+        tables: Vec<PathBuf>,
+        frames: Vec<(f32, RgbImage)>,
+        mirrored_frames: Vec<(f32, RgbImage)>,
+        other: (PathBuf, RgbImage),
+        detail: (PathBuf, RgbImage),
+        icons: Vec<Rect>,
+        subject: [(f32, f32); 2],
+        patch: RECT,
+        spot: RECT,
+    }
+
+    fn save_png(path: &Path, image: &RgbImage) -> Result<()> {
+        fs::write(path, scooch_core::encode_png(image)?)?;
+        Ok(())
+    }
+
+    fn colorful(image: &RgbImage, icons: &[Rect]) -> Option<(f32, f32)> {
+        let (mut sx, mut sy, mut count) = (0.0f64, 0.0f64, 0.0f64);
+        for (x, y, pixel) in image.enumerate_pixels() {
+            let [r, g, b] = pixel.0;
+            let spread = r.max(g).max(b) - r.min(g).min(b);
+            if spread > 90 && r > 120 && !inside(icons, x as f32, y as f32, 6.0) {
+                sx += f64::from(x);
+                sy += f64::from(y);
+                count += 1.0;
+            }
+        }
+        (count > 50.0).then(|| ((sx / count) as f32, (sy / count) as f32))
+    }
+
+    fn inside(icons: &[Rect], x: f32, y: f32, margin: f32) -> bool {
+        icons.iter().any(|rect| x >= rect.x - margin && x < rect.x + rect.w + margin && y >= rect.y - margin && y < rect.y + rect.h + margin)
+    }
+
+    fn block_gap(a: &RgbImage, b: &RgbImage, left: u32, top: u32, size: u32) -> f32 {
+        let mut total = 0u64;
+        for y in top..(top + size).min(a.height()) {
+            for x in left..(left + size).min(a.width()) {
+                let (p, q) = (a.get_pixel(x, y).0, b.get_pixel(x, y).0);
+                total += p.iter().zip(q.iter()).map(|(m, n)| u64::from(m.abs_diff(*n))).sum::<u64>();
+            }
+        }
+        total as f32 / (size * size * 3) as f32
+    }
+
+    fn best_block(a: &RgbImage, b: &RgbImage, icons: &[Rect], size: u32) -> (u32, u32, f32) {
+        let mut best = (a.width() / 2, a.height() / 2, -1.0f32);
+        for top in (0..a.height().saturating_sub(size)).step_by(size as usize) {
+            for left in (0..a.width().saturating_sub(size + 40)).step_by(size as usize) {
+                let corners = [(left, top), (left + size, top), (left, top + size), (left + size, top + size)];
+                if corners.iter().any(|(x, y)| inside(icons, *x as f32, *y as f32, 8.0)) {
+                    continue;
+                }
+                let gap = block_gap(a, b, left, top, size);
+                if gap > best.2 {
+                    best = (left, top, gap);
+                }
+            }
+        }
+        best
+    }
+
+    fn kit(p: &mut Probe, screen: &Screen) -> Result<Kit> {
+        let (width, height) = (screen.frame.w as u32, screen.frame.h as u32);
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/photos/balloon-sky.jpg");
+        let picture_path = p.home.join("glide-picture.jpg");
+        fs::copy(&source, &picture_path).with_context(|| format!("no test photo at {}", source.display()))?;
+        let image = picture::decode(&picture_path)?;
+        let analysis = scooch_core::analyze(&image);
+        let options = Options { scenery: Scenery::Auto, ..Options::default() };
+        let icons: Vec<Rect> = icon_rects()?.into_iter().map(|rect| Rect { x: rect.x - screen.frame.x, y: rect.y - screen.frame.y, ..rect }).collect();
+        let centre = |rect: &Rect| (rect.x + rect.w / 2.0 - width as f32 / 2.0).hypot(rect.y + rect.h / 2.0 - height as f32 / 2.0);
+        let index = icons.iter().enumerate().min_by(|(_, x), (_, y)| centre(x).total_cmp(&centre(y))).map(|(index, _)| index).context("no icons to move")?;
+        let mut moved = icons.clone();
+        let shift = if moved[index].x > width as f32 / 2.0 { -320.0 } else { 320.0 };
+        moved[index].x = (moved[index].x + shift).clamp(0.0, width as f32 - moved[index].w);
+        let first = Scene { width, height, icons: icons.clone() };
+        let second = Scene { width, height, icons: moved };
+        let placed_a = scooch_core::solve(&analysis, &first, &options, None);
+        let placed_b = scooch_core::solve(&analysis, &second, &options, Some(&placed_a));
+        let mut placed_m = placed_a.clone();
+        placed_m.fx.iter_mut().for_each(|value| *value = 1.0 - *value);
+        placed_m.mirrored = !placed_a.mirrored;
+        let a = scooch_core::bundle(&image, &analysis, &placed_a, &first, &options);
+        let b = scooch_core::bundle(&image, &analysis, &placed_b, &second, &options);
+        let mirrored = scooch_core::bundle(&image, &analysis, &placed_m, &first, &options);
+        let mut stills = Vec::new();
+        let mut tables = Vec::new();
+        for (name, placement, scene, bundle) in [("a", &placed_a, &first, &a), ("b", &placed_b, &second, &b), ("mirrored", &placed_m, &first, &mirrored)] {
+            let still = scooch_core::render_with(&image, &analysis, placement, scene, &options);
+            let path = p.home.join(format!("glide-{name}.png"));
+            save_png(&path, &still)?;
+            stills.push((path, still));
+            let table = p.home.join(format!("glide-{name}.tables"));
+            fs::write(&table, bundle.tables_to_bytes())?;
+            tables.push(table);
+        }
+        let frames: Vec<(f32, RgbImage)> = (0..=20).map(|step| step as f32 / 20.0).map(|s| (s, scooch_core::frame(&a, &b, s))).collect();
+        let mirrored_frames: Vec<(f32, RgbImage)> = (0..=10).map(|step| step as f32 / 10.0).map(|s| (s, scooch_core::frame(&a, &mirrored, s))).collect();
+        let other_image = subject_picture(width, height);
+        let other_path = p.home.join("glide-other.png");
+        save_png(&other_path, &other_image)?;
+        let detail_image = detailed(width, height);
+        let detail_path = p.home.join("glide-detail.png");
+        save_png(&detail_path, &detail_image)?;
+        let subject = [colorful(&stills[0].1, &icons).unwrap_or_default(), colorful(&stills[1].1, &icons).unwrap_or_default()];
+        let (left, top, moving) = best_block(&frames[0].1, &frames[3].1, &icons, 24);
+        let (spot_left, spot_top, apart) = best_block(&stills[0].1, &other_image, &icons, 16);
+        let origin = (screen.frame.x as i32, screen.frame.y as i32);
+        p.line(format!(
+            "- test photo {} decoded to {}x{}, icon {index} moved by {shift} px, compatible {} and mirrored compatible {}, canvas {}x{}, tables {} and {} bytes, subject at {:?} then {:?}, motion patch at {left},{top} differs by {moving:.1}, other still patch at {spot_left},{spot_top} differs by {apart:.1}",
+            source.display(),
+            image.width(),
+            image.height(),
+            scooch_core::compatible(&a, &b),
+            scooch_core::compatible(&a, &mirrored),
+            a.canvas_width,
+            a.canvas_height,
+            fs::metadata(&tables[0]).map(|meta| meta.len()).unwrap_or(0),
+            fs::metadata(&tables[1]).map(|meta| meta.len()).unwrap_or(0),
+            subject[0],
+            subject[1]
+        ));
+        Ok(Kit {
+            picture: picture_path,
+            size: [width, height],
+            stills,
+            tables,
+            frames,
+            mirrored_frames,
+            other: (other_path, other_image),
+            detail: (detail_path, detail_image),
+            icons,
+            subject,
+            patch: RECT { left: origin.0 + left as i32, top: origin.1 + top as i32, right: origin.0 + (left + 24) as i32, bottom: origin.1 + (top + 24) as i32 },
+            spot: RECT { left: origin.0 + spot_left as i32, top: origin.1 + spot_top as i32, right: origin.0 + (spot_left + 16) as i32, bottom: origin.1 + (spot_top + 16) as i32 },
+        })
+    }
+
+    fn outside(width: u32, height: u32, icons: &[Rect], step: u32) -> Vec<usize> {
+        let bottom = work_area().map_or(height, |area| (area.bottom.max(0) as u32).min(height));
+        let mut keep = Vec::new();
+        for y in (0..bottom).step_by(step as usize) {
+            for x in (0..width.saturating_sub(40)).step_by(step as usize) {
+                if !inside(icons, x as f32, y as f32, 8.0) {
+                    keep.push((y * width + x) as usize);
+                }
+            }
+        }
+        keep
+    }
+
+    fn difference(a: &RgbImage, b: &RgbImage, keep: &[usize]) -> (f32, u8, u8) {
+        if a.dimensions() != b.dimensions() {
+            return (f32::MAX, 255, 255);
+        }
+        let (x, y) = (a.as_raw(), b.as_raw());
+        let mut spread = [0usize; 256];
+        let mut total = 0u64;
+        for index in keep {
+            let at = index * 3;
+            let gaps = [x[at].abs_diff(y[at]), x[at + 1].abs_diff(y[at + 1]), x[at + 2].abs_diff(y[at + 2])];
+            total += gaps.iter().map(|gap| u64::from(*gap)).sum::<u64>();
+            spread[*gaps.iter().max().unwrap_or(&0) as usize] += 1;
+        }
+        let count = keep.len().max(1);
+        let mut seen = 0usize;
+        let high = spread.iter().position(|n| {
+            seen += n;
+            seen * 100 >= count * 99
+        });
+        (total as f32 / (count * 3) as f32, high.unwrap_or(0) as u8, spread.iter().rposition(|n| *n > 0).unwrap_or(0) as u8)
+    }
+
+    fn strong(baseline: &RgbImage, still: &RgbImage, icons: &[Rect]) -> Vec<usize> {
+        let width = baseline.width();
+        let mut mask = Vec::new();
+        for (index, (p, q)) in baseline.as_raw().as_chunks::<3>().0.iter().zip(still.as_raw().as_chunks::<3>().0.iter()).enumerate() {
+            let (x, y) = (index as u32 % width, index as u32 / width);
+            if inside(icons, x as f32, y as f32, 0.0) && (0..3).any(|c| p[c].abs_diff(q[c]) > 60) {
+                mask.push(index);
+            }
+        }
+        mask
+    }
+
+    fn covered(shot: &RgbImage, baseline: &RgbImage, expected: &[&RgbImage], mask: &[usize]) -> (usize, usize) {
+        let (s, b) = (shot.as_raw(), baseline.as_raw());
+        let (mut hidden, mut redrawn) = (0usize, 0usize);
+        for index in mask {
+            let at = index * 3;
+            if !(0..3).any(|c| s[at + c].abs_diff(b[at + c]) > 40) {
+                continue;
+            }
+            if expected.iter().any(|image| {
+                let e = image.as_raw();
+                (0..3).all(|c| e.get(at + c).is_some_and(|value| s[at + c].abs_diff(*value) <= 16))
+            }) {
+                hidden += 1;
+            } else {
+                redrawn += 1;
+            }
+        }
+        (hidden, redrawn)
+    }
+
+    fn best_frame(shot: &RgbImage, frames: &[(f32, RgbImage)], keep: &[usize]) -> (f32, f32) {
+        frames.iter().map(|(s, frame)| (*s, difference(shot, frame, keep).0)).min_by(|x, y| x.1.total_cmp(&y.1)).unwrap_or((0.0, f32::MAX))
+    }
+
+    fn tracked(shot: &RgbImage, template: &RgbImage, from: (f32, f32), to: (f32, f32)) -> f32 {
+        let size = template.width() as i32;
+        let steps = 48;
+        let mut best = (0.0f32, f64::MAX);
+        for step in 0..=steps {
+            let t = step as f32 / steps as f32;
+            let (cx, cy) = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+            let (left, top) = (cx as i32 - size / 2, cy as i32 - size / 2);
+            if left < 0 || top < 0 || left + size > shot.width() as i32 || top + size > shot.height() as i32 {
+                continue;
+            }
+            let mut total = 0u64;
+            for y in 0..size {
+                for x in 0..size {
+                    let (p, q) = (shot.get_pixel((left + x) as u32, (top + y) as u32).0, template.get_pixel(x as u32, y as u32).0);
+                    total += p.iter().zip(q.iter()).map(|(m, n)| u64::from(m.abs_diff(*n))).sum::<u64>();
+                }
+            }
+            if (total as f64) < best.1 {
+                best = (t, total as f64);
+            }
+        }
+        best.0
+    }
+
+    fn template(still: &RgbImage, at: (f32, f32), size: u32) -> RgbImage {
+        let left = (at.0 as i32 - size as i32 / 2).clamp(0, still.width() as i32 - size as i32) as u32;
+        let top = (at.1 as i32 - size as i32 / 2).clamp(0, still.height() as i32 - size as i32) as u32;
+        RgbImage::from_fn(size, size, |x, y| *still.get_pixel(left + x, top + y))
+    }
+
+    fn strip(shots: &[(u128, RgbImage)], from: u128, to: u128) -> Option<RgbImage> {
+        let picked: Vec<&RgbImage> = (0..9)
+            .filter_map(|k| {
+                let at = from + (to.saturating_sub(from)) * k / 8;
+                shots.iter().min_by_key(|(t, _)| t.abs_diff(at)).map(|(_, shot)| shot)
+            })
+            .collect();
+        let first = picked.first()?;
+        let (w, h) = (first.width() / 4, first.height() / 4);
+        let mut out = RgbImage::new(w * 9, h);
+        for (k, shot) in picked.iter().enumerate() {
+            for y in 0..h {
+                for x in 0..w {
+                    out.put_pixel(k as u32 * w + x, y, *shot.get_pixel(x * 4, y * 4));
+                }
+            }
+        }
+        Some(out)
+    }
+
+    fn shows(area: RECT, still: &RgbImage, keep: &[usize], limit: Duration) -> Option<Duration> {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            if capture(area).is_ok_and(|shot| difference(&shot, still, keep).0 < 1.5) {
+                return Some(started.elapsed());
+            }
+            pump(Duration::from_millis(30));
+        }
+        None
+    }
+
+    fn patch_of(image: &RgbImage, area: RECT, patch: RECT) -> RgbImage {
+        let (left, top) = ((patch.left - area.left) as u32, (patch.top - area.top) as u32);
+        let (w, h) = ((patch.right - patch.left) as u32, (patch.bottom - patch.top) as u32);
+        RgbImage::from_fn(w, h, |x, y| *image.get_pixel((left + x).min(image.width() - 1), (top + y).min(image.height() - 1)))
+    }
+
+    fn patch_until(patch: RECT, wanted: &RgbImage, close: bool, limit: Duration) -> Option<Duration> {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            if let Ok(shot) = capture(patch) {
+                let gap = mean_gap_all(&shot, wanted);
+                if (gap < 6.0) == close {
+                    return Some(started.elapsed());
+                }
+            }
+            std::thread::yield_now();
+        }
+        None
+    }
+
+    fn mean_gap_all(a: &RgbImage, b: &RgbImage) -> f32 {
+        if a.dimensions() != b.dimensions() {
+            return f32::MAX;
+        }
+        let total: u64 = a.as_raw().iter().zip(b.as_raw()).map(|(p, q)| u64::from(p.abs_diff(*q))).sum();
+        total as f32 / a.as_raw().len().max(1) as f32
     }
 
     fn new_lines(path: &Path, read: &mut u64) -> Vec<String> {
