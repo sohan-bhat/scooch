@@ -51,7 +51,7 @@ function stage(materials: Iterable<Material>, triangle: BufferGeometry) {
   return scene;
 }
 
-export function precompile(gl: WebGLRenderer, scene: Scene, camera: Camera, composer: { passes?: Pass[] } | null) {
+export function precompile(gl: WebGLRenderer, scene: Scene, camera: Camera, composer: { passes?: Pass[] } | null, extra: Promise<unknown>[] = []) {
   const materials = new Set<Material>();
   if (composer) collect(composer, materials, new Set(), 0);
   const final = (composer?.passes ?? []).filter((pass) => pass.renderToScreen && pass.fullscreenMaterial).map((pass) => pass.fullscreenMaterial as Material);
@@ -62,7 +62,7 @@ export function precompile(gl: WebGLRenderer, scene: Scene, camera: Camera, comp
   const target = new WebGLRenderTarget(1, 1, { type: HalfFloatType });
   const previous = gl.getRenderTarget();
   gl.setRenderTarget(target);
-  const pending = [gl.compileAsync(scene, camera), gl.compileAsync(stage(materials, triangle), flat)];
+  const pending = [gl.compileAsync(scene, camera), gl.compileAsync(stage(materials, triangle), flat), ...extra];
   gl.setRenderTarget(null);
   pending.push(gl.compileAsync(stage(final, triangle), flat));
   gl.setRenderTarget(previous);

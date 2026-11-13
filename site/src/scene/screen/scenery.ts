@@ -275,10 +275,24 @@ export function createFrame(scenery: Scenery) {
     return { from, to, s: count > 1 ? clamped - from : 0 };
   };
 
+  const textures = () => {
+    const found = new Set<Texture>([scenery.canvas]);
+    for (const look of scenery.states) for (const texture of Object.values(look)) found.add(texture);
+    return [...found];
+  };
+
   return {
     texture: target.texture,
     material,
     select,
+    textures,
+    compile(gl: WebGLRenderer) {
+      const previous = gl.getRenderTarget();
+      gl.setRenderTarget(target);
+      const pending = gl.compileAsync(scene, camera);
+      gl.setRenderTarget(previous);
+      return pending;
+    },
     render(gl: WebGLRenderer, place: number) {
       const { from, to, s } = select(place);
       const key = `${from}:${to}:${s.toFixed(4)}:${scenery.states.length}`;

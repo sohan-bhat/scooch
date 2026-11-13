@@ -16,6 +16,7 @@ import {
   Quaternion,
   RectAreaLight,
   SpotLight,
+  type Texture,
   Vector2,
   Vector3,
   WebGLRenderTarget,
@@ -172,10 +173,22 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         timer = window.setTimeout(() => void begin(), 200);
         return;
       }
+      const upload = async (textures: Texture[]) => {
+        for (const texture of textures) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          if (stopped) return;
+          gl.initTexture(texture);
+        }
+      };
+      const ready = new Set(screens.main.textures());
       await streamScenery(screens.main.scenery);
+      await upload(screens.main.textures().filter((texture) => !ready.has(texture)));
       const loaded = await loadScenery(manifest.pictures[0].scenery, false);
       if (stopped) return;
       const frame = createFrame(loaded);
+      await frame.compile(gl);
+      await upload(frame.textures());
+      if (stopped) return;
       second.current = frame;
       screens.lcd.uniforms.uFrame.value = frame.texture;
       runtime.scenery = true;
@@ -185,7 +198,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [screens, manifest]);
+  }, [screens, manifest, gl]);
 
   useEffect(() => {
     if (!inside || insideIn) return;
@@ -286,7 +299,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     };
     performance.mark('scooch:assets');
     environmentReady(scene)
-      .then(() => precompile(gl, scene, camera, quality.composer))
+      .then(() => precompile(gl, scene, camera, quality.composer, [screens.main.compile(gl)]))
       .catch(() => undefined)
       .then(() => {
         if (cancelled) return;
