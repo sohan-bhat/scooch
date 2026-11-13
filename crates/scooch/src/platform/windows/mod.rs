@@ -103,7 +103,7 @@ mod system {
         }
 
         fn format(&self) -> Format {
-            Format::Jpeg
+            Format::Png
         }
 
         fn decode(&self, path: &Path) -> Result<RgbImage> {
