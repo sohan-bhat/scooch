@@ -957,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn off_twice_gives_up_on_screens_it_cannot_reach() {
+    fn off_twice_quickly_gives_up_on_screens_it_cannot_reach() {
         let (fake, store, _, _) = pair("twice");
         fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
         assert_eq!(off_of(&fake, &store), Off::Pending(tally(1, 0, 0, 1, 0)));
@@ -1280,6 +1280,63 @@ mod tests {
         assert!(stray.exists());
         assert_eq!(fake.showing("D@S1"), stray);
         assert!(!closing(&counts).contains("is back"));
+    }
+
+    #[test]
+    fn off_during_a_slow_tick_wins() {
+        let (fake, store, left, right) = pair("offslow");
+        fake.place(vec![Rect { x: 60.0, y: 30.0, w: 40.0, h: 40.0 }]);
+        let (desktop, stopping) = (fake.clone(), store.clone());
+        fake.during(move || {
+            assert_eq!(wind_down(desktop.as_ref(), &stopping).unwrap(), Off::Done(tally(2, 0, 0, 0, 0)));
+        });
+        let mut daemon = crate::daemon::Daemon::new(fake.clone(), store.clone());
+        daemon.grace = Duration::ZERO;
+        let report = daemon.tick();
+        assert!(!report.unload);
+        assert_eq!((fake.showing("L"), fake.showing("R")), (left, right));
+        let state = store.load();
+        assert!(!state.on && !state.restoring && state.screens.is_empty());
+        assert!(std::fs::read_dir(store.out()).map_or(true, |mut files| files.next().is_none()));
+        assert!(daemon.tick().exit);
+    }
+
+    #[test]
+    fn scooch_right_after_off_with_pending_entries_turns_back_on() {
+        let (fake, store, left, right) = pair("onagain");
+        fake.connect(screens(&["L"]));
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(1, 0, 0, 1, 0)));
+        let mut state = store.load();
+        assert!(wake_up(&mut state));
+        store.save(&state).unwrap();
+        fake.connect(screens(&["L", "R"]));
+        let daemon = crate::daemon::Daemon::new(fake.clone(), store.clone());
+        let report = daemon.tick();
+        assert!(!report.unload && !report.exit);
+        let state = store.load();
+        assert!(state.on && !state.restoring && state.tally.is_empty());
+        assert_eq!((state.screens["L"].original.clone(), state.screens["R"].original.clone()), (left, right));
+    }
+
+    #[test]
+    fn a_daemon_killed_while_restoring_finishes_when_started_again() {
+        let (fake, store, originals) = trio("killed");
+        fake.connect(Vec::new());
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(0, 0, 0, 3, 0)));
+        fake.connect(screens(&["A"]));
+        let first = crate::daemon::Daemon::new(fake.clone(), store.clone());
+        assert!(!first.tick().unload);
+        drop(first);
+        fake.show("B", &originals[1]);
+        let state = store.load();
+        assert!(state.restoring && ids(&state) == ["B", "C"] && state.tally.back == 1);
+        fake.connect(screens(&["A", "B", "C"]));
+        let again = crate::daemon::Daemon::new(fake.clone(), store.clone());
+        assert!(again.tick().unload);
+        assert_eq!((fake.showing("B"), fake.showing("C")), (originals[1].clone(), originals[2].clone()));
+        let state = store.load();
+        assert!(!state.restoring && state.screens.is_empty() && !store.out().exists());
+        assert_eq!(state.tally.back, 3);
     }
 
     #[test]
