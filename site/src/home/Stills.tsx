@@ -5,7 +5,7 @@ import { BeatCopy, beatFrame, place } from './Beats';
 
 export function Stills() {
   return (
-    <section className="stills" aria-label="Scooch in seven steps">
+    <section className="stills" aria-label="Scooch in eight steps">
       <ol>
         {content.beats.map((beat, index) => (
           <li key={beat.id}>

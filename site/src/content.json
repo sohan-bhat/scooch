@@ -30,6 +30,10 @@
       "title": "Then it moves the picture so nothing important is covered."
     },
     {
+      "id": "grow",
+      "title": "Then clouds and islands grow around your icons."
+    },
+    {
       "id": "follow",
       "title": "Move an icon and the wallpaper follows."
     },
@@ -79,13 +83,14 @@
   },
   "stills": {
     "alt": [
-      "An old beige laptop open on a metal desk at night under an orange arm lamp. The screen shows a hot air balloon on a blue sky with desktop icons over it.",
-      "Close on the laptop screen, where desktop icons sit on the balloon.",
-      "The screen turns into a map of where the picture matters, glowing warm on the balloon over a dim grey copy of the photo.",
-      "The balloon photo after Scooch moved it, with every icon on open sky.",
-      "A pointer drags one icon onto the balloon, and after the drop the picture moves the balloon clear again.",
-      "The lamp is off and the laptop screen is the only light on the desk.",
-      "A wide shot of the desk with the lamp back on low."
+      "A desk at night under an orange arm lamp, with an old laptop and a small television. The television shows a hot air balloon on a blue sky with desktop icons over it.",
+      "Close on the television, where desktop icons sit on the balloon.",
+      "The picture lifts out of the television, the balloon rises from it with a warm glow, and the icons float above it as tiles.",
+      "The picture slides under the floating icons until the balloon is clear.",
+      "Soft white clouds grow around each group of icons on the open sky.",
+      "One icon moves next to the balloon, the picture slides clear again, and the clouds follow the icons.",
+      "The picture is back on the television. The lamp is off and the two screens are the only light.",
+      "A high wide shot of the desk with the lamp back on low. The television shows the balloon with clouds and the laptop shows two swans with islands."
     ]
   },
   "missing": {

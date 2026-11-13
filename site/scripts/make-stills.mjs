@@ -31,7 +31,7 @@ try {
     console.log('wrote', file);
   }
   for (const size of heroOnly ? [] : sizes) {
-    for (let beat = 0; beat < 7; beat++) {
+    for (let beat = 0; beat < 8; beat++) {
       const { context, page } = await openStill(browser, { beat, ...size });
       const shot = await page.screenshot({ type: 'png' });
       await context.close();

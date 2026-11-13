@@ -7,6 +7,7 @@ export const place: Record<string, string> = {
   problem: 'wide:right-0 wide:top-1/2 wide:-translate-y-1/2 wide:w-[min(32vw,30rem)]',
   sees: 'wide:left-0 wide:top-1/2 wide:-translate-y-1/2 wide:w-[min(31vw,30rem)]',
   fix: 'wide:left-0 wide:top-1/2 wide:-translate-y-1/2 wide:w-[min(31vw,30rem)]',
+  grow: 'wide:left-0 wide:top-1/2 wide:-translate-y-1/2 wide:w-[min(31vw,30rem)]',
   follow: 'wide:left-0 wide:top-1/2 wide:-translate-y-1/2 wide:w-[min(31vw,30rem)]',
   rest: 'wide:right-0 wide:top-1/2 wide:-translate-y-1/2 wide:w-[min(36vw,32rem)]',
   end: 'wide:right-0 wide:top-1/2 wide:-translate-y-1/2 wide:w-[min(40vw,36rem)]',

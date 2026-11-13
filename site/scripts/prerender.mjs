@@ -23,13 +23,14 @@ try {
   const wide = '(min-width: 768px) and (orientation: landscape) and (min-aspect-ratio: 1601/1000)';
   const square = '(min-width: 768px) and (orientation: landscape) and (max-aspect-ratio: 16/10)';
   const tall = '(max-width: 767px), (orientation: portrait)';
-  const images = [manifest.photo.file, manifest.photo.saliency, ...manifest.pictures.map((picture) => picture.photo.file), 'atlas.png'];
+  const images = [manifest.photo.saliency, `${manifest.scenery.folder}/${manifest.scenery.canvas.file}`, 'atlas.png'];
   const scene = [
     `<link rel="preload" as="image" href="/scooch/stills/hero-desktop.webp" media="${wide}" fetchpriority="high" />`,
     `<link rel="preload" as="image" href="/scooch/stills/hero-square.webp" media="${square}" fetchpriority="high" />`,
     `<link rel="preload" as="image" href="/scooch/stills/hero-phone.webp" media="${tall}" fetchpriority="high" />`,
     stage ? `<link rel="modulepreload" crossorigin href="/scooch/assets/${stage}" media="${story}" fetchpriority="high" />` : '',
     `<link rel="preload" as="fetch" crossorigin href="/scooch/demo/manifest.json" media="${story}" />`,
+    `<link rel="preload" as="fetch" crossorigin href="/scooch/demo/${manifest.scenery.folder}/${manifest.scenery.fill.file}" media="${story}" />`,
     ...['laptop', 'desk', 'lamp', 'television'].map((model) => `<link rel="preload" as="fetch" crossorigin href="/scooch/models/lite/${model}.glb" media="${story}" />`),
     ...['basis_transcoder.js', 'basis_transcoder.wasm'].map((file) => `<link rel="preload" as="fetch" crossorigin href="/scooch/basis/${file}" media="${story}" />`),
     `<link rel="preload" as="fetch" crossorigin href="/scooch/hdri/studio.hdr" media="${story}" fetchpriority="low" />`,
