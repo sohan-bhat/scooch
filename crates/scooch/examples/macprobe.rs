@@ -132,6 +132,8 @@ mod probe {
         kind_before: Option<String>,
         allowed: bool,
         runs: u32,
+        limits: Vec<String>,
+        wrapped: bool,
     }
 
     impl Probe {
@@ -144,6 +146,14 @@ mod probe {
 
         fn raw(&mut self, text: impl AsRef<str>) {
             let _ = writeln!(self.log, "{:>8} {}", now(), text.as_ref());
+        }
+
+        fn limit(&mut self, text: impl Into<String>) {
+            let text = text.into();
+            self.line(format!("- **runner limit** {text}"));
+            if !self.limits.contains(&text) {
+                self.limits.push(text);
+            }
         }
 
         fn fail(&mut self, text: impl Into<String>) {
@@ -245,6 +255,8 @@ mod probe {
             kind_before: None,
             allowed: false,
             runs: 0,
+            limits: Vec::new(),
+            wrapped: false,
         };
         probe.section("1 Session facts", facts);
         if !probe.runner {
@@ -272,6 +284,10 @@ mod probe {
         }
         for failure in &failed {
             probe.line(format!("- **failed** {failure}"));
+        }
+        let limits = probe.limits.clone();
+        for limit in &limits {
+            probe.line(format!("- runner limit, not a failure: {limit}"));
         }
         probe.save();
         if failed.is_empty() {
@@ -583,12 +599,6 @@ mod probe {
         fs::read(p.home.join("state.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
     }
 
-    fn rendered(home: &Path) -> bool {
-        let Ok(bytes) = fs::read(home.join("state.json")) else { return false };
-        let Ok(state) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false };
-        state["screens"].as_object().is_some_and(|screens| !screens.is_empty() && screens.values().all(|screen| !screen["fingerprint"].is_null()))
-    }
-
     fn daemon_pid(p: &mut Probe) -> Option<i32> {
         let printed = p.tool("/bin/launchctl", &["print", &target()]);
         printed.out.lines().map(str::trim).find_map(|line| line.strip_prefix("pid = ").and_then(|pid| pid.trim().parse().ok()))
@@ -601,6 +611,84 @@ mod probe {
 
     fn daemon_log(p: &Probe) -> String {
         fs::read_to_string(p.home.join("watch.log")).unwrap_or_default()
+    }
+
+    fn scooch_pid(p: &Probe) -> Option<i32> {
+        let pid: i32 = fs::read_to_string(p.home.join("watch.pid")).ok()?.trim().parse().ok()?;
+        (unsafe { libc::kill(pid, 0) } == 0).then_some(pid)
+    }
+
+    fn problem(p: &Probe) -> Option<String> {
+        state(p)["problem"].as_str().map(str::to_string)
+    }
+
+    fn asking(p: &Probe) -> bool {
+        problem(p).as_deref() == Some(finder::ASKING)
+    }
+
+    fn wait_render(p: &Probe, limit: Duration, source: Option<&Path>) -> Option<Duration> {
+        let home = p.home.clone();
+        let source = source.map(|path| path.to_string_lossy().into_owned());
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            let state: serde_json::Value = fs::read(home.join("state.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+            let screens = state["screens"].as_object();
+            let done = screens.is_some_and(|screens| !screens.is_empty() && screens.values().all(|entry| !entry["fingerprint"].is_null() && source.as_deref().is_none_or(|source| entry["source"].as_str() == Some(source))));
+            if done {
+                return Some(started.elapsed());
+            }
+            if state["problem"].as_str() == Some(finder::ASKING) {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        None
+    }
+
+    fn finder_answers(p: &mut Probe) -> Option<u128> {
+        let ran = p.osa("with timeout of 10 seconds\ntell application \"Finder\" to get name of startup disk\nend timeout");
+        ran.ok().then_some(ran.took.as_millis())
+    }
+
+    fn start_wrapped(p: &mut Probe) -> Result<Duration> {
+        let plist = launchd::plist_path()?;
+        let domain = format!("gui/{}", uid());
+        let _ = p.tool("/bin/launchctl", &["bootout", &target()]);
+        let _ = wait_until(Duration::from_secs(10), || !launchd::loaded());
+        let command = format!("'{}' watch; exit $?", p.bin.display());
+        let text = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array><string>/bin/bash</string><string>-c</string><string>{}</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ProcessType</key><string>Standard</string>\n<key>EnvironmentVariables</key><dict><key>SCOOCH_HOME</key><string>{}</string><key>SCOOCH_TRACE</key><string>1</string></dict>\n<key>StandardErrorPath</key><string>{}</string>\n</dict>\n</plist>\n",
+            launchd::LABEL,
+            command.replace('&', "&amp;").replace('<', "&lt;"),
+            p.home.display(),
+            p.home.join("watch.log").display()
+        );
+        fs::write(&plist, text)?;
+        let _ = fs::remove_file(p.home.join("watch.pid"));
+        let started = Instant::now();
+        let loaded = p.tool("/bin/launchctl", &["bootstrap", &domain, &plist.to_string_lossy()]);
+        if !loaded.ok() {
+            anyhow::bail!("launchctl bootstrap of the bash started job failed: {}", loaded.text());
+        }
+        let home = p.home.clone();
+        wait_until(Duration::from_secs(15), || fs::read_to_string(home.join("watch.pid")).ok().and_then(|text| text.trim().parse::<i32>().ok()).is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)).context("the bash started job wrote no pid file")?;
+        p.wrapped = true;
+        Ok(started.elapsed())
+    }
+
+    fn need_wrapped(p: &mut Probe, what: &str) -> Result<Option<Duration>> {
+        if !asking(p) {
+            return Ok(None);
+        }
+        p.limit("on a hosted runner the login item daemon waits for the Finder automation prompt that nobody can click, and the runner image pre-grants Finder automation only to bash, osascript and its own agents");
+        let job = daemon_pid(p);
+        let started = Instant::now();
+        start_wrapped(p)?;
+        let pid = scooch_pid(p);
+        p.line(format!("- {what}: swapped the login item job {job:?} for the same label and plist path started through /bin/bash, scooch now runs as {pid:?}"));
+        let answers = finder_answers(p);
+        p.line(format!("- Finder answers Apple Events again after the swap {answers:?} ms"));
+        Ok(Some(started.elapsed()))
     }
 
     fn first_run(p: &mut Probe) -> Result<()> {
@@ -618,18 +706,16 @@ mod probe {
         let kind = format!("{:?}", store::describe(&screen.id));
         p.line(format!("- wallpaper set to a plain test JPEG with one bright subject in the middle {}, store kind {kind}", subject.display()));
         p.kind_before = Some(kind);
-        p.line(format!("- wallpaper read back {:?}", desktop.wallpaper(&screen).ok().flatten()));
         let started = Instant::now();
         let ran = p.scooch(&[], Duration::from_secs(60));
         p.line(format!("- bare scooch exit {:?} after {} ms", ran.code, ran.took.as_millis()));
         for line in ran.text().lines() {
             p.line(format!("  - `{line}`"));
         }
-        let home = p.home.clone();
-        let rendered_at = wait_until(Duration::from_secs(60).saturating_sub(started.elapsed()), || rendered(&home)).map(|_| started.elapsed());
+        let rendered_at = wait_render(p, Duration::from_secs(45), None).map(|_| started.elapsed());
         let shown = desktop.wallpaper(&screen).ok().flatten();
         let ours = shown.as_ref().is_some_and(|path| path.starts_with(p.home.join("out")));
-        p.line(format!("- first render {:?} ms after scooch started, wallpaper now {:?}, inside the probe home {ours}", rendered_at.map(|time| time.as_millis()), shown));
+        p.line(format!("- first render by the login item {:?} ms after scooch started, wallpaper now {:?}, inside the probe home {ours}", rendered_at.map(|time| time.as_millis()), shown));
         let plist = launchd::plist_path()?;
         p.line(format!("- login item file {} exists {}", plist.display(), plist.exists()));
         if let Ok(text) = fs::read_to_string(&plist) {
@@ -639,8 +725,9 @@ mod probe {
         let pid = daemon_pid(p);
         let parent = pid.map(|pid| p.tool("/bin/ps", &["-o", "ppid=,comm=", "-p", &pid.to_string()]).out.trim().to_string());
         p.line(format!("- launchctl print finds the job {}, daemon pid {pid:?}, parent and command {parent:?}", launchd::loaded()));
-        let state = state(p);
-        p.line(format!("- state on {} problem {:?} screens {:?}", state["on"], state["problem"].as_str(), state["screens"].as_object().map(|screens| screens.keys().cloned().collect::<Vec<_>>())));
+        p.line(format!("- state on {} problem {:?}", state(p)["on"], problem(p)));
+        let status = p.scooch(&["status"], LIMIT);
+        p.line(format!("- scooch status says {:?}", status.text()));
         let log = daemon_log(p);
         p.line(format!("- daemon log {} lines", log.lines().count()));
         for line in log.lines().filter(|line| !line.contains("mouse up")).take(25) {
@@ -652,15 +739,23 @@ mod probe {
         if pid.is_none() {
             p.fail("no daemon process runs under launchd");
         }
-        if rendered_at.is_none() || !ours {
+        if rendered_at.is_some() && ours {
+            return Ok(());
+        }
+        if !asking(p) {
             p.fail("the daemon under launchd never rendered");
-            if let Some(pid) = pid {
-                let sample = p.out.join("daemon-sample.txt");
-                let sampled = p.tool("/usr/bin/sample", &[&pid.to_string(), "2", "-file", &sample.to_string_lossy()]);
-                let text = fs::read_to_string(&sample).unwrap_or_default();
-                let waiting = ["AEDeterminePermissionToAutomateTarget", "AESendMessage", "sendEventWithOptions", "mach_msg"].iter().filter(|name| text.contains(*name)).copied().collect::<Vec<_>>();
-                p.line(format!("- sampled the daemon {}, its stacks mention {waiting:?}", if sampled.ok() { "ok" } else { "with an error" }));
-            }
+            return Ok(());
+        }
+        let swapped = need_wrapped(p, "first run")?;
+        let rendered = wait_render(p, Duration::from_secs(45), None);
+        let shown = desktop.wallpaper(&screen).ok().flatten();
+        let ours = shown.as_ref().is_some_and(|path| path.starts_with(p.home.join("out")));
+        p.line(format!(
+            "- first render by the bash started launchd job {:?} ms after it was loaded, wallpaper now {shown:?}, inside the probe home {ours}",
+            swapped.zip(rendered).map(|(load, render)| (load + render).as_millis())
+        ));
+        if rendered.is_none() || !ours {
+            p.fail("the bash started launchd job never rendered");
         }
         Ok(())
     }
@@ -768,7 +863,9 @@ mod probe {
 
     fn idle(p: &mut Probe) -> Result<()> {
         std::thread::sleep(Duration::from_secs(3));
-        let pid = daemon_pid(p).context("no daemon runs under launchd")?;
+        let job = daemon_pid(p);
+        let pid = scooch_pid(p).context("no scooch daemon runs")?;
+        p.line(format!("- launchd job pid {job:?}, scooch daemon pid {pid}, started through bash {}", p.wrapped));
         let before = rusage(pid).context("the daemon usage could not be read")?;
         let from = epoch();
         std::thread::sleep(Duration::from_secs(60));
@@ -808,6 +905,7 @@ mod probe {
             p.line(format!("  - `{line}`"));
         }
         std::thread::sleep(Duration::from_millis(1500));
+        p.wrapped = false;
         let shown = desktop.wallpaper(&screen).ok().flatten();
         let kind = format!("{:?}", store::describe(&screen.id));
         let same_path = shown.as_ref().zip(p.subject.as_ref()).is_some_and(|(shown, subject)| shown == subject || shown.canonicalize().ok() == subject.canonicalize().ok());
@@ -826,41 +924,57 @@ mod probe {
         let screen = main_screen(p)?;
         let (width, height) = pixels(&screen);
         let second = picture_file(p, "probe-second.jpg", &subject_picture(width, height, (0.35, 0.55)))?;
+        let third = picture_file(p, "probe-third.jpg", &subject_picture(width, height, (0.65, 0.45)))?;
         let started = Instant::now();
         let ran = p.scooch(&["use", &second.to_string_lossy()], Duration::from_secs(60));
-        p.line(format!("- scooch use exit {:?} after {} ms", ran.code, ran.took.as_millis()));
+        p.line(format!("- scooch use from off exit {:?} after {} ms", ran.code, ran.took.as_millis()));
         for line in ran.text().lines() {
             p.line(format!("  - `{line}`"));
         }
-        let home = p.home.clone();
-        let source = second.clone();
-        let reached = wait_until(Duration::from_secs(40), || {
-            let Ok(bytes) = fs::read(home.join("state.json")) else { return false };
-            let state: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
-            state["screens"].as_object().is_some_and(|screens| !screens.is_empty() && screens.values().all(|entry| entry["source"].as_str() == Some(&source.to_string_lossy()) && !entry["fingerprint"].is_null()))
-        });
-        let pid = daemon_pid(p);
-        p.line(format!("- daemon under launchd pid {pid:?}, rendered the new picture after {:?} ms, wallpaper {:?}", reached.map(|_| started.elapsed().as_millis()), desktop.wallpaper(&screen).ok().flatten()));
-        if reached.is_none() || pid.is_none() {
-            p.fail("scooch use did not reach a daemon under launchd");
+        let mut rendered = wait_render(p, Duration::from_secs(30), Some(&second));
+        p.line(format!("- the login item it installed is loaded {}, rendered the new picture after {:?} ms, problem {:?}", launchd::loaded(), rendered.map(|_| started.elapsed().as_millis()), problem(p)));
+        if rendered.is_none() && need_wrapped(p, "second cycle")?.is_some() {
+            rendered = wait_render(p, Duration::from_secs(30), Some(&second));
+            p.line(format!("- the bash started job rendered the new picture {:?}", rendered.map(|time| time.as_millis())));
+        }
+        if rendered.is_none() {
+            p.fail("scooch use did not bring a render from a daemon under launchd");
+        }
+        let job = daemon_pid(p);
+        let started = Instant::now();
+        let ran = p.scooch(&["use", &third.to_string_lossy()], Duration::from_secs(60));
+        let rendered = wait_render(p, Duration::from_secs(30), Some(&third));
+        let kept = fs::read_to_string(launchd::plist_path()?).is_ok_and(|text| !p.wrapped || text.contains("/bin/bash"));
+        let after = daemon_pid(p);
+        p.line(format!("- scooch use while it runs exit {:?}, job {job:?} then {after:?}, plist untouched {kept}, rendered after {:?} ms, wallpaper {:?}", ran.code, rendered.map(|_| started.elapsed().as_millis()), desktop.wallpaper(&screen).ok().flatten()));
+        if rendered.is_none() || !kept {
+            p.fail("scooch use did not reach the daemon running under launchd");
         }
         let ticks_before = daemon_log(p).lines().filter(|line| line.contains(" tick ")).count();
         let ran = p.scooch(&["flip"], LIMIT);
         p.line(format!("- scooch flip exit {:?}: {}", ran.code, ran.text()));
-        let mirrored = wait_until(Duration::from_secs(10), || {
-            let state: serde_json::Value = fs::read(home.join("state.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
-            state["options"]["mirror"].as_bool() == Some(true)
-        });
+        let home = p.home.clone();
         let ticked = wait_until(Duration::from_secs(10), || fs::read_to_string(home.join("watch.log")).unwrap_or_default().lines().filter(|line| line.contains(" tick ")).count() > ticks_before);
-        p.line(format!("- mirror saved {:?}, the daemon ticked after the flip {:?} ms later", mirrored.is_some(), ticked.map(|time| time.as_millis())));
+        p.line(format!("- mirror saved {}, the daemon ticked {:?} ms after the flip", state(p)["options"]["mirror"], ticked.map(|time| time.as_millis())));
         if ticked.is_none() {
             p.fail("scooch flip did not reach the daemon under launchd");
         }
         let ran = p.scooch(&["off"], Duration::from_secs(60));
-        p.line(format!("- scooch off exit {:?}: {}", ran.code, ran.text()));
+        p.line(format!("- scooch off exit {:?} after {} ms: {}", ran.code, ran.took.as_millis(), ran.text()));
         std::thread::sleep(Duration::from_millis(1500));
+        p.wrapped = false;
         gone(p, "the second off");
         Ok(())
+    }
+
+    fn switch(p: &mut Probe, code: u32) -> Ran {
+        let ran = p.osa(&format!("tell application \"System Events\" to key code {code} using control down"));
+        std::thread::sleep(Duration::from_millis(2500));
+        ran
+    }
+
+    fn entries(p: &Probe) -> Vec<String> {
+        state(p)["screens"].as_object().map(|screens| screens.iter().map(|(id, entry)| format!("{id} output {}", entry["output"].as_str().unwrap_or("none"))).collect()).unwrap_or_default()
     }
 
     fn spaces_check(p: &mut Probe) -> Result<()> {
@@ -869,8 +983,6 @@ mod probe {
         p.line(format!("- System Events UI scripting enabled {}", ui.text()));
         let opened = p.tool("/usr/bin/open", &["-a", "Mission Control"]);
         std::thread::sleep(Duration::from_millis(1500));
-        let tree = p.osa("with timeout of 15 seconds\ntell application \"System Events\" to tell process \"Dock\" to get entire contents of group 1\nend timeout");
-        p.raw(format!("Mission Control tree {}", tree.text()));
         let added = p.osa("with timeout of 15 seconds\ntell application \"System Events\" to tell process \"Dock\" to click (first button whose description is \"add desktop\") of group 2 of group 1 of group 1\nend timeout");
         std::thread::sleep(Duration::from_millis(1500));
         let _ = p.osa("tell application \"System Events\" to key code 53");
@@ -882,41 +994,45 @@ mod probe {
             return Ok(());
         }
         let screen = main_screen(p)?;
-        let (display, first) = spaces::split(&screen.id);
-        let display = display.to_string();
-        let first = first.map(str::to_string);
-        let switched = p.osa("tell application \"System Events\" to key code 124 using control down");
-        std::thread::sleep(Duration::from_millis(2000));
-        let now = spaces::current(&display);
-        p.line(format!("- switch right {}, showing Space {now:?} was {first:?}", if switched.ok() { "ok".to_string() } else { switched.text() }));
-        if now == first || now.is_none() {
+        let display = spaces::split(&screen.id).0.to_string();
+        let first = spaces::current(&display);
+        let switched = switch(p, 124);
+        let second = spaces::current(&display);
+        p.line(format!("- switch right {}, showing Space {second:?} was {first:?}", if switched.ok() { "ok".to_string() } else { switched.text() }));
+        if second == first || second.is_none() {
             p.line("- switching Spaces did not work on this runner, so the Spaces cycle stops here".to_string());
             return Ok(());
         }
-        let _ = p.osa("tell application \"System Events\" to key code 123 using control down");
-        std::thread::sleep(Duration::from_millis(2000));
+        switch(p, 123);
         let subject = p.subject.clone().context("no test picture")?;
         let ran = p.scooch(&["use", &subject.to_string_lossy()], Duration::from_secs(60));
         p.line(format!("- scooch use on the first Space exit {:?}", ran.code));
-        let _ = p.osa("tell application \"System Events\" to key code 124 using control down");
+        if wait_render(p, Duration::from_secs(30), Some(&subject)).is_none() {
+            need_wrapped(p, "Spaces")?;
+        }
+        let one = wait_render(p, Duration::from_secs(30), Some(&subject));
+        p.line(format!("- first Space rendered {:?}, entries {:?}", one.map(|time| time.as_millis()), entries(p)));
+        switch(p, 124);
         let home = p.home.clone();
-        let two = wait_until(Duration::from_secs(20), || {
+        let two = wait_until(Duration::from_secs(25), || {
             let state: serde_json::Value = fs::read(home.join("state.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
             state["screens"].as_object().is_some_and(|screens| screens.len() >= 2 && screens.values().all(|entry| !entry["output"].is_null()))
         });
-        let outputs: Vec<String> = state(p)["screens"].as_object().map(|screens| screens.iter().map(|(id, entry)| format!("{id} {}", entry["output"])).collect()).unwrap_or_default();
-        p.line(format!("- second Space entry with its own output after {:?} ms: {outputs:?}", two.map(|time| time.as_millis())));
-        let _ = p.osa("tell application \"System Events\" to key code 123 using control down");
-        std::thread::sleep(Duration::from_millis(2000));
+        p.line(format!("- second Space entry with its own output after {:?} ms: {:?}", two.map(|time| time.as_millis()), entries(p)));
+        switch(p, 123);
         let ran = p.scooch(&["off"], Duration::from_secs(60));
+        p.wrapped = false;
         p.line(format!("- scooch off from the first Space exit {:?}: {}", ran.code, ran.text()));
-        p.line(format!("- after off, restoring {}, login item loaded {}", state(p)["restoring"], launchd::loaded()));
-        let _ = p.osa("tell application \"System Events\" to key code 124 using control down");
-        let finished = wait_until(Duration::from_secs(30), || !launchd::loaded());
-        let back = platform::current()?.screens()?.first().and_then(|screen| platform::current().ok()?.wallpaper(screen).ok().flatten());
-        p.line(format!("- second Space shows {back:?} and the login item removed itself after {:?} ms", finished.map(|time| time.as_millis())));
-        let _ = p.osa("tell application \"System Events\" to key code 123 using control down");
-        if two.is_none() || finished.is_none() {
+        p.line(format!("- after off, restoring {}, entries {:?}, login item loaded {}", state(p)["restoring"], entries(p), launchd::loaded()));
+        let plist = fs::read_to_string(launchd::plist_path()?).unwrap_or_default();
+        p.line(format!("- the restoring daemon is the real login item {}", !plist.is_empty() && !plist.contains("/bin/bash")));
+        switch(p, 124);
+        let finished = wait_until(Duration::from_secs(30), || !launchd::loaded() && !launchd::installed());
+        let back = platform::current()?.screens()?.first().cloned().and_then(|screen| platform::current().ok()?.wallpaper(&screen).ok().flatten());
+        p.line(format!("- second Space shows {back:?}, the login item removed itself after {:?} ms, tally {}", finished.map(|time| time.as_millis()), state(p)["tally"]));
+        switch(p, 123);
+        p.line(format!("- back on the first Space, it now reads as {:?}, and the window server lists {:?}", spaces::current(&display), spaces::window_server().map(|monitors| monitors.into_iter().map(|monitor| monitor.spaces).collect::<Vec<_>>())));
+        if one.is_none() || two.is_none() || finished.is_none() || back.as_ref() != Some(&subject) {
             p.fail("the Spaces cycle did not finish");
         }
         Ok(())
@@ -946,10 +1062,10 @@ mod probe {
             }
         }
         let desktop = platform::current()?;
-        let original = p.original.clone();
-        for (screen, shown) in original {
-            if let Some(shown) = shown.filter(|path| path.is_file()) {
-                let restored = desktop.set_wallpaper(&screen, &shown);
+        let original = p.original.iter().find_map(|(_, shown)| shown.clone()).filter(|path| path.is_file());
+        for screen in desktop.screens().unwrap_or_default() {
+            if let Some(shown) = &original {
+                let restored = desktop.set_wallpaper(&screen, shown);
                 p.line(format!("- wallpaper of `{}` set back to {} {:?}", screen.id, shown.display(), restored.map_err(|error| error.to_string())));
             }
         }
