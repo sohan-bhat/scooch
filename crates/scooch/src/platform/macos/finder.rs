@@ -9,6 +9,8 @@ use objc2_core_foundation::{CGRect, CGSize};
 use objc2_foundation::{ns_string, NSAppleEventDescriptor, NSAppleEventSendOptions, NSDictionary, NSNumber, NSString};
 use scooch_core::Rect;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 const NOT_ALLOWED: i32 = -1743;
 const WOULD_ASK: i32 = -1744;
@@ -19,6 +21,37 @@ const BUILD: i32 = 1;
 const TIMEOUT: f64 = 2.0;
 
 pub const DENIED: &str = "Scooch cannot see your desktop icons, so turn on Finder for scooch in System Settings, Privacy and Security, Automation.";
+pub const ASKING: &str = "macOS is asking whether scooch may control Finder, so choose Allow in that window.";
+
+type Answered = Arc<dyn Fn() + Send + Sync>;
+
+static ANSWERED: OnceLock<Answered> = OnceLock::new();
+static WAITING: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Consent {
+    Granted,
+    AskNow,
+    AskLater,
+    Refused,
+}
+
+pub fn consent_for(access: Access, waiting_allowed: bool) -> Consent {
+    match (access, waiting_allowed) {
+        (Access::Allowed, _) => Consent::Granted,
+        (Access::WouldAsk, true) => Consent::AskLater,
+        (Access::WouldAsk, false) => Consent::AskNow,
+        _ => Consent::Refused,
+    }
+}
+
+pub fn ask_in_background(answered: impl Fn() + Send + Sync + 'static) {
+    let _ = ANSWERED.set(Arc::new(answered));
+}
+
+pub fn start_asking(flag: &AtomicBool) -> bool {
+    !flag.swap(true, Ordering::SeqCst)
+}
 
 const LABEL_GAP: f32 = 5.0;
 const LABEL_HALO: f32 = 8.0;
@@ -205,16 +238,41 @@ fn names() -> Result<Vec<String>> {
 
 fn fetch(property_code: u32) -> Result<Option<Retained<NSAppleEventDescriptor>>> {
     match send(property_code) {
-        Err(WOULD_ASK | TIMED_OUT) if consent() => send(property_code).or_else(failure),
+        Err(status @ (WOULD_ASK | TIMED_OUT)) => match consent() {
+            Consent::Granted => send(property_code).or_else(failure),
+            Consent::AskLater => Err(anyhow!("{ASKING}")),
+            _ => failure(status),
+        },
         other => other.or_else(failure),
     }
 }
 
-fn consent() -> bool {
-    match access(false) {
-        Access::Allowed => true,
-        Access::WouldAsk => access(true) == Access::Allowed,
-        _ => false,
+fn consent() -> Consent {
+    match consent_for(access(false), ANSWERED.get().is_some()) {
+        Consent::AskNow if access(true) == Access::Allowed => Consent::Granted,
+        Consent::AskNow => Consent::Refused,
+        Consent::AskLater => {
+            ask_later();
+            Consent::AskLater
+        }
+        other => other,
+    }
+}
+
+fn ask_later() {
+    let Some(answered) = ANSWERED.get().cloned() else { return };
+    if !start_asking(&WAITING) {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("scooch-consent".into()).spawn(move || {
+        let answer = objc2::rc::autoreleasepool(|_| access(true));
+        WAITING.store(false, Ordering::SeqCst);
+        if answer == Access::Allowed {
+            answered();
+        }
+    });
+    if spawned.is_err() {
+        WAITING.store(false, Ordering::SeqCst);
     }
 }
 
@@ -354,6 +412,21 @@ fn truthy(value: &AnyObject) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_daemon_asks_for_finder_in_the_background_and_a_command_asks_in_place() {
+        assert_eq!(consent_for(Access::Allowed, true), Consent::Granted);
+        assert_eq!(consent_for(Access::WouldAsk, true), Consent::AskLater);
+        assert_eq!(consent_for(Access::WouldAsk, false), Consent::AskNow);
+        assert_eq!(consent_for(Access::Denied, true), Consent::Refused);
+        assert_eq!(consent_for(Access::FinderOff, false), Consent::Refused);
+        let flag = AtomicBool::new(false);
+        assert!(start_asking(&flag));
+        assert!(!start_asking(&flag));
+        flag.store(false, Ordering::SeqCst);
+        assert!(start_asking(&flag));
+        assert!(!ASKING.contains(['\u{2014}', '\u{2013}', ';', '(', ')']) && !ASKING.contains(": "));
+    }
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() <= 1.5
