@@ -1963,7 +1963,7 @@ mod probe {
     const GLIDE_MS: u32 = 450;
 
     fn bare() -> Hints {
-        Hints { present: Some(Method::Bare.hint().into()) }
+        Hints { present: Some(Method::Bare.hint().into()), scale: None }
     }
 
     struct Kit {
@@ -2336,21 +2336,59 @@ mod probe {
         ending: Ending,
         ms: u32,
         strip: bool,
+        scale: Option<f32>,
     }
 
-    fn equal_until(area: RECT, still: &RgbImage, keep: &[usize], limit: Duration) -> (Option<Duration>, (f32, u8, u8)) {
+    const HOLD: u128 = 700;
+
+    fn region(old: &RgbImage, new: &RgbImage, keep: &[usize]) -> Vec<usize> {
+        if old.dimensions() != new.dimensions() {
+            return Vec::new();
+        }
+        let (x, y) = (old.as_raw(), new.as_raw());
+        keep.iter().copied().filter(|index| (0..3).any(|c| x[index * 3 + c].abs_diff(y[index * 3 + c]) > 24)).collect()
+    }
+
+    fn region_gap(shot: &RgbImage, still: &RgbImage, region: &[usize]) -> f32 {
+        if region.is_empty() || shot.dimensions() != still.dimensions() {
+            return 0.0;
+        }
+        let (x, y) = (shot.as_raw(), still.as_raw());
+        let total: u64 = region.iter().map(|index| (0..3).map(|c| u64::from(x[index * 3 + c].abs_diff(y[index * 3 + c]))).sum::<u64>()).sum();
+        total as f32 / (region.len() * 3) as f32
+    }
+
+    fn side(shot: &RgbImage, old: &RgbImage, new: &RgbImage, region: &[usize]) -> char {
+        if region.is_empty() {
+            return '=';
+        }
+        let (a, b) = (region_gap(shot, old, region), region_gap(shot, new, region));
+        if a < 3.0 && a * 3.0 < b {
+            'A'
+        } else if b < 3.0 && b * 3.0 < a {
+            'B'
+        } else {
+            '~'
+        }
+    }
+
+    fn equal_until(area: RECT, still: &RgbImage, other: &RgbImage, keep: &[usize], limit: Duration) -> (Option<Duration>, (f32, u8, u8), Option<RgbImage>) {
         let started = Instant::now();
+        let apart = region(still, other, keep);
         let mut last = (f32::MAX, 255, 255);
+        let mut shot = None;
         while started.elapsed() < limit {
-            if let Ok(shot) = capture(area) {
-                last = difference(&shot, still, keep);
-                if last.1 <= 2 && last.0 < 0.3 {
-                    return (Some(started.elapsed()), last);
+            if let Ok(taken) = capture(area) {
+                last = difference(&taken, still, keep);
+                let near = region_gap(&taken, still, &apart) < 2.0;
+                shot = Some(taken);
+                if last.1 <= 2 && near {
+                    return (Some(started.elapsed()), last, None);
                 }
             }
             pump(Duration::from_millis(15));
         }
-        (None, last)
+        (None, last, shot)
     }
 
     fn evidence(p: &mut Probe, name: &str, shot: &RgbImage, reference: &RgbImage, keep: &[usize], marks: &[(&str, Option<i128>)]) -> String {
@@ -2393,10 +2431,11 @@ mod probe {
         let (width, height) = (kit.size[0], kit.size[1]);
         let keep = outside(width, height, &kit.icons, 2);
         let wide = outside(width, height, &kit.icons, 1);
-        p.line(format!("- **{}**, {} ms", run.label, run.ms));
+        p.line(format!("- **{}**, {} ms, scale {}", run.label, run.ms, run.scale.map_or("chosen by the helper".to_string(), |scale| format!("pinned at {scale}"))));
+        helper.warm(Hints { scale: run.scale, ..bare() }, None, None, ANSWER)?;
         let asked_old = Instant::now();
         desktop.set_wallpaper(screen, &run.old.0)?;
-        let (landed, landed_gap) = equal_until(area, &run.old.1, &wide, Duration::from_secs(6));
+        let (landed, landed_gap, missed) = equal_until(area, &run.old.1, &run.new.1, &wide, Duration::from_secs(6));
         park_cursor();
         let baseline = settle(area, Duration::from_secs(3))?;
         let mask = strong(&baseline, &run.old.1, &kit.icons);
@@ -2414,6 +2453,10 @@ mod probe {
         ));
         if landed.is_none() {
             p.failed.push(format!("{}: the old still never showed exactly before open", run.label));
+            if let Some(shot) = missed {
+                let told = evidence(p, &format!("{}-before", run.name), &shot, &run.old.1, &wide, &[]);
+                p.line(format!("  - {told}"));
+            }
         }
         let asked = Instant::now();
         helper.ask_open(id, screen, &run.old.0)?;
@@ -2477,7 +2520,7 @@ mod probe {
             while let Some(reply) = helper.next(Duration::ZERO) {
                 let now = started.elapsed().as_millis();
                 match reply {
-                    Reply::Glided { id: seen, frames, slow_frames, first_frame_ms, uploads } if seen == id => glided = Some((now, frames, slow_frames, first_frame_ms, uploads)),
+                    Reply::Glided { id: seen, frames, slow_frames, first_frame_ms, uploads, scale } if seen == id => glided = Some((now, frames, slow_frames, first_frame_ms, uploads, scale)),
                     Reply::Settled { id: seen } if seen == id => settled = Some(now),
                     Reply::Failed { why, .. } => failed = Some((now, why)),
                     _ => {}
@@ -2486,7 +2529,7 @@ mod probe {
             if closed_at.is_none() {
                 let ready = match run.ending {
                     Ending::Never => failed.as_ref().map(|(at, _)| *at),
-                    _ => full_at.or(settled.map(|at| at + 1500)).map(|at| at.max(settled.unwrap_or(0) + 400)),
+                    _ => settled.zip(set_at).map(|(done, set)| done.max(set + HOLD)),
                 };
                 if ready.is_some_and(|ready| started.elapsed().as_millis() >= ready) {
                     if run.ending != Ending::Never {
@@ -2562,12 +2605,14 @@ mod probe {
         let after_gap = difference(&after, &run.new.1, &wide);
         let worst_held = held.iter().max_by_key(|(_, d)| d.1).copied();
         let first_after_settled = held.first().map(|(_, d)| *d);
-        let distances: Vec<(f32, f32)> = shots.iter().map(|(_, shot)| (difference(shot, &run.old.1, &keep).0, difference(shot, &run.new.1, &keep).0)).collect();
-        let appeared = distances.iter().position(|(_, new)| *new < 1.5);
-        let returned: Vec<usize> = appeared.map_or(Vec::new(), |first| (first..distances.len()).filter(|index| distances[*index].0 + 0.5 < distances[*index].1 && distances[*index].1 > 1.5).collect());
+        let apart = region(&run.old.1, &run.new.1, &keep);
+        let sides: Vec<char> = shots.iter().map(|(_, shot)| side(shot, &run.old.1, &run.new.1, &apart)).collect();
+        let appeared = sides.iter().position(|class| *class == 'B');
+        let returned: Vec<usize> = appeared.map_or(Vec::new(), |first| (first..sides.len()).filter(|index| sides[*index] == 'A').collect());
+        let after_close: String = shots.iter().zip(&sides).filter(|((at, _), _)| closed_at.is_some_and(|closed| *at >= closed)).map(|(_, class)| *class).collect();
         p.line(format!(
             "  - glided {:?}, settled at {settled:?} ms, first capture equal to the new still at {full_at:?} ms, failure {failed:?}, new wallpaper set at {set_at:?} ms, closed at {closed_at:?} ms, {} captures at {:.1} per second",
-            glided.map(|(at, frames, slow, first, uploads)| format!("at {at} ms with {frames} frames, {slow} slow, first moving frame {first} ms after glide was sent, pictures uploaded {uploads}")),
+            glided.map(|(at, frames, slow, first, uploads, scale)| format!("at {at} ms with {frames} frames, {slow} slow, first moving frame {first} ms after glide was sent, pictures uploaded {uploads}, drawn at scale {scale}")),
             shots.len(),
             shots.len() as f32 / started.elapsed().as_secs_f32().max(0.001)
         ));
@@ -2604,7 +2649,7 @@ mod probe {
             }
         }
         p.line(line);
-        let mut line = format!("  - old picture seen again after the new one {} times, windows of ours left {left}", returned.len());
+        let mut line = format!("  - {} pixels differ between the two stills, old picture seen again after the new one {} times, captures after close {after_close}, windows of ours left {left}", apart.len(), returned.len());
         if let Some(index) = returned.first() {
             let (at, shot) = &shots[*index];
             line += &format!(", {}", evidence(p, &format!("{}-returned", run.name), shot, &run.new.1, &keep, &marks(*at)));
@@ -2675,14 +2720,7 @@ mod probe {
     }
 
     fn classify(shot: &RgbImage, old: &RgbImage, new: &RgbImage, keep: &[usize]) -> char {
-        let (a, b) = (difference(shot, old, keep).0, difference(shot, new, keep).0);
-        if a < 1.0 && a <= b {
-            'A'
-        } else if b < 1.0 {
-            'B'
-        } else {
-            '~'
-        }
+        side(shot, old, new, &region(old, new, keep))
     }
 
     fn handover_question(p: &mut Probe, helper: &mut Helper, id: &mut u32, screen: &Screen, kit: &Kit) -> Result<()> {
@@ -2694,7 +2732,7 @@ mod probe {
         p.line("- **what the screen shows when the layer closes after the system wallpaper changed under it**".to_string());
         for delay in [0u64, 150, 300, 600, 1200, 2500] {
             desktop.set_wallpaper(screen, &old.0)?;
-            let (ready, _) = equal_until(area, &old.1, &keep, Duration::from_secs(6));
+            let (ready, _, _) = equal_until(area, &old.1, &new.1, &keep, Duration::from_secs(6));
             *id += 1;
             helper.open(*id, screen, &old.0, ANSWER)?;
             pump(Duration::from_millis(200));
@@ -2954,7 +2992,7 @@ mod probe {
             let frame = Rect { x: x.parse()?, y: y.parse()?, w: w.parse()?, h: h.parse()? };
             let screen = Screen { id: "held".into(), frame, scale: 1.0 };
             let mut helper = Helper::spawn(Path::new(program), Duration::from_secs(5))?;
-            helper.warm(Hints { present: Some(present.clone()) }, None, None, Duration::from_secs(20))?;
+            helper.warm(Hints { present: Some(present.clone()), scale: None }, None, None, Duration::from_secs(20))?;
             helper.open(1, &screen, Path::new(still), ANSWER)?;
             println!("shown {}", helper.pid);
             let _ = std::io::stdout().flush();
@@ -3185,12 +3223,13 @@ mod probe {
         color_check(p, &mut helper, id, &screen, &kit.detail, "scale at the first scale, a fine detail still")?;
         let slow = 3000;
         let runs = [
-            Pass { label: "glide from A to B, settle sent with the new wallpaper at 150 ms", name: "glide", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, ms: slow, strip: true },
-            Pass { label: "cross-fade to a mirrored B", name: "mirrored", tables: (&kit.tables[0], &kit.tables[2]), track: false, old: &kit.stills[0], new: &kit.stills[2], frames: &kit.mirrored_frames, ending: Ending::During, ms: slow, strip: true },
-            Pass { label: "glide with settle sent together with the glide", name: "early", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::AtOnce, ms: slow, strip: false },
-            Pass { label: "glide with no settle, left to the helper's five second rule", name: "unsettled", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::Never, ms: slow, strip: false },
-            Pass { label: "a pair where only the scenery changes", name: "scenery", tables: (&kit.tables[0], &kit.tables[3]), track: false, old: &kit.stills[0], new: &kit.stills[3], frames: &kit.scenic_frames, ending: Ending::During, ms: slow, strip: true },
-            Pass { label: "a 450 ms glide for timing only", name: "quick", tables: (&kit.tables[0], &kit.tables[1]), track: false, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, ms: GLIDE_MS, strip: false },
+            Pass { label: "glide from A to B, settle sent with the new wallpaper at 150 ms", name: "glide", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, ms: slow, strip: true, scale: Some(1.0) },
+            Pass { label: "the same glide drawn at half scale", name: "half", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, ms: slow, strip: true, scale: Some(0.5) },
+            Pass { label: "cross-fade to a mirrored B", name: "mirrored", tables: (&kit.tables[0], &kit.tables[2]), track: false, old: &kit.stills[0], new: &kit.stills[2], frames: &kit.mirrored_frames, ending: Ending::During, ms: slow, strip: true, scale: None },
+            Pass { label: "glide with settle sent together with the glide", name: "early", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::AtOnce, ms: slow, strip: false, scale: None },
+            Pass { label: "glide with no settle, left to the helper's five second rule", name: "unsettled", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::Never, ms: slow, strip: false, scale: None },
+            Pass { label: "a pair where only the scenery changes", name: "scenery", tables: (&kit.tables[0], &kit.tables[3]), track: false, old: &kit.stills[0], new: &kit.stills[3], frames: &kit.scenic_frames, ending: Ending::During, ms: slow, strip: true, scale: None },
+            Pass { label: "a 450 ms glide for timing only", name: "quick", tables: (&kit.tables[0], &kit.tables[1]), track: false, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, ms: GLIDE_MS, strip: false, scale: None },
         ];
         for run in &runs {
             id += 1;
@@ -3224,7 +3263,7 @@ mod probe {
             p.line(format!("  - `{line}`"));
         }
         id += 1;
-        let after_restart = Pass { label: "glide after the restart", name: "restart", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, ms: 3000, strip: true };
+        let after_restart = Pass { label: "glide after the restart", name: "restart", tables: (&kit.tables[0], &kit.tables[1]), track: true, old: &kit.stills[0], new: &kit.stills[1], frames: &kit.frames, ending: Ending::During, ms: 3000, strip: true, scale: None };
         if let Err(error) = glide_run(p, &mut helper, id, &screen, &kit, &after_restart) {
             p.failed.push(format!("the helper could not glide after an Explorer restart {error:#}"));
         }
