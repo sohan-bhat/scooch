@@ -1,11 +1,12 @@
 use super::parse::desktop::Session;
-use super::parse::kde::{self, Containment, Layout, State};
+use super::parse::kde::{self, Containment, Layout, Mapping, State};
 use super::parse::{gio, keyfile, wakes};
 use super::settings::{self, Plasma};
 use super::{screens, tool, FileWatch, Shell, Watches};
 use crate::platform::Screen;
 use anyhow::{anyhow, Result};
 use scooch_core::Rect;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 pub const SHELL_NAME: &str = "org.kde.plasmashell";
@@ -43,8 +44,12 @@ pub fn plasma6() -> bool {
     tool::run("plasmashell", &["--version"]).map(|output| !String::from_utf8_lossy(&output.stdout).contains(" 5.")).unwrap_or(true)
 }
 
-pub fn count(folder: &Path, hidden: bool) -> usize {
-    std::fs::read_dir(folder).map(|entries| entries.flatten().filter(|entry| hidden || !entry.file_name().to_string_lossy().starts_with('.')).count()).unwrap_or(0)
+pub fn entries(folder: &Path, hidden: bool) -> Vec<String> {
+    std::fs::read_dir(folder).map(|entries| entries.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).filter(|name| hidden || !name.starts_with('.')).collect()).unwrap_or_default()
+}
+
+pub fn mapping() -> Mapping {
+    kde::mapping(&groups(kde::APPLETS))
 }
 
 fn data_folders() -> Vec<PathBuf> {
@@ -96,20 +101,31 @@ fn folder_of(containment: &Containment, desktop: &Path) -> Option<PathBuf> {
 }
 
 impl Kde {
-    pub fn icons_on(&self, state: &State, screen: &Screen, plasma6: bool) -> Vec<Rect> {
+    pub fn on_screen(&self, state: &State, number: i64, folder: &Path, hidden: bool, mapping: &Mapping) -> BTreeSet<String> {
+        let names = entries(folder, hidden);
+        if mapping.shared {
+            return names.into_iter().collect();
+        }
+        let activity = state.activity.clone().unwrap_or_default();
+        let available: Vec<i64> = state.desktops.iter().filter(|other| other.folder() && folder_of(other, &self.desktop).as_deref() == Some(folder)).map(|other| other.screen).collect();
+        names.into_iter().filter(|name| kde::shows_on(kde::mapped_screen(mapping, &kde::item_urls(name, folder), &activity), number, &available)).collect()
+    }
+
+    pub fn icons_on(&self, state: &State, screen: &Screen, plasma6: bool, mapping: &Mapping) -> Vec<Rect> {
         let (Some(number), Some(containment)) = (number_for(state, screen), containment(state, screen)) else { return Vec::new() };
         if !containment.folder() {
             return Vec::new();
         }
         let Some(folder) = folder_of(containment, &self.desktop) else { return Vec::new() };
         let hidden = containment.general.get("showHiddenFiles").is_some_and(|value| value == "true");
-        let total = count(&folder, hidden);
+        let mine = self.on_screen(state, number, &folder, hidden, mapping);
+        let total = mine.len();
         let area = kde::available(&screen.frame, number, &state.panels);
         let layout = Layout::from(containment, plasma6);
         let per_stripe = layout.per_stripe(area.w as f64, area.h as f64).max(1);
         let manual = containment.setting("sortMode") == Some(-1);
         let saved = containment.general.get("positions").filter(|_| manual).and_then(|raw| kde::positions(raw, &kde::resolution(&screen.frame)));
-        let present = |url: &str| kde::item_path(url, &folder).is_some_and(|path| path.exists());
+        let present = |url: &str| kde::item_path(url, &folder).is_some_and(|path| path.exists() && path.file_name().is_some_and(|name| mine.contains(name.to_string_lossy().as_ref())));
         kde::occupied(saved.as_ref(), &present, total, per_stripe, plasma6).into_iter().map(|index| kde::INSETS.apply(layout.rect(index, &area))).collect()
     }
 }
@@ -118,7 +134,8 @@ impl Shell for Kde {
     fn icons(&self, screens: &[Screen]) -> Result<Vec<Rect>> {
         let state = state()?;
         let plasma6 = plasma6();
-        Ok(screens.iter().flat_map(|screen| self.icons_on(&state, screen, plasma6)).collect())
+        let mapping = mapping();
+        Ok(screens.iter().flat_map(|screen| self.icons_on(&state, screen, plasma6, &mapping)).collect())
     }
 
     fn adjust(&self, _session: Session, found: &mut [screens::Found]) {

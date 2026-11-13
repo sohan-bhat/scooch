@@ -1,5 +1,5 @@
 use super::geometry::Insets;
-use super::keyfile::{find, Group};
+use super::keyfile::{find, unescape, Group};
 use scooch_core::Rect;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -398,6 +398,62 @@ pub fn best_image(files: &[PathBuf], width: f64, height: f64) -> Option<PathBuf>
     best.map(|(_, file)| file.clone())
 }
 
+pub const MAPPING_GROUP: &str = "ScreenMapping";
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Mapping {
+    pub shared: bool,
+    pub items: Vec<(String, i64, String)>,
+}
+
+pub fn split_list(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut letters = value.chars();
+    while let Some(letter) = letters.next() {
+        match letter {
+            '\\' => match letters.next() {
+                Some(next @ (',' | '\\')) => current.push(next),
+                Some(next) => {
+                    current.push('\\');
+                    current.push(next);
+                }
+                None => current.push('\\'),
+            },
+            ',' => items.push(std::mem::take(&mut current)),
+            _ => current.push(letter),
+        }
+    }
+    items.push(current);
+    items
+}
+
+pub fn mapping(groups: &[Group]) -> Mapping {
+    let Some(group) = find(groups, &[MAPPING_GROUP]) else { return Mapping::default() };
+    let shared = group.get("sharedDesktops").is_some_and(|value| value.trim() == "true");
+    let list = group.get("screenMapping").map(|raw| split_list(&unescape(raw))).unwrap_or_default();
+    let items = list.as_chunks::<3>().0.iter().filter_map(|[url, screen, activity]| Some((String::from_utf8_lossy(&super::gio::decode(url)).into_owned(), screen.trim().parse().ok()?, activity.clone()))).collect();
+    Mapping { shared, items }
+}
+
+pub fn item_urls(name: &str, folder: &Path) -> Vec<String> {
+    vec![format!("desktop:/{name}"), format!("file://{}", folder.join(name).display())]
+}
+
+pub fn mapped_screen(mapping: &Mapping, urls: &[String], activity: &str) -> Option<i64> {
+    mapping.items.iter().find(|(url, _, from)| from == activity && urls.iter().any(|candidate| candidate == url)).map(|(_, screen, _)| *screen)
+}
+
+pub fn shows_on(mapped: Option<i64>, screen: i64, available: &[i64]) -> bool {
+    match mapped.filter(|mapped| available.contains(mapped)) {
+        Some(mapped) => mapped == screen,
+        None => available.iter().min() == Some(&screen),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,5 +595,30 @@ mod tests {
         assert!(script.contains("desktopById(7)"));
         assert!(script.contains("d.writeConfig('Image', \"file:///p/it's \\\"here\\\".jpg\")"));
         assert_eq!(resolution(&Rect { x: 0.0, y: 0.0, w: 1920.6, h: 1080.0 }), "1920x1080");
+    }
+
+    #[test]
+    fn kconfig_lists_split_on_bare_commas() {
+        assert_eq!(split_list("desktop:/a.txt,0,act,desktop:/b\\,c.txt,1,act"), vec!["desktop:/a.txt", "0", "act", "desktop:/b,c.txt", "1", "act"]);
+        assert_eq!(split_list(""), Vec::<String>::new());
+        assert_eq!(split_list("a\\\\b"), vec!["a\\b"]);
+    }
+
+    #[test]
+    fn the_screen_mapping_puts_each_item_on_one_screen() {
+        let groups = super::super::keyfile::parse("[ScreenMapping]\nitemsOnDisabledScreens=\nscreenMapping=desktop:/a.txt,1,act,desktop:/two%20words.txt,0,act,desktop:/a.txt,0,other\n");
+        let found = mapping(&groups);
+        assert!(!found.shared);
+        assert_eq!(found.items.len(), 3);
+        let folder = Path::new("/home/ada/Desktop");
+        assert_eq!(mapped_screen(&found, &item_urls("a.txt", folder), "act"), Some(1));
+        assert_eq!(mapped_screen(&found, &item_urls("two words.txt", folder), "act"), Some(0));
+        assert_eq!(mapped_screen(&found, &item_urls("new.txt", folder), "act"), None);
+        assert!(shows_on(Some(1), 1, &[0, 1]));
+        assert!(!shows_on(Some(1), 0, &[0, 1]));
+        assert!(shows_on(None, 0, &[0, 1]));
+        assert!(!shows_on(None, 1, &[0, 1]));
+        assert!(shows_on(Some(3), 0, &[0, 1]));
+        assert!(mapping(&super::super::keyfile::parse("[ScreenMapping]\nsharedDesktops=true\n")).shared);
     }
 }
