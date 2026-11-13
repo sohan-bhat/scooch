@@ -13,7 +13,7 @@ pub struct Spacing {
     pub sides: f32,
 }
 
-pub const SPACING: Spacing = Spacing { inset: 4.0, above: 4.0, gap: 6.0, below: 4.0, sides: 8.0 };
+pub const SPACING: Spacing = Spacing { inset: 10.0, above: -3.0, gap: 6.0, below: 4.0, sides: 6.0 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cell {
@@ -117,21 +117,46 @@ mod tests {
     use super::*;
 
     fn cell() -> Cell {
-        Cell { width: 75.0, icon: 48.0, line: 15.0 }
+        Cell { width: 78.0, icon: 48.0, line: 15.0 }
+    }
+
+    fn contains(outer: &Rect, inner: &Rect) -> bool {
+        outer.x <= inner.x && outer.y <= inner.y && outer.x + outer.w >= inner.x + inner.w && outer.y + outer.h >= inner.y + inner.h
+    }
+
+    fn spare(outer: &Rect, inner: &Rect) -> f32 {
+        [inner.x - outer.x, inner.y - outer.y, outer.x + outer.w - inner.x - inner.w, outer.y + outer.h - inner.y - inner.h].into_iter().fold(0.0, f32::max)
     }
 
     #[test]
-    fn a_one_line_label_sits_under_the_icon() {
+    fn a_short_label_sits_under_the_icon_box() {
         let rect = item_rect((100.0, 200.0), &cell(), Label { width: 30.0, height: 15.0 }, &SPACING);
-        assert_eq!(rect, Rect { x: 100.0 + 24.0 - 28.0, y: 196.0, w: 56.0, h: 4.0 + 48.0 + 6.0 + 15.0 + 4.0 });
+        assert_eq!(rect, Rect { x: 100.0 + 24.0 - 27.0, y: 203.0, w: 54.0, h: -3.0 + 48.0 + 6.0 + 15.0 + 4.0 });
     }
 
     #[test]
     fn a_wide_label_is_capped_at_the_wrap_width() {
         let rect = item_rect((0.0, 0.0), &cell(), Label { width: 140.0, height: 30.0 }, &SPACING);
-        assert_eq!(rect.w, 71.0 + 8.0);
-        assert_eq!(rect.x, 24.0 - 39.5);
-        assert_eq!(rect.h, 4.0 + 48.0 + 6.0 + 30.0 + 4.0);
+        assert_eq!(cell().wrap(&SPACING), 68.0);
+        assert_eq!(rect.w, 68.0 + 6.0);
+        assert_eq!(rect.x, 24.0 - 37.0);
+        assert_eq!(rect.y + rect.h, 48.0 + 6.0 + 30.0 + 4.0);
+    }
+
+    #[test]
+    fn the_rect_holds_what_explorer_drew_on_the_runner() {
+        let at = (512.0, 256.0);
+        let one = item_rect(at, &cell(), Label { width: 80.0, height: 15.0 }, &SPACING);
+        let two = item_rect(at, &cell(), Label { width: 68.0, height: 45.0 }, &SPACING);
+        let icon_box = Rect { x: 512.0, y: 259.0, w: 48.0, h: 48.0 };
+        let drawn_one = Rect { x: 502.0, y: 263.0, w: 69.0, h: 64.0 };
+        let drawn_two = Rect { x: 501.0, y: 263.0, w: 71.0, h: 79.0 };
+        let bounds_one = Rect { x: 512.0, y: 259.0, w: 48.0, h: 70.0 };
+        let bounds_two = Rect { x: 512.0, y: 259.0, w: 48.0, h: 85.0 };
+        for (rect, drawn, bounds) in [(one, drawn_one, bounds_one), (two, drawn_two, bounds_two)] {
+            assert!(contains(&rect, &drawn) && contains(&rect, &icon_box) && contains(&rect, &bounds), "{rect:?}");
+            assert!(spare(&rect, &drawn) < 8.0, "{rect:?} {}", spare(&rect, &drawn));
+        }
     }
 
     #[test]
@@ -143,7 +168,7 @@ mod tests {
 
     #[test]
     fn the_rect_follows_every_constant() {
-        let wide = Spacing { sides: 12.0, above: 6.0, ..SPACING };
+        let wide = Spacing { sides: SPACING.sides + 4.0, above: SPACING.above + 2.0, ..SPACING };
         let base = item_rect((10.0, 10.0), &cell(), Label { width: 20.0, height: 15.0 }, &SPACING);
         let moved = item_rect((10.0, 10.0), &cell(), Label { width: 20.0, height: 15.0 }, &wide);
         assert_eq!(moved.w - base.w, 4.0);

@@ -7,7 +7,7 @@ use std::mem::{size_of, ManuallyDrop};
 use ::windows::core::{w, Interface, PCWSTR, PWSTR};
 use ::windows::Win32::Foundation::{HWND, POINT, RECT, S_OK};
 use ::windows::Win32::Graphics::Gdi::{
-    CreateFontIndirectW, DeleteObject, DrawTextW, GetDC, GetTextMetricsW, MapWindowPoints, ReleaseDC, SelectObject, DT_CALCRECT, DT_CENTER, DT_EDITCONTROL, DT_NOPREFIX, DT_WORDBREAK, HDC, HFONT, HGDIOBJ,
+    CreateFontIndirectW, DeleteObject, DrawTextW, GetDC, GetTextMetricsW, MapWindowPoints, ReleaseDC, SelectObject, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_WORDBREAK, HDC, HFONT, HGDIOBJ,
     LOGFONTW, TEXTMETRICW,
 };
 use ::windows::Win32::System::Com::{CoCreateInstance, IServiceProvider, CLSCTX_ALL};
@@ -160,7 +160,7 @@ impl Font {
         let mut text: Vec<u16> = name.encode_utf16().collect();
         let mut room = RECT { left: 0, top: 0, right: wrap.max(1), bottom: 0 };
         if !text.is_empty() {
-            unsafe { DrawTextW(self.dc, &mut text, &mut room, DT_CALCRECT | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX | DT_CENTER) };
+            unsafe { DrawTextW(self.dc, &mut text, &mut room, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_CENTER) };
         }
         Label { width: (room.right - room.left).max(0) as f32, height: (room.bottom - room.top).max(self.line) as f32 }
     }
