@@ -6,14 +6,15 @@ pub const TWIN: &str = "scoochw.exe";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Spacing {
-    pub inset: f32,
+    pub wrap: f32,
+    pub cap: f32,
     pub above: f32,
     pub gap: f32,
     pub below: f32,
     pub sides: f32,
 }
 
-pub const SPACING: Spacing = Spacing { inset: 10.0, above: -3.0, gap: 6.0, below: 4.0, sides: 6.0 };
+pub const SPACING: Spacing = Spacing { wrap: 4.0, cap: 10.0, above: -3.0, gap: 6.0, below: 4.0, sides: 6.0 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cell {
@@ -30,7 +31,11 @@ pub struct Label {
 
 impl Cell {
     pub fn wrap(&self, spacing: &Spacing) -> f32 {
-        (self.width - spacing.inset).max(1.0)
+        (self.width - spacing.wrap).max(1.0)
+    }
+
+    pub fn cap(&self, spacing: &Spacing) -> f32 {
+        (self.width - spacing.cap).max(1.0)
     }
 }
 
@@ -39,7 +44,11 @@ pub fn lines(cell: &Cell, label: Label) -> f32 {
 }
 
 pub fn item_rect(at: (f32, f32), cell: &Cell, label: Label, spacing: &Spacing) -> Rect {
-    let width = cell.icon.max(label.width.min(cell.wrap(spacing))) + spacing.sides;
+    let width = if lines(cell, label) > 1.0 {
+        cell.wrap(spacing).max(cell.icon + spacing.sides)
+    } else {
+        cell.icon.max(label.width.min(cell.cap(spacing))) + spacing.sides
+    };
     let left = at.0 + cell.icon / 2.0 - width / 2.0;
     let top = at.1 - spacing.above;
     let height = spacing.above + cell.icon + spacing.gap + lines(cell, label) * cell.line + spacing.below;
@@ -135,10 +144,18 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_label_is_capped_at_the_wrap_width() {
-        let rect = item_rect((0.0, 0.0), &cell(), Label { width: 140.0, height: 30.0 }, &SPACING);
-        assert_eq!(cell().wrap(&SPACING), 68.0);
+    fn a_long_word_is_capped_on_one_line() {
+        let rect = item_rect((0.0, 0.0), &cell(), Label { width: 140.0, height: 15.0 }, &SPACING);
+        assert_eq!((cell().wrap(&SPACING), cell().cap(&SPACING)), (74.0, 68.0));
         assert_eq!(rect.w, 68.0 + 6.0);
+        assert_eq!(rect.x, 24.0 - 37.0);
+        assert_eq!(rect.y + rect.h, 48.0 + 6.0 + 15.0 + 4.0);
+    }
+
+    #[test]
+    fn a_wrapped_label_takes_the_cell_width_minus_four() {
+        let rect = item_rect((0.0, 0.0), &cell(), Label { width: 59.0, height: 60.0 }, &SPACING);
+        assert_eq!(rect.w, 74.0);
         assert_eq!(rect.x, 24.0 - 37.0);
         assert_eq!(rect.y + rect.h, 48.0 + 6.0 + 30.0 + 4.0);
     }
@@ -146,16 +163,19 @@ mod tests {
     #[test]
     fn the_rect_holds_what_explorer_drew_on_the_runner() {
         let at = (512.0, 256.0);
-        let one = item_rect(at, &cell(), Label { width: 80.0, height: 15.0 }, &SPACING);
-        let two = item_rect(at, &cell(), Label { width: 68.0, height: 45.0 }, &SPACING);
+        let rows = [
+            (Label { width: 85.0, height: 15.0 }, Rect { x: 502.0, y: 263.0, w: 69.0, h: 64.0 }, 70.0),
+            (Label { width: 59.0, height: 60.0 }, Rect { x: 501.0, y: 263.0, w: 71.0, h: 79.0 }, 85.0),
+            (Label { width: 110.0, height: 15.0 }, Rect { x: 502.0, y: 267.0, w: 69.0, h: 60.0 }, 70.0),
+            (Label { width: 11.0, height: 15.0 }, Rect { x: 519.0, y: 263.0, w: 34.0, h: 61.0 }, 70.0),
+            (Label { width: 60.0, height: 15.0 }, Rect { x: 507.0, y: 263.0, w: 59.0, h: 61.0 }, 70.0),
+        ];
         let icon_box = Rect { x: 512.0, y: 259.0, w: 48.0, h: 48.0 };
-        let drawn_one = Rect { x: 502.0, y: 263.0, w: 69.0, h: 64.0 };
-        let drawn_two = Rect { x: 501.0, y: 263.0, w: 71.0, h: 79.0 };
-        let bounds_one = Rect { x: 512.0, y: 259.0, w: 48.0, h: 70.0 };
-        let bounds_two = Rect { x: 512.0, y: 259.0, w: 48.0, h: 85.0 };
-        for (rect, drawn, bounds) in [(one, drawn_one, bounds_one), (two, drawn_two, bounds_two)] {
-            assert!(contains(&rect, &drawn) && contains(&rect, &icon_box) && contains(&rect, &bounds), "{rect:?}");
-            assert!(spare(&rect, &drawn) < 8.0, "{rect:?} {}", spare(&rect, &drawn));
+        for (label, drawn, bounds_height) in rows {
+            let rect = item_rect(at, &cell(), label, &SPACING);
+            let bounds = Rect { x: 512.0, y: 259.0, w: 48.0, h: bounds_height };
+            assert!(contains(&rect, &drawn) && contains(&rect, &icon_box) && contains(&rect, &bounds), "{rect:?} {drawn:?}");
+            assert!(spare(&rect, &drawn) <= 10.0, "{rect:?} {drawn:?} {}", spare(&rect, &drawn));
         }
     }
 
