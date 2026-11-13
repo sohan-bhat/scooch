@@ -1,5 +1,6 @@
 use crate::table::{self, Curve};
-use crate::shape::Grid;
+use crate::area::{self, Area as Cells};
+use crate::shape::{self, Grid};
 use crate::{blur, color, scenery, solver, Analysis, Options, Placement, RgbImage, Scene};
 use rayon::prelude::*;
 
@@ -388,15 +389,47 @@ pub fn gates(found: &Analysis) -> Option<(Vec<f32>, Vec<f32>)> {
     Some((ground, free))
 }
 
-pub fn maps(small: &[[f32; 3]], grid: &Grid, found: &Analysis, lookup: &Lookup, scene: &Scene, options: &Options, belong: Option<&[f32]>) -> Option<Vec<u8>> {
-    let amount = amount(options);
-    let rects = solver::screen_rects(scene);
-    let (width, height) = (scene.width as usize, scene.height as usize);
-    if amount <= 0.0 || rects.is_empty() || width == 0 || height == 0 {
-        return None;
-    }
+pub struct Calm {
+    ground: Vec<f32>,
+    open: Vec<f32>,
+    rgb: Vec<[u8; 3]>,
+}
+
+pub fn calm(small: &[[f32; 3]], grid: &Grid, found: &Analysis, lookup: &Lookup, width: usize) -> Option<Calm> {
     let (ground, free) = gates(found)?;
-    let feather = FEATHER * median(&mut rects.iter().map(|r| r[3] - r[1]).collect::<Vec<_>>());
+    let open = lookup.plane(&free, grid);
+    let sigma = (CALM * width as f64 / Q as f64) as f32;
+    let stacked: Vec<[f32; 4]> = small.iter().zip(&open).map(|(c, o)| [c[0] * o, c[1] * o, c[2] * o, *o]).collect();
+    let planes = blur::boxes_parallel4(&stacked, grid.w, grid.h, sigma);
+    let encode = color::encode_table();
+    let rgb = (0..grid.w * grid.h)
+        .into_par_iter()
+        .map(|c| {
+            let share = planes[c][3];
+            let calm = |k: usize| if share > 1e-4 { planes[c][k] / share } else { small[c][k] };
+            [color::encode(encode, calm(0)), color::encode(encode, calm(1)), color::encode(encode, calm(2))]
+        })
+        .collect();
+    Some(Calm { ground, open, rgb })
+}
+
+impl Calm {
+    pub fn bytes(&self) -> usize {
+        (self.ground.len() + self.open.len()) * 4 + self.rgb.len() * 3
+    }
+}
+
+pub struct Pads {
+    feather: f64,
+    amount: f32,
+    grown: Vec<[f64; 4]>,
+    padded: Vec<[usize; 4]>,
+    raw: Vec<f32>,
+    mask: Vec<f32>,
+    weight: Vec<f32>,
+}
+
+fn outline(rects: &[[f64; 4]], feather: f64, width: usize, height: usize) -> (Vec<[f64; 4]>, Vec<[usize; 4]>) {
     let pad = REACH * feather;
     let grown: Vec<[f64; 4]> = rects
         .iter()
@@ -405,7 +438,7 @@ pub fn maps(small: &[[f32; 3]], grid: &Grid, found: &Analysis, lookup: &Lookup, 
             [r[0] - gx, r[1] - gy, r[2] + gx, r[3] + gy]
         })
         .collect();
-    let padded: Vec<[usize; 4]> = grown
+    let padded = grown
         .iter()
         .map(|g| {
             [
@@ -417,48 +450,129 @@ pub fn maps(small: &[[f32; 3]], grid: &Grid, found: &Analysis, lookup: &Lookup, 
         })
         .filter(|b| b[2] > b[0] && b[3] > b[1])
         .collect();
-    let open = lookup.plane(&free, grid);
-    let mut mask = vec![0.0f32; grid.w * grid.h];
-    mask.par_chunks_mut(grid.w).enumerate().for_each(|(qy, line)| {
-        let py = (qy * Q) as f64 + Q as f64 / 2.0;
-        for g in &grown {
-            if py < g[1] - Q as f64 || py > g[3] + Q as f64 {
-                continue;
-            }
-            let radius = ROUND * (g[2] - g[0]).min(g[3] - g[1]);
-            let (qx0, qx1) = quarter_span(g[0] - Q as f64, g[2] + Q as f64, grid.w);
-            for (qx, cell) in line.iter_mut().enumerate().take(qx1).skip(qx0) {
-                let d = rounded_box((qx * Q) as f64 + Q as f64 / 2.0, py, g, radius);
-                *cell = cell.max((0.5 - d / Q as f64).clamp(0.0, 1.0) as f32);
-            }
+    (grown, padded)
+}
+
+pub fn feather(scene: &Scene) -> f64 {
+    FEATHER * median(&mut solver::screen_rects(scene).iter().map(|r| r[3] - r[1]).collect::<Vec<_>>())
+}
+
+impl Pads {
+    pub fn new(calm: &Calm, grid: &Grid, lookup: &Lookup, scene: &Scene, options: &Options, belong: Option<&[f32]>) -> Option<Pads> {
+        let amount = amount(options);
+        let rects = solver::screen_rects(scene);
+        let (width, height) = (scene.width as usize, scene.height as usize);
+        if amount <= 0.0 || rects.is_empty() || width == 0 || height == 0 {
+            return None;
         }
-    });
-    let mask = blur::boxes_parallel(&mask, grid.w, grid.h, (feather / Q as f64) as f32);
-    let mut weight = vec![0.0f32; grid.w * grid.h];
-    for b in &padded {
-        for qy in b[1]..b[3].min(grid.h) {
-            for qx in b[0]..b[2].min(grid.w) {
+        let feather = feather(scene);
+        let (grown, padded) = outline(&rects, feather, width, height);
+        let cells = grid.w * grid.h;
+        let mut pads = Pads { feather, amount, grown, padded, raw: vec![0.0; cells], mask: vec![0.0; cells], weight: vec![0.0; cells] };
+        let all = [0, 0, grid.w, grid.h];
+        pads.raw_into(grid, all);
+        blur::boxes_fixed_into(&pads.raw, &mut pads.mask, grid.w, grid.h, (feather / Q as f64) as f32, all);
+        pads.weight_into(calm, grid, lookup, belong, all);
+        Some(pads)
+    }
+
+    pub fn bytes(&self) -> usize {
+        (self.raw.len() + self.mask.len() + self.weight.len()) * 4 + self.grown.len() * 32 + self.padded.len() * 32
+    }
+
+    pub fn feather(&self) -> f64 {
+        self.feather
+    }
+
+    fn raw_into(&mut self, grid: &Grid, a: Cells) {
+        let grown = &self.grown;
+        self.raw.par_chunks_mut(grid.w).enumerate().skip(a[1]).take(a[3] - a[1]).for_each(|(qy, line)| {
+            let py = (qy * Q) as f64 + Q as f64 / 2.0;
+            line[a[0]..a[2]].fill(0.0);
+            for g in grown {
+                if py < g[1] - Q as f64 || py > g[3] + Q as f64 {
+                    continue;
+                }
+                let radius = ROUND * (g[2] - g[0]).min(g[3] - g[1]);
+                let (qx0, qx1) = quarter_span(g[0] - Q as f64, g[2] + Q as f64, grid.w);
+                for (qx, cell) in line.iter_mut().enumerate().take(qx1.min(a[2])).skip(qx0.max(a[0])) {
+                    let d = rounded_box((qx * Q) as f64 + Q as f64 / 2.0, py, g, radius);
+                    *cell = cell.max((0.5 - d / Q as f64).clamp(0.0, 1.0) as f32);
+                }
+            }
+        });
+    }
+
+    fn weight_into(&mut self, calm: &Calm, grid: &Grid, lookup: &Lookup, belong: Option<&[f32]>, a: Cells) {
+        let (padded, mask, amount) = (&self.padded, &self.mask, self.amount);
+        self.weight.par_chunks_mut(grid.w).enumerate().skip(a[1]).take(a[3] - a[1]).for_each(|(qy, line)| {
+            for (qx, cell) in line.iter_mut().enumerate().take(a[2]).skip(a[0]) {
                 let c = qy * grid.w + qx;
-                if weight[c] == 0.0 && mask[c] > 0.0 {
-                    weight[c] = mask[c] * lookup.sample(&ground, qx, qy) * open[c] * amount * belong.map_or(1.0, |b| 1.0 - b[c]);
+                let inside = padded.iter().any(|b| b[1] <= qy && qy < b[3].min(grid.h) && b[0] <= qx && qx < b[2].min(grid.w));
+                *cell = if inside && mask[c] > 0.0 { mask[c] * lookup.sample(&calm.ground, qx, qy) * calm.open[c] * amount * belong.map_or(1.0, |b| 1.0 - b[c]) } else { 0.0 };
+            }
+        });
+    }
+
+    pub fn any(&self) -> bool {
+        self.weight.iter().any(|w| *w > 0.0)
+    }
+
+    pub fn table(&self, calm: &Calm) -> Option<Vec<u8>> {
+        if !self.any() {
+            return None;
+        }
+        let mut out = vec![0u8; self.weight.len() * 4];
+        out.par_chunks_mut(4).enumerate().for_each(|(c, px)| {
+            let rgb = calm.rgb[c];
+            px.copy_from_slice(&[rgb[0], rgb[1], rgb[2], alpha(self.weight[c])]);
+        });
+        Some(out)
+    }
+
+    pub fn update(&mut self, calm: &Calm, grid: &Grid, lookup: &Lookup, scene: &Scene, belong: Option<&[f32]>, moved: &[[f64; 4]]) -> Vec<Cells> {
+        let (width, height) = (scene.width as usize, scene.height as usize);
+        let (grown, padded) = outline(&solver::screen_rects(scene), self.feather, width, height);
+        let (touched_grown, touched_padded) = outline(moved, self.feather, width, height);
+        self.grown = grown;
+        self.padded = padded;
+        let (w, h) = (grid.w, grid.h);
+        let near: Vec<Cells> = area::merge(touched_grown.iter().map(|g| shape::cells_near(grid, &g.map(|v| v as f32), Q as f32)).collect());
+        for a in &near {
+            self.raw_into(grid, *a);
+        }
+        let sigma = (self.feather / Q as f64) as f32;
+        let reach = blur::box_reach(sigma);
+        let mut changed: Vec<Cells> = Vec::new();
+        for a in area::merge(near.iter().map(|a| area::grow(*a, reach, w, h)).collect()) {
+            let before = area::take(&self.mask, w, a);
+            blur::boxes_fixed_into(&self.raw, &mut self.mask, w, h, sigma, a);
+            changed.extend(area::moved(&before, &self.mask, w, a, area::bits));
+        }
+        changed.extend(touched_padded.iter().map(|b| [b[0], b[1], b[2].min(w), b[3].min(h)]));
+        let mut out = Vec::new();
+        for a in area::merge(changed) {
+            let before = area::take(&self.weight, w, a);
+            self.weight_into(calm, grid, lookup, belong, a);
+            out.extend(area::moved(&before, &self.weight, w, a, |p, q| alpha(*p) == alpha(*q)));
+        }
+        out
+    }
+
+    pub fn patch(&self, table: &mut [u8], w: usize, areas: &[Cells]) {
+        let cells = table.as_chunks_mut::<4>().0;
+        for a in areas {
+            for y in a[1]..a[3] {
+                for (cell, weight) in cells[y * w + a[0]..y * w + a[2]].iter_mut().zip(&self.weight[y * w + a[0]..y * w + a[2]]) {
+                    cell[3] = alpha(*weight);
                 }
             }
         }
     }
-    if !weight.iter().any(|w| *w > 0.0) {
-        return None;
-    }
-    let sigma = (CALM * width as f64 / Q as f64) as f32;
-    let stacked: Vec<[f32; 4]> = small.iter().zip(&open).map(|(c, o)| [c[0] * o, c[1] * o, c[2] * o, *o]).collect();
-    let planes = blur::boxes_parallel4(&stacked, grid.w, grid.h, sigma);
-    let encode = color::encode_table();
-    let mut out = vec![0u8; grid.w * grid.h * 4];
-    out.par_chunks_mut(4).enumerate().for_each(|(c, px)| {
-        let share = planes[c][3];
-        let calm = |k: usize| if share > 1e-4 { planes[c][k] / share } else { small[c][k] };
-        px.copy_from_slice(&[color::encode(encode, calm(0)), color::encode(encode, calm(1)), color::encode(encode, calm(2)), (weight[c].clamp(0.0, 1.0) * 255.0).round() as u8]);
-    });
-    Some(out)
+}
+
+fn alpha(weight: f32) -> u8 {
+    (weight.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 #[cfg(test)]
