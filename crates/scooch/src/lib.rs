@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "scooch", version, about = "Wallpaper that scooches over for your desktop icons.", after_help = "Run scooch with nothing after it to turn it on or see how it is doing.")]
+#[command(name = "scooch", version, about = "Moves the desktop wallpaper so icons do not cover the subject of the picture.", after_help = "Run scooch with nothing after it to turn it on or see how it is doing.")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

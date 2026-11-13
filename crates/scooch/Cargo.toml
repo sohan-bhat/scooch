@@ -1,6 +1,6 @@
 [package]
 name = "scooch"
-description = "Wallpaper that scooches over for your desktop icons."
+description = "Moves the desktop wallpaper so icons do not cover the subject of the picture."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

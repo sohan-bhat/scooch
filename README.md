@@ -1,10 +1,8 @@
 # Scooch
 
-Scooch moves your wallpaper so your desktop icons stay off the best part of the picture.
+Moves the desktop wallpaper so icons do not cover the subject of the picture. macOS, Windows and Linux.
 
-![The same desktop before and after Scooch](docs/demo.jpg)
-
-It works with the picture you already have and uses plain image math with no AI. Between changes it draws nothing and uses no CPU.
+![The same desktop before and after](docs/demo.jpg)
 
 ## Install
 
@@ -22,28 +20,26 @@ irm https://sohanbhat.me/scooch/install.ps1 | iex
 
 Then run `scooch`.
 
-## Use
+## Commands
 
 | Command | What happens |
 |---|---|
-| `scooch` | Turns Scooch on. Run it again to see how it is doing. |
+| `scooch` | Turns Scooch on. Run it again for status. |
 | `scooch use` | Picks a different picture. |
-| `scooch flip` | Lets Scooch flip the picture when that clears your icons. |
-| `scooch off` | Puts your wallpaper back and removes the login item. Desktops and screens that are not showing switch back the next time they show. |
-| `scooch doctor` | Checks that Scooch can read your desktop. |
-
-Move an icon and the wallpaper follows about half a second later.
+| `scooch flip` | Allows flipping the picture when that clears the icons. |
+| `scooch off` | Restores the wallpaper and removes the login item. Desktops and screens that are not showing are restored the next time they show. |
+| `scooch doctor` | Checks that the desktop can be read. |
 
 ## How it works
 
-1. Scooch finds the subject of the picture from color and contrast.
-2. It reads where your icons sit.
-3. It slides the picture, and stretches plain background a little, until the subject is clear. It zooms only when a slide is not enough.
-4. It saves one image and sets that image as your normal wallpaper.
+1. Find the subject with a saliency map from color and contrast. No model files.
+2. Read the icon rectangles from the desktop.
+3. Search crop, pan and a per-axis warp that only stretches columns and rows with no subject in them. Zoom is used only when a slide cannot clear the icons.
+4. Render one image and set it as the normal wallpaper.
 
-One small background program does this. It runs only when an icon moves, a file lands on the desktop, a screen changes or you pick a new wallpaper. The full design is in [docs/DESIGN.md](docs/DESIGN.md).
+One background process does this. It is event driven with no timer and no window, so it uses no CPU between changes. The engine, the daemon and each desktop adapter are described in [docs/DESIGN.md](docs/DESIGN.md).
 
-## Where it runs
+## Status
 
 | System | Status |
 |---|---|
@@ -53,23 +49,18 @@ One small background program does this. It runs only when an icon moves, a file 
 
 ## Limits
 
-- A subject that touches the screen edge under your icons cannot slide clear, because there is no picture beyond that edge. `scooch flip` lets Scooch flip the picture, which clears it.
-- Scooch needs a picture file. With a slideshow, a video wallpaper or a plain color it leaves your wallpaper alone until you pick a picture with `scooch use`.
-- On macOS the first run asks once for permission to read icon positions from Finder.
-- On GNOME, Cinnamon and MATE one picture covers every monitor, so Scooch arranges it for the main one.
-- On KDE an icon move can take up to 10 seconds to change the picture, because Plasma saves icon positions on a timer.
-- On macOS colors outside sRGB lose a little saturation once Scooch renders the picture.
+- A subject that touches the screen edge under the icons cannot slide clear, because there is no picture beyond that edge. `scooch flip` clears it by mirroring.
+- The wallpaper must be a picture file. A slideshow, a video wallpaper or a plain color is left alone until a picture is picked with `scooch use`.
+- macOS asks once for permission to read icon positions from Finder. Colors outside sRGB lose a little saturation in the rendered picture.
+- GNOME, Cinnamon and MATE use one picture for every monitor, so it is arranged for the main one.
+- On KDE an icon move can take up to 10 seconds to arrive, because Plasma saves icon positions on a timer.
 
-## Remove
-
-Run `scooch off`, then delete the `scooch` program. `command -v scooch` shows where it is on macOS and Linux. On Windows it is in `%LOCALAPPDATA%\Programs\Scooch`.
-
-## Build from source
+## Build
 
 ```sh
 cargo install --path crates/scooch
 ```
 
-## License
+To remove it, run `scooch off` and delete the program.
 
-MIT. The test photos and their sources are listed in [assets/photos/SOURCES.md](assets/photos/SOURCES.md).
+MIT license. Test photos and their sources are in [assets/photos/SOURCES.md](assets/photos/SOURCES.md).
