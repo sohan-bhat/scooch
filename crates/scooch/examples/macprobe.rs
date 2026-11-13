@@ -1003,11 +1003,29 @@ mod probe {
             let spent = earlier.map(|earlier| total.saturating_sub(earlier));
             p.line(format!("  - thread {handle:#x} `{name}` {}, CPU during the minute {:?} us", state_word(*state), spent.map(|spent| spent / 1000)));
         }
+        let logged = p.tool("/usr/bin/log", &["show", "--last", "80s", "--info", "--debug", "--style", "ndjson", "--predicate", &format!("processIdentifier == {pid}")]);
+        let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+        let mut examples: Vec<String> = Vec::new();
+        for line in logged.out.lines() {
+            let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+            let kind = format!("{} {} {}", entry["senderImagePath"].as_str().and_then(|path| path.rsplit('/').next()).unwrap_or("?"), entry["subsystem"].as_str().unwrap_or(""), entry["category"].as_str().unwrap_or(""));
+            *kinds.entry(kind.clone()).or_default() += 1;
+            let message = format!("{kind}: {}", entry["eventMessage"].as_str().unwrap_or("").chars().take(120).collect::<String>());
+            if examples.len() < 12 && !examples.contains(&message) {
+                examples.push(message);
+            }
+        }
+        p.line(format!("- unified log entries from the daemon in the last 80 s: {} by sender, subsystem and category {kinds:?}", kinds.values().sum::<usize>()));
+        for example in &examples {
+            p.line(format!("  - `{example}`"));
+        }
         let file = p.out.join(format!("sample-{pid}.txt"));
-        let sampled = p.tool("/usr/bin/sample", &[&pid.to_string(), "5", "-file", &file.to_string_lossy()]);
+        let sampled = p.tool("/usr/bin/sample", &[&pid.to_string(), "30", "1", "-file", &file.to_string_lossy()]);
         let text = fs::read_to_string(&file).unwrap_or_default();
-        p.line(format!("- sample 5 s {}, kept as {}", if sampled.ok() { "ok" } else { "failed" }, file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
-        let mut blocks: Vec<(String, String)> = Vec::new();
+        p.line(format!("- sample 30 s at 1 ms {}, kept as {}", if sampled.ok() { "ok" } else { "failed" }, file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+        let mut thread = String::new();
+        let mut total = 0u64;
+        let mut shown = 0;
         let mut inside = false;
         for line in text.lines() {
             if line.starts_with("Call graph:") {
@@ -1020,20 +1038,45 @@ mod probe {
             if !inside {
                 continue;
             }
-            let trimmed = line.trim_start();
-            if trimmed.split_whitespace().nth(1).is_some_and(|word| word.starts_with("Thread_")) && !trimmed.starts_with('+') && !trimmed.starts_with('|') {
-                blocks.push((trimmed.to_string(), String::new()));
-            } else if let Some(block) = blocks.last_mut() {
-                block.1 = trimmed.trim_start_matches(['+', '|', '!', ':', ' ']).to_string();
+            let trimmed = line.trim_start().trim_start_matches(['+', '|', '!', ':', ' ']);
+            let count: u64 = trimmed.split_whitespace().next().and_then(|word| word.parse().ok()).unwrap_or(0);
+            if trimmed.split_whitespace().nth(1).is_some_and(|word| word.starts_with("Thread_")) && !line.trim_start().starts_with(['+', '|', '!', ':']) {
+                thread = trimmed.chars().take(80).collect();
+                total = count;
+                continue;
+            }
+            if count < total && shown < 60 {
+                let depth = line.len() - line.trim_start_matches([' ', '+', '|', '!', ':']).len();
+                p.line(format!("  - {thread} at depth {depth}: `{}`", trimmed.chars().take(150).collect::<String>()));
+                shown += 1;
             }
         }
-        for (thread, deepest) in &blocks {
-            p.line(format!("  - `{}` ends in `{}`", thread.chars().take(110).collect::<String>(), deepest.chars().take(140).collect::<String>()));
+        if shown == 0 {
+            p.line("  - every thread stayed in one place for all 30 s".to_string());
         }
-        let tops: Vec<&str> = text.lines().skip_while(|line| !line.starts_with("Sort by top of stack")).skip(1).take_while(|line| !line.trim().is_empty()).take(10).collect();
-        p.line("- hottest leaf frames from sample".to_string());
-        for top in tops {
-            p.line(format!("  - `{}`", top.trim().chars().take(150).collect::<String>()));
+        let protection = p.tool("/usr/bin/csrutil", &["status"]);
+        p.line(format!("- csrutil {}", protection.text()));
+        let traced = p.out.join(format!("oncpu-{pid}.txt"));
+        let script = format!("sched:::on-cpu /pid == {pid}/ {{ @[tid, ustack(28)] = count(); }} tick-25s {{ exit(0); }}");
+        let dtrace = p.run(Path::new("/usr/bin/sudo"), &["-n", "/usr/sbin/dtrace", "-q", "-x", "ustackframes=28", "-o", &traced.to_string_lossy(), "-n", &script], Duration::from_secs(60));
+        let stacks = fs::read_to_string(&traced).unwrap_or_default();
+        p.line(format!("- dtrace on-cpu stacks for 25 s exit {:?} {}, {} lines kept as {}", dtrace.code, dtrace.err.lines().next().unwrap_or(""), stacks.lines().count(), traced.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+        let mut chunk: Vec<String> = Vec::new();
+        let mut printed = 0;
+        for line in stacks.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            chunk.push(trimmed.to_string());
+            if trimmed.chars().all(|letter| letter.is_ascii_digit()) && chunk.len() > 1 && printed < 8 {
+                let frames: Vec<&String> = chunk.iter().filter(|frame| !frame.chars().all(|letter| letter.is_ascii_digit())).take(14).collect();
+                p.line(format!("  - {} wakes: {}", trimmed, frames.iter().map(|frame| frame.as_str()).collect::<Vec<_>>().join(" < ")));
+                printed += 1;
+                chunk.clear();
+            } else if trimmed.chars().all(|letter| letter.is_ascii_digit()) {
+                chunk.clear();
+            }
         }
         let usage = p.tool("/usr/bin/sudo", &["-n", "/usr/bin/fs_usage", "-w", "-t", "10", &pid.to_string()]);
         let lines: Vec<String> = usage.out.lines().filter(|line| !line.trim().is_empty()).map(str::to_string).collect();
