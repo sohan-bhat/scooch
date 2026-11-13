@@ -102,6 +102,25 @@ vec4 paint(int which, vec2 p, vec4 d, float grain) {
     return mix(land, cloud, sky) * belong;
 }
 
+vec3 encode(vec3 c) {
+    vec3 v = clamp(c, 0.0, 1.0);
+    return mix(1.055 * pow(v, vec3(1.0 / 2.4)) - 0.055, v * 12.92, lessThanEqual(v, vec3(0.0031308)));
+}
+
+vec3 decode(vec3 c) {
+    vec3 v = clamp(c, 0.0, 1.0);
+    return mix(pow((v + 0.055) / 1.055, vec3(2.4)), v / 12.92, lessThanEqual(v, vec3(0.04045)));
+}
+
+vec3 over_picture(vec3 picture, vec4 land) {
+    float a = clamp(land.a, 0.0, 1.0);
+    if (a <= 0.0) {
+        return picture;
+    }
+    vec3 straight = encode(land.rgb / a);
+    return decode(straight * a + encode(picture) * (1.0 - a));
+}
+
 float luminance(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
@@ -133,5 +152,5 @@ void main() {
     vec4 a = paint(0, p, reads, grain);
     vec4 b = paint(1, p, reads, grain);
     vec4 land = mix(a, b, s);
-    color = vec4(land.rgb + picture * (1.0 - land.a), 1.0);
+    color = vec4(over_picture(picture, land), 1.0);
 }
