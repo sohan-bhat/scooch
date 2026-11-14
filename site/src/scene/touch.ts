@@ -1,4 +1,4 @@
-import { Color, Mesh, type Material, type MeshStandardMaterial, type Object3D, type Vector2, type Vector4 } from 'three';
+import { Color, Mesh, type Material, type MeshStandardMaterial, type Object3D, type Vector2, type Vector4, type WebGLRenderer } from 'three';
 import type { Frame } from './screen/scenery';
 
 export const things: Record<string, Object3D | undefined> = {};
@@ -7,6 +7,7 @@ export const obstacles: Object3D[] = [];
 export const CHANNELS = ['main', 'swans', 'moon', 'city'];
 
 export const hooks = {
+  drawHeld: (_gl: WebGLRenderer, _delta: number) => false,
   showing: () => [] as string[],
   current: () => 'main',
   frame: null as Frame | null,

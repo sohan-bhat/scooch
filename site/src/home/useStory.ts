@@ -193,7 +193,7 @@ export function introduce(refs: Refs, still: number) {
   if (still >= 0) {
     let frames = 0;
     const wait = () => {
-      if (runtime.posed && ((runtime.props && runtime.scenery && runtime.gallery) || runtime.hero)) frames += 1;
+      if (runtime.posed && ((runtime.props && runtime.scenery && runtime.gallery && runtime.painted) || runtime.hero)) frames += 1;
       if (frames < 30) requestAnimationFrame(wait);
       else (window as Window & { __stillReady?: boolean }).__stillReady = true;
     };
@@ -213,6 +213,7 @@ export function introduce(refs: Refs, still: number) {
       duration: 0.3,
       ease: 'power2.out',
       onComplete: () => {
+        runtime.shown = true;
         performance.mark('scooch:shown');
         glass?.removeAttribute('role');
       },

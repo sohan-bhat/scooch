@@ -33,6 +33,8 @@ export const runtime = {
   hero: false,
   idle: true,
   ready: false,
+  shown: false,
+  painted: false,
   posed: false,
   compiled: false,
   props: false,

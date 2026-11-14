@@ -12,7 +12,7 @@ function read() {
   return { lamp: live.lampTarget > 0.5, power: live.power, tape: live.tape };
 }
 
-export function Controls() {
+export default function Controls() {
   const [state, setState] = useState(read);
   const [open, setOpen] = useState(false);
 

@@ -34,30 +34,34 @@ try {
     ['/scooch/hdri/studio.hdr', 'low'],
   ];
   const images = [manifest.photo.saliency, 'atlas.png'];
+  const home = await readFile(join(dist, 'index.html'), 'utf8');
+  const entry = home.match(/<script type="module" crossorigin src="\/scooch\/assets\/([^"]+\.js)"/)?.[1];
+  const sheets = [...home.matchAll(/<link rel="stylesheet" crossorigin href="\/scooch\/assets\/([^"]+\.css)"/g)].map((match) => match[1]);
+  const imports = async (name) => [...(await readFile(join(dist, 'assets', name), 'utf8')).matchAll(/(?:from|import)\s*"\.\/([^"]+\.js)"/g)].map((match) => match[1]);
+  const closure = async (start) => {
+    const seen = new Set();
+    const walk = async (name) => {
+      if (!name || seen.has(name)) return;
+      seen.add(name);
+      for (const next of await imports(name)) await walk(next);
+    };
+    await walk(start);
+    return seen;
+  };
+  const entryChunks = await closure(entry);
+  const stageChunks = [...(await closure(stage))].filter((name) => !entryChunks.has(name));
   const scene = [
     `<link rel="preload" as="image" href="/scooch/stills/hero-desktop.webp" media="${wide}" fetchpriority="high" />`,
     `<link rel="preload" as="image" href="/scooch/stills/hero-square.webp" media="${square}" fetchpriority="high" />`,
     `<link rel="preload" as="image" href="/scooch/stills/hero-phone.webp" media="${tall}" fetchpriority="high" />`,
-    stage ? `<link rel="modulepreload" crossorigin href="/scooch/assets/${stage}" media="${story}" fetchpriority="high" />` : '',
+    ...stageChunks.map((name) => `<link rel="modulepreload" crossorigin href="/scooch/assets/${name}" media="${story}" fetchpriority="high" />`),
     `<script>if(!/[?&]stills/.test(location.search)&&matchMedia('${story}').matches){var e=window.__early=new Map(),g=window.__got={};${JSON.stringify(early)}.forEach(function(f){var u=new URL(f[0],location.href).href;e.set(u,fetch(u,{credentials:'same-origin',priority:f[1]}).then(function(r){if(!r.ok||!r.body)return r;var k=r.body.getReader(),c=[];g[f[0]]=0;return(function p(){return k.read().then(function(x){if(x.done)return new Response(new Blob(c),{status:r.status,statusText:r.statusText,headers:r.headers});c.push(x.value);g[f[0]]+=x.value.length;return p()})})()}).catch(function(){return null}))})}</script>`,
     ...images.map((file) => `<link rel="preload" as="image" crossorigin href="/scooch/demo/${file}" media="${story}" fetchpriority="low" />`),
   ]
     .filter(Boolean)
     .join('\n    ');
-  const home = await readFile(join(dist, 'index.html'), 'utf8');
-  const entry = home.match(/<script type="module" crossorigin src="\/scooch\/assets\/([^"]+\.js)"/)?.[1];
-  const sheets = [...home.matchAll(/<link rel="stylesheet" crossorigin href="\/scooch\/assets\/([^"]+\.css)"/g)].map((match) => match[1]);
-  const chunks = new Set();
-  const walk = async (name) => {
-    if (!name || chunks.has(name)) return;
-    chunks.add(name);
-    const code = await readFile(join(dist, 'assets', name), 'utf8');
-    for (const match of code.matchAll(/(?:from|import)\s*"\.\/([^"]+\.js)"/g)) await walk(match[1]);
-  };
-  await walk(entry);
-  await walk(stage);
   const needed = [
-    ...[...chunks, ...sheets].map((name) => `/scooch/assets/${name}`),
+    ...[...entryChunks, ...stageChunks, ...sheets].map((name) => `/scooch/assets/${name}`),
     ...early.map(([path]) => path),
     ...images.map((name) => `/scooch/demo/${name}`),
   ];

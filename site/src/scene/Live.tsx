@@ -379,7 +379,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
     }
 
     const stapler = things.stapler;
-    const top = stapler?.getObjectByName('vintage_stapler_top');
+    const top = stapler ? (stapler.userData.top ??= stapler.getObjectByName('vintage_stapler_top')) as Object3D | undefined : undefined;
     if (top) {
       const base = top.userData.base ?? (top.userData.base = top.rotation.clone());
       const t = (now - live.stapleAt) / 1000;
@@ -387,7 +387,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       top.rotation.set(base.x, base.y, base.z - press * 0.09);
     }
 
-    const plant = things.plant?.getObjectByName('potted_plant_04_plant');
+    const plant = things.plant ? (things.plant.userData.leaves ??= things.plant.getObjectByName('potted_plant_04_plant')) as Object3D | undefined : undefined;
     if (plant) {
       const base = plant.userData.base ?? (plant.userData.base = plant.rotation.clone());
       plant.rotation.set(base.x + live.sway.z, base.y, base.z - live.sway.x);

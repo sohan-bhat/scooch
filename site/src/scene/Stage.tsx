@@ -1,17 +1,18 @@
 import './early';
 import { Canvas, useThree } from '@react-three/fiber';
-import { Suspense, useEffect, useRef } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { setConsoleFunction } from 'three';
 import { suspend } from 'suspend-react';
 import { loadManifest } from '@/story/demo';
 import { pointer, runtime } from '@/story/state';
 import { Post } from './Post';
-import { Controls } from './Controls';
 import { Governor } from './Governor';
 import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { ScreenTextures } from './screen/useScreen';
 import { Surroundings, World } from './World';
+
+const Controls = lazy(() => import('./Controls'));
 
 performance.mark('scooch:stage');
 
@@ -76,8 +77,23 @@ function Scene({ phone, onReady }: { phone: boolean; onReady: () => void }) {
   );
 }
 
+function useShown() {
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    if (runtime.still >= 0) return;
+    const timer = window.setInterval(() => {
+      if (!runtime.shown) return;
+      window.clearInterval(timer);
+      setShown(true);
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, []);
+  return shown;
+}
+
 export default function Stage({ onReady }: { onReady: () => void }) {
   const host = useRef<HTMLDivElement>(null);
+  const shown = useShown();
   const fade = useRef<HTMLCanvasElement>(null);
   const phone = layoutFor(window.innerWidth, window.innerHeight) === 'phone';
   const deviceDpr = window.devicePixelRatio || 1;
@@ -105,7 +121,11 @@ export default function Stage({ onReady }: { onReady: () => void }) {
         {runtime.still < 0 && <Governor fade={fade} />}
       </Canvas>
       <canvas ref={fade} aria-hidden className="pointer-events-none absolute inset-0 h-full w-full opacity-0" />
-      {runtime.still < 0 && <Controls />}
+      {shown ? (
+        <Suspense fallback={null}>
+          <Controls />
+        </Suspense>
+      ) : null}
     </div>
   );
 }
