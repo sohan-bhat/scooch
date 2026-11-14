@@ -484,7 +484,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       writing.current = sticky.write;
       await quiet();
       if (stopped) return;
-      const osd = paintedTexture(1024, 768, osdPainter);
+      const osd = paintedTexture(2048, 1536, osdPainter);
       await quiet();
       gl.initTexture(osd.texture);
       screens.crt.uniforms.uOsd.value = osd.texture;

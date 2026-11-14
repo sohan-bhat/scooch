@@ -78,7 +78,7 @@ export function localBox(holder: Object3D) {
 }
 
 export function labelProps(group: Object3D) {
-  const dial = paintedTexture(512, 512, dialPainter, true, false);
+  const dial = paintedTexture(1536, 1536, dialPainter, true, false);
   let typed: ReturnType<typeof revealDecal> | null = null;
 
   const pad = group.getObjectByName('notepads_office_notepads_yellow_pad');
@@ -87,7 +87,7 @@ export function labelProps(group: Object3D) {
     const size = box.getSize(new Vector3());
     const long = Math.max(size.x, size.z);
     const short = Math.min(size.x, size.z);
-    typed = revealDecal(typedText, short * 0.86, long * 0.84, [512, 680]);
+    typed = revealDecal(typedText, short * 0.86, long * 0.84, [1024, 1360]);
     const mesh = typed.mesh;
     mesh.rotation.set(-Math.PI / 2, 0, size.x > size.z ? Math.PI / 2 : 0);
     mesh.position.set((box.min.x + box.max.x) / 2, box.max.y + 0.0006, (box.min.z + box.max.z) / 2 + long * 0.02);
@@ -158,7 +158,7 @@ export type Glass = {
 };
 
 export function stickyNote(glass: Glass) {
-  const sticky = revealDecal(stickyText, 0.1, 0.1, [512, 512], { opaque: true });
+  const sticky = revealDecal(stickyText, 0.1, 0.1, [1024, 1024], { opaque: true });
   const note = sticky.mesh;
   note.position
     .copy(glass.center)
