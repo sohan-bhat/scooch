@@ -142,8 +142,8 @@ export function Tumbler() {
     juice.castShadow = true;
     juice.receiveShadow = true;
     const aim = new Object3D();
-    aim.position.y = 0.045;
-    holder.add(juice, glass, aim);
+    aim.position.set(HOME.x, DESK_TOP + 0.045, HOME.z);
+    holder.add(juice, glass);
     makeLive(holder, 'glass');
     return { holder, aim, juice, glass, floor: extras.floor, profile: extras.inner, level: 1, map: stripeTexture() };
   }, [gltf]);
@@ -214,6 +214,7 @@ export function Tumbler() {
   return (
     <>
       <primitive object={built.holder} />
+      <primitive object={built.aim} />
       <spotLight ref={light} target={built.aim} map={built.map} position={STREET.position} color="#ffe0bd" angle={0.1} penumbra={0.6} decay={2} distance={0} intensity={0} />
     </>
   );

@@ -103,6 +103,11 @@ function settle(x: number, z: number, fromX: number, fromZ: number) {
   return [fromX, fromZ];
 }
 
+function isCrt(object: Object3D | null) {
+  const material = (object as Mesh | null)?.material as { name?: string } | undefined;
+  return material?.name === 'scooch-crt';
+}
+
 function visible(object: Object3D) {
   let at: Object3D | null = object;
   while (at) {
@@ -163,7 +168,10 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       const hits = tools.ray.intersectObjects(roots, true).filter((hit) => visible(hit.object));
       const first = hits[0];
       if (!first) return { id: '', point: null as Vector3 | null, object: null as Object3D | null };
-      return { id: liveId(first.object), point: first.point.clone(), object: first.object };
+      const id = liveId(first.object);
+      const glass = id === 'tv' ? hits.find((hit) => hit.distance < first.distance + 0.03 && isCrt(hit.object)) : undefined;
+      const chosen = glass ?? first;
+      return { id, point: chosen.point.clone(), object: chosen.object };
     };
     const deskPoint = (event: PointerEvent) => {
       const rect = element.getBoundingClientRect();
@@ -210,7 +218,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       }
       const found = pick(event);
       window.clearTimeout(press.rest);
-      const crt = found.id === 'tv' && found.object && ((found.object as Mesh).material as { name?: string }).name === 'scooch-crt';
+      const crt = found.id === 'tv' && isCrt(found.object);
       if (crt && live.channel < 0 && live.power && hooks.frame) {
         const frame = hooks.frame;
         press.rest = window.setTimeout(() => {
@@ -234,7 +242,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       press.aim = live.aimTarget;
       press.region = '';
       if (found.id === 'tv' && found.point && found.object) {
-        const screen = (found.object as Mesh).material && ((found.object as Mesh).material as { name?: string }).name === 'scooch-crt';
+        const screen = isCrt(found.object);
         press.region = screen ? 'channel' : 'power';
         const at = screen && live.channel < 0 && live.power ? screenPoint(found.object, found.point) : null;
         const index = at ? (hooks.icons ?? []).findIndex((rect) => at[0] >= rect.x && at[0] <= rect.x + rect.z && at[1] >= rect.y && at[1] <= rect.y + rect.w) : -1;
