@@ -15,7 +15,6 @@ const photo = resolve(site, config.photo);
 const work = join(site, '.cache', 'demo');
 const out = join(site, 'public', 'demo');
 let { width, height } = config.screen;
-const mapScale = 4;
 
 function rects(layout) {
   return config.icons.map((icon) => [...layout[icon.id], config.icon.width, config.icon.height]);
@@ -37,35 +36,6 @@ function inverse(table, value) {
     else high = middle;
   }
   return (low + high) / 2;
-}
-
-function sample(map, mapWidth, mapHeight, u, v) {
-  const x = Math.min(Math.max(u * mapWidth - 0.5, 0), mapWidth - 1);
-  const y = Math.min(Math.max(v * mapHeight - 0.5, 0), mapHeight - 1);
-  const x0 = Math.floor(x);
-  const y0 = Math.floor(y);
-  const x1 = Math.min(x0 + 1, mapWidth - 1);
-  const y1 = Math.min(y0 + 1, mapHeight - 1);
-  const fx = x - x0;
-  const fy = y - y0;
-  const top = map[y0 * mapWidth + x0] * (1 - fx) + map[y0 * mapWidth + x1] * fx;
-  const bottom = map[y1 * mapWidth + x0] * (1 - fx) + map[y1 * mapWidth + x1] * fx;
-  return top * (1 - fy) + bottom * fy;
-}
-
-function onScreen(analysis, placement) {
-  const w = Math.round(width / mapScale);
-  const h = Math.round(height / mapScale);
-  const pixels = Buffer.alloc(w * h);
-  for (let y = 0; y < h; y++) {
-    const v = lookup(placement.fy, (y + 0.5) / h);
-    for (let x = 0; x < w; x++) {
-      const u = lookup(placement.fx, (x + 0.5) / w);
-      const value = sample(analysis.saliency, analysis.width, analysis.height, u, v);
-      pixels[y * w + x] = Math.round(Math.min(Math.max(value, 0), 1) * 255);
-    }
-  }
-  return sharp(pixels, { raw: { width: w, height: h, channels: 1 } }).png({ compressionLevel: 9 });
 }
 
 function subjectOnScreen(analysis, placement) {
@@ -129,11 +99,7 @@ function check({ state, hidden }) {
 
 async function write({ state, icons, framePath, data, hidden }) {
   const { placement, analysis } = data;
-  await sharp(framePath).webp({ quality: 86, effort: 6 }).toFile(join(out, `${state.id}.webp`));
-  await onScreen(analysis, placement).toFile(join(out, `${state.id}.saliency.png`));
   return {
-    frame: `${state.id}.webp`,
-    saliency: `${state.id}.saliency.png`,
     average: await average(framePath),
     hidden: round(hidden),
     flat: !analysis.saliency.some((value) => value > 0),
@@ -158,7 +124,7 @@ async function writeSaliency(analysis, file) {
   return file;
 }
 
-async function writePhoto(results, source = photo, file = 'photo.webp') {
+async function photoSize(results, source = photo) {
   const span = (table) => Math.abs(table[table.length - 1] - table[0]);
   const spanX = Math.min(...results.map((result) => span(result.data.placement.fx)));
   const spanY = Math.min(...results.map((result) => span(result.data.placement.fy)));
@@ -167,8 +133,7 @@ async function writePhoto(results, source = photo, file = 'photo.webp') {
   const limit = 2048 / Math.max(meta.width, meta.height);
   const scale = Math.min(1, needed * 1.25, limit);
   const size = { width: Math.round(meta.width * scale), height: Math.round(meta.height * scale) };
-  await sharp(source).rotate().resize(size.width, size.height).webp({ quality: 88, effort: 6 }).toFile(join(out, file));
-  return { file, ...size };
+  return size;
 }
 
 function tables(results) {
@@ -276,14 +241,14 @@ if (process.argv.includes('--saliency')) {
   const manifest = JSON.parse(await readFile(join(out, 'manifest.json'), 'utf8'));
   const cached = JSON.parse(await readFile(join(work, 'before.json'), 'utf8'));
   manifest.photo.saliency = await writeSaliency(cached.analysis, 'photo.saliency.png');
-  await writeFile(join(out, 'manifest.json'), JSON.stringify(manifest, null, 2));
+  await writeFile(join(out, 'manifest.json'), JSON.stringify(manifest));
   process.exit(0);
 }
 if (process.argv.includes('--pictures')) {
   const manifest = JSON.parse(await readFile(join(out, 'manifest.json'), 'utf8'));
   manifest.pictures = [];
   for (const entry of config.pictures ?? []) manifest.pictures.push(await picture(entry));
-  await writeFile(join(out, 'manifest.json'), JSON.stringify(manifest, null, 2));
+  await writeFile(join(out, 'manifest.json'), JSON.stringify(manifest));
   process.exit(0);
 }
 const layouts = { ...config.layouts };
@@ -305,7 +270,7 @@ const normalize = ([x, y]) => [round(x / width), round(y / height)];
 const manifest = {
   screen: config.screen,
   icons: config.icons,
-  photo: { ...(await writePhoto(rendered)), saliency: await writeSaliency(rendered[0].data.analysis, 'photo.saliency.png') },
+  photo: { ...(await photoSize(rendered)), saliency: await writeSaliency(rendered[0].data.analysis, 'photo.saliency.png') },
   order: rendered.map((result) => result.state.id),
   tables: tables(rendered),
   frames,
@@ -320,5 +285,5 @@ manifest.scenery = await scenery('main', photo, [layouts.start, layouts.dropped]
 manifest.scenery.fill = await fillMap('main', before.data.placement);
 manifest.pictures = [];
 for (const entry of config.pictures ?? []) manifest.pictures.push(await picture(entry));
-await writeFile(join(out, 'manifest.json'), JSON.stringify(manifest, null, 2));
+await writeFile(join(out, 'manifest.json'), JSON.stringify(manifest));
 console.log('wrote', Object.keys(frames).length, 'frames to', out);

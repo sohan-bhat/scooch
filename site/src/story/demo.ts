@@ -5,8 +5,6 @@ import { fetchEarly } from './early';
 export type Rect = [number, number, number, number];
 
 export type DemoFrame = {
-  frame: string;
-  saliency: string;
   average: [number, number, number];
   flat: boolean;
   solved: boolean;
@@ -18,7 +16,7 @@ export type DemoFrame = {
 export type DemoManifest = {
   screen: { width: number; height: number };
   icons: { id: string; label: string; glyph: string }[];
-  photo: { file: string; width: number; height: number; saliency: string };
+  photo: { width: number; height: number; saliency: string };
   order: string[];
   tables: Record<string, { fx: number[]; fy: number[] }>;
   frames: Record<string, DemoFrame> & { before: DemoFrame; fixed: DemoFrame; moved: DemoFrame };
