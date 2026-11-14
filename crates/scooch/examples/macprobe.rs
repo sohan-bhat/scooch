@@ -307,6 +307,12 @@ mod probe {
         if std::env::args().nth(1).as_deref() == Some("helper") {
             return helper();
         }
+        if std::env::args().nth(1).as_deref() == Some("cold-start") {
+            return cold_start(PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "maccold".into())));
+        }
+        if std::env::args().nth(1).as_deref() == Some("cold-split") {
+            return cold_split(PathBuf::from(std::env::args().nth(2).unwrap_or_default()));
+        }
         if std::env::args().nth(1).as_deref() == Some("gpu-bench") {
             return gpu_bench(PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "macbench".into())));
         }
@@ -2858,6 +2864,111 @@ mod probe {
 
     fn timed(values: &[f64]) -> String {
         format!("{}, over 16.7 ms {}", stats(values), values.iter().filter(|value| **value > 16.7).count())
+    }
+
+    const COLD: [u32; 2] = [2880, 1800];
+
+    fn cold_split(file: PathBuf) -> ExitCode {
+        let result = (|| -> Result<[f64; 5]> {
+            let ms = |since: Instant| since.elapsed().as_secs_f64() * 1000.0;
+            let clock = Instant::now();
+            let gpu = Gpu::new(false).map_err(anyhow::Error::msg)?;
+            gpu.ready().map_err(anyhow::Error::msg)?;
+            let device = ms(clock);
+            let clock = Instant::now();
+            let image = objc2::rc::autoreleasepool(|_| picture::decode(&file))?;
+            let decode = ms(clock);
+            let clock = Instant::now();
+            let canvas = scooch_core::canvas(&image, COLD[0], COLD[1]);
+            let made = ms(clock);
+            let clock = Instant::now();
+            let uploaded = gpu.try_picture(&canvas).map_err(anyhow::Error::msg)?;
+            let upload = ms(clock);
+            let clock = Instant::now();
+            let heavy = scooch_live::heavy(COLD[0], COLD[1], &uploaded);
+            let glide = gpu.glide(&uploaded, &heavy, &heavy).map_err(anyhow::Error::msg)?;
+            let look = [(Layered::Glide(&glide, 0.5), 1.0)];
+            let _ = gpu.time(COLD[0], COLD[1], &look);
+            let _ = gpu.time(COLD[0], COLD[1], &look);
+            Ok([device, decode, made, upload, ms(clock)])
+        })();
+        match result {
+            Ok(split) => {
+                println!("split {}", split.iter().map(|value| format!("{value:.1}")).collect::<Vec<_>>().join(" "));
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                println!("failed {error:#}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    fn cold_start(out: PathBuf) -> ExitCode {
+        let _ = fs::create_dir_all(&out);
+        let mut lines = vec!["# Scooch helper cold start".to_string(), String::new()];
+        let result = (|| -> Result<()> {
+            let load = Command::new("/usr/bin/uptime").output().map(|ran| String::from_utf8_lossy(&ran.stdout).trim().to_string()).unwrap_or_default();
+            lines.push(format!("- uptime before `{load}`"));
+            let me = std::env::current_exe()?;
+            let program = me.parent().and_then(Path::parent).map(|folder| folder.join("scooch")).filter(|path| path.is_file()).context("the scooch program is not next to the examples folder")?;
+            let file = out.join("balloon-sky.jpg");
+            fs::write(&file, BALLOON)?;
+            let (mut totals, mut hellos, mut warms, mut gone) = (Vec::new(), Vec::new(), Vec::new(), 0);
+            let mut adapter = String::new();
+            for _ in 0..10 {
+                let started = Instant::now();
+                let mut helper = scooch::live::Helper::spawn(&program, Duration::from_secs(10))?;
+                hellos.push(started.elapsed().as_secs_f64() * 1000.0);
+                let ready = helper.warm(scooch::live::Hints::default(), Some(&file), Some(COLD), Duration::from_secs(30))?;
+                totals.push(started.elapsed().as_secs_f64() * 1000.0);
+                warms.push(ready.ms as f64);
+                adapter = format!("{} of kind {}", ready.adapter, ready.kind);
+                let pid = helper.pid;
+                drop(helper);
+                let alive = Command::new("/bin/kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().is_ok_and(|status| status.success());
+                if !alive {
+                    gone += 1;
+                }
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            lines.push(format!("- helper spawned cold ten times, each warmed with the balloon picture at {}x{} and ended, adapter {adapter}", COLD[0], COLD[1]));
+            lines.push(format!("  - spawn to ready {}", stats(&totals)));
+            lines.push(format!("  - process start, spawn to hello {}", stats(&hellos)));
+            lines.push(format!("  - warm inside the helper, device with shaders, decode, canvas, upload and two timing frames {}", stats(&warms)));
+            lines.push(format!("  - helpers gone after their run {gone} of 10"));
+            let mut parts: [Vec<f64>; 5] = Default::default();
+            let mut failed = Vec::new();
+            for _ in 0..10 {
+                let ran = Command::new(&me).arg("cold-split").arg(&file).stderr(Stdio::null()).output()?;
+                let text = String::from_utf8_lossy(&ran.stdout).to_string();
+                match text.lines().find_map(|line| line.strip_prefix("split ")) {
+                    Some(values) => {
+                        for (slot, value) in values.split_whitespace().filter_map(|value| value.parse::<f64>().ok()).enumerate().take(5) {
+                            parts[slot].push(value);
+                        }
+                    }
+                    None => failed.push(text.trim().to_string()),
+                }
+            }
+            let names = ["device with shader compile", "decode", "canvas", "upload", "two timing frames"];
+            lines.push(format!("- the same warm steps in ten fresh processes, failed {failed:?}"));
+            for (name, values) in names.iter().zip(&parts) {
+                lines.push(format!("  - {name} {}", stats(values)));
+            }
+            let _ = fs::remove_file(&file);
+            let load = Command::new("/usr/bin/uptime").output().map(|ran| String::from_utf8_lossy(&ran.stdout).trim().to_string()).unwrap_or_default();
+            lines.push(format!("- uptime after `{load}`"));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            lines.push(format!("- **stopped** {error:#}"));
+        }
+        for line in &lines {
+            println!("{line}");
+        }
+        let _ = fs::write(out.join("report.md"), lines.join("\n") + "\n");
+        ExitCode::SUCCESS
     }
 
     fn gpu_bench(out: PathBuf) -> ExitCode {
