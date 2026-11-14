@@ -119,7 +119,7 @@ impl Real {
 impl Link for Real {
     fn warm(&mut self, picture: &Path, size: [u32; 2]) -> Result<()> {
         self.ready = None;
-        self.helper.send(&live::Command::Warm { hints: Hints::default(), picture: Some(picture.to_path_buf()), size: Some(size) })
+        self.helper.send(&live::Command::Warm { hints: Hints::default(), picture: Some(picture.to_path_buf()), size: Some(size), warm_id: None })
     }
 
     fn ready(&mut self, timeout: Duration) -> Result<Adapter> {
