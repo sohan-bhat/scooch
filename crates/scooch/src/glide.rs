@@ -383,15 +383,6 @@ impl Glider {
         self.link.as_mut().ok_or_else(|| anyhow!("no helper"))
     }
 
-    pub fn warm(&mut self, picture: &Path, size: [u32; 2]) {
-        if !self.usable() {
-            return;
-        }
-        if let Err(error) = self.send_warm(picture, size, SPAWN_WAIT) {
-            self.give_up(None, &error);
-        }
-    }
-
     fn send_warm(&mut self, picture: &Path, size: [u32; 2], wait: Duration) -> Result<()> {
         let wanted = (picture.to_path_buf(), size);
         self.connect(wait)?;
@@ -437,7 +428,7 @@ impl Glider {
         })();
         match result {
             Ok(()) => {
-                note(&mut self.said, format!("early open {id} on {}", still.display()));
+                note(&mut self.said, format!("open after snapshot {id} on {}", still.display()));
                 self.early.push(Early { id, screen: screen.id.clone(), size, still: still.to_path_buf() });
             }
             Err(error) => self.give_up(None, &error),
@@ -457,7 +448,7 @@ impl Glider {
         let Some(link) = self.link.as_mut() else { return };
         let shown = link.shown(unused.id, BUDGET);
         link.close(unused.id);
-        note(&mut self.said, format!("closed early open {} with nothing to glide", unused.id));
+        note(&mut self.said, format!("closed open after snapshot {} with nothing to glide", unused.id));
         if let Err(error) = shown {
             self.remember_size(&unused.screen, unused.size, &error);
         }
@@ -512,7 +503,7 @@ impl Glider {
         match result {
             Ok(()) => {
                 self.late = 0;
-                note(&mut self.said, format!("open {id} shown and gliding after {} ms{}", started.elapsed().as_millis(), if reused.is_some() { ", opened early" } else { "" }));
+                note(&mut self.said, format!("open {id} shown and gliding after {} ms{}", started.elapsed().as_millis(), if reused.is_some() { ", opened after the snapshot" } else { "" }));
                 self.flights.push(Flight { id, screen: plan.screen.id.clone(), settled: false, set: None });
                 Some(id)
             }

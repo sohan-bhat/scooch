@@ -3,7 +3,7 @@ use crate::state::{display_of, file_safe, parse, same, write_atomic, Entry, Lock
 use crate::glide::{Glider, Plan, Program};
 use crate::{cache, poke, scene};
 use anyhow::{Context, Result};
-use scooch_core::{Analysis, Options, Placement, RgbImage, Scene};
+use scooch_core::{Analysis, Options, Placement, Rect, RgbImage, Scene};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -362,6 +362,7 @@ pub struct Daemon {
     sessions: Arc<Mutex<HashMap<String, (u64, scooch_core::Session)>>>,
     used: Arc<Mutex<Instant>>,
     seen: Mutex<Option<u64>>,
+    prints: Mutex<HashMap<String, u64>>,
 }
 
 #[derive(Default)]
@@ -405,7 +406,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()) }
     }
 
     pub fn quick_look(&self) -> bool {
@@ -444,34 +445,16 @@ impl Daemon {
         reduce
     }
 
-    fn glide_wanted(&self, state: &State) -> bool {
-        state.on && self.glide_block(state).is_none()
-    }
-
-    pub fn warm(&self) {
-        if !self.desktop.live() {
-            return;
-        }
-        let state = self.store.load();
-        if !self.glide_wanted(&state) {
-            return;
-        }
-        let Ok(screens) = self.desktop.screens() else { return };
-        let Ok(mut glider) = self.glider.try_lock() else { return };
-        glider.reap();
-        for screen in &screens {
-            let Some(entry) = state.screens.get(&screen.id) else { continue };
-            let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { continue };
-            let Ok(key) = tables_key(&entry.source, &state.options) else { continue };
-            if !self.store.tables_for(output, key).is_file() {
-                continue;
+    fn moved_screens(&self, snapshot: &Snapshot) -> Vec<String> {
+        let mut prints = self.prints.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut moved = Vec::new();
+        for screen in &snapshot.screens {
+            let now = screen_print(snapshot, screen);
+            if prints.insert(screen.id.clone(), now).is_some_and(|before| before != now) {
+                moved.push(screen.id.clone());
             }
-            let scene = scene::scene(screen, &[]);
-            glider.warm(&entry.source, [scene.width, scene.height]);
-            break;
         }
-        drop(glider);
-        self.reap_later();
+        moved
     }
 
     fn session_still(&self, screen: &str, key: u64, (image, analysis, placement, scene, options): (&RgbImage, &Analysis, &Placement, &Scene, &Options)) -> (Arc<scooch_core::Bundle>, Arc<RgbImage>) {
@@ -562,10 +545,6 @@ impl Daemon {
             let glider = self.glider.clone();
             let blocked = self.glide_block(&state);
             let mut gliding = blocked.is_none().then(|| glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
-            if let Some(glider) = gliding.as_deref_mut() {
-                self.open_early(&state, glider);
-                lap("early", &mut clock);
-            }
             let snapshot = self.desktop.snapshot();
             lap("snapshot", &mut clock);
             if let Ok(snapshot) = &snapshot {
@@ -573,6 +552,11 @@ impl Daemon {
                 *self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(print);
                 if trace() {
                     eprintln!("{} snapshot icons {print:016x}", stamp());
+                }
+                let moved = self.moved_screens(snapshot);
+                if let (Some(glider), false) = (gliding.as_deref_mut(), moved.is_empty()) {
+                    self.open_after_snapshot(&state, snapshot, &moved, glider);
+                    lap("early", &mut clock);
                 }
             }
             match snapshot {
@@ -628,9 +612,8 @@ impl Daemon {
         }
     }
 
-    fn open_early(&self, state: &State, glider: &mut Glider) {
-        let Ok(screens) = self.desktop.screens() else { return };
-        for screen in &screens {
+    fn open_after_snapshot(&self, state: &State, snapshot: &Snapshot, moved: &[String], glider: &mut Glider) {
+        for screen in snapshot.screens.iter().filter(|screen| moved.contains(&screen.id)) {
             let Some(entry) = state.screens.get(&screen.id) else { continue };
             let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { continue };
             let Ok(key) = tables_key(&entry.source, &state.options) else { continue };
@@ -1043,7 +1026,19 @@ pub fn merge(mine: &State, before: &State, fresh: &State) -> State {
 pub const QUICK: Duration = Duration::from_millis(60);
 
 pub fn icon_print(snapshot: &Snapshot) -> u64 {
-    let mut rects: Vec<[i64; 4]> = snapshot.icons.iter().map(|icon| [icon.x.round() as i64, icon.y.round() as i64, icon.w.round() as i64, icon.h.round() as i64]).collect();
+    print_of(snapshot.icons.iter())
+}
+
+pub fn screen_print(snapshot: &Snapshot, screen: &Screen) -> u64 {
+    let frame = &screen.frame;
+    print_of(snapshot.icons.iter().filter(|icon| {
+        let (x, y) = (icon.x + icon.w / 2.0, icon.y + icon.h / 2.0);
+        x >= frame.x && x < frame.x + frame.w && y >= frame.y && y < frame.y + frame.h
+    }))
+}
+
+fn print_of<'a>(icons: impl Iterator<Item = &'a Rect>) -> u64 {
+    let mut rects: Vec<[i64; 4]> = icons.map(|icon| [icon.x.round() as i64, icon.y.round() as i64, icon.w.round() as i64, icon.h.round() as i64]).collect();
     rects.sort_unstable();
     cache::digest(&rects.iter().flat_map(|rect| rect.iter().flat_map(|value| value.to_le_bytes())).collect::<Vec<u8>>())
 }
@@ -1245,7 +1240,6 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
         let mut said: Option<String> = None;
         loop {
             worker.first();
-            daemon.warm();
             if daemon.quick_look() {
                 worker.take();
             } else {
@@ -2703,24 +2697,51 @@ pub mod tests {
         }
     }
 
+    fn helper_commands(fake: &Fake) -> Vec<String> {
+        events(fake).into_iter().filter(|event| ["spawn", "warm ", "open ", "glide ", "settle ", "close "].iter().any(|command| event.starts_with(command))).collect()
+    }
+
     #[test]
-    fn the_layer_opens_before_the_snapshot_and_an_unused_one_closes_with_nothing_set() {
+    fn the_layer_opens_after_a_snapshot_that_moved_icons_and_before_the_glide() {
         let (daemon, fake, _, _) = glide_rig("glide-early", true);
         fake.place(vec![subject()]);
         daemon.tick();
+        assert!(helper_commands(&fake).is_empty(), "{:?}", events(&fake));
         fake.place(vec![moved_subject()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
         let events = events(&fake);
         let open = at(&events, "open");
-        assert!(open < events.iter().rposition(|event| event == "snapshot").unwrap() && open < at(&events, "glide"), "{events:?}");
-        assert!(daemon.glider.lock().unwrap().said.iter().any(|line| line.ends_with("opened early")));
+        assert!(events.iter().rposition(|event| event == "snapshot").unwrap() < open && open < at(&events, "glide"), "{events:?}");
+        assert!(daemon.glider.lock().unwrap().said.iter().any(|line| line.ends_with("opened after the snapshot")));
+        assert!(daemon.held_bytes() > 0);
+    }
+
+    #[test]
+    fn thirty_wakes_with_nothing_moved_send_the_helper_nothing() {
+        let (daemon, fake, _, spawned) = glide_rig("glide-quiet-wakes", true);
+        assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
         fake.events.lock().unwrap().clear();
         let sets = fake.sets.load(Ordering::SeqCst);
-        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
-        let events: Vec<String> = fake.events.lock().unwrap().iter().map(|(event, _)| event.clone()).collect();
-        assert!(at(&events, "open") < at(&events, "close") && !events.iter().any(|event| event.starts_with("glide ") || event.starts_with("set ")), "{events:?}");
+        for _ in 0..30 {
+            assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        }
+        assert!(helper_commands(&fake).is_empty(), "{:?}", events(&fake));
         assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
-        assert!(daemon.held_bytes() > 0);
+        assert_eq!(*spawned.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn icons_that_move_without_moving_the_picture_open_and_close_with_nothing_set() {
+        let (daemon, fake, _, _) = glide_rig("glide-moved-kept", true);
+        assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
+        fake.events.lock().unwrap().clear();
+        let sets = fake.sets.load(Ordering::SeqCst);
+        fake.place(vec![moved_subject(), Rect { x: 2.0, y: 2.0, w: 4.0, h: 4.0 }]);
+        let ticked = outcome(&daemon.tick());
+        let events = events(&fake);
+        assert!(matches!(ticked, Outcome::Unchanged | Outcome::Kept), "{ticked:?}");
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
+        assert!(at(&events, "open") < at(&events, "close") && !events.iter().any(|event| event.starts_with("glide ")), "{events:?}");
     }
 
     #[test]

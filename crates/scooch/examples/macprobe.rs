@@ -2455,6 +2455,10 @@ mod probe {
         (changed, log)
     }
 
+    fn commanded(line: &str) -> bool {
+        ["glide open", "glide warm", "glide helper started", "glide closed", "glide settle", "glide ready", "glide glided", "glide interrupted"].iter().any(|marker| line.contains(marker))
+    }
+
     fn cover(marker: MainThreadMarker, screen: &Screen) -> Result<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
         use objc2::MainThreadOnly as _;
         let (display, _) = picture::screen_for(marker, &screen.id)?;
@@ -2592,11 +2596,10 @@ mod probe {
         }
         let _ = scooch_core::encode_png(&before.image()).map(|bytes| fs::write(p.out.join("idle-wake-before.png"), bytes));
         let woke: Vec<String> = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(180).collect()).collect();
-        let opened = woke.iter().any(|line| line.contains("glide early open"));
-        let closed = woke.iter().any(|line| line.contains("closed early open"));
-        p.line(format!("- a wake that changes nothing: early open {opened}, closed again {closed}, {shots} captures over 2.5 s, largest change from before the wake {} of 255 at {worst_at} ms at pixel {},{} from {:?} to {:?}, captures kept as idle-wake-before.png and idle-wake-worst.png, log {woke:?}", worst.worst, worst.x, worst.y, worst.before, worst.after));
-        if !opened || !closed || worst.worst > 2 {
-            p.fail("an early open with nothing to glide was not invisible");
+        let sent = woke.iter().filter(|line| commanded(line)).count();
+        p.line(format!("- a wake that changes nothing: helper commands {sent}, {shots} captures over 2.5 s, largest change from before the wake {} of 255 at {worst_at} ms at pixel {},{} from {:?} to {:?}, captures kept as idle-wake-before.png and idle-wake-worst.png, log {woke:?}", worst.worst, worst.x, worst.y, worst.before, worst.after));
+        if sent > 0 || worst.worst > 2 {
+            p.fail("a wake that changed nothing reached the helper or changed the screen");
         }
         let calm_a = (screen.frame.x + screen.frame.w * 0.15, screen.frame.y + screen.frame.h * 0.75);
         let calm_b = (screen.frame.x + screen.frame.w * 0.25, screen.frame.y + screen.frame.h * 0.75);
@@ -2724,7 +2727,19 @@ mod probe {
             p.fail("killing the helper mid glide was not handled cleanly");
         }
         let last = Instant::now();
-        let gone = wait_until(Duration::from_secs(40), || helper_pids(p).is_empty());
+        let lines = daemon_log(p).lines().count();
+        for _ in 0..30 {
+            poke(p);
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        let woken = new_lines(&daemon_log(p), lines);
+        let ticks = woken.iter().filter(|line| line.contains(" tick ")).count();
+        let sent: Vec<String> = woken.iter().filter(|line| commanded(line)).map(|line| line.chars().take(160).collect()).collect();
+        p.line(format!("- thirty wakes with nothing moved over {} s after the last drag: ticks {ticks}, helper commands {} {sent:?}", last.elapsed().as_secs(), sent.len()));
+        if !sent.is_empty() {
+            p.fail("a wake with nothing moved sent the helper a command");
+        }
+        let gone = wait_until(Duration::from_secs(40).saturating_sub(last.elapsed()), || helper_pids(p).is_empty());
         p.line(format!("- no helper process {:?} s after the last drag", gone.map(|_| last.elapsed().as_secs())));
         std::thread::sleep(Duration::from_secs(35).saturating_sub(last.elapsed()));
         let pids = helper_pids(p);
