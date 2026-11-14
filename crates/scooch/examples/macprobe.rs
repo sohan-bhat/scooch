@@ -2355,13 +2355,24 @@ mod probe {
         }
     }
 
-    fn judge_glide(p: &mut Probe, dragged: &Dragged, screen: &Screen, label: &str, evidence: Option<&str>) -> bool {
+    const SEEN_GAP: f64 = 0.125;
+
+    struct Judged {
+        rest: bool,
+        enough: bool,
+        moving: usize,
+        rate: Option<f64>,
+        gap: Option<f64>,
+        frames: Option<u32>,
+    }
+
+    fn judge_glide(p: &mut Probe, dragged: &Dragged, screen: &Screen, label: &str, evidence: Option<&str>) -> Judged {
         let desktop = platform::current().ok();
         let new = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
         let decode = |path: &Option<PathBuf>| path.as_deref().and_then(|path| objc2::rc::autoreleasepool(|_| picture::decode(path)).ok()).map(|image| halved(&image));
         let (Some(old_still), Some(new_still)) = (dragged.old_still.clone(), decode(&new)) else {
             p.line(format!("- {label}: the two stills could not be read, old {:?} new {new:?}", dragged.old));
-            return false;
+            return Judged { rest: false, enough: false, moving: 0, rate: None, gap: None, frames: None };
         };
         let (width, height) = (old_still.width() as usize, old_still.height() as usize);
         let icons: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().map(|(_, rect)| rect).collect();
@@ -2404,7 +2415,9 @@ mod probe {
         let first_move = settled_old.and_then(|from| (from..classes.len()).find(|index| classes[*index] != 'A' && classes[*index] != '=')).map(|index| (dragged.seen[index].at - dragged.dropped) * 1000.0);
         let span = glide_at.zip(glided).map(|(from, to)| to - from);
         let rate = span.map(|span| dragged.seen.iter().filter(|seen| glide_at.is_some_and(|at| seen.at >= at) && seen.at <= glide_at.unwrap_or(0.0) + span).count() as f64 / span.max(0.001));
-        let expected = rate.map(|rate| rate * 0.45 * 0.64);
+        let expected = rate.map(|rate| rate * 0.45 * 0.62);
+        let gap = glide_at.zip(glided).and_then(|(from, to)| dragged.seen.windows(2).filter(|pair| pair[1].at >= from && pair[0].at <= to).map(|pair| pair[1].at - pair[0].at).reduce(f64::max));
+        let frames_drawn = dragged.log.iter().find_map(|line| line.split(" glide glided ").nth(1).and_then(|rest| rest.split("with ").nth(1)).and_then(|rest| rest.split_whitespace().next()).and_then(|count| count.parse::<u32>().ok()));
         let inked = dragged.seen.iter().map(|seen| seen.inked).fold(0.0, f32::max);
         let handed = settled.and_then(|settled| dragged.seen.windows(2).filter(|pair| pair[0].at >= settled && closed.is_none_or(|closed| pair[1].at <= closed + 1.0)).map(|pair| &pair[1]).max_by_key(|seen| seen.step.worst));
         let fade = settled.and_then(|settled| dragged.seen.windows(2).find(|pair| pair[0].at < settled && pair[1].at >= settled).map(|pair| pair[1].step));
@@ -2421,7 +2434,7 @@ mod probe {
             moving.len(),
             window.len()
         ));
-        p.line(format!("  - captures a second during the glide {:?}, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95", rate.map(|rate| rate.round()), expected.map(|value| value.round())));
+        p.line(format!("  - captures a second during the glide {:?}, largest gap between captures during the glide {:?} ms, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95, frames the helper drew {frames_drawn:?}", rate.map(|rate| rate.round()), gap.map(|gap| (gap * 1000.0).round()), expected.map(|value| value.round())));
         p.line(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(closed)));
         p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, captures of the settled layer before close {layered:?}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
         p.line(format!("  - the change across the settle fade from the glide's last frame to the still, which ends before settled, {:?} of 255 at pixel {:?} from {:?} to {:?}", fade.map(|step| step.worst), fade.map(|step| (step.x, step.y)), fade.map(|step| step.before), fade.map(|step| step.after)));
@@ -2456,7 +2469,7 @@ mod probe {
             }
             p.line(format!("  - every capture saved in {name} with captures.md, nine frame strip {name}-strip.png"));
         }
-        returned == 0 && steady && moving.len() >= 2 && inked <= 0.1 && hand_over.is_some_and(|value| value <= 2) && settled.is_some()
+        Judged { rest: returned == 0 && steady && inked <= 0.1 && hand_over.is_some_and(|value| value <= 2) && settled.is_some(), enough: gap.is_some_and(|gap| gap <= SEEN_GAP), moving: moving.len(), rate, gap, frames: frames_drawn }
     }
 
     fn stuck(p: &mut Probe, pid: i32) {
@@ -2607,11 +2620,43 @@ mod probe {
         let still: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().filter(|(found, _)| found.starts_with("scooch") && found != name).map(|(_, rect)| rect).collect();
         let masks: Vec<Vec<(usize, usize)>> = paper.as_ref().map(|field| still.iter().map(|rect| strong_ink(&baseline, field, rect, &screen)).collect()).unwrap_or_default();
         p.line(format!("- solid icon ink pixels of the still icons {:?}", masks.iter().map(Vec::len).collect::<Vec<_>>()));
-        let start = position(p, name).unwrap_or(subject);
-        let dragged = watch_drag(p, display, &screen, start, aside, &masks).context("the glide drag could not be watched")?;
-        let during = memory(daemon);
-        let held = daemon_log(p).lines().rev().find_map(|line| line.split("sessions hold ").nth(1).map(str::to_string));
-        let good = judge_glide(p, &dragged, &screen, "glide on, CGEvent drag", Some("glide"));
+        let mut verdict: Option<bool> = None;
+        let mut unseen = Vec::new();
+        let mut during = String::new();
+        let mut held = None;
+        for attempt in 1..=3 {
+            if attempt > 1 {
+                quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
+            }
+            let from = position(p, name).unwrap_or(subject);
+            let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
+            let dragged = watch_drag(p, display, &screen, from, to, &masks).context("the glide drag could not be watched")?;
+            if attempt == 1 {
+                during = memory(daemon);
+                held = daemon_log(p).lines().rev().find_map(|line| line.split("sessions hold ").nth(1).map(str::to_string));
+            }
+            let evidence = if attempt == 1 { "glide".to_string() } else { format!("glide-{attempt}") };
+            let judged = judge_glide(p, &dragged, &screen, &format!("glide on, CGEvent drag, attempt {attempt}"), Some(&evidence));
+            if !judged.rest {
+                verdict = Some(false);
+                break;
+            }
+            if judged.enough {
+                p.line(format!("  - captures between the old and the new picture judged, {} between, at least 2 needed", judged.moving));
+                verdict = Some(judged.moving >= 2);
+                break;
+            }
+            p.line(format!("  - captures between the old and the new picture not judged, {} captures a second, largest gap {:?} ms, two in-between captures are certain only with no gap over {} ms", judged.rate.map_or(0.0, f64::round), judged.gap.map(|gap| (gap * 1000.0).round()), (SEEN_GAP * 1000.0) as u32));
+            unseen.push(judged.frames);
+        }
+        let good = match verdict {
+            Some(good) => good,
+            None => {
+                let drew = unseen.iter().all(|frames| frames.is_some_and(|frames| frames >= 3));
+                p.limit(format!("the frames between the old and the new picture could not be judged on this runner, since screen capture slowed below one every {} ms during each of three glides, while the helper drew {unseen:?} frames and every other glide check passed", (SEEN_GAP * 1000.0) as u32));
+                drew
+            }
+        };
         p.line(format!("  - daemon {daemon} before the burst {rest_before}, right after the glide {during}, its sessions hold {held:?}"));
         std::thread::sleep(Duration::from_millis(1000));
         let pids = helper_pids(p);
