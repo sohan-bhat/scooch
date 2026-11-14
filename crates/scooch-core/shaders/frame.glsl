@@ -68,38 +68,43 @@ vec4 layer(int which, vec2 p, int index) {
     return which == 0 ? textureLod(paints_a, at, 0.0) : textureLod(paints_b, at, 0.0);
 }
 
-vec4 paint(int which, vec2 p, vec4 d, float grain) {
+float grain_hash(uint x, uint y) {
+    uint h = (x * 0x8da6b343u) ^ (y * 0xd8163841u);
+    h = h ^ (h >> 13u);
+    h = h * 0x5bd1e995u;
+    h = h ^ (h >> 15u);
+    return float(h >> 8u) / 16777215.0;
+}
+
+float sand_grain(uvec2 pixel) {
+    return 1.0 + grain_amount * ((grain_hash(pixel.x, pixel.y) - 0.5) + 0.6 * (grain_hash(pixel.x / 2u, pixel.y / 2u) - 0.5));
+}
+
+vec4 paint(int which, vec2 p, float d, vec3 picture, float grain) {
     vec4 here = which == 0 ? textureLod(look_a, quarter(p), 0.0) : textureLod(look_b, quarter(p), 0.0);
-    float sky = here.r;
-    float belong = here.g;
-    float open = here.b;
-    float light = here.a * 2.0 - 1.0;
-    vec4 first = ramp(which, 0.0, d.x);
-    vec4 second = ramp(which, 1.0, d.x);
-    vec4 shade = ramp(which, 1.0, d.y);
-    vec4 shore = layer(which, p, 0);
-    vec4 fill = layer(which, p, 2);
+    float kind = here.r;
+    float mark = here.g;
+    float broad = here.b;
+    float facing = here.a * 2.0 - 1.0;
+    vec4 first = ramp(which, 0.0, d);
+    vec4 second = ramp(which, 1.0, d);
+    vec4 gain = layer(which, p, 0);
+    vec4 sand = layer(which, p, 2);
     vec4 land = vec4(0.0);
-    land = over(land, vec3(1.0), first.r * shore.a);
-    land = over(land, vec3(0.0), shade.b);
-    land = over(land, min(shore.rgb * grain, vec3(1.0)), first.g);
-    land = over(land, min(layer(which, p, 1).rgb * grain, vec3(1.0)), first.b);
-    land = over(land, min(fill.rgb * grain, vec3(1.0)), first.a);
-    land = over(land, min(layer(which, p, 3).rgb * grain, vec3(1.0)), second.r);
-    land = land * fill.a;
-    vec4 core = layer(which, p, 4);
-    vec3 rim = layer(which, p, 6).rgb;
-    vec3 belly = layer(which, p, 7).rgb;
-    vec3 tone = mix(core.rgb, layer(which, p, 5).rgb, open);
-    tone = mix(tone, rim, max(light, 0.0) * mix(core_lift, volume_lit, open));
-    tone = mix(tone, belly, max(-light, 0.0) * mix(core_drop, volume_dark, open));
-    tone = mix(tone, rim, 1.0 - ramp(which, 0.0, d.z).g);
-    tone = mix(tone, belly, 1.0 - ramp(which, 0.0, d.w).g);
+    land = over(land, min(picture * gain.rgb * 4.0, vec3(1.0)), first.r * gain.a);
+    land = over(land, layer(which, p, 1).rgb, first.g * mark);
+    land = over(land, min(mix(sand.rgb, layer(which, p, 3).rgb, first.a) * grain, vec3(1.0)), first.b);
+    land = land * sand.a;
+    vec4 shaded = layer(which, p, 4);
+    vec3 lit = layer(which, p, 5).rgb;
+    vec3 deep = layer(which, p, 6).rgb;
+    vec3 tone = mix(shaded.rgb, lit, volume_lit * broad);
+    tone = mix(tone, deep, second.b * max(-facing, 0.0) * volume_dark);
+    tone = mix(tone, lit, second.g * max(facing, 0.0));
     vec4 cloud = vec4(0.0);
-    cloud = over(cloud, vec3(0.0), shade.a);
-    cloud = over(cloud, min(tone * grain, vec3(1.0)), second.g);
-    cloud = cloud * core.a;
-    return mix(land, cloud, sky) * belong;
+    cloud = over(cloud, min(tone * (1.0 + mark * core_lift - core_drop), vec3(1.0)), second.r);
+    cloud = cloud * shaded.a;
+    return mix(land, cloud, kind);
 }
 
 vec3 encode(vec3 c) {
@@ -119,10 +124,6 @@ vec3 over_picture(vec3 picture, vec4 land) {
     }
     vec3 straight = encode(land.rgb / a);
     return decode(straight * a + encode(picture) * (1.0 - a));
-}
-
-float luminance(vec3 c) {
-    return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
 
 void main() {
@@ -145,12 +146,9 @@ void main() {
         color = vec4(picture, 1.0);
         return;
     }
-    vec4 reads = vec4(d, field(p + shadow_at * unit), field(p + rim_at * unit), field(p + belly_at * unit));
-    float mean = luminance(textureLod(canvas, uv, grain_lod).rgb);
-    float detail = (luminance(picture) - mean) / max(3.0 * pow(mean, 2.0 / 3.0), grain_floor);
-    float grain = pow(1.0 + clamp(detail / grain_scale, -1.0, 1.0) * grain_amount, 3.0);
-    vec4 a = paint(0, p, reads, grain);
-    vec4 b = paint(1, p, reads, grain);
+    float grain = sand_grain(uvec2(p));
+    vec4 a = paint(0, p, d, picture, grain);
+    vec4 b = paint(1, p, d, picture, grain);
     vec4 land = mix(a, b, s);
     color = vec4(over_picture(picture, land), 1.0);
 }

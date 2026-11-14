@@ -66,40 +66,43 @@ fn layer(paints: texture_2d_array<f32>, p: vec2<f32>, index: i32) -> vec4<f32> {
     return textureSampleLevel(paints, smooth_filter, coarse(p), index, 0.0);
 }
 
-fn paint(looks: texture_2d<f32>, paints: texture_2d_array<f32>, table: texture_2d<f32>, p: vec2<f32>, d: vec4<f32>, grain: f32) -> vec4<f32> {
+fn grain_hash(x: u32, y: u32) -> f32 {
+    var h = (x * 0x8da6b343u) ^ (y * 0xd8163841u);
+    h = h ^ (h >> 13u);
+    h = h * 0x5bd1e995u;
+    h = h ^ (h >> 15u);
+    return f32(h >> 8u) / 16777215.0;
+}
+
+fn sand_grain(pixel: vec2<u32>) -> f32 {
+    return 1.0 + frame.grain * ((grain_hash(pixel.x, pixel.y) - 0.5) + 0.6 * (grain_hash(pixel.x / 2u, pixel.y / 2u) - 0.5));
+}
+
+fn paint(looks: texture_2d<f32>, paints: texture_2d_array<f32>, table: texture_2d<f32>, p: vec2<f32>, d: f32, picture: vec3<f32>, grain: f32) -> vec4<f32> {
     let here = textureSampleLevel(looks, smooth_filter, quarter(p), 0.0);
-    let sky = here.r;
-    let belong = here.g;
-    let open = here.b;
-    let light = here.a * 2.0 - 1.0;
-    let first = ramp(table, 0.0, d.x);
-    let second = ramp(table, 1.0, d.x);
-    let shade = ramp(table, 1.0, d.y);
-    let shore = layer(paints, p, 0);
-    let fill = layer(paints, p, 2);
+    let kind = here.r;
+    let mark = here.g;
+    let broad = here.b;
+    let facing = here.a * 2.0 - 1.0;
+    let first = ramp(table, 0.0, d);
+    let second = ramp(table, 1.0, d);
+    let gain = layer(paints, p, 0);
+    let sand = layer(paints, p, 2);
     var land = vec4<f32>(0.0);
-    land = over(land, vec3<f32>(1.0), first.r * shore.a);
-    land = over(land, vec3<f32>(0.0), shade.b);
-    land = over(land, min(shore.rgb * grain, vec3<f32>(1.0)), first.g);
-    land = over(land, min(layer(paints, p, 1).rgb * grain, vec3<f32>(1.0)), first.b);
-    land = over(land, min(fill.rgb * grain, vec3<f32>(1.0)), first.a);
-    land = over(land, min(layer(paints, p, 3).rgb * grain, vec3<f32>(1.0)), second.r);
-    land = land * fill.a;
-    let core = layer(paints, p, 4);
-    let rim = layer(paints, p, 6).rgb;
-    let belly = layer(paints, p, 7).rgb;
-    var tone = mix(core.rgb, layer(paints, p, 5).rgb, open);
-    let lift = mix(frame.core_lift, frame.volume_lit, open);
-    let drop = mix(frame.core_drop, frame.volume_dark, open);
-    tone = mix(tone, rim, max(light, 0.0) * lift);
-    tone = mix(tone, belly, max(-light, 0.0) * drop);
-    tone = mix(tone, rim, 1.0 - ramp(table, 0.0, d.z).g);
-    tone = mix(tone, belly, 1.0 - ramp(table, 0.0, d.w).g);
+    land = over(land, min(picture * gain.rgb * 4.0, vec3<f32>(1.0)), first.r * gain.a);
+    land = over(land, layer(paints, p, 1).rgb, first.g * mark);
+    land = over(land, min(mix(sand.rgb, layer(paints, p, 3).rgb, first.a) * grain, vec3<f32>(1.0)), first.b);
+    land = land * sand.a;
+    let shaded = layer(paints, p, 4);
+    let lit = layer(paints, p, 5).rgb;
+    let deep = layer(paints, p, 6).rgb;
+    var tone = mix(shaded.rgb, lit, frame.volume_lit * broad);
+    tone = mix(tone, deep, second.b * max(-facing, 0.0) * frame.volume_dark);
+    tone = mix(tone, lit, second.g * max(facing, 0.0));
     var cloud = vec4<f32>(0.0);
-    cloud = over(cloud, vec3<f32>(0.0), shade.a);
-    cloud = over(cloud, min(tone * grain, vec3<f32>(1.0)), second.g);
-    cloud = cloud * core.a;
-    return mix(land, cloud, sky) * belong;
+    cloud = over(cloud, min(tone * (1.0 + mark * frame.core_lift - frame.core_drop), vec3<f32>(1.0)), second.r);
+    cloud = cloud * shaded.a;
+    return mix(land, cloud, kind);
 }
 
 fn encode(c: vec3<f32>) -> vec3<f32> {
@@ -119,10 +122,6 @@ fn over_picture(picture: vec3<f32>, land: vec4<f32>) -> vec3<f32> {
     }
     let straight = encode(land.rgb / a);
     return decode(straight * a + encode(picture) * (1.0 - a));
-}
-
-fn luminance(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
 @vertex
@@ -151,13 +150,9 @@ fn draw(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     if (d > frame.reach) {
         return vec4<f32>(picture, 1.0);
     }
-    let u = frame.unit;
-    let reads = vec4<f32>(d, field(p + frame.shadow * u), field(p + frame.rim * u), field(p + frame.belly * u));
-    let mean = luminance(textureSampleLevel(canvas, smooth_filter, uv, frame.grain_lod).rgb);
-    let detail = (luminance(picture) - mean) / max(3.0 * pow(mean, 2.0 / 3.0), frame.grain_floor);
-    let grain = pow(1.0 + clamp(detail / frame.grain_scale, -1.0, 1.0) * frame.grain, 3.0);
-    let a = paint(look_a, paints_a, ramps_a, p, reads, grain);
-    let b = paint(look_b, paints_b, ramps_b, p, reads, grain);
+    let grain = sand_grain(vec2<u32>(p));
+    let a = paint(look_a, paints_a, ramps_a, p, d, picture, grain);
+    let b = paint(look_b, paints_b, ramps_b, p, d, picture, grain);
     let land = mix(a, b, frame.s);
     return vec4<f32>(over_picture(picture, land), 1.0);
 }
