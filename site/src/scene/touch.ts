@@ -43,6 +43,8 @@ const rimColor = new Color('#ffd9a8');
 const rims = new WeakMap<Object3D, { value: number }[]>();
 
 function withRim(material: MeshStandardMaterial, level: { value: number }) {
+  if (material.userData.rim) return material.userData.rim as { value: number };
+  material.userData.rim = level;
   const previous = material.onBeforeCompile;
   const key = material.customProgramCacheKey();
   material.onBeforeCompile = (shader, renderer) => {
@@ -57,6 +59,7 @@ function withRim(material: MeshStandardMaterial, level: { value: number }) {
       );
   };
   material.customProgramCacheKey = () => `${key}|rim`;
+  return level;
 }
 
 export function makeLive(root: Object3D, id: string) {
@@ -71,9 +74,7 @@ export function makeLive(root: Object3D, id: string) {
     for (const material of materials) {
       if (seen.has(material) || !(material as MeshStandardMaterial).isMeshStandardMaterial || material.transparent) continue;
       seen.add(material);
-      const level = { value: 0 };
-      withRim(material as MeshStandardMaterial, level);
-      levels.push(level);
+      levels.push(withRim(material as MeshStandardMaterial, { value: 0 }));
     }
   });
   rims.set(root, levels);

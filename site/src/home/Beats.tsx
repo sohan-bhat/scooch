@@ -52,6 +52,7 @@ export function Beats({ refs }: { refs: React.RefObject<HTMLElement[]> }) {
             ref={keep(index + 2)}
             aria-hidden
             data-overlay={beat.id}
+            data-phone=""
             className="phone-caption absolute inset-x-0 bottom-[max(6svh,1.75rem)] hidden text-(length:--text-support) leading-snug text-paper"
           >
             {beat.caption}

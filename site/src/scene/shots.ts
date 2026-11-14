@@ -43,12 +43,12 @@ export const keys: Record<Layout, Key[]> = {
     { frame: 'space', position: [0.2, -1.65, 2.0], target: [0.03, 0.03, 0.0], fov: 46, shiftX: 0, shiftY: 0.34 },
     { frame: 'space', position: [-0.16, -1.66, 1.98], target: [0.0, 0.03, 0.0], fov: 46, shiftX: 0, shiftY: 0.34 },
     { frame: 'space', position: [-0.16, -1.66, 1.98], target: [0.0, 0.03, 0.0], fov: 46, shiftX: 0, shiftY: 0.34 },
-    { frame: 'world', position: [-0.12, 1.08, 0.5], target: [0.0, 0.95, -0.12], fov: 30, shiftX: 0, shiftY: 0 },
-    { frame: 'world', position: [-1.56, 1.03, 1.95], target: [0.3, 0.95, -0.04], fov: 46, shiftX: 0, shiftY: 0.36 },
-    { frame: 'world', position: [-1.05, 0.88, 0.32], target: [-0.62, 0.82, -0.12], fov: 30, shiftX: 0, shiftY: 0 },
-    { frame: 'world', position: [0.05, 0.88, 0.52], target: [0.42, 0.84, 0.08], fov: 30, shiftX: 0, shiftY: 0 },
-    { frame: 'world', position: [-1.56, 1.03, 1.95], target: [0.3, 0.95, -0.04], fov: 46, shiftX: 0, shiftY: 0.36 },
-    { frame: 'world', position: [0.25, 2.65, 2.45], target: [0.25, 0.85, -0.05], fov: 48, shiftX: 0, shiftY: 0.36 },
+    { frame: 'world', position: [0.12, 1.2, 0.78], target: [0.0, 0.95, -0.12], fov: 40, shiftX: 0, shiftY: 0.3 },
+    { frame: 'world', position: [1.02, 0.82, 1.8], target: [1.44, 0.26, 0.32], fov: 46, shiftX: 0, shiftY: 0.32 },
+    { frame: 'world', position: [-1.0, 0.92, 0.46], target: [-0.8, 0.83, -0.08], fov: 40, shiftX: 0, shiftY: 0.3 },
+    { frame: 'world', position: [-0.62, 0.9, 0.34], target: [-0.44, 0.85, -0.26], fov: 40, shiftX: 0, shiftY: 0.3 },
+    { frame: 'world', position: [-0.22, 0.95, 0.24], target: [-0.41, 0.86, -0.27], fov: 38, shiftX: 0, shiftY: 0.3 },
+    { frame: 'world', position: [0.88, 2.4, 3.3], target: [0.8, 0.55, 0.0], fov: 56, shiftX: 0, shiftY: 0.3 },
   ],
 };
 
