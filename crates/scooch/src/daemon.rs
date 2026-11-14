@@ -433,10 +433,14 @@ impl Daemon {
         let mut glider = self.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let launched = glider.wake();
         drop(glider);
-        if launched {
-            self.reap_later();
-        }
-        launched
+        let Some(generation) = launched else { return false };
+        self.reap_later();
+        let glider = self.glider.clone();
+        let _ = std::thread::Builder::new().name("scooch-early".into()).spawn(move || {
+            std::thread::sleep(crate::glide::EARLY_LIFE);
+            glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).expire_early(generation);
+        });
+        true
     }
 
     fn glide_block(&self, state: &State) -> Option<&'static str> {
@@ -2814,10 +2818,13 @@ pub mod tests {
         daemon.glider.lock().unwrap().reset_for_test();
         fake.events.lock().unwrap().clear();
         let before = *spawned.lock().unwrap();
+        let life = crate::glide::EARLY_LIFE + Duration::from_millis(400);
         assert!(daemon.wake_early());
         assert!(!daemon.wake_early());
         assert_eq!(*spawned.lock().unwrap(), before + 1);
         daemon.tick();
+        assert!(daemon.glider.lock().unwrap().running(), "an early helper lives on through a bare snapshot inside 1.5 s");
+        std::thread::sleep(life);
         assert!(!daemon.glider.lock().unwrap().running());
         let seen = events(&fake);
         assert!(seen.iter().any(|event| event == "device") && seen.iter().any(|event| event == "quit"), "{seen:?}");
@@ -2826,6 +2833,8 @@ pub mod tests {
         daemon.glider.lock().unwrap().forget_early_for_test();
         assert!(daemon.wake_early());
         daemon.tick();
+        std::thread::sleep(life);
+        assert!(!daemon.glider.lock().unwrap().running());
         daemon.glider.lock().unwrap().forget_early_for_test();
         assert!(!daemon.wake_early(), "an early launch after two bare wakes in a row");
         fake.place(vec![moved_subject()]);

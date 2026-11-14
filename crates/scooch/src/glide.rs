@@ -16,6 +16,7 @@ pub const CHECK: Duration = Duration::from_millis(50);
 pub const PATIENCE: Duration = Duration::from_millis(150);
 pub const BARE: u32 = 2;
 pub const EARLY_EVERY: Duration = Duration::from_secs(10);
+pub const EARLY_LIFE: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Heard {
@@ -387,6 +388,8 @@ pub struct Glider {
     launched: Option<Instant>,
     ready_at: Option<Instant>,
     early_launch: bool,
+    early_generation: u64,
+    moved_now: bool,
     thrown: u32,
     last_early: Option<Instant>,
     pub said: Vec<String>,
@@ -433,7 +436,7 @@ fn keep(said: &mut Vec<String>, line: String) {
 impl Glider {
     pub fn new(spawner: Box<dyn Spawn>) -> Self {
         let forced = std::env::var_os(FORCE).is_some_and(|value| !value.is_empty() && value != "0");
-        Self { forced, software: false, strikes: 0, stalled: false, spawner, link: None, warmed: None, last_warm: None, ready: false, next: 0, late: 0, flights: Vec::new(), early: Vec::new(), doomed: false, huge: std::collections::HashMap::new(), adapter: None, scales: BTreeMap::new(), learned: Vec::new(), prepared: None, noted: false, revived: false, starts: BTreeMap::new(), fresh_starts: Vec::new(), launched: None, ready_at: None, early_launch: false, thrown: 0, last_early: None, said: Vec::new() }
+        Self { forced, software: false, strikes: 0, stalled: false, spawner, link: None, warmed: None, last_warm: None, ready: false, next: 0, late: 0, flights: Vec::new(), early: Vec::new(), doomed: false, huge: std::collections::HashMap::new(), adapter: None, scales: BTreeMap::new(), learned: Vec::new(), prepared: None, noted: false, revived: false, starts: BTreeMap::new(), fresh_starts: Vec::new(), launched: None, ready_at: None, early_launch: false, early_generation: 0, moved_now: false, thrown: 0, last_early: None, said: Vec::new() }
     }
 
     #[cfg(test)]
@@ -492,9 +495,9 @@ impl Glider {
         self.early_launch = false;
     }
 
-    pub fn wake(&mut self) -> bool {
+    pub fn wake(&mut self) -> Option<u64> {
         if !self.usable() || self.doomed || self.link.is_some() || self.thrown >= BARE || self.last_early.is_some_and(|at| at.elapsed() < EARLY_EVERY) {
-            return false;
+            return None;
         }
         let started = Instant::now();
         self.last_early = Some(started);
@@ -504,27 +507,36 @@ impl Glider {
                 self.link = Some(link);
                 self.launched = Some(started);
                 self.early_launch = true;
+                self.early_generation += 1;
                 note(&mut self.said, format!("early launch at the wake in {} ms, device only", started.elapsed().as_millis()));
-                true
+                Some(self.early_generation)
             }
             Err(error) => {
                 note(&mut self.said, format!("early launch failed, {error:#}"));
-                false
+                None
             }
         }
     }
 
     pub fn after_snapshot(&mut self, moved: bool) {
+        self.moved_now = moved;
         if moved {
             self.thrown = 0;
-        } else if self.early_launch {
+        } else if self.early_launch && self.launched.is_some_and(|launched| launched.elapsed() >= EARLY_LIFE) {
             self.thrown += 1;
             self.quit_early("nothing moved");
         }
     }
 
+    pub fn expire_early(&mut self, generation: u64) {
+        if self.early_launch && self.early_generation == generation {
+            self.thrown += 1;
+            self.quit_early("nothing moved within 1.5 s of its launch");
+        }
+    }
+
     pub fn retire_unused(&mut self) {
-        if self.early_launch && self.warmed.is_none() && self.flights.is_empty() {
+        if self.early_launch && self.moved_now && self.warmed.is_none() && self.flights.is_empty() {
             self.quit_early("no screen could glide");
         }
     }
@@ -741,24 +753,24 @@ impl Glider {
                 return Err(anyhow!("the helper had not started when the plain swap was ready, so this move swaps plainly"));
             }
         }
-        let mut answered = None;
         if cold {
             match link.ready(Duration::ZERO) {
-                Ok(adapter) => answered = Some(adapter),
+                Ok(adapter) => self.heard_ready(adapter)?,
                 Err(error) if format!("{error:#}").contains("did not answer within") => {}
                 Err(error) => return Err(error),
             }
         }
-        let predicted = if cold {
+        let waits_for_ready = !self.ready;
+        let predicted = if waits_for_ready {
             let from_launch = known(remembered.cold).or_else(|| known(remembered.ready).zip(known(remembered.draw)).map(|(ready, draw)| ready + draw));
             match (from_launch, launched) {
                 (Some(after), Some(launched)) => Some(launched + after),
-                _ if answered.is_some() => None,
                 _ => return Err(anyhow!("no cold start is remembered for this adapter yet, so this move swaps plainly")),
             }
         } else {
             let base = opened_at.unwrap_or(started);
-            known(remembered.shown).map(|shown| self.ready_at.map_or(base, |ready| ready.max(base)) + shown)
+            let base = self.ready_at.map_or(base, |ready| ready.max(base));
+            known(remembered.shown).or_else(|| known(remembered.draw)).map(|shown| base + shown)
         };
         if let Some(predicted) = predicted {
             trace.predicted = since(predicted);
@@ -767,25 +779,9 @@ impl Glider {
             }
         }
         let deadline = started + PATIENCE;
-        if cold {
-            let adapter = match answered {
-                Some(adapter) => adapter,
-                None => self.link.as_mut().ok_or_else(|| anyhow!("no helper"))?.ready(Self::left(deadline))?,
-            };
-            if !self.forced && software(&adapter) {
-                self.software = true;
-                return Err(anyhow!("the only GPU here is the software renderer {} of kind {}", adapter.name, adapter.kind));
-            }
-            note(&mut self.said, format!("ready on {} of kind {}, canvas from {}, first scale {}, {} ms after launch", adapter.name, adapter.kind, adapter.from.as_deref().unwrap_or("unknown"), adapter.scale.map_or("unknown".to_string(), |scale| scale.to_string()), shown_ms(adapter.after)));
-            self.ready_at = Some(launched.zip(adapter.after).map_or_else(Instant::now, |(launched, after)| launched + after));
-            if !self.noted {
-                self.noted = true;
-                if let Some(after) = adapter.after {
-                    self.learn(&adapter.name, |start| start.ready = ms(after));
-                }
-            }
-            self.adapter = Some(adapter.name);
-            self.ready = true;
+        if waits_for_ready {
+            let adapter = self.link.as_mut().ok_or_else(|| anyhow!("no helper"))?.ready(Self::left(deadline))?;
+            self.heard_ready(adapter)?;
         }
         trace.ready = self.ready_at.and_then(since);
         let open_at = Instant::now();
@@ -802,7 +798,7 @@ impl Glider {
         let drawn = trace.drawn;
         if let Some(adapter) = self.adapter.clone() {
             self.learn(&adapter, |start| {
-                if cold {
+                if waits_for_ready {
                     if let Some(after) = launched.map(|launched| shown_at.saturating_duration_since(launched)) {
                         start.cold = ms(after);
                     }
@@ -816,6 +812,24 @@ impl Glider {
                 }
             });
         }
+        Ok(())
+    }
+
+    fn heard_ready(&mut self, adapter: Adapter) -> Result<()> {
+        if !self.forced && software(&adapter) {
+            self.software = true;
+            return Err(anyhow!("the only GPU here is the software renderer {} of kind {}", adapter.name, adapter.kind));
+        }
+        note(&mut self.said, format!("ready on {} of kind {}, canvas from {}, first scale {}, {} ms after launch", adapter.name, adapter.kind, adapter.from.as_deref().unwrap_or("unknown"), adapter.scale.map_or("unknown".to_string(), |scale| scale.to_string()), shown_ms(adapter.after)));
+        self.ready_at = Some(self.launched.zip(adapter.after).map_or_else(Instant::now, |(launched, after)| launched + after));
+        if !self.noted {
+            self.noted = true;
+            if let Some(after) = adapter.after {
+                self.learn(&adapter.name, |start| start.ready = ms(after));
+            }
+        }
+        self.adapter = Some(adapter.name);
+        self.ready = true;
         Ok(())
     }
 
