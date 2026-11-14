@@ -368,6 +368,7 @@ mod probe {
         probe.section("5b Scenery", scenery_check);
         probe.section("5c Glide", glide_check);
         probe.section("5d Cold drags", cold_drags_check);
+        probe.section("5e Bare wakes", rest_wakes);
         probe.section("6 Idle", idle);
         probe.section("7 Off", off);
         probe.section("8 Second cycle", second_cycle);
@@ -2517,7 +2518,7 @@ mod probe {
         let home = p.home.clone();
         let _ = wait_until(Duration::from_secs(5), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" tick ")));
         std::thread::sleep(Duration::from_millis(600));
-        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(180).collect()).collect();
+        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(if line.contains(" tick ") { 260 } else { 180 }).collect()).collect();
         (changed, log)
     }
 
@@ -2576,6 +2577,22 @@ mod probe {
         shown: Option<f64>,
         first: Option<f64>,
         from: Option<String>,
+        early: bool,
+        wake: Option<f64>,
+        launch: Option<f64>,
+        hello: Option<f64>,
+        ready_at: Option<f64>,
+        shown_at: Option<f64>,
+        decided: Option<f64>,
+        waited: Option<f64>,
+    }
+
+    fn number_after(line: &str, key: &str) -> Option<f64> {
+        line.split(key).nth(1).and_then(|rest| rest.split([',', ' ']).next()).and_then(|value| value.parse::<f64>().ok())
+    }
+
+    fn rounded(value: Option<f64>) -> String {
+        value.map_or("none".to_string(), |value| format!("{}", value.round()))
     }
 
     fn cold_drag(p: &mut Probe, screen: &Screen, name: &str, (subject, aside): ((f32, f32), (f32, f32))) -> Cold {
@@ -2598,7 +2615,22 @@ mod probe {
         let opened = at(" glide open after snapshot");
         let gliding = at("shown and gliding");
         let first = log.iter().find_map(|line| line.split("first frame ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()));
+        let after_drop = |stamp: f64| (stamp - dropped) * 1000.0;
+        let decision = log.iter().find(|line| line.contains("glide decision at the set"));
+        let waited = decision.and_then(|line| number_after(line, "waited "));
+        let decided = decision.and_then(|line| stamp_of(line)).map(after_drop).zip(waited).map(|(at, waited)| at - waited);
+        let launch = decided.zip(decision.and_then(|line| number_after(line, "helper launched "))).map(|(at, before)| at - before);
+        let later_ready = log.iter().find(|line| line.contains("glide helper ready ")).and_then(|line| number_after(line, "glide helper ready "));
+        let from_launch = |key: &str| launch.zip(decision.and_then(|line| number_after(line, key))).map(|(at, after)| at + after);
         Cold {
+            early: log.iter().any(|line| line.contains("glide early launch")),
+            wake: log.iter().find(|line| line.contains(" wake ") && !line.contains(" glide ")).and_then(|line| stamp_of(line)).map(after_drop),
+            launch,
+            hello: from_launch("hello "),
+            ready_at: from_launch("ready ").or_else(|| launch.zip(later_ready).map(|(at, after)| at + after)),
+            shown_at: from_launch(", shown "),
+            decided,
+            waited,
             tick: log.iter().find(|line| line.contains(" tick ") && line.contains("Rendered")).map(|line| {
                 let took = line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()).unwrap_or(0.0);
                 let began = stamp_of(line).map(|ended| ((ended - took / 1000.0 - dropped) * 1000.0).round());
@@ -2627,14 +2659,22 @@ mod probe {
             let cold = cold_drag(p, screen, name, places);
             last = Instant::now();
             p.line(format!(
-                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, launch to ready {:?} ms, open to shown {:?} ms, drop to first frame {:?} ms, drop to set {:?} ms, canvas from {:?}, tick laps {:?}",
+                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, ready {}, shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, canvas from {:?}, tick laps {:?}",
                 index + 1,
                 cold.glided,
                 cold.skip,
-                cold.ready,
-                cold.shown,
+                cold.early,
+                rounded(cold.wake),
+                rounded(cold.launch),
+                rounded(cold.hello),
+                rounded(cold.ready_at),
+                rounded(cold.shown_at),
+                rounded(cold.decided),
+                rounded(cold.waited),
                 cold.first,
                 cold.set,
+                cold.ready,
+                cold.shown,
                 cold.from,
                 cold.tick
             ));
@@ -2732,6 +2772,56 @@ mod probe {
                 p.fail("a slow helper held the plain swap back by more than 60 ms");
             }
         }
+        bare_wakes(p);
+        Ok(())
+    }
+
+    fn bare_wakes(p: &mut Probe) {
+        let rested = rest_for_cold(p, Instant::now());
+        let lines = daemon_log(p).lines().count();
+        let mut alive = Vec::new();
+        for _ in 0..30 {
+            poke(p);
+            std::thread::sleep(Duration::from_millis(400));
+            alive.push(helper_pids(p).len());
+        }
+        std::thread::sleep(Duration::from_millis(1000));
+        let left = helper_pids(p);
+        let log = new_lines(&daemon_log(p), lines);
+        let launches = log.iter().filter(|line| line.contains("glide early launch")).count();
+        let lived: Vec<f64> = log.iter().filter_map(|line| number_after(line, "it lived ")).collect();
+        let ticks = log.iter().filter(|line| line.contains(" tick ")).count();
+        let sent: Vec<String> = log.iter().filter(|line| commanded(line) || line.contains("glide warm") || line.contains("glide open")).map(|line| line.chars().take(160).collect()).collect();
+        p.line(format!("- thirty wakes with nothing moved, after the helper was gone {rested}: ticks {ticks}, early launches {launches}, each quit after living {lived:?} ms, helper commands or picture warms {sent:?}, helpers seen after each wake {alive:?}, helpers left a second after the last wake {left:?}"));
+        if launches > 2 || lived.len() != launches || lived.iter().any(|lived| *lived > 1000.0) || !sent.is_empty() || !left.is_empty() {
+            p.fail("thirty bare wakes launched more than two helpers, kept one past a second, or sent it work");
+        }
+    }
+
+    fn rest_wakes(p: &mut Probe) -> Result<()> {
+        let whole = daemon_log(p);
+        let early = whole.lines().filter(|line| line.contains("glide early launch")).count();
+        let quit = whole.lines().filter(|line| line.contains("glide early helper quit")).count();
+        let ticks = whole.lines().filter(|line| line.contains(" tick ")).count();
+        let bare = whole.lines().filter(|line| line.contains(" tick ") && line.contains("Unchanged") && !["Rendered", "Plain", "Reapplied", "Kept", "Interrupted"].iter().any(|outcome| line.contains(outcome))).count();
+        p.line(format!("- over the whole probe so far: ticks {ticks}, ticks that changed nothing {bare}, early launches {early}, early helpers quit with nothing to do {quit}"));
+        if scooch_pid(p).is_none() {
+            p.line("- no daemon runs, so the ten quiet minutes were skipped".to_string());
+            return Ok(());
+        }
+        let lines = whole.lines().count();
+        std::thread::sleep(Duration::from_secs(600));
+        let log = new_lines(&daemon_log(p), lines);
+        let mut kinds: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for line in log.iter().filter(|line| !line.contains(" glide ")) {
+            if let Some(kind) = line.split(" wake ").nth(1).and_then(|rest| rest.split_whitespace().next()) {
+                *kinds.entry(kind.to_string()).or_default() += 1;
+            }
+        }
+        let ticks = log.iter().filter(|line| line.contains(" tick ")).count();
+        let mouse = log.iter().filter(|line| line.contains("mouse up")).count();
+        let early = log.iter().filter(|line| line.contains("glide early launch")).count();
+        p.line(format!("- ten quiet minutes with nothing done on the runner: wakes {} by kind {kinds:?}, mouse ups {mouse}, ticks {ticks}, early launches {early}", kinds.values().sum::<usize>()));
         Ok(())
     }
 
@@ -2785,7 +2875,7 @@ mod probe {
             p.line(format!("- setup move {step} of {name} to {:.0},{:.0}, new wallpaper {setup:?} ms after the Apple Event returned, daemon log {log:?}", target.0, target.1));
             setup_log = log;
         }
-        let tables = setup_log.iter().any(|line| line.contains(" tick ") && line.contains("Rendered") && (line.contains("tables ") || line.contains("later ")));
+        let tables = setup_log.iter().any(|line| line.contains(" tick ") && line.contains("Rendered") && (line.contains(", tables") || line.contains(", later")));
         p.line(format!("- the last setup move rendered and wrote tables {tables}"));
         if !tables {
             p.fail("the setup moves wrote no tables, so the timed drag could not glide");
@@ -3141,6 +3231,33 @@ mod probe {
             lines.push(format!("  - process start, launch to hello {}", stats(&hellos)));
             lines.push(format!("  - warm inside the helper, device with shaders, canvas read, check and upload of the stored mips {}", stats(&warms)));
             lines.push(format!("  - helpers gone after their run {gone} of 10"));
+            let children = || {
+                let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+                unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) };
+                let ms = |time: libc::timeval| time.tv_sec as f64 * 1000.0 + time.tv_usec as f64 / 1000.0;
+                ms(usage.ru_utime) + ms(usage.ru_stime)
+            };
+            for held in [70u64, 300] {
+                let (mut cpu, mut exits, mut left) = (Vec::new(), Vec::new(), 0);
+                for _ in 0..10 {
+                    let before = children();
+                    let mut helper = scooch::live::Helper::launch(&program)?;
+                    helper.ask_warm_with(scooch::live::Hints::default(), None, None, None, std::collections::BTreeMap::new())?;
+                    std::thread::sleep(Duration::from_millis(held));
+                    let pid = helper.pid;
+                    let quit = Instant::now();
+                    drop(helper);
+                    exits.push(quit.elapsed().as_secs_f64() * 1000.0);
+                    if Command::new("/bin/kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().is_ok_and(|status| status.success()) {
+                        left += 1;
+                    }
+                    cpu.push(children() - before);
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+                lines.push(format!("- an early launch thrown away after {held} ms, device only and then quit, ten times, helpers left running {left}"));
+                lines.push(format!("  - CPU time of the helper, user and system {}", stats(&cpu)));
+                lines.push(format!("  - quit to exit {}", stats(&exits)));
+            }
             let mut parts: [Vec<f64>; 15] = Default::default();
             let mut failed = Vec::new();
             for _ in 0..10 {

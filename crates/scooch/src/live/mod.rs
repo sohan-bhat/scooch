@@ -174,6 +174,10 @@ impl Helper {
         Ok(helper)
     }
 
+    pub fn arrived(&self) -> Option<Instant> {
+        self.arrived
+    }
+
     pub fn since_launch(&self) -> Option<Duration> {
         self.arrived.map(|arrived| arrived.saturating_duration_since(self.launched))
     }
@@ -292,6 +296,10 @@ impl Helper {
 
     pub fn exited(&mut self) -> bool {
         self.child.try_wait().ok().flatten().is_some()
+    }
+
+    pub fn broke(&mut self) -> bool {
+        self.child.try_wait().ok().flatten().is_some_and(|status| !status.success())
     }
 
     pub fn wait_exit(&mut self, limit: Duration) -> Option<Duration> {
