@@ -6,8 +6,10 @@ import { runtime } from '@/story/state';
 import { DESK_TOP } from './layout';
 import { ask, begin, end } from './drag';
 import { warm } from './engine';
-import { CHANNELS, hooks, live, liveId, obstacles, release, rimOf, rimOn, things } from './touch';
+import { CHANNELS, hooks, live, liveId, obstacles, release, rimOf, things } from './touch';
 import { hush } from './sound';
+import { quiet } from '@/lib/idle';
+import { acceleratedRaycast, computeBoundsTree } from 'three-mesh-bvh';
 
 const DESK = { left: -0.98, right: 0.98, back: -0.36, front: 0.42 };
 const QUIET = 250;
@@ -50,6 +52,24 @@ function screenPoint(mesh: Object3D, point: Vector3) {
   const u = (local.x - hooks.origin.x) / hooks.extent.x;
   const v = 1 - (local.y - hooks.origin.y) / hooks.extent.y;
   return barrel((u - 0.5) / 0.94 + 0.5, (v - 0.5) / 0.93 + 0.5);
+}
+
+const bounded = new WeakSet<Object3D>();
+
+function bounds(root: Object3D) {
+  if (bounded.has(root)) return;
+  bounded.add(root);
+  const meshes: Mesh[] = [];
+  root.traverse((child) => {
+    if ((child as Mesh).isMesh) meshes.push(child as Mesh);
+  });
+  void (async () => {
+    for (const mesh of meshes) {
+      await quiet();
+      if (!mesh.geometry.boundsTree) computeBoundsTree.call(mesh.geometry);
+      mesh.raycast = acceleratedRaycast;
+    }
+  })();
 }
 
 function rects(index: number, x: number, y: number) {
@@ -171,6 +191,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       tools.ndc.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
       tools.ray.setFromCamera(tools.ndc, camera);
       const roots = Object.values(things).filter((thing): thing is Object3D => !!thing && visible(thing));
+      for (const root of roots) bounds(root);
       const hits = tools.ray.intersectObjects(roots, true).filter((hit) => visible(hit.object));
       const first = hits[0];
       if (!first) return { id: '', point: null as Vector3 | null, object: null as Object3D | null };
@@ -185,7 +206,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       tools.ray.setFromCamera(tools.ndc, camera);
       return tools.ray.ray.intersectPlane(tools.plane, tools.hit);
     };
-    const onMove = (event: PointerEvent) => {
+    const onMove = (event: PointerEvent, movementX: number, movementY: number) => {
       if (!live.quiet || !runtime.ready) return;
       if (press.id) {
         const dx = event.clientX - press.x;
@@ -232,8 +253,8 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
         }, 160);
       }
       if (found.id === 'plant' && found.object) {
-        live.sway.vx += event.movementX * 0.0009;
-        live.sway.vz += event.movementY * 0.0009;
+        live.sway.vx += movementX * 0.0009;
+        live.sway.vz += movementY * 0.0009;
       }
       live.hover = found.id;
       element.style.cursor = found.id ? 'pointer' : '';
@@ -297,9 +318,26 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       live.hover = '';
       element.style.cursor = '';
     };
+    const moved = { event: null as PointerEvent | null, frame: 0, x: 0, y: 0 };
+    const onPointer = (event: PointerEvent) => {
+      moved.event = event;
+      moved.x += event.movementX;
+      moved.y += event.movementY;
+      if (moved.frame) return;
+      moved.frame = requestAnimationFrame(() => {
+        moved.frame = 0;
+        const latest = moved.event;
+        const x = moved.x;
+        const y = moved.y;
+        moved.event = null;
+        moved.x = 0;
+        moved.y = 0;
+        if (latest) onMove(latest, x, y);
+      });
+    };
     window.addEventListener('scroll', onScroll, { passive: true });
     window.addEventListener('wheel', onScroll, { passive: true });
-    element.addEventListener('pointermove', onMove);
+    element.addEventListener('pointermove', onPointer);
     element.addEventListener('pointerdown', onDown);
     element.addEventListener('pointerup', onUp);
     element.addEventListener('pointercancel', onUp);
@@ -308,7 +346,8 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       window.clearTimeout(press.rest);
       window.removeEventListener('scroll', onScroll);
       window.removeEventListener('wheel', onScroll);
-      element.removeEventListener('pointermove', onMove);
+      cancelAnimationFrame(moved.frame);
+      element.removeEventListener('pointermove', onPointer);
       element.removeEventListener('pointerdown', onDown);
       element.removeEventListener('pointerup', onUp);
       element.removeEventListener('pointercancel', onUp);
@@ -355,16 +394,14 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
     live.sway.x += live.sway.vx * step;
     live.sway.z += live.sway.vz * step;
 
-    let lit = 0;
     for (const [id, root] of Object.entries(things)) {
       const target = live.hover === id && live.quiet ? 0.55 : 0;
       for (const level of rimOf(root)) {
+        if (level.value === 0 && target === 0) continue;
         level.value += (target - level.value) * (1 - Math.exp(-step * 10));
-        if (level.value < 0.001) level.value = 0;
-        lit = Math.max(lit, level.value);
+        if (level.value < 0.001 && target === 0) level.value = 0;
       }
     }
-    rimOn.value = lit > 0 ? 1 : 0;
 
     const lamp = things.lamp;
     if (lamp) lamp.rotation.y = live.aim;

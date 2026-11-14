@@ -7,7 +7,7 @@ export const obstacles: Object3D[] = [];
 export const CHANNELS = ['main', 'swans', 'moon', 'city'];
 
 export const hooks = {
-  drawHeld: (_gl: WebGLRenderer, _delta: number) => false,
+  drawHeld: (_gl: WebGLRenderer, _delta: number, _part?: { width: number; height: number }) => false,
   showing: () => [] as string[],
   current: () => 'main',
   frame: null as Frame | null,
@@ -45,7 +45,6 @@ export const live = {
 export type Live = typeof live;
 
 const rimColor = new Color('#ffd9a8');
-export const rimOn = { value: 0 };
 const rims = new WeakMap<Object3D, { value: number }[]>();
 
 function withRim(material: MeshStandardMaterial, level: { value: number }) {
@@ -57,12 +56,11 @@ function withRim(material: MeshStandardMaterial, level: { value: number }) {
     previous.call(material, shader, renderer);
     shader.uniforms.uRimLevel = level;
     shader.uniforms.uRimColor = { value: rimColor };
-    shader.uniforms.uRimOn = rimOn;
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', '#include <common>\nuniform float uRimLevel;\nuniform vec3 uRimColor;\nuniform float uRimOn;')
+      .replace('#include <common>', '#include <common>\nuniform float uRimLevel;\nuniform vec3 uRimColor;')
       .replace(
         '#include <opaque_fragment>',
-        'if ( uRimOn > 0.5 ) outgoingLight += uRimColor * pow(1.0 - saturate(dot(normal, normalize(vViewPosition))), 3.0) * uRimLevel;\n#include <opaque_fragment>',
+        'if ( uRimLevel > 0.0 ) outgoingLight += uRimColor * pow(1.0 - saturate(dot(normal, normalize(vViewPosition))), 3.0) * uRimLevel;\n#include <opaque_fragment>',
       );
   };
   material.customProgramCacheKey = () => `${key}|rim`;
