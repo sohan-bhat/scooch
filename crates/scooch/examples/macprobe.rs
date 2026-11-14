@@ -800,7 +800,7 @@ mod probe {
     }
 
     fn stand_in(p: &mut Probe, what: &str) -> Result<Option<Duration>> {
-        if !asking(p) {
+        if !asking(p) && !windows().iter().any(|(owner, _, _)| owner == "UserNotificationCenter") {
             return Ok(None);
         }
         p.limit("on a hosted runner the login item daemon waits for a Finder automation prompt that nobody can click, and the runner image pre-grants Finder automation only to bash, osascript and its own agents, which a launchd job does not inherit");
@@ -2766,11 +2766,15 @@ mod probe {
         let on = cold_round(p, &screen, name, places, "cold");
         let glided = on.iter().filter(|cold| cold.glided).count();
         let (slow, off) = if restart_daemon(p, true)? {
-            p.line(format!("- the daemon restarted with {}=1000, so each helper answers hello a second late, then one drag to settle the new daemon that is not counted, then ten pairs, each a drag with the glide on and the slow helper followed by a drag with the glide off, every drag after 35 s at rest, so both drags of a pair meet the same runner load", scooch::live::SLOW_HELLO));
+            p.line(format!("- the daemon restarted with {}=1000, so each helper answers hello a second late, then one drag to settle the new daemon that is not counted, then ten pairs, each a drag with the glide on and the slow helper followed by a drag with the glide off, both after 35 s at rest so they meet the same runner load, and before each pair one uncounted drag with the glide on so the slow drag finds glide tables", scooch::live::SLOW_HELLO));
             let mut last = Instant::now();
             cold_one(p, &screen, name, places, ("settling", 0), &mut last);
             let (mut slow, mut off) = (Vec::new(), Vec::new());
             for index in 0..10 {
+                if index > 0 {
+                    let _ = cold_drag(p, &screen, name, places);
+                    last = Instant::now();
+                }
                 slow.push(cold_one(p, &screen, name, places, ("slow", index), &mut last));
                 let _ = p.scooch(&["glide"], LIMIT);
                 off.push(cold_one(p, &screen, name, places, ("off", index), &mut last));
