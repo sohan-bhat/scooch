@@ -17,6 +17,8 @@ pub const PATIENCE: Duration = Duration::from_millis(150);
 pub const BARE: u32 = 2;
 pub const EARLY_EVERY: Duration = Duration::from_secs(10);
 pub const EARLY_LIFE: Duration = Duration::from_millis(1500);
+const COLD_SAMPLES: usize = 3;
+const COLD_WITHIN: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Heard {
@@ -768,9 +770,7 @@ impl Glider {
                 _ => return Err(anyhow!("no cold start is remembered for this adapter yet, so this move swaps plainly")),
             }
         } else {
-            let base = opened_at.unwrap_or(started);
-            let base = self.ready_at.map_or(base, |ready| ready.max(base));
-            known(remembered.shown).or_else(|| known(remembered.draw)).map(|shown| base + shown)
+            None
         };
         if let Some(predicted) = predicted {
             trace.predicted = since(predicted);
@@ -796,12 +796,14 @@ impl Glider {
         let opened = opened_at.unwrap_or(open_at);
         let warm = self.ready_at.is_some_and(|ready| ready <= opened);
         let drawn = trace.drawn;
+        let fresh = launched.filter(|launched| waits_for_ready && started.saturating_duration_since(*launched) <= COLD_WITHIN);
         if let Some(adapter) = self.adapter.clone() {
             self.learn(&adapter, |start| {
-                if waits_for_ready {
-                    if let Some(after) = launched.map(|launched| shown_at.saturating_duration_since(launched)) {
-                        start.cold = ms(after);
-                    }
+                if let Some(launched) = fresh {
+                    start.colds.push(ms(shown_at.saturating_duration_since(launched)));
+                    let extra = start.colds.len().saturating_sub(COLD_SAMPLES);
+                    start.colds.drain(..extra);
+                    start.cold = start.colds.iter().copied().min().unwrap_or(0);
                 }
                 if warm {
                     start.shown = ms(shown_at.saturating_duration_since(opened));

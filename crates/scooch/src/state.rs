@@ -46,6 +46,8 @@ pub struct Start {
     pub ready: u32,
     pub shown: u32,
     pub cold: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub colds: Vec<u32>,
     pub draw: u32,
     pub window: u32,
     pub at: u64,
