@@ -75,7 +75,10 @@ function targets(value: unknown, found: Set<WebGLRenderTarget>, seen: Set<unknow
   for (const key of Object.keys(probe)) targets(probe[key], found, seen, depth + 1);
 }
 
+const unused = new Set(['Bloom.Target', 'Blur.Target.A', 'Blur.Target.B', 'Luminance', 'Luminance.Previous', 'Luminance.Adapted']);
+
 export async function allocate(gl: WebGLRenderer, composer: EffectComposer) {
+  if (!composer.outputBuffer.depthTexture) composer.outputBuffer.depthBuffer = false;
   const found = new Set<WebGLRenderTarget>();
   targets(composer.inputBuffer, found, new Set(), 0);
   targets(composer.outputBuffer, found, new Set(), 0);
@@ -83,6 +86,7 @@ export async function allocate(gl: WebGLRenderer, composer: EffectComposer) {
   for (const pass of composer.passes) targets(pass as Pass, found, seen, 0);
   const context = gl.getContext();
   for (const target of found) {
+    if (unused.has(target.texture.name)) continue;
     await quiet();
     if (still.off) return false;
     gl.initRenderTarget(target);
