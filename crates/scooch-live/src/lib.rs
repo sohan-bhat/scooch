@@ -53,6 +53,12 @@ pub struct Renderer {
     pub adapter: String,
 }
 
+static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn devices_made() -> usize {
+    MADE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 fn composition(target: &Target) -> bool {
     matches!(target, Target::Window { composition: true, .. })
 }
@@ -83,7 +89,9 @@ impl Gpu {
             wgpu::DeviceType::VirtualGpu => "virtual",
             wgpu::DeviceType::Other => "other",
         };
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|error| format!("request device {error}"))?;
+        let descriptor = wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() };
+        let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).map_err(|error| format!("request device {error}"))?;
+        MADE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let scenes = Arc::new(glide::pipes(&device));
         let gpu = Self { instance, adapter, device, queue, composition, pipelines: Arc::new(Mutex::new(Vec::new())), scenes, small: Arc::new(Mutex::new(None)), name, kind };
         gpu.pipeline(wgpu::TextureFormat::Bgra8Unorm);
@@ -165,6 +173,7 @@ impl Renderer {
         if gpu.composition != composition(&target) {
             return Err("the device was made for another presentation system".into());
         }
+        gpu.fits(pattern.width, pattern.height)?;
         let Gpu { instance, adapter, device, queue, name, .. } = gpu.clone();
         let surface = unsafe { instance.create_surface_unsafe(surface_target(&target)?) }.map_err(|error| format!("create surface {error}"))?;
         if !adapter.is_surface_supported(&surface) {

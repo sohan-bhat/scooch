@@ -148,6 +148,24 @@ fn the_chooser_picks_a_scale_on_this_device() {
 }
 
 #[test]
+fn a_screen_wider_than_the_default_limit_draws_or_says_too_large() {
+    let Some(gpu) = device() else { return };
+    let wide = RgbImage::from_raw(9000, 4, (0..9000 * 4 * 3).map(|index| (index % 251) as u8).collect()).expect("image");
+    match gpu.still(&wide) {
+        Ok(still) => assert_eq!(gpu.snapshot_at(9000, 4, &[(Look::Still(&still), 1.0)], 1.0).expect("snapshot"), wide),
+        Err(why) => assert!(why.contains("too large"), "{why}"),
+    }
+    println!("{} draws up to {} pixels a side", gpu.name, gpu.largest());
+    let beyond = gpu.largest() + 1;
+    let line = RgbImage::from_raw(beyond, 1, vec![9; beyond as usize * 3]).expect("image");
+    assert!(gpu.still(&line).err().is_some_and(|why| why.contains("too large")));
+    assert!(gpu.snapshot_at(beyond, 1, &[], 1.0).err().is_some_and(|why| why.contains("too large")));
+    assert!(gpu.time(beyond, 1, &[]).err().is_some_and(|why| why.contains("too large")));
+    let canvas = scooch_core::Canvas { width: beyond, height: 1, pixels: vec![9; beyond as usize * 3] };
+    assert!(gpu.try_picture(&canvas).err().is_some_and(|why| why.contains("too large")));
+}
+
+#[test]
 fn a_frame_can_be_timed_without_a_readback() {
     let Some(gpu) = device() else { return };
     let raw = vec![90u8; 64 * 48 * 3];
