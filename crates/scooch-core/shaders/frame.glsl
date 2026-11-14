@@ -48,10 +48,6 @@ vec2 coarse(vec2 p) {
     return p / 16.0 / paint_grid;
 }
 
-float field(vec2 p) {
-    return mix(textureLod(field_a, quarter(p), 0.0).r, textureLod(field_b, quarter(p), 0.0).r, s);
-}
-
 vec4 ramp(int which, float row, float d) {
     float x = clamp((d - ramp_low) / (ramp_high - ramp_low), 0.0, 1.0);
     vec2 at = vec2((x * 511.0 + 0.5) / 512.0, (row + 0.5) / 2.0);
@@ -141,14 +137,15 @@ void main() {
     if (weight > 0.0) {
         picture = mix(picture, (calm_a.rgb * weight_a + calm_b.rgb * weight_b) / weight, weight);
     }
-    float d = field(p);
-    if (d > reach) {
+    float d_a = textureLod(field_a, quarter(p), 0.0).r;
+    float d_b = textureLod(field_b, quarter(p), 0.0).r;
+    if (min(d_a, d_b) > reach) {
         color = vec4(picture, 1.0);
         return;
     }
     float grain = sand_grain(uvec2(p));
-    vec4 a = paint(0, p, d, picture, grain);
-    vec4 b = paint(1, p, d, picture, grain);
+    vec4 a = paint(0, p, d_a, picture, grain);
+    vec4 b = paint(1, p, d_b, picture, grain);
     vec4 land = mix(a, b, s);
     color = vec4(over_picture(picture, land), 1.0);
 }

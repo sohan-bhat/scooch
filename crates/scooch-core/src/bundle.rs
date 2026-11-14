@@ -764,8 +764,11 @@ pub fn finish(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opti
             if !active[j * grid.w + column.a] {
                 continue;
             }
-            let d = field_lines.iter().zip(&shares).map(|(f, (share, _))| (f[column.a] + (f[column.b] - f[column.a]) * column.t) * share).sum::<f32>();
-            if d > c.reach {
+            let mut ds = [f32::MAX; 2];
+            for (slot, f) in ds.iter_mut().zip(&field_lines) {
+                *slot = f[column.a] + (f[column.b] - f[column.a]) * column.t;
+            }
+            if ds.iter().all(|d| *d > c.reach) {
                 continue;
             }
             let tint_column = &tint_columns[x];
@@ -774,9 +777,12 @@ pub fn finish(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opti
             let grain = grain_at(&c, x as u32, y as u32);
             let mut total = Paint::default();
             for (k, (plane, (share, x))) in planes.iter().zip(&shares).enumerate() {
+                if ds[k] > c.reach {
+                    continue;
+                }
                 let look = lerp4(&look_lines[k], column);
                 let tints = &tint_lines[k];
-                let part = paint(&x.constants, &plane.ramps, d, look, |layer| lerp4(&tints[layer], tint_column), here, grain);
+                let part = paint(&x.constants, &plane.ramps, ds[k], look, |layer| lerp4(&tints[layer], tint_column), here, grain);
                 total = total.plus(part.scaled(*share));
             }
             if total.a <= 1e-4 {

@@ -46,12 +46,6 @@ fn coarse(p: vec2<f32>) -> vec2<f32> {
     return p / 16.0 / frame.paint;
 }
 
-fn field(p: vec2<f32>) -> f32 {
-    let a = textureSampleLevel(field_a, smooth_filter, quarter(p), 0.0).r;
-    let b = textureSampleLevel(field_b, smooth_filter, quarter(p), 0.0).r;
-    return mix(a, b, frame.s);
-}
-
 fn ramp(table: texture_2d<f32>, row: f32, d: f32) -> vec4<f32> {
     let x = clamp((d - frame.ramp_low) / (frame.ramp_high - frame.ramp_low), 0.0, 1.0);
     return textureSampleLevel(table, smooth_filter, vec2<f32>((x * 511.0 + 0.5) / 512.0, (row + 0.5) / 2.0), 0.0);
@@ -146,13 +140,14 @@ fn draw(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     if (weight > 0.0) {
         picture = mix(picture, (calm_a.rgb * weight_a + calm_b.rgb * weight_b) / weight, weight);
     }
-    let d = field(p);
-    if (d > frame.reach) {
+    let d_a = textureSampleLevel(field_a, smooth_filter, quarter(p), 0.0).r;
+    let d_b = textureSampleLevel(field_b, smooth_filter, quarter(p), 0.0).r;
+    if (min(d_a, d_b) > frame.reach) {
         return vec4<f32>(picture, 1.0);
     }
     let grain = sand_grain(vec2<u32>(p));
-    let a = paint(look_a, paints_a, ramps_a, p, d, picture, grain);
-    let b = paint(look_b, paints_b, ramps_b, p, d, picture, grain);
+    let a = paint(look_a, paints_a, ramps_a, p, d_a, picture, grain);
+    let b = paint(look_b, paints_b, ramps_b, p, d_b, picture, grain);
     let land = mix(a, b, frame.s);
     return vec4<f32>(over_picture(picture, land), 1.0);
 }
