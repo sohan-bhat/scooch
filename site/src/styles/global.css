@@ -145,11 +145,6 @@ html.lenis body {
   overflow: clip;
 }
 
-.line {
-  padding-bottom: 0.08em;
-  margin-bottom: -0.08em;
-}
-
 .story,
 .story-only {
   display: none;
@@ -255,17 +250,21 @@ html.still-shot.share-shot .share-only {
 }
 
 [data-reveal] {
-  transition:
-    opacity var(--duration-reveal) var(--ease-out),
-    transform var(--duration-reveal) var(--ease-out);
+  transition: opacity var(--duration-reveal) var(--ease-out);
   transition-delay: calc(var(--reveal-index, 0) * 90ms);
 }
 
 .js [data-reveal]:not([data-shown]) {
   opacity: 0;
-  transform: translateY(28px);
 }
 
-.js .beats[data-pending] [data-beat]:not([data-beat="hero"]) {
+.js .beats [data-overlay]:not([data-overlay="hero"]) {
   opacity: 0;
+  visibility: hidden;
+}
+
+@media (max-width: 767px), (orientation: portrait) {
+  .beats .phone-caption[data-phone] {
+    display: block;
+  }
 }

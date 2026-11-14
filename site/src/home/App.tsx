@@ -8,7 +8,7 @@ import { Story } from './Story';
 import { introduce, storyMode, useReveal, useSolidNav, useStory } from './useStory';
 
 export function App() {
-  const beats = useRef<HTMLDivElement[]>([]);
+  const beats = useRef<HTMLElement[]>([]);
   const section = useRef<HTMLElement>(null);
   const canvas = useRef<HTMLDivElement>(null);
   const action = useRef<HTMLAnchorElement>(null);

@@ -7,7 +7,7 @@ import { runtime, story } from '@/story/state';
 import { beats as beatList, buildTimeline, TOTAL } from '@/story/timeline';
 
 type Refs = {
-  beats: React.RefObject<HTMLDivElement[]>;
+  beats: React.RefObject<HTMLElement[]>;
   section: React.RefObject<HTMLElement | null>;
   canvas: React.RefObject<HTMLDivElement | null>;
   action: React.RefObject<HTMLAnchorElement | null>;
@@ -99,7 +99,7 @@ export function useStory(refs: Refs, live: boolean, still: number) {
     const build = (at: number) => {
       if (!manifest || disposed) return;
       built = buildTimeline(
-        { beats: refs.beats.current, navAction: refs.action.current, skip: refs.skip.current },
+        { overlays: refs.beats.current, navAction: refs.action.current, skip: refs.skip.current },
         manifest,
       );
       refs.section.current?.querySelector('.beats')?.removeAttribute('data-pending');
@@ -130,7 +130,6 @@ export function useStory(refs: Refs, live: boolean, still: number) {
       trigger = null;
       if (built) {
         built.timeline.progress(0).kill();
-        for (const split of built.splits) split.revert();
         built = null;
       }
       Object.assign(story, initial);

@@ -13,6 +13,14 @@ export const story = {
   tubeOn: 1,
   tubeOff: 0,
   blinds: 1,
+  osd: 0,
+  typed: 0,
+  written: 0,
+  wall: 0,
+  shape: 0,
+  fly: 0,
+  city: 0,
+  drift: 0,
   progress: 0,
 };
 

@@ -12,40 +12,42 @@
   },
   "beats": [
     {
-      "id": "hero",
-      "title": "Wallpaper that scooches over for your icons.",
-      "action": "Install"
+      "id": "hero"
     },
     {
       "id": "problem",
-      "title": "Icons always land on the best part of the picture."
+      "caption": "Icons hide the best part"
     },
     {
-      "id": "sees",
-      "title": "Scooch finds the subject with plain image math.",
-      "support": "No AI and no model files."
+      "id": "lift"
     },
     {
       "id": "fix",
-      "title": "Then it moves the picture so nothing important is covered."
+      "caption": "Scooch slides the picture clear"
     },
     {
       "id": "grow",
-      "title": "Then clouds and islands grow around your icons."
+      "caption": "Clouds grow around your icons"
     },
     {
-      "id": "follow",
-      "title": "Move an icon and the wallpaper follows."
+      "id": "follow"
+    },
+    {
+      "id": "shapes",
+      "caption": "Any picture, any screen"
+    },
+    {
+      "id": "travel"
+    },
+    {
+      "id": "macro"
     },
     {
       "id": "rest",
-      "title": "Between changes it draws nothing.",
-      "support": "At rest it uses no CPU and about 7 MB of memory."
+      "caption": "No CPU at rest"
     },
     {
-      "id": "end",
-      "title": "It works with any picture on Mac, Windows and Linux.",
-      "action": "Install"
+      "id": "end"
     }
   ],
   "install": {
@@ -84,13 +86,16 @@
   "stills": {
     "alt": [
       "A desk at night under an orange arm lamp, with an old laptop and a small television. The television shows a hot air balloon on a blue sky with desktop icons over it.",
-      "Close on the television, where desktop icons sit on the balloon.",
-      "The picture lifts out of the television, the balloon rises from it with a warm glow, and the icons float above it as tiles.",
-      "The picture slides under the floating icons until the balloon is clear.",
-      "Soft white clouds grow around each group of icons on the open sky.",
-      "One icon moves next to the balloon, the picture slides clear again, and the clouds follow the icons.",
-      "The picture is back on the television. The lamp is off and the two screens are the only light.",
-      "A high wide shot of the desk with the lamp back on low. The television shows the balloon with clouds and the laptop shows two swans with islands."
+      "Close on the television, where desktop icons sit on the balloon and a channel caption reads Icons hide the best part.",
+      "The picture lifts out of the television and the balloon rises from it with a warm glow.",
+      "The picture slides clear of the icons above a yellow notepad typed with Scooch slides the picture clear.",
+      "Soft clouds grow around each group of icons, next to a sticky note that reads Clouds grow around your icons.",
+      "An icon is dragged next to the balloon, the picture slides clear again and the clouds follow it.",
+      "The picture stretches very wide and then tall, with the icons in a column and then a row, under the words Any picture, any screen written in the light on the wall.",
+      "The picture flies to the laptop, which shows two swans with islands, and on to a large old television showing the moon in a sky with clouds.",
+      "A slow low pass along the desk over the tape player, the clock and the light from the blinds.",
+      "The lamp is off and the screens are the only light. The alarm clock dial reads No CPU at rest.",
+      "A high wide shot of every screen on the desk with the line Mac, Windows and Linux and an install button."
     ]
   },
   "missing": {
@@ -250,5 +255,12 @@
       }
     ]
   },
-  "placeholders": {}
+  "placeholders": {},
+  "story": {
+    "title": "Wallpaper that scooches over for your icons.",
+    "end": "Mac, Windows and Linux",
+    "action": "Install",
+    "hint": "The desk works. Try the lamp.",
+    "label": "Scooch in eleven steps"
+  }
 }

@@ -1,4 +1,5 @@
 import { Component, lazy, Suspense, type ReactNode } from 'react';
+import content from '@/content.json';
 import { asset } from '@/lib/base';
 import { Beats } from './Beats';
 
@@ -22,7 +23,7 @@ class Fallback extends Component<{ children: ReactNode }, { failed: boolean }> {
 
 type Props = {
   live: boolean;
-  beats: React.RefObject<HTMLDivElement[]>;
+  beats: React.RefObject<HTMLElement[]>;
   canvas: React.Ref<HTMLDivElement>;
   still: React.Ref<HTMLPictureElement>;
   section: React.Ref<HTMLElement>;
@@ -31,7 +32,7 @@ type Props = {
 
 export function Story({ live, beats, canvas, still, section, onReady }: Props) {
   return (
-    <section ref={section} id="story" className="story relative h-[938svh]" aria-label="Scooch in eight steps">
+    <section ref={section} id="story" className="story relative h-[1400svh]" aria-label={content.story.label}>
       <div className="stage sticky top-0 h-svh w-full overflow-hidden bg-room">
         <div ref={canvas} className="absolute inset-0 opacity-0">
           {live ? (
