@@ -2673,11 +2673,14 @@ mod probe {
 
     fn cold_round(p: &mut Probe, screen: &Screen, name: &str, places: ((f32, f32), (f32, f32)), label: &str) -> Vec<Cold> {
         let mut last = Instant::now();
-        let mut seen = Vec::new();
-        for index in 0..10 {
-            let rested = rest_for_cold(p, last);
+        (0..10).map(|index| cold_one(p, screen, name, places, (label, index), &mut last)).collect()
+    }
+
+    fn cold_one(p: &mut Probe, screen: &Screen, name: &str, places: ((f32, f32), (f32, f32)), (label, index): (&str, usize), last: &mut Instant) -> Cold {
+        {
+            let rested = rest_for_cold(p, *last);
             let cold = cold_drag(p, screen, name, places);
-            last = Instant::now();
+            *last = Instant::now();
             p.line(format!(
                 "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}",
                 index + 1,
@@ -2700,9 +2703,8 @@ mod probe {
                 cold.from,
                 cold.tick
             ));
-            seen.push(cold);
+            cold
         }
-        seen
     }
 
     fn restart_daemon(p: &mut Probe, slow: bool) -> Result<bool> {
@@ -2763,19 +2765,26 @@ mod probe {
         p.line("- ten drags with the glide on, each after 35 s at rest so the helper is gone".to_string());
         let on = cold_round(p, &screen, name, places, "cold");
         let glided = on.iter().filter(|cold| cold.glided).count();
-        let ran = p.scooch(&["glide"], LIMIT);
-        p.line(format!("- scooch glide said {:?}, then ten drags with the glide off, each after 35 s at rest", ran.text()));
-        let off = cold_round(p, &screen, name, places, "off");
-        let ran = p.scooch(&["glide"], LIMIT);
-        p.line(format!("- scooch glide said {:?}", ran.text()));
-        let slow = if restart_daemon(p, true)? {
-            p.line(format!("- the daemon restarted with {}=1000, so each helper answers hello a second late, then ten drags each after 35 s at rest", scooch::live::SLOW_HELLO));
-            let slow = cold_round(p, &screen, name, places, "slow");
+        let (slow, off) = if restart_daemon(p, true)? {
+            p.line(format!("- the daemon restarted with {}=1000, so each helper answers hello a second late, then one drag to settle the new daemon that is not counted, then ten pairs, each a drag with the glide on and the slow helper followed by a drag with the glide off, every drag after 35 s at rest, so both drags of a pair meet the same runner load", scooch::live::SLOW_HELLO));
+            let mut last = Instant::now();
+            cold_one(p, &screen, name, places, ("settling", 0), &mut last);
+            let (mut slow, mut off) = (Vec::new(), Vec::new());
+            for index in 0..10 {
+                slow.push(cold_one(p, &screen, name, places, ("slow", index), &mut last));
+                let _ = p.scooch(&["glide"], LIMIT);
+                off.push(cold_one(p, &screen, name, places, ("off", index), &mut last));
+                let _ = p.scooch(&["glide"], LIMIT);
+            }
+            p.line(format!("- the glide setting after the pairs is {}", state(p)["glide"]));
             restart_daemon(p, false)?;
-            Some(slow)
+            (Some(slow), off)
         } else {
-            p.line("- the daemon here is the login item, so the slow helper hint could not be set and the slow drags were skipped".to_string());
-            None
+            let ran = p.scooch(&["glide"], LIMIT);
+            p.line(format!("- the daemon here is the login item, so the slow helper hint could not be set and the slow drags were skipped, scooch glide said {:?}, then ten drags with the glide off, each after 35 s at rest", ran.text()));
+            let off = cold_round(p, &screen, name, places, "off");
+            let _ = p.scooch(&["glide"], LIMIT);
+            (None, off)
         };
         let sets = |round: &[Cold]| round.iter().filter_map(|cold| cold.set).collect::<Vec<u128>>();
         let (on_set, off_set) = (middle(&sets(&on)), middle(&sets(&off)));
