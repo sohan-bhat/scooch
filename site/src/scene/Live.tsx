@@ -263,6 +263,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       if (!live.quiet || !runtime.ready || event.button > 0) return;
       const found = pick(event);
       press.id = found.id || (event.pointerType === 'mouse' ? 'space' : '');
+      live.pressing = !!press.id;
       press.x = event.clientX;
       press.y = event.clientY;
       press.moved = false;
@@ -292,6 +293,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       if (press.id === 'glass' || press.id === 'lamp' || press.id === 'space') element.setPointerCapture(event.pointerId);
     };
     const onUp = (event: PointerEvent) => {
+      live.pressing = false;
       if (!press.id) return;
       const id = press.id;
       press.id = '';

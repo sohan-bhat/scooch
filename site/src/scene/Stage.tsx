@@ -25,9 +25,7 @@ setConsoleFunction((type: string, message: unknown, ...params: unknown[]) => {
 
 function Pauser({ host }: { host: React.RefObject<HTMLDivElement | null> }) {
   const setFrameloop = useThree((state) => state.setFrameloop);
-  const setDpr = useThree((state) => state.setDpr);
   useEffect(() => {
-    quality.setDpr = setDpr;
     let visible = true;
     const sync = () => setFrameloop(runtime.compiled && visible && !document.hidden && !runtime.abandoned ? 'always' : 'never');
     runtime.resume = sync;
@@ -49,7 +47,7 @@ function Pauser({ host }: { host: React.RefObject<HTMLDivElement | null> }) {
       runtime.resume = null;
       window.removeEventListener('pointermove', move);
     };
-  }, [host, setFrameloop, setDpr]);
+  }, [host, setFrameloop]);
   return null;
 }
 
@@ -95,11 +93,10 @@ function useShown() {
 export default function Stage({ onReady }: { onReady: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const shown = useShown();
-  const fade = useRef<HTMLCanvasElement>(null);
   const phone = layoutFor(window.innerWidth, window.innerHeight) === 'phone';
   const deviceDpr = window.devicePixelRatio || 1;
   quality.configure(phone, phone ? Math.min(deviceDpr, 1.5) : deviceDpr, gpuClass().gpu);
-  const dpr = runtime.still >= 0 ? Math.min(deviceDpr, 2) : Math.min(quality.step.dpr, deviceDpr);
+  const dpr = runtime.still >= 0 ? Math.min(deviceDpr, 2) : Math.min(quality.sharpDpr, deviceDpr);
 
   return (
     <div ref={host} className="absolute inset-0">
@@ -122,9 +119,8 @@ export default function Stage({ onReady }: { onReady: () => void }) {
           <Scene phone={phone} onReady={onReady} />
         </Suspense>
         <Pauser host={host} />
-        {runtime.still < 0 && <Governor fade={fade} />}
+        {runtime.still < 0 && <Governor />}
       </Canvas>
-      <canvas ref={fade} aria-hidden className="pointer-events-none absolute inset-0 h-full w-full opacity-0" />
       {shown ? (
         <Suspense fallback={null}>
           <Controls />

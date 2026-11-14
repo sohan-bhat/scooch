@@ -4,14 +4,11 @@ import { runtime } from '@/story/state';
 import { quality } from './quality';
 
 const SIZE = 512;
-const UP_WINDOW = 3000;
-const UP_LIMIT = 12;
-const DOWN_WINDOW = 500;
-const DOWN_LIMIT = 18;
-const WARMUP = 1500;
-const SETTLE = 700;
-const RETRY = 30000;
+const WINDOW = 1500;
+const GPU_BUDGET = 10.5;
+const FRAME_BUDGET = 17.5;
 const REST = 1000;
+const SETTLE = 600;
 
 type Timer = {
   TIME_ELAPSED_EXT: number;
@@ -61,7 +58,7 @@ class Ring {
   }
 }
 
-export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | null> }) {
+export function Governor() {
   const gl = useThree((state) => state.gl);
   const state = useMemo(() => {
     const context = gl.getContext() as WebGL2RenderingContext;
@@ -74,12 +71,8 @@ export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | n
       current: null as WebGLQuery | null,
       frames: new Ring(),
       gpu: new Ring(),
-      start: performance.now(),
-      changed: performance.now(),
-      fading: 0,
-      failedAt: new Float64Array(16).fill(-Infinity),
       input: performance.now(),
-      failures: new Uint8Array(16),
+      restSince: performance.now(),
     };
   }, [gl]);
 
@@ -87,7 +80,7 @@ export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | n
     const mark = () => {
       state.input = performance.now();
     };
-    const events = ['scroll', 'wheel', 'pointerdown', 'pointermove', 'keydown', 'touchmove'] as const;
+    const events = ['scroll', 'wheel', 'pointerdown', 'keydown', 'touchmove'] as const;
     for (const name of events) window.addEventListener(name, mark, { passive: true });
     return () => {
       for (const name of events) window.removeEventListener(name, mark);
@@ -129,57 +122,26 @@ export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | n
       state.pending.push(state.current);
       state.current = null;
     }
-    if (state.fading > 0) {
-      state.fading -= 1;
-      if (state.fading === 0 && fade.current) {
-        fade.current.style.transition = 'opacity 420ms cubic-bezier(0.22, 1, 0.36, 1)';
-        fade.current.style.opacity = '0';
-      }
-    }
-    if (!runtime.ready || !runtime.props || !runtime.scenery || !runtime.gallery || !runtime.painted || !runtime.inside) {
-      state.start = now;
+    const warm = runtime.ready && runtime.props && runtime.scenery && runtime.gallery && runtime.painted && runtime.inside;
+    const resting = now - state.input > REST && quality.chain === 'sharp' && now - quality.blendAt > 300;
+    if (!warm || !resting || !quality.hasFast) {
+      state.restSince = now;
       state.frames.clear();
       state.gpu.clear();
       return;
     }
-    if (now - state.start < WARMUP || now - state.changed < SETTLE) return;
-    const frames = state.frames.stats(now, DOWN_WINDOW);
-    const slowFrames = frames.n >= 8 && frames.steady > DOWN_LIMIT;
-    const gpuShort = state.gpu.stats(now, DOWN_WINDOW);
-    const slow = slowFrames || (gpuShort.n >= 8 && gpuShort.steady > DOWN_LIMIT);
-    const resting = now - state.input > REST;
-    if (slow && quality.canDown() && (quality.sameSize(quality.level + 1) || (quality.tier === 'light' && resting))) {
-      state.failedAt[quality.level] = now;
-      state.failures[quality.level] += 1;
-      change(() => quality.down());
-      return;
-    }
-    if (!timer || !quality.canUp() || !quality.sameSize(quality.level - 1)) return;
-    const gpuLong = state.gpu.stats(now, UP_WINDOW);
-    const quiet = gpuLong.n >= 90 && gpuLong.max < UP_LIMIT;
-    const framesLong = state.frames.stats(now, UP_WINDOW);
-    const target = quality.level - 1;
-    const allowed = state.failures[target] < 2 && now - state.failedAt[target] > RETRY;
-    const roomy = allowed && quiet && framesLong.mean < 17.5 && now - state.changed > UP_WINDOW;
-    if (roomy) change(() => quality.up());
-  }, 2);
-
-  function change(apply: () => void) {
-    const overlay = fade.current;
-    const source = gl.domElement;
-    if (overlay) {
-      overlay.width = source.width;
-      overlay.height = source.height;
-      overlay.getContext('2d')?.drawImage(source, 0, 0);
-      overlay.style.transition = 'none';
-      overlay.style.opacity = '1';
-      state.fading = 3;
-    }
-    apply();
-    state.changed = performance.now();
+    if (now - state.restSince < SETTLE) return;
+    const frames = state.frames.stats(now, WINDOW);
+    const gpu = state.gpu.stats(now, WINDOW);
+    const enough = timer ? gpu.n >= 45 : frames.n >= 45;
+    if (!enough) return;
+    const needs = (timer ? gpu.steady > GPU_BUDGET : false) || frames.steady > FRAME_BUDGET;
+    quality.needsFast = needs;
+    quality.decided = true;
+    state.restSince = now;
     state.frames.clear();
     state.gpu.clear();
-  }
+  }, 2);
 
   return null;
 }
