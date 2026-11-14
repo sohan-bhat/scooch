@@ -473,7 +473,7 @@ impl Gpu {
         Ok(Picture { view: Self::view(&texture, wgpu::TextureViewDimension::D2), width, height, levels })
     }
 
-    pub fn try_picture_levels(&self, width: u32, height: u32, levels: &[Vec<u8>]) -> Result<Picture, String> {
+    pub fn try_picture_levels(&self, width: u32, height: u32, levels: &[&[u8]]) -> Result<Picture, String> {
         self.healthy()?;
         self.fits(width.max(1), height.max(1))?;
         let count = levels.len().max(1) as u32;

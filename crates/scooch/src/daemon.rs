@@ -363,6 +363,7 @@ pub struct Daemon {
     used: Arc<Mutex<Instant>>,
     seen: Mutex<Option<u64>>,
     prints: Mutex<HashMap<String, u64>>,
+    moved: Mutex<Vec<String>>,
 }
 
 #[derive(Default)]
@@ -406,7 +407,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()) }
     }
 
     pub fn quick_look(&self) -> bool {
@@ -557,11 +558,7 @@ impl Daemon {
                 if trace() {
                     eprintln!("{} snapshot icons {print:016x}", stamp());
                 }
-                let moved = self.moved_screens(snapshot);
-                if let (Some(glider), false) = (gliding.as_deref_mut(), moved.is_empty()) {
-                    self.open_after_snapshot(&state, snapshot, &moved, glider);
-                    lap("early", &mut clock);
-                }
+                *self.moved.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = self.moved_screens(snapshot);
             }
             match snapshot {
                 Ok(snapshot) => self.pass(&mut state, &snapshot, &mut report, (gliding.as_deref_mut(), blocked)),
@@ -619,18 +616,18 @@ impl Daemon {
         }
     }
 
-    fn open_after_snapshot(&self, state: &State, snapshot: &Snapshot, moved: &[String], glider: &mut Glider) {
-        for screen in snapshot.screens.iter().filter(|screen| moved.contains(&screen.id)) {
-            let Some(entry) = state.screens.get(&screen.id) else { continue };
-            let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { continue };
-            let Ok(key) = tables_key(&entry.source, &state.options) else { continue };
-            if !self.store.tables_for(output, key).is_file() || !self.desktop.wallpaper(screen).ok().flatten().is_some_and(|shown| same(&shown, output)) {
-                continue;
-            }
-            let scene = scene::scene(screen, &[]);
-            let canvas = Some(self.store.canvas_for(&screen.id, key)).filter(|canvas| canvas.is_file());
-            glider.open_early(screen, &entry.source, [scene.width, scene.height], output, canvas.as_deref());
+    fn open_after_snapshot(&self, entry: &Entry, screen: &Screen, options: &Options, current: Option<&Path>, glider: &mut Glider) {
+        if !self.moved.lock().map(|moved| moved.contains(&screen.id)).unwrap_or(false) {
+            return;
         }
+        let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { return };
+        let Ok(key) = tables_key(&entry.source, options) else { return };
+        if !self.store.tables_for(output, key).is_file() || !current.is_some_and(|shown| same(shown, output)) {
+            return;
+        }
+        let scene = scene::scene(screen, &[]);
+        let canvas = Some(self.store.canvas_for(&screen.id, key)).filter(|canvas| canvas.is_file());
+        glider.open_early(screen, &entry.source, [scene.width, scene.height], output, canvas.as_deref());
     }
 
     fn pass(&self, state: &mut State, snapshot: &Snapshot, report: &mut Report, (mut gliding, blocked): (Option<&mut Glider>, Option<&'static str>)) {
@@ -733,6 +730,11 @@ impl Daemon {
             let shown = entry.shown().to_path_buf();
             self.show(screen, &shown)?;
             return Ok(Outcome::Reapplied);
+        }
+        if let (Some(glider), false) = (glider.as_deref_mut(), settling) {
+            let mut clock = Instant::now();
+            self.open_after_snapshot(entry, screen, options, current.as_deref(), glider);
+            lap("early", &mut clock);
         }
         let outcome = self.place(entry, screen, &scene, options, (current.as_deref().filter(|_| !settling), current.as_deref()), (glider, blocked))?;
         if outcome != Outcome::Interrupted {
@@ -908,14 +910,18 @@ impl Daemon {
         Ok(Outcome::Rendered)
     }
 
+    #[cfg(not(any(windows, target_os = "macos")))]
+    fn keep_canvas(&self, _screen: &str, _key: u64, _bundle: &scooch_core::Bundle) {}
+
+    #[cfg(any(windows, target_os = "macos"))]
     fn keep_canvas(&self, screen: &str, key: u64, bundle: &scooch_core::Bundle) {
         let path = self.store.canvas_for(screen, key);
         if path.is_file() {
             return;
         }
         let print = crate::live::canvas::fingerprint(bundle.canvas_width, bundle.canvas_height, &bundle.canvas);
-        let head = crate::live::canvas::encode(bundle.canvas_width, bundle.canvas_height, &[], print);
-        if crate::state::write_parts(&path, &[&head, &bundle.canvas]).is_err() {
+        let canvas = scooch_core::Canvas { width: bundle.canvas_width, height: bundle.canvas_height, pixels: bundle.canvas.clone() };
+        if crate::live::canvas::write(&path, canvas.width, canvas.height, &scooch_live::levels(&canvas), print).is_err() {
             return;
         }
         let prefix = format!("{}.", file_safe(screen));
@@ -2720,13 +2726,16 @@ pub mod tests {
         let key = tables_key(&daemon.store.load().screens["main"].source, &Options::default()).unwrap();
         let mut kept: Vec<_> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|file| file.path()).collect();
         kept.sort();
-        let mut wanted = vec![daemon.store.tables_for(&second, key), daemon.store.canvas_for("main", key)];
+        let mut wanted = vec![daemon.store.tables_for(&second, key)];
+        if cfg!(any(windows, target_os = "macos")) {
+            wanted.push(daemon.store.canvas_for("main", key));
+            let canvas = crate::live::canvas::read(&daemon.store.canvas_for("main", key)).unwrap().canvas().unwrap();
+            let tables = std::fs::read(daemon.store.tables_for(&second, key)).unwrap();
+            assert_eq!(crate::live::canvas::tables_print(&tables), Some(crate::live::canvas::fingerprint(canvas.width, canvas.height, &canvas.pixels)));
+            assert!(events.iter().any(|event| event.starts_with("warm ") && event.contains(" canvas")), "{events:?}");
+        }
         wanted.sort();
         assert_eq!(kept, wanted);
-        let canvas = crate::live::canvas::read(&daemon.store.canvas_for("main", key)).unwrap();
-        let tables = std::fs::read(daemon.store.tables_for(&second, key)).unwrap();
-        assert_eq!(crate::live::canvas::tables_print(&tables), Some(crate::live::canvas::fingerprint(canvas.width, canvas.height, &canvas.pixels)));
-        assert!(events.iter().any(|event| event.starts_with("warm ") && event.contains(" canvas")), "{events:?}");
     }
 
     #[test]
