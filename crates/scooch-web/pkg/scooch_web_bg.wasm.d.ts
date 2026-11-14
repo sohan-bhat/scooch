@@ -1,0 +1,33 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_engine_free: (a: number, b: number) => void;
+export const __wbg_tables_free: (a: number, b: number) => void;
+export const engine_create: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
+export const engine_drag: (a: number, b: number, c: number, d: number, e: number) => number;
+export const engine_drop: (a: number, b: number, c: number) => number;
+export const engine_screen: (a: number, b: number, c: number) => void;
+export const tables_canvas: (a: number) => [number, number];
+export const tables_canvasFits: (a: number) => number;
+export const tables_canvasHeight: (a: number) => number;
+export const tables_canvasWidth: (a: number) => number;
+export const tables_constants: (a: number) => [number, number];
+export const tables_field: (a: number) => [number, number];
+export const tables_gridHeight: (a: number) => number;
+export const tables_gridWidth: (a: number) => number;
+export const tables_height: (a: number) => number;
+export const tables_look: (a: number) => [number, number];
+export const tables_map: (a: number) => [number, number];
+export const tables_mapWidth: (a: number) => number;
+export const tables_mirrored: (a: number) => number;
+export const tables_pad: (a: number) => [number, number];
+export const tables_paintHeight: (a: number) => number;
+export const tables_paintWidth: (a: number) => number;
+export const tables_paints: (a: number) => [number, number];
+export const tables_ramps: (a: number) => [number, number];
+export const tables_width: (a: number) => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_start: () => void;
