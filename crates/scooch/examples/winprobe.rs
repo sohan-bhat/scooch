@@ -3345,6 +3345,7 @@ mod probe {
         shots: Vec<(f64, RgbImage)>,
         log: Vec<String>,
         old: Option<PathBuf>,
+        kept: Option<PathBuf>,
         new: Option<PathBuf>,
         sent: bool,
     }
@@ -3353,6 +3354,13 @@ mod probe {
         let desktop = platform::current().ok();
         let area = screen_rect(screen);
         let old = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
+        let kept = old.as_ref().and_then(|path| {
+            static KEPT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let number = KEPT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let extension = path.extension().map_or("png".to_string(), |extension| extension.to_string_lossy().into_owned());
+            let kept = std::env::temp_dir().join(format!("scooch-judged-{}-{number}.{extension}", std::process::id()));
+            fs::copy(path, &kept).ok().map(|_| kept)
+        });
         let start = log_lines(log).len();
         let sent = act();
         let dropped = epoch();
@@ -3378,12 +3386,14 @@ mod probe {
             drain();
         }
         let log: Vec<String> = log_lines(log).into_iter().skip(start).filter(|line| line.contains(" glide ") || line.contains(" tick ") || line.contains(" wake ") || line.contains(" set ")).collect();
-        let new = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
-        Watched { dropped, shots, log, old, new, sent }
+        let set = log.iter().rev().find_map(|line| line.split_once(' ').and_then(|(_, rest)| rest.strip_prefix("set ")).map(|path| PathBuf::from(path.trim())));
+        let new = set.or_else(|| desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten()));
+        Watched { dropped, shots, log, old, kept, new, sent }
     }
 
     fn logged(watched: &Watched, word: &str) -> Option<f64> {
-        watched.log.iter().find(|line| line.contains(word)).and_then(|line| stamp_of(line))
+        let word = word.trim_start();
+        watched.log.iter().find(|line| line.split_once(' ').is_some_and(|(_, rest)| rest.starts_with(word))).and_then(|line| stamp_of(line))
     }
 
     fn tables_file(home: &Path, output: &Path) -> Option<Vec<u8>> {
@@ -3402,12 +3412,13 @@ mod probe {
 
     fn judge_daemon_glide(p: &mut Probe, watched: &Watched, screen: &Screen, given: &Judged, label: &str, strip_name: Option<&str>) -> bool {
         let Judged { source, old_tables, before, still_icons, earlier_ready } = *given;
-        let (Some(old_path), Some(new_path)) = (&watched.old, &watched.new) else {
-            p.line(format!("- {label}: the wallpaper before {:?} or after {:?} is unknown", watched.old, watched.new));
+        let (Some(old_path), Some(new_path)) = (&watched.kept, &watched.new) else {
+            p.line(format!("- {label}: the wallpaper before {:?}, kept as {:?}, or after {:?} is unknown", watched.old, watched.kept, watched.new));
             return false;
         };
-        let (Ok(old), Ok(new)) = (picture::decode(old_path), picture::decode(new_path)) else {
-            p.line(format!("- {label}: the two stills could not be read"));
+        let (old, new) = (picture::decode(old_path), picture::decode(new_path));
+        let (Ok(old), Ok(new)) = (old, new) else {
+            p.line(format!("- {label}: the two stills could not be read, old kept as {} and new {}", old_path.display(), new_path.display()));
             return false;
         };
         let (width, height) = old.dimensions();
