@@ -196,24 +196,42 @@ export const dialPainter: Painter = (context, width, height) => {
 export const WALL = { left: -0.45, right: 0.75, bottom: 1.84, top: 2.08, z: -0.975 };
 
 export function wallTexture(projector: Matrix4) {
-  const size = 1024;
-  const scale = 1400;
+  const density = 4096;
+  const scale = 2800;
   const width = Math.round((WALL.right - WALL.left) * scale);
   const height = Math.round((WALL.top - WALL.bottom) * scale);
+  const corners = [
+    [WALL.left, WALL.bottom],
+    [WALL.right, WALL.bottom],
+    [WALL.left, WALL.top],
+    [WALL.right, WALL.top],
+  ].map(([x, y]) => {
+    const point = new Vector4(x, y, WALL.z, 1).applyMatrix4(projector);
+    return [point.x / point.w, point.y / point.w];
+  });
+  const margin = 0.012;
+  const u0 = Math.max(0, Math.min(...corners.map((c) => c[0])) - margin);
+  const u1 = Math.min(1, Math.max(...corners.map((c) => c[0])) + margin);
+  const v0 = Math.max(0, Math.min(...corners.map((c) => c[1])) - margin);
+  const v1 = Math.min(1, Math.max(...corners.map((c) => c[1])) + margin);
+  const box = new Vector4(u0, v0, u1 - u0, v1 - v0);
+  const across = Math.min(2048, Math.ceil(box.z * density));
+  const down = Math.min(2048, Math.ceil(box.w * density));
   const text = document.createElement('canvas');
   text.width = width;
   text.height = height;
   const draw = text.getContext('2d', { willReadFrequently: true });
   const out = document.createElement('canvas');
-  out.width = size;
-  out.height = size;
+  out.width = across;
+  out.height = down;
   const target = out.getContext('2d');
   const texture = new CanvasTexture(out);
   texture.colorSpace = NoColorSpace;
   texture.flipY = false;
   texture.magFilter = LinearFilter;
-  texture.minFilter = LinearFilter;
-  texture.generateMipmaps = false;
+  texture.minFilter = LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.anisotropy = 8;
   const inverse = projector.clone().invert();
   const near = new Vector4();
   const far = new Vector4();
@@ -229,50 +247,49 @@ export function wallTexture(projector: Matrix4) {
     draw.fillText(caption('shapes'), width / 2, height * 0.54, width * 0.92);
     await quiet();
     const letters = draw.getImageData(0, 0, width, height).data;
-    const image = target.createImageData(size, size);
-    const corners = [
-      [WALL.left, WALL.bottom],
-      [WALL.right, WALL.bottom],
-      [WALL.left, WALL.top],
-      [WALL.right, WALL.top],
-    ].map(([x, y]) => {
-      const point = new Vector4(x, y, WALL.z, 1).applyMatrix4(projector);
-      return [point.x / point.w, point.y / point.w];
-    });
-    const u0 = Math.max(0, Math.floor(Math.min(...corners.map((c) => c[0])) * size) - 8);
-    const u1 = Math.min(size, Math.ceil(Math.max(...corners.map((c) => c[0])) * size) + 8);
-    const v0 = Math.max(0, Math.floor(Math.min(...corners.map((c) => c[1])) * size) - 8);
-    const v1 = Math.min(size, Math.ceil(Math.max(...corners.map((c) => c[1])) * size) + 8);
+    const image = target.createImageData(across, down);
+    const sample = (tx: number, ty: number) => {
+      const x = Math.min(Math.max(tx * width - 0.5, 0), width - 1.001);
+      const y = Math.min(Math.max(ty * height - 0.5, 0), height - 1.001);
+      const ix = Math.floor(x);
+      const iy = Math.floor(y);
+      const fx = x - ix;
+      const fy = y - iy;
+      const at = (iy * width + ix) * 4;
+      const below = at + width * 4;
+      const top = letters[at] + (letters[at + 4] - letters[at]) * fx;
+      const bottom = letters[below] + (letters[below + 4] - letters[below]) * fx;
+      return top + (bottom - top) * fy;
+    };
     let until = 0;
-    for (let v = v0; v < v1; v++) {
+    for (let v = 0; v < down; v++) {
       if (performance.now() > until) {
         await quiet();
         until = performance.now() + 4;
       }
-      for (let u = u0; u < u1; u++) {
-        const su = (u + 0.5) / size;
-        const sv = (v + 0.5) / size;
-        near.set(su, sv, 0.1, 1).applyMatrix4(inverse);
-        far.set(su, sv, 0.9, 1).applyMatrix4(inverse);
-        const ax = near.x / near.w, ay = near.y / near.w, az = near.z / near.w;
-        const bx = far.x / far.w, by = far.y / far.w, bz = far.z / far.w;
-        const t = (WALL.z - az) / (bz - az);
-        const x = ax + (bx - ax) * t;
-        const y = ay + (by - ay) * t;
-        const tx = (x - WALL.left) / (WALL.right - WALL.left);
-        const ty = (WALL.top - y) / (WALL.top - WALL.bottom);
-        const edge = Math.min(tx, 1 - tx, ty, 1 - ty);
-        if (edge <= -0.02) continue;
-        const region = Math.min(Math.max((edge + 0.02) / 0.06, 0), 1);
+      for (let u = 0; u < across; u++) {
         let letter = 0;
-        if (edge > 0) {
-          const px = Math.min(width - 1, Math.max(0, Math.floor(tx * width)));
-          const py = Math.min(height - 1, Math.max(0, Math.floor(ty * height)));
-          letter = letters[(py * width + px) * 4];
+        let region = 0;
+        for (let k = 0; k < 4; k++) {
+          const su = box.x + ((u + 0.25 + 0.5 * (k & 1)) / across) * box.z;
+          const sv = box.y + ((v + 0.25 + 0.5 * (k >> 1)) / down) * box.w;
+          near.set(su, sv, 0.1, 1).applyMatrix4(inverse);
+          far.set(su, sv, 0.9, 1).applyMatrix4(inverse);
+          const ax = near.x / near.w, ay = near.y / near.w, az = near.z / near.w;
+          const bx = far.x / far.w, by = far.y / far.w, bz = far.z / far.w;
+          const t = (WALL.z - az) / (bz - az);
+          const x = ax + (bx - ax) * t;
+          const y = ay + (by - ay) * t;
+          const tx = (x - WALL.left) / (WALL.right - WALL.left);
+          const ty = (WALL.top - y) / (WALL.top - WALL.bottom);
+          const edge = Math.min(tx, 1 - tx, ty, 1 - ty);
+          if (edge <= -0.02) continue;
+          region += Math.min(Math.max((edge + 0.02) / 0.06, 0), 1);
+          if (edge > 0) letter += sample(tx, ty);
         }
-        const at = (v * size + u) * 4;
-        image.data[at] = letter;
-        image.data[at + 1] = Math.round(region * 255);
+        const at = (v * across + u) * 4;
+        image.data[at] = Math.round(letter / 4);
+        image.data[at + 1] = Math.round((region / 4) * 255);
         image.data[at + 3] = 255;
       }
     }
@@ -280,5 +297,5 @@ export function wallTexture(projector: Matrix4) {
     target.putImageData(image, 0, 0);
     texture.needsUpdate = true;
   };
-  return { texture, paint };
+  return { texture, paint, box };
 }

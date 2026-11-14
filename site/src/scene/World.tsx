@@ -493,6 +493,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       if (stopped) return;
       await quiet();
       gl.initTexture(caption.texture);
+      wall.uniforms.uCaptionBox.value.copy(caption.box);
       wall.uniforms.uCaption.value = caption.texture;
       runtime.painted = true;
     };
