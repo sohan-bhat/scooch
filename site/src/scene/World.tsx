@@ -33,9 +33,10 @@ import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
 import { still as native } from './still';
-import { advance, budget, calm, finished, level } from './budget';
+import { advance, budget, calm, finished, level, memory, prefetch, upgrades } from './budget';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
+import { stripUpload } from './upload';
 import { Tumbler } from './Tumbler';
 import { CHANNELS, hooks, live } from './touch';
 import { BULB, DESK_TOP, Desk, LAMP, type Console, type Screens } from './Desk';
@@ -248,11 +249,23 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     };
     const sharpen = async () => {
       const amount = level();
+      await wait(() => runtime.shown);
+      const main = screens.main.sharpUrl();
+      if (amount !== 'none' && main) prefetch([main]);
+      await wait(() => runtime.props && runtime.painted && runtime.gallery);
+      if (amount === 'all') prefetch(Object.values(gallery.current).flatMap((frame) => frame.sharpUrl() ?? []));
+      if (memory() >= 4) {
+        for (const upgrade of upgrades) {
+          await calm();
+          if (stopped) return;
+          await upgrade(calm).catch(() => false);
+        }
+      }
       if (amount === 'none') {
         finished();
         return;
       }
-      await wait(() => runtime.painted && runtime.gallery && native.ready && (amount === 'main' || budget.stage >= 1));
+      await wait(() => native.ready && (amount === 'main' || budget.stage >= 1));
       if (stopped || native.off) return;
       await calm();
       await screens.main.sharpen(gl, calm).catch(() => false);
@@ -269,7 +282,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       }
       finished();
     };
-    timer = window.setTimeout(() => void sharpen(), 1000);
+    timer = window.setTimeout(() => void sharpen(), 0);
     return () => {
       stopped = true;
       window.clearTimeout(timer);
@@ -278,9 +291,14 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
 
   useEffect(() => {
     const restored = () => {
-      screens.main.invalidate();
-      for (const frame of Object.values(gallery.current)) frame.invalidate();
+      const again = [screens.main, ...Object.values(gallery.current)].filter((frame) => frame.invalidate());
       gl.shadowMap.needsUpdate = true;
+      void (async () => {
+        for (const frame of again) {
+          await calm();
+          await frame.sharpen(gl, calm).catch(() => false);
+        }
+      })();
     };
     gl.domElement.addEventListener('webglcontextrestored', restored);
     return () => gl.domElement.removeEventListener('webglcontextrestored', restored);
@@ -487,7 +505,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     let note: Mesh | null = null;
     const paint = async () => {
       if (stopped) return;
-      if (!runtime.shown && runtime.still < 0) {
+      const shownAt = performance.getEntriesByName('scooch:shown')[0]?.startTime;
+      if (runtime.still < 0 && (shownAt === undefined || performance.now() - shownAt < 1000)) {
         timer = window.setTimeout(() => void paint(), 200);
         return;
       }
@@ -522,15 +541,15 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       writing.current = sticky.write;
       await quiet();
       if (stopped) return;
-      const osd = paintedTexture(2048, 1536, osdPainter);
+      const osd = paintedTexture(2048, 1536, osdPainter, false, false);
       await quiet();
-      gl.initTexture(osd.texture);
+      osd.draw(1);
+      await stripUpload(gl, osd.texture, osd.texture.image as HTMLCanvasElement);
+      if (stopped) return;
       screens.crt.uniforms.uOsd.value = osd.texture;
       const caption = wallTexture(blindsMatrix);
-      await caption.paint();
+      await caption.paint(gl);
       if (stopped) return;
-      await quiet();
-      gl.initTexture(caption.texture);
       wall.uniforms.uCaptionBox.value.copy(caption.box);
       wall.uniforms.uCaption.value = caption.texture;
       runtime.painted = true;
@@ -561,7 +580,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       minY = Math.min(minY, scratch.corner.y);
       maxY = Math.max(maxY, scratch.corner.y);
     }
-    const size = screens.main.texture.image as { width: number; height: number };
+    const size = screens.main.live.image as { width: number; height: number };
     const fit = Math.min(1, Math.max(((maxX - minX) / 2) * buffer.x / size.width, ((maxY - minY) / 2) * buffer.y / size.height) * 1.25);
     if (fit >= 1) return undefined;
     return { width: Math.max(64, Math.ceil(size.width * fit)), height: Math.max(48, Math.ceil(size.height * fit)) };
@@ -656,18 +675,13 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     wall.uniforms.uDrift.value.set(story.drift * 0.018, -story.drift * 0.028);
     floor.uniforms.uDrift.value.copy(wall.uniforms.uDrift.value);
     crt.uTime.value = time;
-    const frameSize = screens.main.texture.image as { width: number; height: number };
+    const frameSize = screens.main.live.image as { width: number; height: number };
     const part = inside?.group.visible ? undefined : heldPart();
     const holding = hooks.drawHeld(gl, Math.min(delta, 0.05), part);
-    const share = native.full ? 1 : quality.frameLive * (quality.chain === 'fast' ? quality.fastScale : 1);
-    const moving = share < 0.999 ? scratch.part.set(Math.max(1, Math.round(frameSize.width * share)), Math.max(1, Math.round(frameSize.height * share))) : null;
+    const moving = quality.chain === 'fast' && quality.fastScale < 1 ? scratch.part.set(Math.max(1, Math.round(frameSize.width * quality.fastScale)), Math.max(1, Math.round(frameSize.height * quality.fastScale))) : null;
     const movingPart = moving ? { width: moving.x, height: moving.y } : undefined;
-    if (!holding && (native.phase === 'live' || native.full)) {
-      runtime.muted = native.phase !== 'live';
-      screens.main.render(gl, story.place, movingPart);
-      runtime.muted = false;
-    }
-    const shownPart = holding ? part : movingPart;
+    if (!holding && native.phase === 'live') screens.main.render(gl, story.place, movingPart);
+    const shownPart = native.full ? undefined : holding ? part : movingPart;
     const sx = shownPart ? shownPart.width / frameSize.width : 1;
     const sy = shownPart ? shownPart.height / frameSize.height : 1;
     crt.uFrameScale.value.set(crt.uFrame.value === screens.main.texture ? sx : 1, crt.uFrame.value === screens.main.texture ? sy : 1);

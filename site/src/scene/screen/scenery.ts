@@ -29,6 +29,7 @@ import { asset } from '@/lib/base';
 import { quiet } from '@/lib/idle';
 import { fetchEarly } from '@/story/early';
 import { changed } from '@/story/state';
+import { still } from '../still';
 
 type Table = { file: string; width: number; height: number; layers?: number };
 
@@ -221,7 +222,7 @@ export async function streamScenery(scenery: Scenery) {
 const PIXEL = 'vec2 p = vec2(gl_FragCoord.x, size.y - gl_FragCoord.y);';
 if (!frame.includes(PIXEL)) throw new Error('frame.glsl no longer reads the pixel the way the site maps it');
 
-export function createFrame(scenery: Scenery, view?: { width: number; height: number }) {
+export function createFrame(scenery: Scenery, view?: { width: number; height: number }, held?: { width: number; height: number }) {
   const { info } = scenery;
   const constants = info.states[0].tables.constants;
   const number = (key: string) => Number(constants[key]);
@@ -287,8 +288,19 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
     minFilter: LinearMipmapLinearFilter,
     magFilter: LinearFilter,
   });
+  const large = held
+    ? new WebGLRenderTarget(held.width, held.height, {
+        colorSpace: SRGBColorSpace,
+        depthBuffer: false,
+        generateMipmaps: true,
+        minFilter: LinearMipmapLinearFilter,
+        magFilter: LinearFilter,
+      })
+    : null;
   let last = '';
   let custom = false;
+  let generation = 0;
+  let plain: { texture: Texture; lod: number } | null = null;
   const keys = ['unit', 'ramp_low', 'ramp_high', 'reach', 'grain_amount', 'grain_scale', 'grain_floor', 'core_lift', 'core_drop', 'volume_lit', 'volume_dark', 'shadow_at', 'rim_at', 'belly_at'] as const;
   const defaults = Object.fromEntries(keys.map((key) => [key, uniforms[key].value]));
 
@@ -316,32 +328,58 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
   };
 
   return {
-    texture: target.texture,
+    get texture() {
+      return large && still.full ? large.texture : target.texture;
+    },
+    live: target.texture,
+    rows: large ? large.height : target.height,
     material,
     select,
     textures,
     invalidate() {
       last = '';
+      generation += 1;
+      if (!plain || scenery.canvas === plain.texture) return false;
+      const sharp = scenery.canvas;
+      uniforms.canvas.value = plain.texture;
+      uniforms.grain_lod.value = plain.lod;
+      scenery.canvas = plain.texture;
+      plain.texture.needsUpdate = true;
+      sharp.dispose();
+      return true;
+    },
+    prepare(gl: WebGLRenderer) {
+      if (large) gl.initRenderTarget(large);
     },
     renderRows(gl: WebGLRenderer, place: number, from: number, rows: number) {
       if (custom) {
         custom = false;
         for (const key of keys) (uniforms[key] as { value: unknown }).value = defaults[key];
       }
+      const into = large ?? target;
       const { from: a, to: b, s } = select(place);
       bind('a', scenery.states[a]);
       bind('b', scenery.states[b]);
       uniforms.s.value = s;
-      target.scissor.set(0, from, target.width, Math.min(rows, target.height - from));
-      target.scissorTest = true;
+      const done = from + rows >= into.height;
+      const size = uniforms.view.value;
+      uniforms.view.value = [into.width, into.height];
+      into.texture.generateMipmaps = done;
+      into.scissor.set(0, from, into.width, Math.min(rows, into.height - from));
+      into.scissorTest = true;
       const previous = gl.getRenderTarget();
-      gl.setRenderTarget(target);
+      gl.setRenderTarget(into);
       gl.render(scene, camera);
       gl.setRenderTarget(previous);
-      target.scissorTest = false;
-      const done = from + rows >= target.height;
-      if (done) last = `${a}:${b}:${s.toFixed(4)}:${scenery.states.length}:full`;
+      into.scissorTest = false;
+      into.texture.generateMipmaps = true;
+      uniforms.view.value = size;
+      if (done && !large) last = `${a}:${b}:${s.toFixed(4)}:${scenery.states.length}:full`;
       return done;
+    },
+    sharpUrl() {
+      const sharp = scenery.info.sharp;
+      return sharp ? `${asset(`demo/${scenery.info.folder}`)}/${sharp.file}` : null;
     },
     async sharpen(gl: WebGLRenderer, wait: () => Promise<void> = quiet) {
       const sharp = scenery.info.sharp;
@@ -357,8 +395,11 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       texture.minFilter = LinearMipmapLinearFilter;
       texture.magFilter = LinearFilter;
       texture.anisotropy = 4;
+      texture.source.dataReady = false;
+      texture.mipmapsAutoUpdate = false;
       texture.needsUpdate = true;
       await wait();
+      const started = generation;
       gl.initTexture(texture);
       const context = gl.getContext() as WebGL2RenderingContext;
       const handle = (gl.properties.get(texture) as { __webglTexture?: WebGLTexture }).__webglTexture;
@@ -366,6 +407,11 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       const rows = Math.max(64, Math.ceil(height / 12));
       for (let y = 0; y < height; y += rows) {
         await wait();
+        if (started !== generation || context.isContextLost()) {
+          bitmap.close();
+          texture.dispose();
+          return false;
+        }
         const strip = await createImageBitmap(bitmap, 0, y, width, Math.min(rows, height - y));
         gl.state.bindTexture(context.TEXTURE_2D, handle);
         context.pixelStorei(context.UNPACK_FLIP_Y_WEBGL, false);
@@ -375,10 +421,15 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
         strip.close();
       }
       await wait();
+      bitmap.close();
+      if (started !== generation || context.isContextLost()) {
+        texture.dispose();
+        return false;
+      }
       gl.state.bindTexture(context.TEXTURE_2D, handle);
       context.generateMipmap(context.TEXTURE_2D);
-      bitmap.close();
       const previous = uniforms.canvas.value;
+      plain = { texture: previous, lod: uniforms.grain_lod.value };
       uniforms.canvas.value = texture;
       uniforms.grain_lod.value = Math.log2((4 * width) / scenery.info.width);
       scenery.canvas = texture;
@@ -482,6 +533,7 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
     scenery,
     dispose() {
       target.dispose();
+      large?.dispose();
       geometry.dispose();
       material.dispose();
     },

@@ -9,7 +9,7 @@ import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
 import { still as native } from './still';
-import { advance, budget, calm, level } from './budget';
+import { advance, budget, calm, level, prefetch, upgrades } from './budget';
 import { labelProps } from './labels';
 import { makeLive, obstacles, rimmed } from './touch';
 import { quiet } from '@/lib/idle';
@@ -127,8 +127,8 @@ function whenReady(start: () => void, test: () => boolean) {
 
 function Sharpener({ list, when, done }: { list: string[]; when: () => boolean; done: () => void }) {
   const [index, setIndex] = useState(-1);
-  const next = useCallback(() => setIndex((value) => value + 1), []);
-  useEffect(() => whenReady(() => setIndex(0), when), [when]);
+  const next = useCallback(() => void calm().then(() => setIndex((value) => value + 1)), []);
+  useEffect(() => whenReady(() => void calm().then(() => setIndex(0)), when), [when]);
   useEffect(() => {
     if (index >= list.length) done();
   }, [index, list, done]);
@@ -249,6 +249,7 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
   useEffect(() => {
     let stopped = false;
     group.visible = false;
+    const sharpLabels = (wait: () => Promise<void>) => labels.sharpen(gl, wait);
     const target = new WebGLRenderTarget(1, 1, { type: HalfFloatType });
     const compileEach = async () => {
       const waits: Promise<unknown>[] = [];
@@ -290,12 +291,14 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
           warmDraw(gl, scene, camera, holder);
         }
         if (stopped) return;
+        upgrades.add(sharpLabels);
         group.visible = true;
         runtime.props = true;
         onExtras();
       });
     return () => {
       stopped = true;
+      upgrades.delete(sharpLabels);
     };
   }, [group, gl, scene, camera, onExtras, labels]);
 
@@ -332,6 +335,17 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
   const laptop = useGLTF(urls.laptop, false, true, extend);
   const lamp = useGLTF(urls.lamp, false, true, extend);
   const television = useGLTF(urls.television, false, true, extend);
+
+  useEffect(
+    () =>
+      whenReady(
+        () => {
+          if (desktop() && level() === 'all') prefetch([...(lite ? heroUrls : []), ...sharpUrls]);
+        },
+        () => runtime.shown,
+      ),
+    [],
+  );
 
   useMemo(() => {
     for (const model of [desk, laptop, lamp, television]) prepare(model.scene);

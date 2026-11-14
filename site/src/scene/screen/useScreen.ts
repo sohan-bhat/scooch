@@ -52,9 +52,9 @@ export function useScreens(manifest: DemoManifest) {
     const { width, height } = main.info;
     const longest = Math.max(width, height);
     const live = Math.min(1, Math.max(buffer.x, buffer.y) / longest);
-    const scale = quality.liveScale < 0.999 ? Math.max(live, Math.min(2, Math.max(native.x, native.y) / longest)) : live;
-    quality.frameLive = live / scale;
-    const mainFrame = createFrame(main, { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) });
+    const held = Math.max(live, Math.min(2, Math.max(native.x, native.y) / longest));
+    const sized = (scale: number) => ({ width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) });
+    const mainFrame = createFrame(main, sized(live), quality.liveScale < 0.999 ? sized(held) : undefined);
     const crt = createCrtMaterial();
     crt.uniforms.uFrame.value = mainFrame.texture;
     crt.uniforms.uAtlas.value = atlas;

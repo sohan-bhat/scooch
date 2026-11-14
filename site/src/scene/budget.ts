@@ -45,3 +45,9 @@ export async function calm() {
 export function advance(to: number) {
   budget.stage = Math.max(budget.stage, to);
 }
+
+export const upgrades = new Set<(wait: () => Promise<void>) => Promise<unknown>>();
+
+export function prefetch(urls: string[]) {
+  for (const url of urls) void fetch(url, { priority: 'low' }).then((response) => response.blob()).catch(() => undefined);
+}

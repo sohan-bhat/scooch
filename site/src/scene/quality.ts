@@ -49,15 +49,15 @@ export function gpuClass(): Probe {
   return probed;
 }
 
-type Settings = { sharp: number; dof: boolean; ao: boolean; grain: boolean };
+type Settings = { sharp: number; fast: number; dof: boolean; ao: boolean; grain: boolean };
 
 const settings: Record<GpuClass, Settings> = {
-  high: { sharp: 1.5, dof: true, ao: true, grain: true },
-  mid: { sharp: 1, dof: false, ao: false, grain: true },
-  low: { sharp: 0.85, dof: false, ao: false, grain: true },
+  high: { sharp: 1.5, fast: 0.7, dof: true, ao: true, grain: true },
+  mid: { sharp: 1, fast: 0.85, dof: false, ao: false, grain: true },
+  low: { sharp: 0.85, fast: 0.7, dof: false, ao: false, grain: true },
 };
 
-const FAST = 0.7;
+const FAST: number | undefined = undefined;
 const NATIVE = 2;
 const EARN = 2000;
 const EARN_LIMIT = 32000;
@@ -84,7 +84,6 @@ class Quality {
   sharpDpr = 1;
   nativeDpr = 1;
   liveScale = 1;
-  frameLive = 1;
   fastScale = 1;
   chain: Chain = 'sharp';
   switchAt = -1e9;
@@ -103,14 +102,14 @@ class Quality {
     this.phone = phone;
     this.gpu = phone ? 'low' : gpu;
     this.tier = this.gpu === 'low' ? 'light' : 'full';
-    const chosen = phone ? { sharp: 1, dof: false, ao: false, grain: true } : settings[this.gpu];
+    const chosen = phone ? { sharp: 1, fast: 0.7, dof: false, ao: false, grain: true } : settings[this.gpu];
     this.dof = chosen.dof;
     this.ao = chosen.ao;
     this.grain = chosen.grain;
     this.nativeDpr = Math.min(Math.max(deviceDpr, 1), NATIVE);
     this.sharpDpr = Math.min(chosen.sharp, this.nativeDpr);
     this.liveScale = this.sharpDpr / this.nativeDpr;
-    this.fastScale = Math.min(1, FAST / this.sharpDpr);
+    this.fastScale = Math.min(1, (FAST ?? chosen.fast) / this.sharpDpr);
   }
 
   liveSize(gl: WebGLRenderer, out: Vector2) {
