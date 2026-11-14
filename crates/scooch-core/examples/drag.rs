@@ -132,6 +132,15 @@ fn main() {
         println!("{label} walk worst over the {} steps that kept the wallpaper still: scenery alpha {} color {} farthest {:.2} cells changed {:.2}% picture largest {}", STEPS - shifted, worst.0, worst.1, worst.2, worst.3, worst.4);
         let end = scene.icons[held];
         let (last_bundle, _) = session.still_shared(&image, &analysis, &placement, &scene, &options);
+        let (mut first_bundle, mut last_bundle) = ((*first_bundle).clone(), (*last_bundle).clone());
+        if let Some(keep) = std::env::var("KEEP").ok().and_then(|v| v.parse::<f32>().ok()) {
+            first_bundle.constants.shadow[0] = keep;
+            last_bundle.constants.shadow[0] = keep;
+        }
+        if let Some(gate) = std::env::var("GATE").ok().and_then(|v| v.parse::<f32>().ok()) {
+            first_bundle.constants.shadow[1] = gate;
+            last_bundle.constants.shadow[1] = gate;
+        }
         let middle = Rect { x: (start.x + end.x) / 2.0, y: (start.y + end.y) / 2.0, w: start.w, h: start.h };
         for (mode, dissolve) in [("morph", false), ("dissolve", true)] {
             let mut previous: Option<(RgbImage, Vec<bool>)> = None;
