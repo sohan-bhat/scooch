@@ -67,6 +67,10 @@ function withRim(material: MeshStandardMaterial, level: { value: number }) {
   return level;
 }
 
+export function rimmed(material: MeshStandardMaterial) {
+  return withRim(material, { value: 0 });
+}
+
 export function makeLive(root: Object3D, id: string) {
   root.userData.live = id;
   things[id] = root;
@@ -77,7 +81,7 @@ export function makeLive(root: Object3D, id: string) {
     if (!mesh.isMesh) return;
     const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     for (const material of materials) {
-      if (seen.has(material) || !(material as MeshStandardMaterial).isMeshStandardMaterial || material.transparent) continue;
+      if (seen.has(material) || !(material as MeshStandardMaterial).isMeshStandardMaterial || (material.transparent && !material.userData.rim)) continue;
       seen.add(material);
       levels.push(withRim(material as MeshStandardMaterial, { value: 0 }));
     }

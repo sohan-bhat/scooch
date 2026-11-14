@@ -9,7 +9,7 @@ import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
 import { labelProps } from './labels';
-import { makeLive, obstacles } from './touch';
+import { makeLive, obstacles, rimmed } from './touch';
 
 export { BULB, DESK_TOP, LAMP, LAPTOP, TELEVISION } from './layout';
 
@@ -163,6 +163,7 @@ function prepare(root: Object3D) {
       };
       material.customProgramCacheKey = () => 'scooch-desk';
     }
+    if (!material.transparent) rimmed(material);
   });
 }
 
