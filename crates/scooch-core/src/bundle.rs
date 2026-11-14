@@ -398,6 +398,16 @@ pub fn still(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &
     out
 }
 
+pub fn regions(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> (Vec<[u8; 4]>, u32, u32) {
+    let parts = parts(image.dimensions(), canvas(image, scene.width, scene.height).into_owned(), found, placement, scene, options, materials);
+    let grid = &parts.framed.grid;
+    let cells = match &parts.fixed {
+        Some(f) => f.sky.iter().zip(&f.belong).map(|(s, b)| [look::byte(*s), look::byte(*b), 0, 0]).collect(),
+        None => vec![[0; 4]; grid.w * grid.h],
+    };
+    (cells, grid.w as u32, grid.h as u32)
+}
+
 pub fn compatible(a: &Bundle, b: &Bundle) -> bool {
     a.width == b.width
         && a.height == b.height

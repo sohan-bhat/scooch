@@ -178,6 +178,11 @@ pub fn bundle(image: &RgbImage, analysis: &Analysis, placement: &Placement, scen
     bundle::make(image, analysis, placement, scene, options, &paint::materials(analysis))
 }
 
+#[doc(hidden)]
+pub fn regions(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Vec<[u8; 4]>, u32, u32) {
+    bundle::regions(image, analysis, placement, scene, options, &paint::materials(analysis))
+}
+
 pub fn still(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Bundle, RgbImage) {
     render::still(image, analysis, placement, scene, options)
 }

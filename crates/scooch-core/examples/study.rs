@@ -241,7 +241,7 @@ fn study(out: &Path, name: &str, photo: &str, scene: Scene) {
     let on = Options { scenery: Scenery::Auto, ..Options::default() };
     let placement = scooch_core::solve(&analysis, &scene, &on, None);
     let plain = scooch_core::render_with(&image, &analysis, &placement, &scene, &Options { pads: 0.0, scenery: Scenery::Off, ..Options::default() });
-    let bundle = scooch_core::bundle(&image, &analysis, &placement, &scene, &on);
+    let (regions, lw, lh) = scooch_core::regions(&image, &analysis, &placement, &scene, &on);
     let (w, h) = (scene.width, scene.height);
     let unit = scene.icons.iter().map(|r| r.w.max(r.h)).fold(0.0f32, f32::max) * 1.1;
     let grid = Grid { w: (w as f32 / (unit / 8.0)).ceil() as usize, h: (h as f32 / (unit / 8.0)).ceil() as usize, step: unit / 8.0 };
@@ -261,8 +261,7 @@ fn study(out: &Path, name: &str, photo: &str, scene: Scene) {
         *m = m.map(|v| v / n.max(1.0));
     }
     let lab: Vec<[f32; 3]> = mean.iter().map(|c| to_lab(*c)).collect();
-    let look = bundle.look.as_chunks::<4>().0;
-    let (lw, lh) = (bundle.grid_width as usize, bundle.grid_height as usize);
+    let (look, lw, lh) = (&regions[..], lw as usize, lh as usize);
     let quarter = |values: &dyn Fn(&[u8; 4]) -> f32, x: f32, y: f32| {
         let (qx, qy) = (((x / 4.0) as usize).min(lw - 1), ((y / 4.0) as usize).min(lh - 1));
         values(&look[qy * lw + qx])
