@@ -39,6 +39,7 @@ import { CHANNELS, hooks, live } from './touch';
 import { BULB, DESK_TOP, Desk, LAMP, type Console, type Screens } from './Desk';
 import { createCrtMaterial } from './screen/crt';
 import { INSIDE_LAYER, useInside, type Stage } from './Inside';
+import { updateWindow, windowLight } from './window';
 import { quality } from './quality';
 import { useRoomMaterial } from './Room';
 import { Rig, type ScreenFrame } from './rig';
@@ -55,6 +56,8 @@ const RECT = 2.4;
 const SCREEN_SPOT = 0.09;
 const INNER = 0.5;
 const STREET_LEVEL = 26;
+const STRIPE = 64;
+const stripeColor = new Color('#ffe0bd');
 const up = new Vector3(0, 1, 0);
 
 function toWorld(local: Vector3, position: readonly [number, number, number], rotation: number) {
@@ -156,7 +159,6 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const [, setExtrasIn] = useState(false);
   const onExtras = useCallback(() => setExtrasIn(true), []);
   const spot = useRef<SpotLight>(null);
-  const street = useRef<SpotLight>(null);
   const laptopRect = useRef<RectAreaLight>(null);
   const televisionRect = useRef<RectAreaLight>(null);
   const laptopSpot = useRef<SpotLight>(null);
@@ -166,7 +168,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const targets = useMemo(() => ({ lamp: new Object3D(), street: new Object3D(), laptop: new Object3D(), television: new Object3D() }), []);
   const bulbs = useRef<MeshStandardMaterial[]>([]);
   const scratch = useMemo(
-    () => ({ color: new Color(), white: new Color(1, 1, 1), focus: new Vector3(), lampColor: new Color('#ffb46b'), street: tokenColor('rim') }),
+    () => ({ color: new Color(), white: new Color(1, 1, 1), focus: new Vector3(), lampColor: new Color('#ffb46b'), street: tokenColor('rim'), window: new Color(), stripe: new Color() }),
     [],
   );
   const room = useMemo(() => tokenColor('room'), []);
@@ -386,13 +388,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       spot.current.target = targets.lamp;
       spot.current.shadow.needsUpdate = true;
     }
-    if (street.current) {
-      street.current.target = targets.street;
-      if (quality.tier === 'full') {
-        street.current.map = blinds;
-        street.current.shadow.needsUpdate = true;
-      }
-    }
+    windowLight.uWindowMap.value = blinds;
     wall.uniforms.uBlindsMatrix.value.copy(blindsMatrix);
     floor.uniforms.uBlindsMatrix.value.copy(blindsMatrix);
     wall.uniforms.uCaption.value = placeholder;
@@ -543,7 +539,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     floor.uniforms.uBlindsLevel.value = streetLevel * 0.6;
     wall.uniforms.uFade.value = 0.25 + 0.75 * away;
     floor.uniforms.uFade.value = 0.25 + 0.75 * away;
-    if (street.current) street.current.intensity = STREET_LEVEL * streetLevel * introStreet;
+    updateWindow(camera, scratch.window.copy(scratch.street).multiplyScalar(STREET_LEVEL * streetLevel * introStreet), scratch.stripe.copy(stripeColor).multiplyScalar(STRIPE * story.blinds * away));
     const ambient = Math.min(story.lamp * live.lamp, 1) * introLamp * away;
     scene.environmentIntensity = (0.05 + 0.17 * ambient) * (0.3 + 0.7 * away);
     if (rim.current) rim.current.intensity = (0.12 + 0.2 * ambient) * away;
@@ -653,23 +649,6 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         shadow-normalBias={0.012}
         shadow-camera-near={0.2}
         shadow-camera-far={3}
-      />
-      <spotLight
-        ref={street}
-        position={STREET.position}
-        color={scratch.street}
-        angle={STREET.angle}
-        penumbra={0.25}
-        decay={2}
-        distance={0}
-        intensity={0}
-        castShadow={quality.tier === 'full'}
-        shadow-mapSize={[1536, 1536]}
-        shadow-radius={3}
-        shadow-bias={-0.0004}
-        shadow-normalBias={0.02}
-        shadow-camera-near={1.2}
-        shadow-camera-far={6}
       />
       {quality.tier === 'full' ? <pointLight ref={inner} position={bulbWorld} color="#ffb46b" intensity={INNER} distance={0.32} decay={2} /> : null}
       <directionalLight ref={rim} position={[1.4, 1.8, -1.6]} color={scratch.street} intensity={0.3} />

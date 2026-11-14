@@ -1,5 +1,6 @@
 import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Quaternion, Vector3, type Texture, type WebGLRenderer } from 'three';
 import { quiet } from '@/lib/idle';
+import { windowLit } from './window';
 import { canvasTexture, dialPainter, fontsReady, paintedTexture, sticky as stickyText, typed as typedText, type Reveal } from './captions';
 
 function decal(map: Texture, width: number, height: number, options: { opaque?: boolean } = {}) {
@@ -41,6 +42,7 @@ function revealDecal(painters: Reveal, width: number, height: number, size: numb
     )}`;
   };
   material.customProgramCacheKey = () => 'reveal';
+  windowLit(material);
   const ready = async (gl: WebGLRenderer) => {
     await fontsReady();
     await quiet();
@@ -97,6 +99,7 @@ export function labelProps(group: Object3D) {
     const box = localBox(clock);
     const size = box.getSize(new Vector3());
     const mesh = decal(dial.texture, size.x * 0.62, size.x * 0.62);
+    windowLit(mesh.material as MeshStandardMaterial);
     mesh.position.set(0, size.y * 0.48, box.max.z + 0.0015);
     clock.add(mesh);
     const turns: Record<string, (date: Date) => number> = {

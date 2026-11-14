@@ -1,38 +1,21 @@
 import { useGLTF } from '@react-three/drei';
 import { useFrame, useThree } from '@react-three/fiber';
 import { useEffect, useMemo, useRef } from 'react';
-import { DataTexture, Group, LatheGeometry, LinearFilter, Mesh, MeshStandardMaterial, Object3D, RGBAFormat, ShaderChunk, SpotLight, UnsignedByteType, Vector2, Vector3, type Camera } from 'three';
+import { Group, LatheGeometry, Mesh, MeshStandardMaterial, Object3D, ShaderChunk, Vector2, Vector3, type Camera } from 'three';
 import { asset } from '@/lib/base';
 import { tokenColor } from '@/lib/tokens';
 import { runtime, story } from '@/story/state';
-import { STREET } from './Blinds';
 import { DESK_TOP } from './layout';
 import { live, makeLive, rimmed, things } from './touch';
+import { placeStripe, windowLit } from './window';
 
 const url = asset('models/tumbler.glb');
 const HOME = { x: 0.235, z: 0.15 };
 const TOP = 0.082;
-const STRIPE = 64;
 const query = new URLSearchParams(window.location.search);
 const emptyStill = query.has('hero') && !query.has('juice');
 
 useGLTF.preload(url, false, true);
-
-function stripeTexture() {
-  const size = 128;
-  const data = new Uint8Array(4 * size * 4);
-  const band = (v: number, center: number) => Math.min(Math.max((0.11 - Math.abs(v - center)) / 0.03, 0), 1);
-  for (let y = 0; y < size; y++) {
-    const v = y / (size - 1);
-    const value = Math.round(255 * Math.max(band(v, 0.5), band(v, 0.1) * 0.45, band(v, 0.9) * 0.45));
-    for (let x = 0; x < 4; x++) data.set([value, value, value, 255], (y * 4 + x) * 4);
-  }
-  const texture = new DataTexture(data, 4, size, RGBAFormat, UnsignedByteType);
-  texture.magFilter = LinearFilter;
-  texture.minFilter = LinearFilter;
-  texture.needsUpdate = true;
-  return texture;
-}
 
 const wrapped = ShaderChunk.lights_physical_pars_fragment.replace(
   'reflectedLight.directDiffuse += irradiance * diffuseBRDF * ( 1.0 - F );',
@@ -52,6 +35,8 @@ function tumblerMaterial(juice: boolean) {
     shader.fragmentShader = `uniform float uJuice;\n${shader.fragmentShader.replace('#include <lights_physical_pars_fragment>', wrapped).replace('#include <opaque_fragment>', edge)}`;
   };
   material.customProgramCacheKey = () => 'tumbler';
+  material.defines = { WINDOW_WRAP: '' };
+  windowLit(material);
   rimmed(material);
   return material;
 }
@@ -116,7 +101,6 @@ export function Tumbler() {
   const gltf = useGLTF(url, false, true);
   const camera = useThree((state) => state.camera);
   const size = useThree((state) => state.size);
-  const light = useRef<SpotLight>(null);
   const shown = useRef(emptyStill ? 0 : 1);
   const built = useMemo(() => {
     let source = null as Mesh | null;
@@ -140,7 +124,8 @@ export function Tumbler() {
     aim.position.set(HOME.x, DESK_TOP + 0.045, HOME.z);
     holder.add(juice, glass);
     makeLive(holder, 'glass');
-    return { holder, aim, juice, glass, floor: extras.floor, profile: extras.inner, level: 1, map: stripeTexture() };
+    placeStripe(aim.position);
+    return { holder, juice, glass, floor: extras.floor, profile: extras.inner, level: 1 };
   }, [gltf]);
 
   useEffect(() => {
@@ -155,7 +140,6 @@ export function Tumbler() {
   useEffect(
     () => () => {
       built.juice.geometry.dispose();
-      built.map.dispose();
       if (things.glass === built.holder) delete things.glass;
     },
     [built],
@@ -165,7 +149,6 @@ export function Tumbler() {
     const now = performance.now();
     const step = Math.min(delta, 0.05);
     const { holder } = built;
-    if (light.current) light.current.intensity = STRIPE * story.blinds * (1 - story.inside);
     if (!live.glass.ready) {
       live.glass.x = HOME.x;
       live.glass.z = HOME.z;
@@ -209,8 +192,6 @@ export function Tumbler() {
   return (
     <>
       <primitive object={built.holder} />
-      <primitive object={built.aim} />
-      <spotLight ref={light} target={built.aim} map={built.map} position={STREET.position} color="#ffe0bd" angle={0.1} penumbra={0.6} decay={2} distance={0} intensity={0} />
     </>
   );
 }

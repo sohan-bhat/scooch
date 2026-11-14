@@ -12,6 +12,7 @@ import { labelProps } from './labels';
 import { makeLive, obstacles, rimmed } from './touch';
 import { quiet } from '@/lib/idle';
 import { settle, warmDraw } from './warm';
+import { windowLit } from './window';
 
 export { BULB, DESK_TOP, LAMP, LAPTOP, TELEVISION } from './layout';
 
@@ -165,6 +166,7 @@ function prepare(root: Object3D) {
       };
       material.customProgramCacheKey = () => 'scooch-desk';
     }
+    windowLit(material);
     if (!material.transparent) rimmed(material);
   });
 }
