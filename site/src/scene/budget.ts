@@ -4,7 +4,15 @@ import { quality } from './quality';
 type Connection = { saveData?: boolean; effectiveType?: string };
 type Level = 'none' | 'main' | 'all';
 
-export const budget = { stage: 0 };
+export const budget = { stage: 0, busy: true, since: performance.now() };
+
+export function idleBudget() {
+  return !budget.busy || performance.now() - budget.since > 60000;
+}
+
+export function finished() {
+  budget.busy = false;
+}
 
 export function network() {
   const connection = (navigator as Navigator & { connection?: Connection }).connection;

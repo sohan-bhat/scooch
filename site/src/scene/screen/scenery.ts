@@ -323,6 +323,26 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
     invalidate() {
       last = '';
     },
+    renderRows(gl: WebGLRenderer, place: number, from: number, rows: number) {
+      if (custom) {
+        custom = false;
+        for (const key of keys) (uniforms[key] as { value: unknown }).value = defaults[key];
+      }
+      const { from: a, to: b, s } = select(place);
+      bind('a', scenery.states[a]);
+      bind('b', scenery.states[b]);
+      uniforms.s.value = s;
+      target.scissor.set(0, from, target.width, Math.min(rows, target.height - from));
+      target.scissorTest = true;
+      const previous = gl.getRenderTarget();
+      gl.setRenderTarget(target);
+      gl.render(scene, camera);
+      gl.setRenderTarget(previous);
+      target.scissorTest = false;
+      const done = from + rows >= target.height;
+      if (done) last = `${a}:${b}:${s.toFixed(4)}:${scenery.states.length}:full`;
+      return done;
+    },
     async sharpen(gl: WebGLRenderer) {
       const sharp = scenery.info.sharp;
       if (!sharp) return false;

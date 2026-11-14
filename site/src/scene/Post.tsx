@@ -5,10 +5,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinusConstantAlphaFactor, SRGBColorSpace, Vector2, WebGLRenderTarget, type Texture } from 'three';
 import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass } from 'postprocessing';
 import { quiet } from '@/lib/idle';
-import { runtime } from '@/story/state';
+import { runtime, story } from '@/story/state';
 import { quality, type Toggle } from './quality';
 import { allocate, freeze, inView, nativeAllowed, nativeOff, still, thaw } from './still';
-import { animating, live, things } from './touch';
+import { idleBudget } from './budget';
+import { animating, hooks, live, things } from './touch';
 import { precompile } from './warm';
 
 type Target = { isWebGLMultipleRenderTargets?: boolean; textures?: Texture[] & { mipmaps?: unknown[] } };
@@ -369,10 +370,12 @@ export function Post({ phone }: { phone: boolean }) {
         quality.chain === 'sharp' &&
         now - quality.blendAt > BLEND &&
         now - still.inputAt > STILL_AFTER &&
-        now - runtime.changedAt > STILL_AFTER;
+        now - runtime.changedAt > STILL_AFTER &&
+        idleBudget();
       if (still.phase !== 'live' && !calm) {
         still.phase = 'live';
         still.showing = false;
+        still.full = false;
         quality.hold = false;
         thaw();
         return;
@@ -391,8 +394,25 @@ export function Post({ phone }: { phone: boolean }) {
         still.live = composer && render && last ? grab(last, () => render(0)) : null;
         still.band = 0;
         still.pass = 0;
+        still.row = 0;
         still.tick = false;
-        still.phase = still.live ? 'bands' : 'live';
+        still.phase = still.live ? 'screen' : 'live';
+        return;
+      }
+      if (still.phase === 'screen') {
+        const frame = hooks.frame;
+        if (!frame) {
+          still.phase = 'live';
+          return;
+        }
+        const rows = Math.max(32, Math.ceil((frame.texture.image as { height: number }).height / 8));
+        runtime.muted = true;
+        const done = frame.renderRows(gl, story.place, still.row, rows);
+        runtime.muted = false;
+        still.row += rows;
+        if (!done) return;
+        still.full = true;
+        still.phase = 'bands';
         return;
       }
       if (still.phase === 'bands') {

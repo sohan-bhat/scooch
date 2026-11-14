@@ -3,7 +3,7 @@ import { Box3, Frustum, Matrix4, Texture, Vector2, type Camera, type Object3D, t
 import { quiet } from '@/lib/idle';
 import { changed, runtime } from '@/story/state';
 
-export type Phase = 'live' | 'capture' | 'bands' | 'post' | 'show' | 'still';
+export type Phase = 'live' | 'capture' | 'screen' | 'bands' | 'post' | 'show' | 'still';
 
 const KEY = 'scooch:native';
 
@@ -20,6 +20,8 @@ export const still = {
   second: -1,
   tick: false,
   showing: false,
+  full: false,
+  row: 0,
   ready: false,
   off: false,
 };

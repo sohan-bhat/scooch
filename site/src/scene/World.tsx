@@ -33,7 +33,7 @@ import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
 import { still as native } from './still';
-import { advance, budget, calm, level } from './budget';
+import { advance, budget, calm, finished, level } from './budget';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
 import { Tumbler } from './Tumbler';
@@ -248,19 +248,26 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     };
     const sharpen = async () => {
       const amount = level();
-      if (amount === 'none') return;
+      if (amount === 'none') {
+        finished();
+        return;
+      }
       await wait(() => runtime.painted && runtime.gallery && native.ready && (amount === 'main' || budget.stage >= 1));
       if (stopped || native.off) return;
       await calm();
       await screens.main.sharpen(gl).catch(() => false);
       advance(2);
-      if (amount !== 'all') return;
+      if (amount !== 'all') {
+        finished();
+        return;
+      }
       await wait(() => budget.stage >= 3);
       for (const frame of Object.values(gallery.current)) {
         await calm();
         if (stopped || native.off) return;
         await frame.sharpen(gl).catch(() => false);
       }
+      finished();
     };
     timer = window.setTimeout(() => void sharpen(), 1000);
     return () => {
@@ -579,7 +586,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const motion = idle ? 1 : 0;
     const lookX = pointer.x * motion + live.look.x;
     const lookY = pointer.y * motion + live.look.y;
-    rig.apply(camera as PerspectiveCamera, story.camera, time, lookX, lookY, Math.min(delta, 0.1), size.width, size.height, idle);
+    rig.apply(camera as PerspectiveCamera, story.camera, time, lookX, lookY, Math.min(delta, 0.1), size.width, size.height, idle, runtime.frozen !== null);
     runtime.settled = rig.settled(lookX, lookY);
 
     if (runtime.introAt === null && runtime.ready && runtime.still < 0) {
@@ -652,10 +659,10 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const frameSize = screens.main.texture.image as { width: number; height: number };
     const part = inside?.group.visible ? undefined : heldPart();
     const holding = hooks.drawHeld(gl, Math.min(delta, 0.05), part);
-    const share = native.phase !== 'live' ? 1 : quality.frameLive * (quality.chain === 'fast' ? quality.fastScale : 1);
+    const share = native.full ? 1 : quality.frameLive * (quality.chain === 'fast' ? quality.fastScale : 1);
     const moving = share < 0.999 ? scratch.part.set(Math.max(1, Math.round(frameSize.width * share)), Math.max(1, Math.round(frameSize.height * share))) : null;
     const movingPart = moving ? { width: moving.x, height: moving.y } : undefined;
-    if (!holding) {
+    if (!holding && (native.phase === 'live' || native.full)) {
       runtime.muted = native.phase !== 'live';
       screens.main.render(gl, story.place, movingPart);
       runtime.muted = false;

@@ -57,7 +57,7 @@ export class Rig {
     return values[i] + (values[i + 1] - values[i]) * f;
   }
 
-  apply(camera: PerspectiveCamera, u: number, time: number, pointerX: number, pointerY: number, delta: number, width: number, height: number, idle: boolean) {
+  apply(camera: PerspectiveCamera, u: number, time: number, pointerX: number, pointerY: number, delta: number, width: number, height: number, idle: boolean, frozen = false) {
     const t = MathUtils.clamp(u / (this.count - 1), 0, 1);
     this.positions.getPoint(t, this.position);
     this.targets.getPoint(t, this.target);
@@ -68,8 +68,10 @@ export class Rig {
       this.position.z += Math.sin(time * 0.27 + 0.4) * 0.0015;
     }
     const damping = 1 - Math.exp(-delta * 2.2);
-    this.yaw += (pointerX * MathUtils.degToRad(1.5) - this.yaw) * damping;
-    this.pitch += (pointerY * MathUtils.degToRad(1.0) - this.pitch) * damping;
+    if (!frozen) {
+      this.yaw += (pointerX * MathUtils.degToRad(1.5) - this.yaw) * damping;
+      this.pitch += (pointerY * MathUtils.degToRad(1.0) - this.pitch) * damping;
+    }
     this.forward.subVectors(this.target, this.position).normalize();
     this.right.crossVectors(this.forward, this.worldUp).normalize();
     this.up.crossVectors(this.right, this.forward).normalize();
@@ -86,7 +88,7 @@ export class Rig {
   }
 
   settled(pointerX: number, pointerY: number) {
-    return Math.abs(pointerX * MathUtils.degToRad(1.5) - this.yaw) < 2e-5 && Math.abs(pointerY * MathUtils.degToRad(1.0) - this.pitch) < 2e-5;
+    return Math.abs(pointerX * MathUtils.degToRad(1.5) - this.yaw) < 8e-4 && Math.abs(pointerY * MathUtils.degToRad(1.0) - this.pitch) < 8e-4;
   }
 
   focusPoint(out: Vector3) {
