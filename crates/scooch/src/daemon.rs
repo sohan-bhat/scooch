@@ -516,7 +516,8 @@ impl Daemon {
 
     fn tidy_tables(&self, state: &State) {
         let Ok(found) = std::fs::read_dir(self.store.tables()) else { return };
-        let kept: Vec<PathBuf> = state.screens.values().filter_map(|entry| Some(self.store.tables_for(entry.output.as_ref()?, tables_key(&entry.source, &state.options).ok()?))).collect();
+        let mut kept: Vec<PathBuf> = state.screens.values().filter_map(|entry| Some(self.store.tables_for(entry.output.as_ref()?, tables_key(&entry.source, &state.options).ok()?))).collect();
+        kept.extend(state.screens.iter().filter_map(|(id, entry)| Some(self.store.canvas_for(id, tables_key(&entry.source, &state.options).ok()?))));
         for file in found.flatten() {
             let path = file.path();
             if !kept.contains(&path) {
@@ -545,6 +546,9 @@ impl Daemon {
             let glider = self.glider.clone();
             let blocked = self.glide_block(&state);
             let mut gliding = blocked.is_none().then(|| glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+            if let Some(glider) = gliding.as_deref_mut() {
+                glider.know(&state.scales);
+            }
             let snapshot = self.desktop.snapshot();
             lap("snapshot", &mut clock);
             if let Ok(snapshot) = &snapshot {
@@ -565,6 +569,9 @@ impl Daemon {
             }
             if let Some(glider) = gliding.as_deref_mut() {
                 glider.close_early();
+                for (key, scale) in glider.learned() {
+                    state.scales.insert(key, scale);
+                }
             }
             drop(gliding);
             self.reap_later();
@@ -621,7 +628,8 @@ impl Daemon {
                 continue;
             }
             let scene = scene::scene(screen, &[]);
-            glider.open_early(screen, &entry.source, [scene.width, scene.height], output);
+            let canvas = Some(self.store.canvas_for(&screen.id, key)).filter(|canvas| canvas.is_file());
+            glider.open_early(screen, &entry.source, [scene.width, scene.height], output, canvas.as_deref());
         }
     }
 
@@ -787,32 +795,10 @@ impl Daemon {
         };
         lap("decode", &mut clock);
         let format = self.desktop.format();
-        let mut flight = None;
-        let mut tables = None;
-        let picture = if let Some(glider) = glider.as_deref_mut() {
-            let tables_key = tables_key(&source, options)?;
-            let (_, next) = self.fresh_name(&screen.id, entry.counter, format.extension(), current);
-            let made = self.store.tables_for(&next, tables_key);
+        let (picture, bundle) = if glider.is_some() {
             let (bundle, picture) = self.session_still(&screen.id, key, (&decoded, &analysis, &placement, scene, options));
             lap("render", &mut clock);
-            let written = std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| write_atomic(&made, &bundle.tables_to_bytes()));
-            drop(bundle);
-            lap("tables", &mut clock);
-            if written.is_ok() {
-                let from = output.as_ref().filter(|_| showing_output).map(|output| self.store.tables_for(output, tables_key)).filter(|from| from.is_file());
-                match (from, output.as_deref().filter(|_| showing_output)) {
-                    (Some(from), Some(still)) => {
-                        flight = glider.begin(&Plan { screen, picture: &source, size: [scene.width, scene.height], still, from: &from, to: &made });
-                        lap("open", &mut clock);
-                    }
-                    (_, None) => crate::glide::skipped("output not shown", ""),
-                    (None, _) => crate::glide::skipped("no tables", ""),
-                }
-                tables = Some(made);
-            } else {
-                crate::glide::skipped("tables not written", "");
-            }
-            picture
+            (picture, Some(bundle))
         } else {
             crate::glide::skipped(blocked.unwrap_or("not live"), "");
             let held = entry.placement.as_ref() == Some(&placement);
@@ -823,45 +809,77 @@ impl Daemon {
                 Arc::new(scooch_core::render_with(&decoded, &analysis, &placement, scene, options))
             };
             lap("render", &mut clock);
-            picture
-        };
-        let undo = |glider: Option<&mut Glider>, flight: Option<u32>, tables: &Option<PathBuf>| {
-            if let Some(glider) = glider {
-                if let Some(id) = flight {
-                    glider.abort(id);
-                }
-                glider.close_early_for(&screen.id);
-            }
-            if let Some(tables) = tables {
-                let _ = std::fs::remove_file(tables);
-            }
+            (picture, None)
         };
         drop(decoded);
         drop(analysis);
-        let bytes = match encode(&picture, format, self.desktop.profile().as_deref(), self.desktop.live()) {
+        let encoded = encode(&picture, format, self.desktop.profile().as_deref(), self.desktop.live());
+        drop(picture);
+        lap("encode", &mut clock);
+        let bytes = match encoded {
             Ok(bytes) => bytes,
             Err(error) => {
-                undo(glider.as_deref_mut(), flight, &tables);
+                if let Some(glider) = glider.as_deref_mut() {
+                    glider.close_early_for(&screen.id);
+                }
                 return Err(error);
             }
         };
-        drop(picture);
-        lap("encode", &mut clock);
         if let (true, Some(output)) = (showing_output, &output) {
             if std::fs::read(output).is_ok_and(|old| old == bytes) {
-                undo(glider.as_deref_mut(), flight, &tables);
+                if let Some(glider) = glider.as_deref_mut() {
+                    glider.close_early_for(&screen.id);
+                }
                 entry.placement = Some(placement);
                 return Ok(Outcome::Kept);
             }
         }
-        if let (Some(glider), None) = (glider.as_deref_mut(), flight) {
-            glider.close_early_for(&screen.id);
+        let tables_key = if bundle.is_some() { tables_key(&source, options).ok() } else { None };
+        let mut flight = None;
+        let mut made = None;
+        if let (Some(glider), Some(bundle), Some(tables_key)) = (glider.as_deref_mut(), bundle.as_ref(), tables_key) {
+            let from = output.as_ref().filter(|_| showing_output).map(|output| self.store.tables_for(output, tables_key)).filter(|from| from.is_file());
+            match (from, output.as_deref().filter(|_| showing_output)) {
+                (Some(from), Some(still)) => {
+                    let canvas = self.store.canvas_for(&screen.id, tables_key);
+                    let canvas = canvas.is_file().then_some(canvas);
+                    let prepared = glider.prepare(&Plan { screen, picture: &source, canvas: canvas.as_deref(), size: [scene.width, scene.height], still }, crate::glide::GRACE);
+                    lap("open", &mut clock);
+                    if let Some(id) = prepared {
+                        let (_, next) = self.fresh_name(&screen.id, entry.counter, format.extension(), current);
+                        let target = self.store.tables_for(&next, tables_key);
+                        match std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| write_atomic(&target, &bundle.tables_to_bytes())) {
+                            Ok(()) => {
+                                if glider.go(id, &from, &target) {
+                                    flight = Some(id);
+                                }
+                                made = Some(target);
+                            }
+                            Err(_) => {
+                                glider.abort(id);
+                                crate::glide::skipped("tables not written", "");
+                            }
+                        }
+                        lap("tables", &mut clock);
+                    }
+                }
+                (_, None) => crate::glide::skipped("output not shown", ""),
+                (None, _) => crate::glide::skipped("no tables", ""),
+            }
+            if flight.is_none() {
+                glider.close_early_for(&screen.id);
+            }
         }
         let was = std::mem::replace(&mut entry.painted, painted);
         let published = self.publish(entry, screen, current, seen, format.extension(), |path| write_atomic(path, &bytes));
         if !matches!(published, Ok(true)) {
             entry.painted = was;
-            undo(glider.as_deref_mut(), flight, &tables);
+            if let (Some(glider), Some(id)) = (glider.as_deref_mut(), flight) {
+                glider.abort(id);
+            }
+            if let Some(made) = &made {
+                let _ = std::fs::remove_file(made);
+            }
         }
         if !published? {
             return Ok(Outcome::Interrupted);
@@ -869,16 +887,47 @@ impl Daemon {
         let set = Instant::now();
         entry.placement = Some(placement);
         lap("set", &mut clock);
-        if let (Some(made), Some(output), Ok(tables_key)) = (&tables, &entry.output, tables_key(&source, options)) {
-            let wanted = self.store.tables_for(output, tables_key);
-            if *made != wanted {
-                let _ = std::fs::rename(made, &wanted);
+        if let (Some(bundle), Some(output), Some(tables_key)) = (bundle, entry.output.clone(), tables_key) {
+            let wanted = self.store.tables_for(&output, tables_key);
+            match &made {
+                Some(made) if *made != wanted => {
+                    let _ = std::fs::rename(made, &wanted);
+                }
+                Some(_) => {}
+                None => {
+                    let _ = std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| write_atomic(&wanted, &bundle.tables_to_bytes()));
+                }
             }
+            self.keep_canvas(&screen.id, tables_key, &bundle);
+            drop(bundle);
+            lap("later", &mut clock);
         }
         if let (Some(glider), Some(id), Some(output)) = (glider, flight, entry.output.as_ref()) {
             glider.settle(id, output, set);
         }
         Ok(Outcome::Rendered)
+    }
+
+    fn keep_canvas(&self, screen: &str, key: u64, bundle: &scooch_core::Bundle) {
+        let path = self.store.canvas_for(screen, key);
+        if path.is_file() {
+            return;
+        }
+        let print = crate::live::canvas::fingerprint(bundle.canvas_width, bundle.canvas_height, &bundle.canvas);
+        let head = crate::live::canvas::encode(bundle.canvas_width, bundle.canvas_height, &[], print);
+        if crate::state::write_parts(&path, &[&head, &bundle.canvas]).is_err() {
+            return;
+        }
+        let prefix = format!("{}.", file_safe(screen));
+        if let Ok(found) = std::fs::read_dir(self.store.tables()) {
+            for file in found.flatten() {
+                let other = file.path();
+                let name = file.file_name().to_string_lossy().into_owned();
+                if other != path && name.starts_with(&prefix) && name.ends_with(".canvas") {
+                    let _ = std::fs::remove_file(other);
+                }
+            }
+        }
     }
 
     fn plain(&self, entry: &mut Entry, screen: &Screen, current: Option<&Path>, seen: Option<&Path>) -> Result<bool> {
@@ -2613,7 +2662,7 @@ pub mod tests {
 
     fn inside_budget(waits: &[(&'static str, Duration)]) -> bool {
         let shared: Vec<Duration> = waits.iter().filter(|(what, _)| *what != "spawn").map(|(_, wait)| *wait).collect();
-        waits.iter().all(|(_, wait)| *wait <= crate::glide::BUDGET) && shared.windows(2).all(|pair| pair[1] <= pair[0])
+        waits.iter().all(|(_, wait)| *wait <= crate::glide::GRACE) && shared.windows(2).all(|pair| pair[1] <= pair[0])
     }
 
     fn held(script: &Mutex<crate::glide::tests::Script>) -> Arc<std::sync::atomic::AtomicBool> {
@@ -2668,8 +2717,62 @@ pub mod tests {
         assert!(when(&fake, "close") >= when(&fake, "set ") + fake.hold(), "the layer closed before the hold after the set");
         assert_eq!(*spawned.lock().unwrap(), 1);
         assert_eq!(std::fs::read(&second).unwrap(), today("glide-order-today"));
-        let tables: Vec<_> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|file| file.path()).collect();
-        assert_eq!(tables, vec![daemon.store.tables_for(&second, tables_key(&daemon.store.load().screens["main"].source, &Options::default()).unwrap())]);
+        let key = tables_key(&daemon.store.load().screens["main"].source, &Options::default()).unwrap();
+        let mut kept: Vec<_> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|file| file.path()).collect();
+        kept.sort();
+        let mut wanted = vec![daemon.store.tables_for(&second, key), daemon.store.canvas_for("main", key)];
+        wanted.sort();
+        assert_eq!(kept, wanted);
+        let canvas = crate::live::canvas::read(&daemon.store.canvas_for("main", key)).unwrap();
+        let tables = std::fs::read(daemon.store.tables_for(&second, key)).unwrap();
+        assert_eq!(crate::live::canvas::tables_print(&tables), Some(crate::live::canvas::fingerprint(canvas.width, canvas.height, &canvas.pixels)));
+        assert!(events.iter().any(|event| event.starts_with("warm ") && event.contains(" canvas")), "{events:?}");
+    }
+
+    #[test]
+    fn a_slow_helper_never_holds_the_set_back() {
+        let off = {
+            let (daemon, fake, _, _) = glide_rig("glide-slow-off", false);
+            fake.place(vec![subject()]);
+            daemon.tick();
+            fake.place(vec![moved_subject()]);
+            let started = Instant::now();
+            assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+            started.elapsed()
+        };
+        let ((daemon, fake, script, _), waits) = glide_rig_waits("glide-slow-hello", true);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        script.lock().unwrap().slow_hello = Duration::from_secs(60);
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        let started = Instant::now();
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let took = started.elapsed();
+        assert!(inside_budget(&waits.lock().unwrap()), "{:?}", waits.lock().unwrap());
+        let events = events(&fake);
+        let open = at(&events, "open");
+        let set = events.iter().position(|event| event.starts_with("set ")).unwrap_or_else(|| panic!("{events:?}"));
+        assert!(open < set && !events.iter().any(|event| event.starts_with("glide ")), "{events:?}");
+        assert!(events.iter().any(|event| *event == events[open].replacen("open", "close", 1).split(' ').take(2).collect::<Vec<_>>().join(" ")), "{events:?}");
+        assert!(took < off + Duration::from_secs(5), "the tick took {took:?} against {off:?} with the glide off");
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.contains("skipped, helper cold")), "{said:?}");
+    }
+
+    #[test]
+    fn the_scale_a_glide_ends_at_is_kept_for_the_next_cold_start() {
+        let (daemon, fake, script, _) = glide_rig("glide-scale-kept", true);
+        script.lock().unwrap().glided = Some((20, 0));
+        assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
+        let scales = daemon.store.load().scales;
+        assert_eq!(scales.len(), 1, "{scales:?}");
+        assert!(scales.keys().all(|key| key.starts_with("Fake GPU|")) && scales.values().all(|scale| *scale == 1.0), "{scales:?}");
+        daemon.glider.lock().unwrap().reset_for_test();
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![Rect { x: 40.0, ..moved_subject() }]);
+        daemon.tick();
+        assert!(events(&fake).iter().any(|event| event.starts_with("warm ") && event.ends_with(" Fake GPU=1")), "{:?}", events(&fake));
     }
 
     #[test]
@@ -2891,7 +2994,10 @@ pub mod tests {
                 assert_eq!(opened, closed, "{name} {events:?}");
             }
             assert!(!daemon.glider.lock().unwrap().in_flight(), "{name}");
-            assert_eq!(daemon.glider.lock().unwrap().running(), name == "shown", "{name}");
+            assert_eq!(daemon.glider.lock().unwrap().running(), matches!(name, "shown" | "dies"), "{name}");
+            if name == "dies" {
+                assert_eq!(events.iter().filter(|event| *event == "spawn").count(), 2, "a fresh helper warms after one dies in use {events:?}");
+            }
         }
     }
 

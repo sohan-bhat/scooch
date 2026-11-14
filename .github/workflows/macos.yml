@@ -16,7 +16,7 @@ jobs:
       matrix:
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +36,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./target/release/examples/macprobe gpu-bench macprobe/bench
 
+      - name: Cold start
+        if: ${{ !cancelled() }}
+        run: ./target/release/examples/macprobe cold-start macprobe/cold
+
       - name: Upload
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
@@ -49,4 +53,7 @@ jobs:
         run: |
           if [ -f macprobe/report.md ]; then
             cat macprobe/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f macprobe/cold/report.md ]; then
+            cat macprobe/cold/report.md >> "$GITHUB_STEP_SUMMARY"
           fi

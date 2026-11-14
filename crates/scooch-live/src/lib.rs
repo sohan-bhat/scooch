@@ -2,7 +2,7 @@
 
 mod glide;
 
-pub use glide::{choose, half, heavy, scaled_size, step, Glide, Look, Picture, Screen, Still, OUTPUT, SCALES};
+pub use glide::{choose, half, heavy, levels, rgba, scaled_size, step, Glide, Look, Picture, Screen, Still, OUTPUT, SCALES};
 use std::num::NonZeroIsize;
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +34,7 @@ pub struct Gpu {
     turn: Arc<Mutex<()>>,
     pub name: String,
     pub kind: &'static str,
+    pub made: [std::time::Duration; 3],
 }
 
 #[derive(Clone)]
@@ -78,6 +79,7 @@ fn composition(target: &Target) -> bool {
 
 impl Gpu {
     pub fn new(composition: bool) -> Result<Self, String> {
+        let started = std::time::Instant::now();
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
         descriptor.backends = if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::METAL };
         #[cfg(windows)]
@@ -102,8 +104,10 @@ impl Gpu {
             wgpu::DeviceType::VirtualGpu => "virtual",
             wgpu::DeviceType::Other => "other",
         };
+        let found = started.elapsed();
         let descriptor = wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() };
         let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).map_err(|error| format!("request device {error}"))?;
+        let opened = started.elapsed();
         MADE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let fault = Arc::new(Mutex::new(None::<String>));
         let seen = fault.clone();
@@ -119,9 +123,8 @@ impl Gpu {
             }
         });
         let scenes = Arc::new(glide::pipes(&device));
-        let gpu = Self { instance, adapter, device, queue, composition, pipelines: Arc::new(Mutex::new(Vec::new())), scenes, small: Arc::new(Mutex::new(None)), fault, turn: Arc::new(Mutex::new(())), name, kind };
-        gpu.pipeline(wgpu::TextureFormat::Bgra8Unorm);
-        Ok(gpu)
+        let made = [found, opened - found, started.elapsed() - opened];
+        Ok(Self { instance, adapter, device, queue, composition, pipelines: Arc::new(Mutex::new(Vec::new())), scenes, small: Arc::new(Mutex::new(None)), fault, turn: Arc::new(Mutex::new(())), name, kind, made })
     }
 
     fn pipeline(&self, format: wgpu::TextureFormat) -> Pipeline {

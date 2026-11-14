@@ -34,6 +34,8 @@ pub struct State {
     pub kept: Vec<PathBuf>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stuck: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub scales: BTreeMap<String, f32>,
 }
 
 pub fn fresh_options() -> Options {
@@ -71,7 +73,7 @@ impl Tally {
 
 impl Default for State {
     fn default() -> Self {
-        Self { version: VERSION, on: false, options: Options::default(), glide: true, screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new() }
+        Self { version: VERSION, on: false, options: Options::default(), glide: true, screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new(), scales: BTreeMap::new() }
     }
 }
 
@@ -204,6 +206,10 @@ impl Store {
 
     pub fn tables(&self) -> PathBuf {
         self.cache().join("tables")
+    }
+
+    pub fn canvas_for(&self, screen: &str, key: u64) -> PathBuf {
+        self.tables().join(format!("{}.{key:016x}.canvas", file_safe(screen)))
     }
 
     pub fn tables_for(&self, output: &Path, key: u64) -> PathBuf {

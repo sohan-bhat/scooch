@@ -213,3 +213,12 @@ fn a_mirrored_pair_cross_fades_like_the_cpu() {
         assert!(mean <= 1.5 && off <= 0.005, "the mirrored cross-fade is too far from the CPU frame: mean {mean:.3}/255, share {:.3}%", off * 100.0);
     }
 }
+
+#[test]
+fn four_channel_copies_keep_every_pixel_and_set_alpha() {
+    for pixels in [0usize, 1, 3, 4, 5, 9, 4097] {
+        let rgb: Vec<u8> = (0..pixels * 3).map(|index| (index * 7 % 256) as u8).collect();
+        let expected: Vec<u8> = rgb.chunks(3).flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255]).collect();
+        assert_eq!(scooch_live::rgba(&rgb), expected, "{pixels} pixels");
+    }
+}

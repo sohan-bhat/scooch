@@ -307,6 +307,12 @@ mod probe {
         if std::env::args().nth(1).as_deref() == Some("helper") {
             return helper();
         }
+        if std::env::args().nth(1).as_deref() == Some("cold-start") {
+            return cold_start(PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "maccold".into())));
+        }
+        if std::env::args().nth(1).as_deref() == Some("cold-split") {
+            return cold_split(PathBuf::from(std::env::args().nth(2).unwrap_or_default()), PathBuf::from(std::env::args().nth(3).unwrap_or_default()));
+        }
         if std::env::args().nth(1).as_deref() == Some("gpu-bench") {
             return gpu_bench(PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "macbench".into())));
         }
@@ -361,6 +367,7 @@ mod probe {
         probe.section("5 Move to new wallpaper", moves);
         probe.section("5b Scenery", scenery_check);
         probe.section("5c Glide", glide_check);
+        probe.section("5d Cold drags", cold_drags_check);
         probe.section("6 Idle", idle);
         probe.section("7 Off", off);
         probe.section("8 Second cycle", second_cycle);
@@ -1652,6 +1659,49 @@ mod probe {
         Ok(())
     }
 
+    fn abandoned(p: &mut Probe, marker: MainThreadMarker, screen: &Screen) -> Result<()> {
+        let gpu = match &p.gpu {
+            Some(gpu) => gpu.clone(),
+            None => Gpu::new(false).map_err(anyhow::Error::msg)?,
+        };
+        let pattern = |layer: &layer::Layer| Pattern { width: layer.pixels.0, height: layer.pixels.1, rgba: GRAY.iter().copied().chain([255]).cycle().take(layer.pixels.0 as usize * layer.pixels.1 as usize * 4).collect() };
+        let layer = layer::open(marker, screen)?;
+        let number = layer.number();
+        let mut renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &pattern(&layer)).map_err(anyhow::Error::msg)?;
+        layer.commit();
+        layer.reveal();
+        layer::present(|| renderer.frame(Some(0.3))).map_err(anyhow::Error::msg)?;
+        let (go, held) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let _ = held.recv();
+            let woke = layer::present(|| renderer.frame(Some(0.6)));
+            drop(renderer);
+            woke
+        });
+        layer.abandon();
+        layer::spin(0.3);
+        let on_screen = ours().iter().any(|window| window.number == number && window.on_screen);
+        let _ = go.send(());
+        let woke = worker.join().map_err(|_| anyhow::anyhow!("the held render thread panicked"))?;
+        layer::spin(0.1);
+        let next = layer::open(marker, screen).and_then(|next| {
+            let mut renderer = Renderer::on(&gpu, Target::Layer(next.surface()), &pattern(&next)).map_err(anyhow::Error::msg)?;
+            next.commit();
+            next.reveal();
+            let drawn = layer::present(|| renderer.frame(Some(0.5))).map_err(anyhow::Error::msg);
+            drop(renderer);
+            drop(next);
+            drawn
+        });
+        layer::spin(0.2);
+        let left = ours().iter().filter(|window| window.on_screen).count();
+        p.line(format!("- a layer abandoned while its render thread was held: its window on screen {on_screen}, the thread's frame after waking {woke:?}, a fresh layer after it opened and drew {:?}, windows of ours on screen after {left}", next.as_ref().map(|_| ()).map_err(|error| format!("{error:#}"))));
+        if on_screen || !woke.as_ref().is_err_and(|why| why.contains("occluded")) || next.is_err() || left > 0 {
+            p.fail("an abandoned layer stayed on screen, drew after its thread woke, or kept the next layer from opening");
+        }
+        Ok(())
+    }
+
     fn live(p: &mut Probe) -> Result<()> {
         let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
         accessory(marker);
@@ -1785,6 +1835,9 @@ mod probe {
         cycles(p, marker, &screen, false)?;
         if let Err(error) = helpers(p) {
             p.fail(format!("the helper process could not be measured {error:#}"));
+        }
+        if let Err(error) = abandoned(p, marker, &screen) {
+            p.fail(format!("the abandoned layer check could not run {error:#}"));
         }
         let _ = field_color;
         if let Some(recorded) = recorded.filter(|path| path.is_file()) {
@@ -2309,13 +2362,24 @@ mod probe {
         }
     }
 
-    fn judge_glide(p: &mut Probe, dragged: &Dragged, screen: &Screen, label: &str, evidence: Option<&str>) -> bool {
+    const SEEN_GAP: f64 = 0.125;
+
+    struct Judged {
+        rest: bool,
+        enough: bool,
+        moving: usize,
+        rate: Option<f64>,
+        gap: Option<f64>,
+        frames: Option<u32>,
+    }
+
+    fn judge_glide(p: &mut Probe, dragged: &Dragged, screen: &Screen, label: &str, evidence: Option<&str>) -> Judged {
         let desktop = platform::current().ok();
         let new = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
         let decode = |path: &Option<PathBuf>| path.as_deref().and_then(|path| objc2::rc::autoreleasepool(|_| picture::decode(path)).ok()).map(|image| halved(&image));
         let (Some(old_still), Some(new_still)) = (dragged.old_still.clone(), decode(&new)) else {
             p.line(format!("- {label}: the two stills could not be read, old {:?} new {new:?}", dragged.old));
-            return false;
+            return Judged { rest: false, enough: false, moving: 0, rate: None, gap: None, frames: None };
         };
         let (width, height) = (old_still.width() as usize, old_still.height() as usize);
         let icons: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().map(|(_, rect)| rect).collect();
@@ -2358,7 +2422,9 @@ mod probe {
         let first_move = settled_old.and_then(|from| (from..classes.len()).find(|index| classes[*index] != 'A' && classes[*index] != '=')).map(|index| (dragged.seen[index].at - dragged.dropped) * 1000.0);
         let span = glide_at.zip(glided).map(|(from, to)| to - from);
         let rate = span.map(|span| dragged.seen.iter().filter(|seen| glide_at.is_some_and(|at| seen.at >= at) && seen.at <= glide_at.unwrap_or(0.0) + span).count() as f64 / span.max(0.001));
-        let expected = rate.map(|rate| rate * 0.45 * 0.64);
+        let expected = rate.map(|rate| rate * 0.45 * 0.62);
+        let gap = glide_at.zip(glided).and_then(|(from, to)| dragged.seen.windows(2).filter(|pair| pair[1].at >= from && pair[0].at <= to).map(|pair| pair[1].at - pair[0].at).reduce(f64::max));
+        let frames_drawn = dragged.log.iter().find_map(|line| line.split(" glide glided ").nth(1).and_then(|rest| rest.split("with ").nth(1)).and_then(|rest| rest.split_whitespace().next()).and_then(|count| count.parse::<u32>().ok()));
         let inked = dragged.seen.iter().map(|seen| seen.inked).fold(0.0, f32::max);
         let handed = settled.and_then(|settled| dragged.seen.windows(2).filter(|pair| pair[0].at >= settled && closed.is_none_or(|closed| pair[1].at <= closed + 1.0)).map(|pair| &pair[1]).max_by_key(|seen| seen.step.worst));
         let fade = settled.and_then(|settled| dragged.seen.windows(2).find(|pair| pair[0].at < settled && pair[1].at >= settled).map(|pair| pair[1].step));
@@ -2375,7 +2441,7 @@ mod probe {
             moving.len(),
             window.len()
         ));
-        p.line(format!("  - captures a second during the glide {:?}, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95", rate.map(|rate| rate.round()), expected.map(|value| value.round())));
+        p.line(format!("  - captures a second during the glide {:?}, largest gap between captures during the glide {:?} ms, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95, frames the helper drew {frames_drawn:?}", rate.map(|rate| rate.round()), gap.map(|gap| (gap * 1000.0).round()), expected.map(|value| value.round())));
         p.line(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(closed)));
         p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, captures of the settled layer before close {layered:?}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
         p.line(format!("  - the change across the settle fade from the glide's last frame to the still, which ends before settled, {:?} of 255 at pixel {:?} from {:?} to {:?}", fade.map(|step| step.worst), fade.map(|step| (step.x, step.y)), fade.map(|step| step.before), fade.map(|step| step.after)));
@@ -2410,7 +2476,7 @@ mod probe {
             }
             p.line(format!("  - every capture saved in {name} with captures.md, nine frame strip {name}-strip.png"));
         }
-        returned == 0 && steady && moving.len() >= 2 && inked <= 0.1 && hand_over.is_some_and(|value| value <= 2) && settled.is_some()
+        Judged { rest: returned == 0 && steady && inked <= 0.1 && hand_over.is_some_and(|value| value <= 2) && settled.is_some(), enough: gap.is_some_and(|gap| gap <= SEEN_GAP), moving: moving.len(), rate, gap, frames: frames_drawn }
     }
 
     fn stuck(p: &mut Probe, pid: i32) {
@@ -2456,7 +2522,7 @@ mod probe {
     }
 
     fn commanded(line: &str) -> bool {
-        ["glide open", "glide warm", "glide helper started", "glide closed", "glide settle", "glide ready", "glide glided", "glide interrupted"].iter().any(|marker| line.contains(marker))
+        ["glide open", "glide warm", "glide helper", "glide closed", "glide settle", "glide ready", "glide glided", "glide interrupted"].iter().any(|marker| line.contains(marker))
     }
 
     fn cover(marker: MainThreadMarker, screen: &Screen) -> Result<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
@@ -2498,6 +2564,168 @@ mod probe {
         if after != before {
             p.fail("reduce motion was not put back as the probe found it");
         }
+    }
+
+    #[derive(Default)]
+    struct Cold {
+        set: Option<u128>,
+        glided: bool,
+        skip: Option<String>,
+        ready: Option<f64>,
+        shown: Option<f64>,
+        first: Option<f64>,
+        from: Option<String>,
+    }
+
+    fn cold_drag(p: &mut Probe, screen: &Screen, name: &str, (subject, aside): ((f32, f32), (f32, f32))) -> Cold {
+        let desktop = platform::current().ok();
+        let from = position(p, name).unwrap_or(subject);
+        let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
+        let before = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
+        let lines = daemon_log(p).lines().count();
+        drag(from, to);
+        let dropped = epoch();
+        let acted = Instant::now();
+        let set = wait_until(Duration::from_secs(12), || desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten()) != before).map(|_| acted.elapsed().as_millis());
+        let home = p.home.clone();
+        let _ = wait_until(Duration::from_secs(6), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" tick ") && !line.contains("Unchanged")));
+        std::thread::sleep(Duration::from_millis(1500));
+        let _ = wait_until(Duration::from_secs(4), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" ms after launch")));
+        let log = new_lines(&daemon_log(p), lines);
+        let at = |marker: &str| log.iter().find(|line| line.contains(marker)).and_then(|line| stamp_of(line));
+        let ready = log.iter().find(|line| line.contains(" ms after launch")).and_then(|line| line.split(" ms after launch").next()).and_then(|head| head.rsplit(' ').next()).and_then(|ms| ms.parse::<f64>().ok());
+        let opened = at(" glide open after snapshot");
+        let gliding = at("shown and gliding");
+        let first = log.iter().find_map(|line| line.split("first frame ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()));
+        Cold {
+            set,
+            glided: gliding.is_some(),
+            skip: log.iter().find_map(|line| line.split("glide skipped, ").nth(1).map(|rest| rest.split(',').next().unwrap_or(rest).to_string())),
+            ready,
+            shown: opened.zip(gliding).map(|(from, to)| ((to - from) * 1000.0).round()),
+            first: gliding.zip(first).map(|(at, first)| ((at - dropped) * 1000.0 + first).round()),
+            from: log.iter().find_map(|line| line.split("canvas from ").nth(1).map(|rest| rest.split(',').next().unwrap_or(rest).to_string())),
+        }
+    }
+
+    fn rest_for_cold(p: &mut Probe, since: Instant) -> bool {
+        std::thread::sleep(Duration::from_secs(35).saturating_sub(since.elapsed()));
+        wait_until(Duration::from_secs(15), || helper_pids(p).is_empty()).is_some()
+    }
+
+    fn cold_round(p: &mut Probe, screen: &Screen, name: &str, places: ((f32, f32), (f32, f32)), label: &str) -> Vec<Cold> {
+        let mut last = Instant::now();
+        let mut seen = Vec::new();
+        for index in 0..10 {
+            let rested = rest_for_cold(p, last);
+            let cold = cold_drag(p, screen, name, places);
+            last = Instant::now();
+            p.line(format!(
+                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, launch to ready {:?} ms, open to shown {:?} ms, drop to first frame {:?} ms, drop to set {:?} ms, canvas from {:?}",
+                index + 1,
+                cold.glided,
+                cold.skip,
+                cold.ready,
+                cold.shown,
+                cold.first,
+                cold.set,
+                cold.from
+            ));
+            seen.push(cold);
+        }
+        seen
+    }
+
+    fn restart_daemon(p: &mut Probe, slow: bool) -> Result<bool> {
+        let Some(mut child) = p.stand.take() else { return Ok(false) };
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_file(p.home.join("watch.pid"));
+        let log = fs::OpenOptions::new().create(true).append(true).open(p.home.join("watch.log"))?;
+        let mut command = Command::new(&p.bin);
+        command.arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
+        if slow {
+            command.env(scooch::live::SLOW_HELLO, "1000");
+        } else {
+            command.env_remove(scooch::live::SLOW_HELLO);
+        }
+        p.stand = Some(command.spawn()?);
+        let home = p.home.clone();
+        wait_until(Duration::from_secs(15), || fs::read_to_string(home.join("watch.pid")).ok().and_then(|text| text.trim().parse::<i32>().ok()).is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)).context("the restarted daemon wrote no pid file")?;
+        Ok(true)
+    }
+
+    fn middle(values: &[u128]) -> Option<u128> {
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        sorted.get(sorted.len() / 2).copied()
+    }
+
+    fn cold_drags_check(p: &mut Probe) -> Result<()> {
+        let result = cold_drags(p);
+        put_motion_back(p);
+        if p.stand.is_some() {
+            let _ = restart_daemon(p, false);
+        }
+        result
+    }
+
+    fn cold_drags(p: &mut Probe) -> Result<()> {
+        let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
+        accessory(marker);
+        let screen = main_screen(p)?;
+        let name = PROBES[0].0;
+        if dismiss_prompt(p).is_none() {
+            p.line("- the cold drags need Apple Events to Finder, which the open consent window blocks, so they were skipped".to_string());
+            return Ok(());
+        }
+        if scooch_pid(p).is_none() {
+            p.fail("no daemon runs for the cold drags");
+            return Ok(());
+        }
+        set_motion(p, false);
+        poke(p);
+        let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
+        let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
+        let places = (subject, aside);
+        if state(p)["glide"] != serde_json::json!(true) {
+            let _ = p.scooch(&["glide"], LIMIT);
+        }
+        p.line("- ten drags with the glide on, each after 35 s at rest so the helper is gone".to_string());
+        let on = cold_round(p, &screen, name, places, "cold");
+        let glided = on.iter().filter(|cold| cold.glided).count();
+        let ran = p.scooch(&["glide"], LIMIT);
+        p.line(format!("- scooch glide said {:?}, then ten drags with the glide off, each after 35 s at rest", ran.text()));
+        let off = cold_round(p, &screen, name, places, "off");
+        let ran = p.scooch(&["glide"], LIMIT);
+        p.line(format!("- scooch glide said {:?}", ran.text()));
+        let slow = if restart_daemon(p, true)? {
+            p.line(format!("- the daemon restarted with {}=1000, so each helper answers hello a second late, then ten drags each after 35 s at rest", scooch::live::SLOW_HELLO));
+            let slow = cold_round(p, &screen, name, places, "slow");
+            restart_daemon(p, false)?;
+            Some(slow)
+        } else {
+            p.line("- the daemon here is the login item, so the slow helper hint could not be set and the slow drags were skipped".to_string());
+            None
+        };
+        let sets = |round: &[Cold]| round.iter().filter_map(|cold| cold.set).collect::<Vec<u128>>();
+        let (on_set, off_set) = (middle(&sets(&on)), middle(&sets(&off)));
+        let ready: Vec<f64> = on.iter().filter_map(|cold| cold.ready).collect();
+        p.line(format!("- cold drags glided {glided} of 10, skip reasons {:?}, launch to ready {}, drop to set median {on_set:?} ms against {off_set:?} ms with the glide off", on.iter().filter_map(|cold| cold.skip.clone()).collect::<Vec<_>>(), stats(&ready)));
+        if cfg!(target_arch = "aarch64") && glided < 9 {
+            p.fail("fewer than nine of ten cold drags glided on arm64");
+        }
+        if let Some(slow) = slow {
+            let slow_set = middle(&sets(&slow));
+            let glided_slow = slow.iter().filter(|cold| cold.glided).count();
+            let pairs: Vec<i128> = slow.iter().zip(&off).filter_map(|(slow, off)| slow.set.zip(off.set).map(|(a, b)| a as i128 - b as i128)).collect();
+            let gap = slow_set.zip(off_set).map(|(a, b)| a as i128 - b as i128);
+            p.line(format!("- slow helper drags glided {glided_slow} of 10, drop to set median {slow_set:?} ms against {off_set:?} ms with the glide off, a gap of {gap:?} ms, each drag against the same drag with the glide off {pairs:?} ms"));
+            if glided_slow > 0 || gap.is_none_or(|gap| gap > 60) || sets(&slow).len() < 10 {
+                p.fail("a slow helper held the plain swap back by more than 60 ms");
+            }
+        }
+        Ok(())
     }
 
     fn glide_check(p: &mut Probe) -> Result<()> {
@@ -2561,11 +2789,43 @@ mod probe {
         let still: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().filter(|(found, _)| found.starts_with("scooch") && found != name).map(|(_, rect)| rect).collect();
         let masks: Vec<Vec<(usize, usize)>> = paper.as_ref().map(|field| still.iter().map(|rect| strong_ink(&baseline, field, rect, &screen)).collect()).unwrap_or_default();
         p.line(format!("- solid icon ink pixels of the still icons {:?}", masks.iter().map(Vec::len).collect::<Vec<_>>()));
-        let start = position(p, name).unwrap_or(subject);
-        let dragged = watch_drag(p, display, &screen, start, aside, &masks).context("the glide drag could not be watched")?;
-        let during = memory(daemon);
-        let held = daemon_log(p).lines().rev().find_map(|line| line.split("sessions hold ").nth(1).map(str::to_string));
-        let good = judge_glide(p, &dragged, &screen, "glide on, CGEvent drag", Some("glide"));
+        let mut verdict: Option<bool> = None;
+        let mut unseen = Vec::new();
+        let mut during = String::new();
+        let mut held = None;
+        for attempt in 1..=3 {
+            if attempt > 1 {
+                quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
+            }
+            let from = position(p, name).unwrap_or(subject);
+            let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
+            let dragged = watch_drag(p, display, &screen, from, to, &masks).context("the glide drag could not be watched")?;
+            if attempt == 1 {
+                during = memory(daemon);
+                held = daemon_log(p).lines().rev().find_map(|line| line.split("sessions hold ").nth(1).map(str::to_string));
+            }
+            let evidence = if attempt == 1 { "glide".to_string() } else { format!("glide-{attempt}") };
+            let judged = judge_glide(p, &dragged, &screen, &format!("glide on, CGEvent drag, attempt {attempt}"), Some(&evidence));
+            if !judged.rest {
+                verdict = Some(false);
+                break;
+            }
+            if judged.enough {
+                p.line(format!("  - captures between the old and the new picture judged, {} between, at least 2 needed", judged.moving));
+                verdict = Some(judged.moving >= 2);
+                break;
+            }
+            p.line(format!("  - captures between the old and the new picture not judged, {} captures a second, largest gap {:?} ms, two in-between captures are certain only with no gap over {} ms", judged.rate.map_or(0.0, f64::round), judged.gap.map(|gap| (gap * 1000.0).round()), (SEEN_GAP * 1000.0) as u32));
+            unseen.push(judged.frames);
+        }
+        let good = match verdict {
+            Some(good) => good,
+            None => {
+                let drew = unseen.iter().all(|frames| frames.is_some_and(|frames| frames >= 3));
+                p.limit(format!("the frames between the old and the new picture could not be judged on this runner, since screen capture slowed below one every {} ms during each of three glides, while the helper drew {unseen:?} frames and every other glide check passed", (SEEN_GAP * 1000.0) as u32));
+                drew
+            }
+        };
         p.line(format!("  - daemon {daemon} before the burst {rest_before}, right after the glide {during}, its sessions hold {held:?}"));
         std::thread::sleep(Duration::from_millis(1000));
         let pids = helper_pids(p);
@@ -2767,6 +3027,157 @@ mod probe {
 
     fn timed(values: &[f64]) -> String {
         format!("{}, over 16.7 ms {}", stats(values), values.iter().filter(|value| **value > 16.7).count())
+    }
+
+    const COLD: [u32; 2] = [2880, 1800];
+
+    fn cold_split(picture_file: PathBuf, canvas_file: PathBuf) -> ExitCode {
+        let result = (|| -> Result<Vec<f64>> {
+            let ms = |since: Instant| since.elapsed().as_secs_f64() * 1000.0;
+            let limit = Duration::from_secs(10);
+            let clock = Instant::now();
+            let gpu = Gpu::new(false).map_err(anyhow::Error::msg)?;
+            gpu.ready().map_err(anyhow::Error::msg)?;
+            let device = ms(clock);
+            let [found, opened, shaders] = gpu.made.map(|part| part.as_secs_f64() * 1000.0);
+            let clock = Instant::now();
+            let canvas = scooch::live::canvas::read(&canvas_file)?;
+            let read = ms(clock);
+            let clock = Instant::now();
+            let expanded = scooch_live::rgba(&canvas.pixels);
+            let expand = ms(clock);
+            drop(expanded);
+            let clock = Instant::now();
+            let uploaded = gpu.try_picture(&canvas).map_err(anyhow::Error::msg)?;
+            let upload = ms(clock);
+            gpu.idle(limit).map_err(anyhow::Error::msg)?;
+            let upload_done = ms(clock);
+            let clock = Instant::now();
+            let levels = scooch_live::levels(&canvas);
+            let levels_cpu = ms(clock);
+            let clock = Instant::now();
+            let stored = gpu.try_picture_levels(canvas.width, canvas.height, &levels).map_err(anyhow::Error::msg)?;
+            let stored_upload = ms(clock);
+            gpu.idle(limit).map_err(anyhow::Error::msg)?;
+            let stored_done = ms(clock);
+            drop(stored);
+            let clock = Instant::now();
+            let image = objc2::rc::autoreleasepool(|_| picture::decode(&picture_file))?;
+            let decode = ms(clock);
+            let clock = Instant::now();
+            let _ = scooch_core::canvas(&image, COLD[0], COLD[1]);
+            let made = ms(clock);
+            let clock = Instant::now();
+            let heavy = scooch_live::heavy(COLD[0], COLD[1], &uploaded);
+            let glide = gpu.glide(&uploaded, &heavy, &heavy).map_err(anyhow::Error::msg)?;
+            let look = [(Layered::Glide(&glide, 0.5), 1.0)];
+            let _ = gpu.time(COLD[0], COLD[1], &look);
+            let _ = gpu.time(COLD[0], COLD[1], &look);
+            Ok(vec![device, read, upload, upload_done, levels_cpu, stored_upload, stored_done, decode, made, ms(clock), found, opened, shaders, expand])
+        })();
+        match result {
+            Ok(split) => {
+                println!("split {}", split.iter().map(|value| format!("{value:.1}")).collect::<Vec<_>>().join(" "));
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                println!("failed {error:#}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    fn cold_start(out: PathBuf) -> ExitCode {
+        let _ = fs::create_dir_all(&out);
+        let mut lines = vec!["# Scooch helper cold start".to_string(), String::new()];
+        let result = (|| -> Result<()> {
+            let load = Command::new("/usr/bin/uptime").output().map(|ran| String::from_utf8_lossy(&ran.stdout).trim().to_string()).unwrap_or_default();
+            lines.push(format!("- uptime before `{load}`"));
+            let me = std::env::current_exe()?;
+            let program = me.parent().and_then(Path::parent).map(|folder| folder.join("scooch")).filter(|path| path.is_file()).context("the scooch program is not next to the examples folder")?;
+            let file = out.join("balloon-sky.jpg");
+            fs::write(&file, BALLOON)?;
+            let image = objc2::rc::autoreleasepool(|_| picture::decode(&file))?;
+            let canvas = scooch_core::canvas(&image, COLD[0], COLD[1]);
+            let canvas_file = out.join("balloon.canvas");
+            let print = scooch::live::canvas::fingerprint(canvas.width, canvas.height, &canvas.pixels);
+            fs::write(&canvas_file, [scooch::live::canvas::encode(canvas.width, canvas.height, &[], print), canvas.pixels.clone()].concat())?;
+            let size = fs::metadata(&canvas_file).map(|meta| meta.len()).unwrap_or(0);
+            let (mut totals, mut hellos, mut warms, mut gone) = (Vec::new(), Vec::new(), Vec::new(), 0);
+            let (mut adapter, mut from, mut scale) = (String::new(), String::new(), None);
+            for _ in 0..10 {
+                let started = Instant::now();
+                let mut helper = scooch::live::Helper::launch(&program)?;
+                let warm = helper.ask_warm_with(scooch::live::Hints::default(), Some(&file), Some(COLD), Some(&canvas_file), std::collections::BTreeMap::new())?;
+                helper.expect(Duration::from_secs(10), |reply| matches!(reply, scooch::live::Reply::Hello { .. }).then_some(Ok(())))?;
+                hellos.push(started.elapsed().as_secs_f64() * 1000.0);
+                let ready = helper.ready_for(warm, Duration::from_secs(30))?;
+                totals.push(started.elapsed().as_secs_f64() * 1000.0);
+                warms.push(ready.ms as f64);
+                adapter = format!("{} of kind {}", ready.adapter, ready.kind);
+                from = ready.from.unwrap_or_default();
+                scale = ready.scale;
+                let pid = helper.pid;
+                drop(helper);
+                let alive = Command::new("/bin/kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().is_ok_and(|status| status.success());
+                if !alive {
+                    gone += 1;
+                }
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            lines.push(format!("- helper launched cold ten times, each warmed from a {}x{} canvas file of {size} bytes and ended, adapter {adapter}, canvas from {from}, first scale {scale:?}", canvas.width, canvas.height));
+            lines.push(format!("  - launch to ready {}", stats(&totals)));
+            lines.push(format!("  - process start, launch to hello {}", stats(&hellos)));
+            lines.push(format!("  - warm inside the helper, device with shaders, canvas read and upload {}", stats(&warms)));
+            lines.push(format!("  - helpers gone after their run {gone} of 10"));
+            let mut parts: [Vec<f64>; 14] = Default::default();
+            let mut failed = Vec::new();
+            for _ in 0..10 {
+                let ran = Command::new(&me).arg("cold-split").arg(&file).arg(&canvas_file).stderr(Stdio::null()).output()?;
+                let text = String::from_utf8_lossy(&ran.stdout).to_string();
+                match text.lines().find_map(|line| line.strip_prefix("split ")) {
+                    Some(values) => {
+                        for (slot, value) in values.split_whitespace().filter_map(|value| value.parse::<f64>().ok()).enumerate().take(parts.len()) {
+                            parts[slot].push(value);
+                        }
+                    }
+                    None => failed.push(text.trim().to_string()),
+                }
+            }
+            let names = [
+                "device with shader compile",
+                "canvas file read with its fingerprint",
+                "upload with mips made on the GPU, CPU side",
+                "upload with mips made on the GPU, until the GPU is idle",
+                "mips made on the CPU, as a stored file would hold them",
+                "upload of stored mips, CPU side",
+                "upload of stored mips, until the GPU is idle",
+                "the old path, source picture decode",
+                "the old path, canvas resample",
+                "two timing frames, now after ready",
+                "of the device, finding the adapter",
+                "of the device, opening it",
+                "of the device, compiling the shaders",
+                "of the upload, three channels to four on the CPU",
+            ];
+            lines.push(format!("- the warm steps in ten fresh processes, failed {failed:?}"));
+            for (name, values) in names.iter().zip(&parts) {
+                lines.push(format!("  - {name} {}", stats(values)));
+            }
+            let _ = fs::remove_file(&file);
+            let _ = fs::remove_file(&canvas_file);
+            let load = Command::new("/usr/bin/uptime").output().map(|ran| String::from_utf8_lossy(&ran.stdout).trim().to_string()).unwrap_or_default();
+            lines.push(format!("- uptime after `{load}`"));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            lines.push(format!("- **stopped** {error:#}"));
+        }
+        for line in &lines {
+            println!("{line}");
+        }
+        let _ = fs::write(out.join("report.md"), lines.join("\n") + "\n");
+        ExitCode::SUCCESS
     }
 
     fn gpu_bench(out: PathBuf) -> ExitCode {

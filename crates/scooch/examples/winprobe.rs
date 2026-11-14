@@ -722,9 +722,11 @@ mod probe {
     }
 
     fn park_cursor() {
-        if let Some(area) = work_area() {
-            let _ = unsafe { SetCursorPos(area.right - 20, area.top + 20) };
-        }
+        let Some(area) = work_area() else { return };
+        let icons = icon_rects().unwrap_or_default();
+        let places = [(area.right - 20, area.top + 20), (area.right - 20, area.bottom - 20), (area.right - 20, (area.top + area.bottom) / 2), ((area.left + area.right) / 2, area.bottom - 20)];
+        let (x, y) = places.into_iter().find(|(x, y)| !inside(&icons, *x as f32, *y as f32, 40.0)).unwrap_or(places[0]);
+        let _ = unsafe { SetCursorPos(x, y) };
     }
 
     fn geometry(p: &mut Probe) -> Result<()> {
@@ -893,8 +895,13 @@ mod probe {
             pump(Duration::from_millis(40));
         }
         sent &= mouse(to.x, to.y, MOUSEEVENTF_LEFTUP);
+        if let Ok(mut dropped) = DROPPED.lock() {
+            *dropped = Some(epoch());
+        }
         sent
     }
+
+    static DROPPED: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
 
     fn key(code: VIRTUAL_KEY, up: bool) -> INPUT {
         let flags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
@@ -3114,6 +3121,13 @@ mod probe {
         patch_until(kit.spot, &patch_of(&kit.other.1, area, kit.spot), true, limit)
     }
 
+    fn unseen(p: &mut Probe, kit: &Kit, area: RECT, name: &str) {
+        let Ok(shot) = capture(area) else { return };
+        let all: Vec<usize> = (0..(shot.width() * shot.height()) as usize).collect();
+        let said = evidence(p, name, &shot, &kit.other.1, &all, &[]);
+        p.line(format!("  - the layer was not seen at the spot {},{}, {said}", kit.spot.left - area.left, kit.spot.top - area.top));
+    }
+
     fn other_gone(kit: &Kit, area: RECT, limit: Duration) -> Option<Duration> {
         patch_until(kit.spot, &patch_of(&kit.other.1, area, kit.spot), false, limit)
     }
@@ -3146,6 +3160,9 @@ mod probe {
             bail!("the holding process said {said:?}");
         };
         let before = other_on_screen(kit, area, Duration::from_secs(3));
+        if before.is_none() {
+            unseen(p, kit, area, "parent-unseen");
+        }
         holder.kill()?;
         let _ = holder.wait();
         let off = other_gone(kit, area, Duration::from_secs(2));
@@ -3163,6 +3180,9 @@ mod probe {
         helper.warm(bare(), None, None, Duration::from_secs(20))?;
         helper.open(1, screen, &kit.other.0, ANSWER)?;
         let before = other_on_screen(kit, area, Duration::from_secs(2));
+        if before.is_none() {
+            unseen(p, kit, area, "hang-up-unseen");
+        }
         helper.hang_up();
         let off = other_gone(kit, area, Duration::from_secs(2));
         let ended = helper.wait_exit(Duration::from_secs(3));
@@ -3180,6 +3200,9 @@ mod probe {
         helper.warm(bare(), None, None, Duration::from_secs(20))?;
         helper.open(1, screen, &kit.other.0, ANSWER)?;
         let before = other_on_screen(kit, area, Duration::from_secs(2));
+        if before.is_none() {
+            unseen(p, kit, area, "kill-unseen");
+        }
         let handle = unsafe { OpenProcess(PROCESS_TERMINATE, false, helper.pid) }?;
         let ended = unsafe { TerminateProcess(handle, 9) };
         let _ = unsafe { CloseHandle(handle) };
@@ -3460,8 +3483,11 @@ mod probe {
             fs::copy(path, &kept).ok().map(|_| kept)
         });
         let start = log_lines(log).len();
+        if let Ok(mut dropped) = DROPPED.lock() {
+            *dropped = None;
+        }
         let sent = act();
-        let dropped = epoch();
+        let dropped = DROPPED.lock().ok().and_then(|mut dropped| dropped.take()).unwrap_or_else(epoch);
         let started = Instant::now();
         let mut shots = Vec::new();
         let mut done: Option<Instant> = None;
@@ -3688,7 +3714,10 @@ mod probe {
         let shown = shown_name(name, folder);
         let Some(rect) = automation_rects(&automation, view.list).ok().and_then(|rects| rects.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect)) else { return false };
         let from = POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 };
+        let before = (rect.x + rect.w / 2.0, rect.y);
         let sent = drag_to(from, to);
+        let _ = wait_until(Duration::from_millis(1500), || icon_spot(name, folder).is_some_and(|spot| spot != before));
+        pump(Duration::from_millis(150));
         park_cursor();
         sent
     }
@@ -3962,7 +3991,7 @@ mod probe {
             threads(daemon)
         ));
         quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
-        let rest_target = if last_target.x == lower.x && last_target.y == lower.y { centre } else { lower };
+        let rest_target = if last_target.x == centre.x && last_target.y == centre.y { aside } else { centre };
         let rested = watch_change(&log, &screen, || drag_icon(name, folder, rest_target), false);
         let stamp = |word: &str| rested.log.iter().find(|line| line.contains(word)).and_then(|line| stamp_of(line));
         let rest_glided = rested.log.iter().any(|line| line.contains(" glide settled"));
@@ -3970,7 +3999,10 @@ mod probe {
         let cold = stamp(" glide helper started").zip(stamp(" glide ready")).map(|(started, ready)| ((ready - started) * 1000.0).round());
         let shown = stamp(" glide open after snapshot").zip(rested.log.iter().find(|line| gliding(line)).and_then(|line| stamp_of(line))).map(|(asked, shown)| ((shown - asked) * 1000.0).round());
         p.line(format!(
-            "- the first drag after the helper went away: glided {rest_glided}, skip reasons {rest_skips:?}, helper start to ready {cold:?} ms, open after the snapshot to shown {shown:?} ms, wallpaper set {:?} ms after the drop, log {:?}",
+            "- the first drag after the helper went away, to {},{} and now at {:?}: glided {rest_glided}, skip reasons {rest_skips:?}, helper start to ready {cold:?} ms, open after the snapshot to shown {shown:?} ms, wallpaper set {:?} ms after the drop, log {:?}",
+            rest_target.x,
+            rest_target.y,
+            icon_spot(name, folder),
             stamp(" set ").map(|set| ((set - rested.dropped) * 1000.0).round()),
             rested.log.iter().filter(|line| line.contains(" glide ") || line.contains(" set ")).map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()
         ));

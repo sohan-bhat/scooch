@@ -1,9 +1,11 @@
+pub mod canvas;
 pub mod helper;
 
 use crate::platform::Screen;
 use anyhow::{anyhow, bail, Context, Result};
 use scooch_core::Rect;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
@@ -12,6 +14,7 @@ use std::time::{Duration, Instant};
 
 pub const HELPER: &str = "--live-helper";
 pub const VERSION: u32 = 2;
+pub const SLOW_HELLO: &str = "SCOOCH_HELPER_SLOW_HELLO_MS";
 const QUIT_WAIT: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -26,7 +29,20 @@ pub struct Hints {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Command {
     Hello { version: u32 },
-    Warm { #[serde(default)] hints: Hints, #[serde(default)] picture: Option<PathBuf>, #[serde(default)] size: Option<[u32; 2]>, #[serde(default, skip_serializing_if = "Option::is_none")] warm_id: Option<u32> },
+    Warm {
+        #[serde(default)]
+        hints: Hints,
+        #[serde(default)]
+        picture: Option<PathBuf>,
+        #[serde(default)]
+        size: Option<[u32; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        warm_id: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        canvas: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        scales: BTreeMap<String, f32>,
+    },
     Open { id: u32, screen: String, rect: Rect, #[serde(default = "one")] scale: f32, #[serde(default)] still: Option<PathBuf> },
     Glide { id: u32, a: PathBuf, b: PathBuf, ms: u32 },
     Settle { id: u32, still: PathBuf, #[serde(default)] ms: Option<u32> },
@@ -42,7 +58,20 @@ fn one() -> f32 {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Reply {
     Hello { version: u32, pid: u32 },
-    Ready { adapter: String, ms: u64, #[serde(default)] uploads: u32, #[serde(default, rename = "device")] kind: String, #[serde(default, skip_serializing_if = "Option::is_none")] warm_id: Option<u32> },
+    Ready {
+        adapter: String,
+        ms: u64,
+        #[serde(default)]
+        uploads: u32,
+        #[serde(default, rename = "device")]
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        warm_id: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<f32>,
+    },
     Shown { id: u32, ms: u64 },
     Glided { id: u32, frames: u32, slow_frames: u32, first_frame_ms: u64, #[serde(default)] uploads: u32, #[serde(default = "one")] scale: f32 },
     Settled { id: u32 },
@@ -57,6 +86,8 @@ pub struct Ready {
     pub uploads: u32,
     pub kind: String,
     pub warm_id: Option<u32>,
+    pub from: Option<String>,
+    pub scale: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -82,15 +113,29 @@ pub fn warm_failed(warm_id: Option<u32>, why: &str) -> String {
 pub struct Helper {
     child: Child,
     input: Option<ChildStdin>,
-    replies: mpsc::Receiver<Reply>,
+    replies: mpsc::Receiver<(Instant, Reply)>,
     #[cfg(windows)]
     guard: Option<job::Guard>,
     pub pid: u32,
     warms: u32,
+    launched: Instant,
+    arrived: Option<Instant>,
 }
 
 impl Helper {
     pub fn spawn(program: &Path, timeout: Duration) -> Result<Helper> {
+        let mut helper = Self::launch(program)?;
+        helper.expect(timeout, |reply| match reply {
+            Reply::Hello { version, .. } if *version == VERSION => Some(Ok(())),
+            Reply::Hello { version, .. } => Some(Err(anyhow!("the helper speaks version {version}, not {VERSION}"))),
+            Reply::Failed { id: None, why } => Some(Err(anyhow!("{why}"))),
+            _ => None,
+        })?;
+        Ok(helper)
+    }
+
+    pub fn launch(program: &Path) -> Result<Helper> {
+        let launched = Instant::now();
         let mut command = std::process::Command::new(program);
         command.arg(HELPER).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         #[cfg(windows)]
@@ -107,7 +152,7 @@ impl Helper {
             for text in BufReader::new(output).lines() {
                 let Ok(text) = text else { break };
                 let reply = serde_json::from_str::<Reply>(&text).unwrap_or_else(|error| Reply::Failed { id: None, why: format!("unreadable line from the helper {error}") });
-                if sender.send(reply).is_err() {
+                if sender.send((Instant::now(), reply)).is_err() {
                     break;
                 }
             }
@@ -122,15 +167,15 @@ impl Helper {
             guard,
             pid,
             warms: 0,
+            launched,
+            arrived: None,
         };
         helper.send(&Command::Hello { version: VERSION })?;
-        helper.expect(timeout, |reply| match reply {
-            Reply::Hello { version, .. } if *version == VERSION => Some(Ok(())),
-            Reply::Hello { version, .. } => Some(Err(anyhow!("the helper speaks version {version}, not {VERSION}"))),
-            Reply::Failed { id: None, why } => Some(Err(anyhow!("{why}"))),
-            _ => None,
-        })?;
         Ok(helper)
+    }
+
+    pub fn since_launch(&self) -> Option<Duration> {
+        self.arrived.map(|arrived| arrived.saturating_duration_since(self.launched))
     }
 
     pub fn send(&mut self, command: &Command) -> Result<()> {
@@ -145,7 +190,8 @@ impl Helper {
         let deadline = Instant::now() + timeout;
         loop {
             match self.replies.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(reply) => {
+                Ok((arrived, reply)) => {
+                    self.arrived = Some(arrived);
                     if let Some(result) = pick(&reply) {
                         return result;
                     }
@@ -157,7 +203,9 @@ impl Helper {
     }
 
     pub fn next(&mut self, timeout: Duration) -> Option<Reply> {
-        self.replies.recv_timeout(timeout).ok()
+        let (arrived, reply) = self.replies.recv_timeout(timeout).ok()?;
+        self.arrived = Some(arrived);
+        Some(reply)
     }
 
     fn failure(reply: &Reply, wanted: Option<u32>) -> Option<anyhow::Error> {
@@ -168,16 +216,20 @@ impl Helper {
     }
 
     pub fn ask_warm(&mut self, hints: Hints, picture: Option<&Path>, size: Option<[u32; 2]>) -> Result<u32> {
+        self.ask_warm_with(hints, picture, size, None, BTreeMap::new())
+    }
+
+    pub fn ask_warm_with(&mut self, hints: Hints, picture: Option<&Path>, size: Option<[u32; 2]>, canvas: Option<&Path>, scales: BTreeMap<String, f32>) -> Result<u32> {
         self.warms = self.warms.wrapping_add(1).max(1);
         let warm_id = self.warms;
-        self.send(&Command::Warm { hints, picture: picture.map(Path::to_path_buf), size, warm_id: Some(warm_id) })?;
+        self.send(&Command::Warm { hints, picture: picture.map(Path::to_path_buf), size, warm_id: Some(warm_id), canvas: canvas.map(Path::to_path_buf), scales })?;
         Ok(warm_id)
     }
 
     pub fn ready_for(&mut self, warm_id: u32, timeout: Duration) -> Result<Ready> {
         let mine = format!("warm {warm_id}: ");
         self.expect(timeout, |reply| match reply {
-            Reply::Ready { adapter, ms, uploads, kind, warm_id: Some(answered) } if *answered == warm_id => Some(Ok(Ready { adapter: adapter.clone(), ms: *ms, uploads: *uploads, kind: kind.clone(), warm_id: Some(warm_id) })),
+            Reply::Ready { adapter, ms, uploads, kind, warm_id: Some(answered), from, scale } if *answered == warm_id => Some(Ok(Ready { adapter: adapter.clone(), ms: *ms, uploads: *uploads, kind: kind.clone(), warm_id: Some(warm_id), from: from.clone(), scale: *scale })),
             Reply::Failed { id: None, why } if why.starts_with(&mine) || !why.starts_with("warm ") => Some(Err(anyhow!("{why}"))),
             _ => None,
         })
@@ -309,7 +361,7 @@ mod tests {
     fn commands_and_replies_read_back_the_same() {
         let commands = [
             Command::Hello { version: VERSION },
-            Command::Warm { hints: Hints { present: Some("bare".into()), scale: Some(0.5) }, picture: Some(PathBuf::from("p.jpg")), size: Some([1024, 768]), warm_id: Some(4) },
+            Command::Warm { hints: Hints { present: Some("bare".into()), scale: Some(0.5) }, picture: Some(PathBuf::from("p.jpg")), size: Some([1024, 768]), warm_id: Some(4), canvas: Some(PathBuf::from("main.canvas")), scales: BTreeMap::from([("gpu".to_string(), 0.75)]) },
             Command::Open { id: 3, screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5, still: Some(PathBuf::from("a.png")) },
             Command::Glide { id: 3, a: PathBuf::from("a.tables"), b: PathBuf::from("b.tables"), ms: 450 },
             Command::Settle { id: 3, still: PathBuf::from("b.png"), ms: None },
@@ -321,7 +373,7 @@ mod tests {
         }
         let replies = [
             Reply::Hello { version: VERSION, pid: 9 },
-            Reply::Ready { adapter: "gpu".into(), ms: 12, uploads: 1, kind: "integrated".into(), warm_id: Some(4) },
+            Reply::Ready { adapter: "gpu".into(), ms: 12, uploads: 1, kind: "integrated".into(), warm_id: Some(4), from: Some("cache".into()), scale: Some(0.6) },
             Reply::Shown { id: 3, ms: 40 },
             Reply::Glided { id: 3, frames: 24, slow_frames: 1, first_frame_ms: 30, uploads: 1, scale: 0.75 },
             Reply::Settled { id: 3 },
@@ -335,7 +387,7 @@ mod tests {
 
     #[test]
     fn the_ready_answer_names_the_adapter_kind_as_device() {
-        let text = line(&Reply::Ready { adapter: "warp".into(), ms: 1, uploads: 0, kind: "cpu".into(), warm_id: Some(7) }).unwrap();
+        let text = line(&Reply::Ready { adapter: "warp".into(), ms: 1, uploads: 0, kind: "cpu".into(), warm_id: Some(7), from: None, scale: None }).unwrap();
         assert!(text.contains(r#""kind":"ready""#) && text.contains(r#""device":"cpu""#), "{text}");
     }
 
@@ -358,9 +410,9 @@ mod tests {
 
     #[test]
     fn the_ready_answer_carries_the_warm_it_answers() {
-        let text = line(&Reply::Ready { adapter: "gpu".into(), ms: 1, uploads: 1, kind: "integrated".into(), warm_id: Some(9) }).unwrap();
+        let text = line(&Reply::Ready { adapter: "gpu".into(), ms: 1, uploads: 1, kind: "integrated".into(), warm_id: Some(9), from: None, scale: None }).unwrap();
         assert!(text.contains(r#""warm_id":9"#), "{text}");
-        let warm = line(&Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: Some(3) }).unwrap();
+        let warm = line(&Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: Some(3), canvas: None, scales: BTreeMap::new() }).unwrap();
         assert!(warm.contains(r#""warm_id":3"#), "{warm}");
         assert_eq!(warm_failed(Some(3), "no device"), "warm 3: no device");
     }
@@ -370,7 +422,7 @@ mod tests {
         let read: Command = serde_json::from_str(r#"{"kind":"open","id":1,"screen":"s","rect":{"x":0,"y":0,"w":10,"h":10}}"#).unwrap();
         assert_eq!(read, Command::Open { id: 1, screen: "s".into(), rect: Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 }, scale: 1.0, still: None });
         let warm: Command = serde_json::from_str(r#"{"kind":"warm"}"#).unwrap();
-        assert_eq!(warm, Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: None });
+        assert_eq!(warm, Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: None, canvas: None, scales: BTreeMap::new() });
         let settle: Command = serde_json::from_str(r#"{"kind":"settle","id":2,"still":"b.png"}"#).unwrap();
         assert_eq!(settle, Command::Settle { id: 2, still: PathBuf::from("b.png"), ms: None });
     }

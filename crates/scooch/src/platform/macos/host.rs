@@ -14,6 +14,7 @@ use std::time::Duration;
 
 const PERIOD: Duration = Duration::from_micros(16_667);
 const SETTLE_IN: Duration = Duration::from_millis(34);
+const COMPOSITIONS: u32 = 2;
 
 pub struct Host {
     marker: MainThreadMarker,
@@ -56,12 +57,24 @@ impl Platform for Host {
         layer.close();
     }
 
+    fn abandon(&mut self, layer: layer::Layer) {
+        layer.abandon();
+    }
+
     fn wait(&mut self, timeout: Duration) {
         layer::wait(timeout);
     }
 
     fn waker(&self) -> Waker {
         Arc::new(layer::nudge)
+    }
+
+    fn composed() {
+        std::thread::sleep(layer::period(layer::main_display()).unwrap_or(PERIOD) * COMPOSITIONS);
+    }
+
+    fn prepare(&mut self) {
+        NSApplication::sharedApplication(self.marker).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     }
 
     fn decode(path: &Path) -> Result<RgbImage> {
@@ -77,6 +90,5 @@ pub fn serve() -> ExitCode {
     let Some(marker) = MainThreadMarker::new() else {
         return helper::refuse("the helper has to run on the main thread");
     };
-    NSApplication::sharedApplication(marker).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     helper::serve(Host { marker })
 }
