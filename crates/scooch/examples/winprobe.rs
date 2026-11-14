@@ -3407,8 +3407,20 @@ mod probe {
     }
 
     fn logged(watched: &Watched, word: &str) -> Option<f64> {
+        logged_from(watched, word, f64::MIN)
+    }
+
+    fn logged_from(watched: &Watched, word: &str, from: f64) -> Option<f64> {
         let word = word.trim_start();
-        watched.log.iter().find(|line| line.split_once(' ').is_some_and(|(_, rest)| rest.starts_with(word))).and_then(|line| stamp_of(line))
+        watched.log.iter().filter(|line| line.split_once(' ').is_some_and(|(_, rest)| rest.starts_with(word))).filter_map(|line| stamp_of(line)).find(|stamp| *stamp >= from)
+    }
+
+    fn gliding_id(watched: &Watched) -> Option<String> {
+        watched.log.iter().find_map(|line| {
+            let (_, rest) = line.split_once(' ')?;
+            let (id, tail) = rest.strip_prefix("glide open ")?.split_once(' ')?;
+            tail.starts_with("shown and gliding").then(|| id.to_string())
+        })
     }
 
     fn tables_file(home: &Path, output: &Path) -> Option<Vec<u8>> {
@@ -3422,11 +3434,11 @@ mod probe {
         old_tables: Option<&'a [u8]>,
         before: &'a RgbImage,
         still_icons: &'a [Rect],
-        earlier_ready: Option<f64>,
+        warmed: bool,
     }
 
     fn judge_daemon_glide(p: &mut Probe, watched: &Watched, screen: &Screen, given: &Judged, label: &str, strip_name: Option<&str>) -> bool {
-        let Judged { source, old_tables, before, still_icons, earlier_ready } = *given;
+        let Judged { source, old_tables, before, still_icons, warmed } = *given;
         let (Some(old_path), Some(new_path)) = (&watched.kept, &watched.new) else {
             p.line(format!("- {label}: the wallpaper before {:?}, kept as {:?}, or after {:?} is unknown", watched.old, watched.kept, watched.new));
             return false;
@@ -3454,14 +3466,16 @@ mod probe {
             _ => Vec::new(),
         };
         let classes: Vec<char> = watched.shots.iter().map(|(_, shot)| side(shot, &old, &new, &apart)).collect();
-        let open = logged(watched, " glide open");
-        let settled = logged(watched, " glide settled");
-        let closed = logged(watched, " glide closed");
-        let settle = logged(watched, " glide settle ");
-        let glided = logged(watched, " glide glided");
-        let ready = logged(watched, " glide ready").or(earlier_ready);
-        let tick = watched.log.iter().find(|line| line.contains(" tick ")).cloned();
+        let id = gliding_id(watched);
+        let named = |what: &str| id.as_ref().and_then(|id| logged(watched, &format!("glide {what} {id} ")));
+        let open = named("open");
+        let settle = named("settle");
+        let glided = named("glided");
+        let closed = named("closed");
+        let settled = settle.or(open).and_then(|from| logged_from(watched, "glide settled", from));
+        let ready = logged(watched, " glide ready");
         let set = logged(watched, " set ");
+        let tick = watched.log.iter().filter(|line| line.contains(" tick ")).find(|line| set.is_none_or(|set| stamp_of(line).is_some_and(|stamp| stamp >= set))).cloned();
         let wake = logged(watched, " wake ");
         let fitted: Vec<Option<(f32, f32)>> = watched.shots.iter().map(|(_, shot)| (!frames.is_empty()).then(|| best_frame(shot, &frames, &keep))).collect();
         let window: Vec<f32> = watched.shots.iter().enumerate().filter(|(_, (at, _))| open.is_some_and(|open| *at >= open) && settled.is_none_or(|settled| *at <= settled)).filter_map(|(index, _)| fitted[index].map(|(s, _)| s)).collect();
@@ -3487,12 +3501,17 @@ mod probe {
             watched.shots.iter().filter(|(at, _)| *at > settled && closed.is_none_or(|closed| *at <= closed + 1.0)).map(|(_, shot)| difference(shot, &new, &wide)).fold((0.0f32, 0u8, 0u8), |w, d| (w.0.max(d.0), w.1.max(d.1), w.2.max(d.2)))
         });
         let since = |time: Option<f64>| time.map(|time| ((time - watched.dropped) * 1000.0).round());
-        let order: Vec<(&str, Option<f64>)> = vec![("ready", ready), ("open and glide", open), ("settle after the set", settle), ("glided", glided), ("settled", settled), ("closed", closed)];
+        let ready_text = match (since(ready), warmed) {
+            (Some(ms), _) => format!("ready {ms}"),
+            (None, true) => "ready earlier".to_string(),
+            (None, false) => "ready missing".to_string(),
+        };
+        let order: Vec<String> = std::iter::once(ready_text).chain([("open and glide", open), ("settle after the set", settle), ("glided", glided), ("settled", settled), ("closed", closed)].into_iter().map(|(name, at)| format!("{name} {:?}", since(at)))).collect();
         let in_order = match (open, settle, settled, closed) {
             (Some(open), Some(settle), Some(settled), Some(closed)) => open <= settle && settled >= settle && closed >= settled && closed + 0.02 >= settle + HOLD as f64 / 1000.0,
             _ => false,
         };
-        let counts = watched.log.iter().find(|line| line.contains(" glide glided")).and_then(|line| line.split(" glide glided ").nth(1)).map(str::to_string).unwrap_or_default();
+        let counts = id.as_ref().and_then(|id| watched.log.iter().find_map(|line| line.split_once(" glide glided ").map(|(_, rest)| rest).filter(|rest| rest.starts_with(&format!("{id} "))))).map(str::to_string).unwrap_or_default();
         let laps = tick.as_deref().map(|line| line.split(" ms ").nth(1).and_then(|rest| rest.split("] ").nth(1)).unwrap_or("").to_string()).unwrap_or_default();
         let tick_ms = tick.as_deref().and_then(|line| line.split(" tick ").nth(1)).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok());
         let tick_start = tick.as_deref().and_then(stamp_of).zip(tick_ms).map(|(end, ms)| end - ms / 1000.0);
@@ -3504,7 +3523,7 @@ mod probe {
             apart.len(),
             classes.iter().collect::<String>()
         ));
-        p.line(format!("  - daemon times after the drop {:?}, open before the set, settle after it, close after settled and {HOLD} ms after the set {in_order}, glided `{counts}`", order.iter().map(|(name, at)| format!("{name} {:?}", since(*at))).collect::<Vec<_>>()));
+        p.line(format!("  - daemon times after the drop {:?}, open before the set, settle after it, close after settled and {HOLD} ms after the set {in_order}, glided `{counts}`", order));
         p.line(format!(
             "  - drop to first moving frame on screen {:?} ms, wake {:?} ms, tick started {:?} ms, wallpaper set {:?} ms, settled {:?} ms, closed {:?} ms, tick laps `{laps}`",
             first_move.map(f64::round),
@@ -3678,10 +3697,10 @@ mod probe {
         park_cursor();
         let before = settle(area, Duration::from_secs(3))?;
         let from = icon_spot(name, folder);
+        let warmed = log_lines(&log).iter().any(|line| line.contains(" glide ready"));
         let watched = watch_change(&log, &screen, || drag_icon(name, folder, centre), true);
         p.line(format!("- the timed drag from {from:?} to {},{}, icon now at {:?}", centre.x, centre.y, icon_spot(name, folder)));
-        let earlier_ready = logged(&setup, " glide ready");
-        let given = Judged { source: &source, old_tables: old_tables.as_deref(), before: &before, still_icons: &still_icons, earlier_ready };
+        let given = Judged { source: &source, old_tables: old_tables.as_deref(), before: &before, still_icons: &still_icons, warmed };
         let good = judge_daemon_glide(p, &watched, &screen, &given, "glide on, a real drag onto the subject", Some("daemon-glide-strip"));
         pump(Duration::from_millis(1000));
         let left = layer::ours_left();
