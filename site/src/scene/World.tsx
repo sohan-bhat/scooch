@@ -235,8 +235,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       for (const picture of manifest.pictures) {
         const loaded = await loadScenery(picture.scenery, false);
         if (stopped) return;
-        const longest = Math.max(loaded.info.width, loaded.info.height);
-        const frame = createFrame(loaded, Math.min(1, 1280 / longest));
+        const frame = createFrame(loaded);
         await frame.compile(gl);
         await upload(frame.textures());
         if (stopped) return;
