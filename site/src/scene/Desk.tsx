@@ -33,6 +33,9 @@ const hero = query.has('hero');
 const lite = !still;
 const urls = lite ? pick(heroes, 'models/lite') : full;
 const extraUrls = pick(extras, 'models');
+const sharpExtras = ['clock', 'cassette', 'plant', 'stapler', 'glasses', 'gamepad'] as const;
+const sharpUrls = Object.values(pick(sharpExtras, 'models/sharp'));
+const heroUrls = heroes.map((name) => full[name]);
 
 const support = gpuClass();
 const ktx2 = new KTX2Loader().setTranscoderPath(asset('basis/'));
@@ -95,10 +98,10 @@ async function swapTextures(gl: WebGLRenderer, scene: Object3D, source: Object3D
   return true;
 }
 
-function Sharpen({ name, onDone }: { name: Hero; onDone: () => void }) {
+function Sharpen({ url, onDone }: { url: string; onDone: () => void }) {
   const gl = useThree((state) => state.gl);
   const scene = useThree((state) => state.scene);
-  const gltf = useGLTF(full[name], false, true, extend);
+  const gltf = useGLTF(url, false, true, extend);
   useEffect(() => {
     let stopped = false;
     void swapTextures(gl, scene, gltf.scene, () => stopped).then((done) => {
@@ -121,23 +124,21 @@ function whenReady(start: () => void, test: () => boolean) {
   return () => window.clearTimeout(timer);
 }
 
-function Sharpener() {
+function Sharpener({ list, when }: { list: string[]; when: () => boolean }) {
   const [index, setIndex] = useState(-1);
   const next = useCallback(() => setIndex((value) => value + 1), []);
-  useEffect(() => {
-    if (!lite) return;
-    return whenReady(
-      () => setIndex(0),
-      () => runtime.props && (quality.tier === 'full' || native.ready) && layoutFor(window.innerWidth, window.innerHeight) !== 'phone',
-    );
-  }, []);
-  if (index < 0 || index >= heroes.length) return null;
+  useEffect(() => whenReady(() => setIndex(0), when), [when]);
+  if (index < 0 || index >= list.length) return null;
   return (
     <Suspense fallback={null}>
-      <Sharpen key={heroes[index]} name={heroes[index]} onDone={next} />
+      <Sharpen key={list[index]} url={list[index]} onDone={next} />
     </Suspense>
   );
 }
+
+const desktop = () => layoutFor(window.innerWidth, window.innerHeight) !== 'phone';
+const heroesWhen = () => lite && runtime.props && (quality.tier === 'full' || native.ready) && desktop();
+const extrasWhen = () => runtime.props && runtime.painted && native.ready && desktop();
 
 function prepare(root: Object3D) {
   root.traverse((child) => {
@@ -383,7 +384,8 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
         <primitive object={television.scene} />
       </primitive>
       {hero ? null : <LateExtras phone={phone} onExtras={onExtras} onConsole={onConsole} />}
-      <Sharpener />
+      <Sharpener list={heroUrls} when={heroesWhen} />
+      <Sharpener list={sharpUrls} when={extrasWhen} />
     </group>
   );
 }
