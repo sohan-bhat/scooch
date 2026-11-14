@@ -106,7 +106,7 @@
   },
   "sources": {
     "title": "Sources",
-    "line": "Every model, picture, icon and typeface on this site, with its author and license.",
+    "line": "Every model, picture, sound, icon and typeface on this site, with its author and license.",
     "columns": [
       "What",
       "Used for",
@@ -155,6 +155,20 @@
         "author": "Benny Weimer",
         "license": "CC0",
         "url": "https://polyhaven.com/a/television_02"
+      },
+      {
+        "what": "Television 01",
+        "use": "The old television on the floor",
+        "author": "Gabriel Radić",
+        "license": "CC0",
+        "url": "https://polyhaven.com/a/Television_01"
+      },
+      {
+        "what": "Mug, Glass, Plate, Knife",
+        "use": "The glass of juice",
+        "author": "pasi",
+        "license": "CC0",
+        "url": "https://opengameart.org/content/mugglassplateknife"
       },
       {
         "what": "Alarm Clock 01",
@@ -220,11 +234,67 @@
         "url": "https://commons.wikimedia.org/wiki/File:Hot_air_balloon_in_blue_sky_(Unsplash).jpg"
       },
       {
-        "what": "Frosty tree",
+        "what": "Swans",
         "use": "The wallpaper on the laptop",
-        "author": "Jaleel Akbash",
+        "author": "opera infinita",
         "license": "CC0 1.0",
-        "url": "https://commons.wikimedia.org/wiki/File:Frosty_tree_(Unsplash).jpg"
+        "url": "https://commons.wikimedia.org/wiki/File:Swans_(Unsplash).jpg"
+      },
+      {
+        "what": "Half moon",
+        "use": "The wallpaper on the old television",
+        "author": "Jeremy Bishop",
+        "license": "CC0 1.0",
+        "url": "https://commons.wikimedia.org/wiki/File:Half_moon_(Unsplash).jpg"
+      },
+      {
+        "what": "City of lights",
+        "use": "The night city on the television",
+        "author": "Luca Bravo",
+        "license": "CC0 1.0",
+        "url": "https://commons.wikimedia.org/wiki/File:City_of_lights_(Unsplash).jpg"
+      },
+      {
+        "what": "Clickick Switch",
+        "use": "The lamp switch and the television power",
+        "author": "stephan, PDSounds",
+        "license": "Public domain",
+        "url": "https://commons.wikimedia.org/wiki/File:Clickick_switch.ogg"
+      },
+      {
+        "what": "Metal rotary knob",
+        "use": "The channel knob",
+        "author": "stephan, PDSounds",
+        "license": "Public domain",
+        "url": "https://commons.wikimedia.org/wiki/File:Metal_rotary_knob.ogg"
+      },
+      {
+        "what": "Mechanical tack",
+        "use": "The tape key and the stapler",
+        "author": "stephan, PDSounds",
+        "license": "Public domain",
+        "url": "https://commons.wikimedia.org/wiki/File:Mechanical_tack.ogg"
+      },
+      {
+        "what": "Mechanical Clock Ring",
+        "use": "The alarm clock",
+        "author": "Yoo-toob-FX, Directory.Audio",
+        "license": "CC0",
+        "url": "https://commons.wikimedia.org/wiki/File:Mechanical_Clock_Ring_(Directory.Audio).mp3"
+      },
+      {
+        "what": "Boiling water being poured into a mug for tea",
+        "use": "Filling the glass again",
+        "author": "cori, PDSounds",
+        "license": "Public domain",
+        "url": "https://commons.wikimedia.org/wiki/File:Boiling_water_being_poured_into_a_mug_for_tea.ogg"
+      },
+      {
+        "what": "The Cakewalk in the Sky, 1909",
+        "use": "The music on the tape",
+        "author": "Ben Harney, played by the Victor Dance Orchestra",
+        "license": "Public domain",
+        "url": "https://commons.wikimedia.org/wiki/File:The_Cakewalk_in_the_sky-Victor_C-6882-Victor_Dance_Orchestra.mp3"
       },
       {
         "what": "Phosphor Icons",
