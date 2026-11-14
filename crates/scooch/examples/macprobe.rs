@@ -2517,7 +2517,7 @@ mod probe {
         let home = p.home.clone();
         let _ = wait_until(Duration::from_secs(5), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" tick ")));
         std::thread::sleep(Duration::from_millis(600));
-        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(180).collect()).collect();
+        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(if line.contains(" tick ") { 260 } else { 180 }).collect()).collect();
         (changed, log)
     }
 
@@ -2785,7 +2785,7 @@ mod probe {
             p.line(format!("- setup move {step} of {name} to {:.0},{:.0}, new wallpaper {setup:?} ms after the Apple Event returned, daemon log {log:?}", target.0, target.1));
             setup_log = log;
         }
-        let tables = setup_log.iter().any(|line| line.contains(" tick ") && line.contains("Rendered") && (line.contains("tables ") || line.contains("later ")));
+        let tables = setup_log.iter().any(|line| line.contains(" tick ") && line.contains("Rendered") && (line.contains(", tables") || line.contains(", later")));
         p.line(format!("- the last setup move rendered and wrote tables {tables}"));
         if !tables {
             p.fail("the setup moves wrote no tables, so the timed drag could not glide");
