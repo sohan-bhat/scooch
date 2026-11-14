@@ -7,6 +7,7 @@ import { tokenColor } from '@/lib/tokens';
 import { runtime, story } from '@/story/state';
 import { STREET } from './Blinds';
 import { DESK_TOP } from './layout';
+import { quality } from './quality';
 import { live, makeLive, things } from './touch';
 
 const url = asset('models/tumbler.glb');
@@ -215,7 +216,7 @@ export function Tumbler() {
     <>
       <primitive object={built.holder} />
       <primitive object={built.aim} />
-      <spotLight ref={light} target={built.aim} map={built.map} position={STREET.position} color="#ffe0bd" angle={0.1} penumbra={0.6} decay={2} distance={0} intensity={0} />
+      {quality.tier === 'full' ? <spotLight ref={light} target={built.aim} map={built.map} position={STREET.position} color="#ffe0bd" angle={0.1} penumbra={0.6} decay={2} distance={0} intensity={0} /> : null}
     </>
   );
 }
