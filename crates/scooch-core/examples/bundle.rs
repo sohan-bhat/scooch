@@ -65,6 +65,7 @@ fn main() {
     let a = scooch_core::bundle(&photo, &analysis, &placement, &first, &options);
     let canvas = scooch_core::RgbImage::from_raw(a.canvas_width, a.canvas_height, a.canvas.clone()).expect("canvas");
     std::fs::write(out.join("canvas.jpg"), scooch_core::encode_jpeg(&canvas, 92).expect("jpeg")).expect("canvas");
+    std::fs::write(out.join("analysis.bin"), analysis.to_bytes()).expect("analysis");
     let mut states = vec![serde_json::json!({ "name": "a", "tables": write(&a, &out, "a.") })];
     if args.len() == 4 {
         let second = read(&args[2]);
@@ -77,6 +78,7 @@ fn main() {
         "width": a.width,
         "height": a.height,
         "canvas": { "file": "canvas.jpg", "width": a.canvas_width, "height": a.canvas_height },
+        "analysis": { "file": "analysis.bin", "format": "scooch analysis v1" },
         "grid_cell": 4,
         "paint_cell": 16,
         "states": states,
