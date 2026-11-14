@@ -54,7 +54,7 @@ struct Run<'a> {
 
 impl Run<'_> {
     fn clamp_px(&self) -> (f32, f32) {
-        (HOLD.0 * self.u, HOLD.1 * self.u)
+        (FLOOR * self.u, HOLD.1 * self.u)
     }
 
     fn shallow(&self, x: f32, y: f32) -> f32 {
@@ -136,6 +136,25 @@ fn rows(puffs: &[[f32; 3]], extra: f32, grid: &Grid) -> Vec<Vec<u32>> {
         }
     }
     out
+}
+
+fn label(icon: &Icon, grow: f32) -> [f32; 4] {
+    let r = &icon.r;
+    [r[0] - grow, r[1] + LABEL_TOP * (r[3] - r[1]) - grow, r[2] + grow, r[3] + grow]
+}
+
+fn label_hold(icons: &[Icon], x: f32, y: f32, cell: f32) -> f32 {
+    let fall = LABEL_FALL * cell;
+    let mut most = 0.0f32;
+    for icon in icons {
+        let r = label(icon, 0.0);
+        let (dx, dy) = ((r[0] - x).max(x - r[2]).max(0.0), (r[1] - y).max(y - r[3]).max(0.0));
+        if dx >= fall || dy >= fall {
+            continue;
+        }
+        most = most.max(smoothstep(fall, 0.0, length(dx, dy)));
+    }
+    most
 }
 
 fn bounds(p: &[f32; 3], grow: f32) -> [f32; 4] {
@@ -358,7 +377,8 @@ fn look_cell(run: &Run, live: &Live, piles: &Buckets, i: usize) -> [u8; 4] {
     let blend = fixed.blend(px, py);
     let middle = 4.0 * blend * (1.0 - blend);
     let broad = 1.0 - smoothstep(BROAD.0 * cell, BROAD.1 * cell, live.lit[i]);
-    let broad = broad + (1.0 - broad) * MIDDLE_LIFT * middle;
+    let hold = label_hold(&live.icons, px, py, cell);
+    let broad = (broad + (1.0 - broad) * MIDDLE_LIFT * middle) * (1.0 - hold);
     let (mut arc, mut shade) = (0.0f32, 0.0f32);
     if live.cloud[i] <= grid.cell as f32 {
         let mut front = f32::MIN;
@@ -384,7 +404,7 @@ fn look_cell(run: &Run, live: &Live, piles: &Buckets, i: usize) -> [u8; 4] {
             }
         }
     }
-    let pile = (LIFT * arc - DIM * shade) * (1.0 - CALM * middle);
+    let pile = (LIFT * arc * (1.0 - hold) - DIM * shade) * (1.0 - CALM * middle);
     let pile = (pile + DIM) / (LIFT + DIM);
     let foam = if kind < 1.0 {
         let along = 0.5 + 0.5 * shape::noise(px / (FOAM_ALONG.0 * cell), py / (FOAM_ALONG.0 * cell), FOAM_ALONG.3);
@@ -393,6 +413,7 @@ fn look_cell(run: &Run, live: &Live, piles: &Buckets, i: usize) -> [u8; 4] {
     } else {
         0.0
     };
+    let facing = if facing > 0.0 { facing * (1.0 - hold) } else { facing };
     [byte(kind), byte(kind * pile + (1.0 - kind) * foam), byte(broad), byte(0.5 + 0.5 * facing)]
 }
 
@@ -449,6 +470,13 @@ pub fn relive(fixed: &Fixed, live: &mut Live, g: &Ground, moved: &[[f32; 4]]) ->
     let cloud_grow = high + CLOUD_K * cell + grid.cell as f32;
     let land_grow = high * (SHALLOW.0 + SHALLOW.1) + COAST.0 * cell + LAND_K * cell + grid.cell as f32;
     let mut areas = Vec::new();
+    let fall = LABEL_FALL * cell + grid.cell as f32;
+    for (a, b) in old_icons.iter().zip(&shape.icons) {
+        if a != b {
+            areas.push(cells_of(&grid, label(a, fall)));
+            areas.push(cells_of(&grid, label(b, fall)));
+        }
+    }
     for (k, (a, b)) in live.clouds.iter().zip(&clouds).enumerate() {
         if a != b {
             if a[2] > 0.0 {
