@@ -14,7 +14,7 @@ import { makeLive, obstacles } from './touch';
 export { BULB, DESK_TOP, LAMP, LAPTOP, TELEVISION } from './layout';
 
 const heroes = ['desk', 'laptop', 'lamp', 'television'] as const;
-const extras = ['notepads', 'stationery', 'clock', 'cassette', 'plant', 'stapler', 'glasses', 'watch', 'gamepad', 'console'] as const;
+const extras = ['notepads', 'stationery', 'clock', 'cassette', 'plant', 'stapler', 'glasses', 'gamepad', 'console'] as const;
 type Hero = (typeof heroes)[number];
 type Extra = (typeof extras)[number];
 
@@ -230,7 +230,7 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
     });
     if (holder && screen) onConsole({ mesh: screen, frame: holder });
   }, [group, onConsole]);
-  useFrame(() => labels.update(story.typed, 1 - Math.min(story.lamp / 0.8, 1)));
+  useFrame(() => labels.update(story.typed));
 
   useLayoutEffect(() => {
     for (const child of group.children) child.visible = !phone || child.userData.phone;

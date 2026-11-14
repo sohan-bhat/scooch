@@ -1,7 +1,7 @@
 import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Quaternion, Vector3, type Texture } from 'three';
 import { dialPainter, fontsReady, paintedTexture, stickyPainter, typedPainter } from './captions';
 
-function decal(map: Texture, width: number, height: number, options: { emissive?: boolean; opaque?: boolean } = {}) {
+function decal(map: Texture, width: number, height: number, options: { opaque?: boolean } = {}) {
   const material = new MeshStandardMaterial({
     map,
     transparent: !options.opaque,
@@ -12,15 +12,10 @@ function decal(map: Texture, width: number, height: number, options: { emissive?
     polygonOffsetFactor: -2,
     polygonOffsetUnits: -2,
   });
-  if (options.emissive) {
-    material.emissiveMap = map;
-    material.emissive.set('#bff0b4');
-    material.emissiveIntensity = 1.6;
-  }
   const mesh = new Mesh(new PlaneGeometry(width, height), material);
   mesh.name = 'caption';
   mesh.castShadow = false;
-  mesh.receiveShadow = !options.emissive;
+  mesh.receiveShadow = true;
   return mesh;
 }
 
@@ -58,15 +53,13 @@ export function labelProps(group: Object3D) {
   }
 
   const clock = group.getObjectByName('clock_whole');
-  let glow: MeshStandardMaterial | null = null;
   const hands: { node: Object3D; rest: Quaternion; angle: number; turn: (date: Date) => number }[] = [];
   if (clock) {
     const box = localBox(clock);
     const size = box.getSize(new Vector3());
-    const mesh = decal(dial.texture, size.x * 0.62, size.x * 0.62, { emissive: true });
+    const mesh = decal(dial.texture, size.x * 0.62, size.x * 0.62);
     mesh.position.set(0, size.y * 0.48, box.max.z + 0.0015);
     clock.add(mesh);
-    glow = mesh.material as MeshStandardMaterial;
     const turns: Record<string, (date: Date) => number> = {
       houd_hand: (date) => ((date.getHours() % 12) + date.getMinutes() / 60) / 12,
       minute_hand: (date) => (date.getMinutes() + date.getSeconds() / 60) / 60,
@@ -83,14 +76,18 @@ export function labelProps(group: Object3D) {
       center.applyQuaternion(node.quaternion);
       hands.push({ node, rest: node.quaternion.clone(), angle: Math.atan2(center.x, center.y), turn });
     }
+    if (hands.length) {
+      clock.updateWorldMatrix(true, true);
+      const pivot = clock.worldToLocal(hands[0].node.getWorldPosition(new Vector3()));
+      mesh.position.set(pivot.x, pivot.y, box.max.z + 0.0015);
+    }
   }
   const spin = new Quaternion();
   const axis = new Vector3(0, 0, 1);
 
   return {
-    update(amount: number, dark: number) {
+    update(amount: number) {
       typed.draw(Math.round(amount * 64) / 64);
-      if (glow) glow.emissiveIntensity = 0.25 + 2.4 * dark;
       const now = new Date();
       for (const hand of hands) {
         spin.setFromAxisAngle(axis, -(hand.turn(now) * Math.PI * 2 - hand.angle));

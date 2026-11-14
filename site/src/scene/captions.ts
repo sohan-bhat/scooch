@@ -134,13 +134,13 @@ export const stickyPainter: Painter = (context, width, height, amount) => {
 
 export const dialPainter: Painter = (context, width, height) => {
   const text = caption('rest').toUpperCase();
-  const size = Math.round(width * 0.075);
-  context.font = `700 ${size}px ${FONT.mono}`;
+  const size = Math.round(width * 0.068);
+  context.font = `600 ${size}px ${FONT.text}`;
   context.textBaseline = 'middle';
   context.textAlign = 'center';
-  context.fillStyle = '#cfeec4';
-  const lines = wrap(context, text, width * 0.62);
-  lines.forEach((line, index) => context.fillText(line, width / 2, height * 0.8 + (index - (lines.length - 1) / 2) * size * 1.3));
+  context.fillStyle = '#231f1a';
+  (context as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = `${Math.round(size * 0.14)}px`;
+  context.fillText(text, width / 2, height * 0.635);
 };
 
 export const WALL = { left: -0.45, right: 0.75, bottom: 1.84, top: 2.08, z: -0.975 };
