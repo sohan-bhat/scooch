@@ -1,4 +1,5 @@
 import './early';
+import './lighting';
 import { Canvas, useThree } from '@react-three/fiber';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { setConsoleFunction } from 'three';
