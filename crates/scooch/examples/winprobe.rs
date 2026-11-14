@@ -2193,33 +2193,48 @@ mod probe {
         (total as f32 / (count * 3) as f32, high.unwrap_or(0) as u8, spread.iter().rposition(|n| *n > 0).unwrap_or(0) as u8)
     }
 
-    fn strong(baseline: &RgbImage, still: &RgbImage, icons: &[Rect]) -> Vec<usize> {
+    fn strong(baseline: &RgbImage, still: &RgbImage, icons: &[Rect]) -> Vec<Vec<usize>> {
         let width = baseline.width();
-        let mut mask = Vec::new();
+        let mut mask = vec![Vec::new(); icons.len()];
         for (index, (p, q)) in baseline.as_raw().as_chunks::<3>().0.iter().zip(still.as_raw().as_chunks::<3>().0.iter()).enumerate() {
+            if !(0..3).any(|c| p[c].abs_diff(q[c]) > 60) {
+                continue;
+            }
             let (x, y) = (index as u32 % width, index as u32 / width);
-            if inside(icons, x as f32, y as f32, 0.0) && (0..3).any(|c| p[c].abs_diff(q[c]) > 60) {
-                mask.push(index);
+            if let Some(icon) = icons.iter().position(|rect| inside(std::slice::from_ref(rect), x as f32, y as f32, 0.0)) {
+                mask[icon].push(index);
             }
         }
         mask
     }
 
-    fn covered(shot: &RgbImage, baseline: &RgbImage, expected: &[&RgbImage], mask: &[usize]) -> (usize, usize) {
+    fn total(mask: &[Vec<usize>]) -> usize {
+        mask.iter().map(Vec::len).sum()
+    }
+
+    fn covered(shot: &RgbImage, baseline: &RgbImage, expected: &[&RgbImage], mask: &[Vec<usize>]) -> (usize, usize) {
         let (s, b) = (shot.as_raw(), baseline.as_raw());
         let (mut hidden, mut redrawn) = (0usize, 0usize);
-        for index in mask {
-            let at = index * 3;
-            if !(0..3).any(|c| s[at + c].abs_diff(b[at + c]) > 40) {
-                continue;
+        for icon in mask {
+            let (mut gone, mut changed, mut kept) = (0usize, 0usize, 0usize);
+            for index in icon {
+                let at = index * 3;
+                if !(0..3).any(|c| s[at + c].abs_diff(b[at + c]) > 40) {
+                    kept += 1;
+                } else if expected.iter().any(|image| {
+                    let e = image.as_raw();
+                    (0..3).all(|c| e.get(at + c).is_some_and(|value| s[at + c].abs_diff(*value) <= 16))
+                }) {
+                    gone += 1;
+                } else {
+                    changed += 1;
+                }
             }
-            if expected.iter().any(|image| {
-                let e = image.as_raw();
-                (0..3).all(|c| e.get(at + c).is_some_and(|value| s[at + c].abs_diff(*value) <= 16))
-            }) {
-                hidden += 1;
+            redrawn += changed;
+            if (kept + changed) * 4 >= icon.len() {
+                redrawn += gone;
             } else {
-                redrawn += 1;
+                hidden += gone;
             }
         }
         (hidden, redrawn)
@@ -2626,7 +2641,7 @@ mod probe {
         if !progress.is_empty() {
             p.line(format!("  - subject progress from A to B in {places} distinct places, steps back {slipped}: {:?}", progress.iter().map(|t| (t * 100.0).round() / 100.0).collect::<Vec<_>>()));
         }
-        let mut line = format!("  - icon pixels covered by the layer in the worst capture {} of {}, icon pixels the desktop drew differently but not covered {}", worst_cover.0, mask.len(), worst_cover.1);
+        let mut line = format!("  - icon pixels covered by the layer in the worst capture {} of {}, icon pixels the desktop drew differently but not covered {}", worst_cover.0, total(&mask), worst_cover.1);
         if worst_cover.0 > 0 {
             let (at, shot) = &shots[worst_cover.2];
             line += &format!(", {}", evidence(p, &format!("{}-covered", run.name), shot, &baseline, &(0..(width * height) as usize).collect::<Vec<_>>(), &marks(*at)));
@@ -2662,7 +2677,7 @@ mod probe {
                 let _ = save_png(&p.out.join(format!("{}-strip.png", run.name)), &image);
             }
         }
-        if worst_cover.0 * 100 > mask.len().max(1) {
+        if worst_cover.0 * 100 > total(&mask).max(1) {
             p.failed.push(format!("{}: icons were covered in a capture", run.label));
         }
         if backwards > 0 || slipped > 0 {
@@ -3500,7 +3515,7 @@ mod probe {
             since(closed)
         ));
         p.line(format!("  - {} captures fitted to {} CPU frames during the glide, {distinct} distinct s, steady {steady}: {:?}", window.len(), frames.len(), window.iter().map(|s| (s * 100.0).round() / 100.0).collect::<Vec<_>>()));
-        p.line(format!("  - icon pixels covered {hidden} of {}, from settled to a second after close against the new still {hand_over:?}, old picture after the new {returned}", mask.len()));
+        p.line(format!("  - icon pixels covered {hidden} of {}, from settled to a second after close against the new still {hand_over:?}, old picture after the new {returned}", total(&mask)));
         p.line(format!("  - daemon log {:?}", watched.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         if let Some(name) = strip_name {
             let picked: Vec<(f64, RgbImage)> = watched.shots.iter().filter(|(at, _)| open.is_none_or(|open| *at >= open - 0.05) && settled.is_none_or(|settled| *at <= settled + 0.1)).map(|(at, shot)| (*at, shot.clone())).collect();
@@ -3512,7 +3527,7 @@ mod probe {
                 }
             }
         }
-        returned == 0 && steady && distinct >= 3 && hidden * 100 <= mask.len().max(1) && hand_over.is_some_and(|d| d.1 <= 2) && in_order
+        returned == 0 && steady && distinct >= 3 && hidden * 100 <= total(&mask).max(1) && hand_over.is_some_and(|d| d.1 <= 2) && in_order
     }
 
     fn icons_except(screen: &Screen, moving: &str) -> Vec<Rect> {
