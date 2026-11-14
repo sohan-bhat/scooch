@@ -2445,8 +2445,10 @@ mod probe {
         let desktop = platform::current()?;
         let area = screen_rect(screen);
         let (width, height) = (kit.size[0], kit.size[1]);
-        let keep = outside(width, height, &kit.icons, 2);
-        let wide = outside(width, height, &kit.icons, 1);
+        let mut icons = kit.icons.clone();
+        icons.extend(icon_rects().unwrap_or_default().into_iter().map(|rect| Rect { x: rect.x - screen.frame.x, y: rect.y - screen.frame.y, ..rect }));
+        let keep = outside(width, height, &icons, 2);
+        let wide = outside(width, height, &icons, 1);
         p.line(format!("- **{}**, {} ms, scale {}", run.label, run.ms, run.scale.map_or("chosen by the helper".to_string(), |scale| format!("pinned at {scale}"))));
         helper.warm(Hints { scale: run.scale, ..bare() }, None, None, ANSWER)?;
         let asked_old = Instant::now();
@@ -2454,7 +2456,7 @@ mod probe {
         let (landed, landed_gap, missed) = equal_until(area, &run.old.1, &run.new.1, &wide, Duration::from_secs(6));
         park_cursor();
         let baseline = settle(area, Duration::from_secs(3))?;
-        let mask = strong(&baseline, &run.old.1, &kit.icons);
+        let mask = strong(&baseline, &run.old.1, &icons);
         let system = difference(&baseline, &run.old.1, &wide);
         p.line(format!(
             "  - the old still was set and a capture equalled it after {:?} ms of {} ms waited (last gap mean {:.2} 99th {} largest {}), the system against the file mean {:.2} 99th {} largest {}",
