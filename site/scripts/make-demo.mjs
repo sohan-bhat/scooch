@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -168,6 +168,10 @@ async function scenery(id, source, layouts) {
   const info = await canvas.toFile(join(target, bundle.canvas.file));
   bundle.canvas.width = info.width;
   bundle.canvas.height = info.height;
+  const sharpFile = join(target, 'canvas-2x.jpg');
+  const sharpInfo = await sharp(source).rotate().resize({ width: longest * 2, height: longest * 2, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 78, mozjpeg: true }).toFile(sharpFile);
+  if (sharpInfo.width > info.width * 1.2) bundle.sharp = { file: 'canvas-2x.jpg', width: sharpInfo.width, height: sharpInfo.height };
+  else await rm(sharpFile, { force: true });
   if (bundle.analysis && id === 'main') {
     const file = `${bundle.analysis.file}.gz`;
     await writeFile(join(target, file), gzipSync(await readFile(join(folder, bundle.analysis.file)), { level: 9 }));

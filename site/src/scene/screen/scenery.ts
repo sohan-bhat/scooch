@@ -52,6 +52,7 @@ export type SceneryInfo = {
   grid_cell: number;
   paint_cell: number;
   canvas: { file: string; width: number; height: number };
+  sharp?: { file: string; width: number; height: number };
   states: BundleState[];
   fill?: Table;
 };
@@ -321,6 +322,30 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
     textures,
     invalidate() {
       last = '';
+    },
+    async sharpen(gl: WebGLRenderer) {
+      const sharp = scenery.info.sharp;
+      if (!sharp) return false;
+      const response = await fetch(`${asset(`demo/${scenery.info.folder}`)}/${sharp.file}`);
+      if (!response.ok) return false;
+      const bitmap = await createImageBitmap(await response.blob());
+      const texture = new Texture(bitmap);
+      texture.colorSpace = SRGBColorSpace;
+      texture.flipY = false;
+      texture.generateMipmaps = true;
+      texture.minFilter = LinearMipmapLinearFilter;
+      texture.anisotropy = 4;
+      texture.needsUpdate = true;
+      await quiet();
+      gl.initTexture(texture);
+      const previous = uniforms.canvas.value;
+      uniforms.canvas.value = texture;
+      uniforms.grain_lod.value = Math.log2((4 * bitmap.width) / scenery.info.width);
+      scenery.canvas = texture;
+      previous.dispose();
+      last = '';
+      changed();
+      return true;
     },
     compile(gl: WebGLRenderer) {
       const previous = gl.getRenderTarget();
