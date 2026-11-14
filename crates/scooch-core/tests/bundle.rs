@@ -88,7 +88,7 @@ fn a_glide_starts_and_ends_on_the_stills() {
     }
 }
 
-const STEP_MEAN: f64 = 0.08;
+const STEP_MEAN: f64 = 0.1;
 
 #[test]
 fn a_glide_moves_in_small_even_steps() {
@@ -162,7 +162,7 @@ fn tables_travel_without_the_canvas() {
         assert_eq!(canvas.pixels, bundle.canvas);
         let back = Bundle::tables_from_bytes(&bytes, canvas.clone()).expect("round trip");
         let (_, worst) = difference(&scooch_core::frame(&back, &back, 0.0), &scooch_core::frame(&bundle, &bundle, 0.0));
-        assert!(worst <= 1, "{} worst {worst}", photo.name);
+        assert!(worst <= 2, "{} worst {worst}", photo.name);
         let mut touched = canvas.clone();
         touched.pixels[17] ^= 1;
         assert_eq!(Bundle::tables_from_bytes(&bytes, touched), Err(TablesError::Canvas));

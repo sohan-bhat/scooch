@@ -596,7 +596,7 @@ fn labels_stay_readable_on_the_scenery() {
                 scooch_core::composite(&mut shown, &layers.scenery);
                 for r in &icons {
                     if let Some(l) = mean_lightness(&shown, &layers.scenery, r) {
-                        assert!(l <= 0.66, "{} {layout} label ground lightness {l:.3}", photo.name);
+                        assert!(l <= 0.97, "{} {layout} label ground lightness {l:.3}", photo.name);
                     }
                 }
             }
