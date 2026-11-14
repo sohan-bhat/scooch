@@ -28,6 +28,7 @@ import frame from '../../../../crates/scooch-core/shaders/frame.glsl?raw';
 import { asset } from '@/lib/base';
 import { quiet } from '@/lib/idle';
 import { fetchEarly } from '@/story/early';
+import { changed } from '@/story/state';
 
 type Table = { file: string; width: number; height: number; layers?: number };
 
@@ -346,6 +347,7 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       gl.setRenderTarget(target);
       gl.render(scene, camera);
       gl.setRenderTarget(previous);
+      changed();
       if (part) {
         target.viewport.set(0, 0, target.width, target.height);
         uniforms.view.value = full;
@@ -367,6 +369,7 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
         gl.setRenderTarget(target);
         gl.render(scene, camera);
         gl.setRenderTarget(previous);
+        changed();
       }
       target.scissorTest = false;
     },
@@ -401,6 +404,7 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       gl.setRenderTarget(target);
       gl.render(scene, camera);
       gl.setRenderTarget(previous);
+      changed();
       if (part) {
         target.viewport.set(0, 0, target.width, target.height);
         uniforms.view.value = full;

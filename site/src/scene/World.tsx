@@ -532,10 +532,13 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       gl.shadowMap.needsUpdate = true;
       shadowFrames.current += 1;
     }
-    const time = state.clock.elapsedTime;
+    const time = runtime.frozen ?? state.clock.elapsedTime - runtime.timeShift;
     const idle = runtime.idle;
     const motion = idle ? 1 : 0;
-    rig.apply(camera as PerspectiveCamera, story.camera, time, pointer.x * motion + live.look.x, pointer.y * motion + live.look.y, Math.min(delta, 0.1), size.width, size.height, idle);
+    const lookX = pointer.x * motion + live.look.x;
+    const lookY = pointer.y * motion + live.look.y;
+    rig.apply(camera as PerspectiveCamera, story.camera, time, lookX, lookY, Math.min(delta, 0.1), size.width, size.height, idle);
+    runtime.settled = rig.settled(lookX, lookY);
 
     if (runtime.introAt === null && runtime.ready && runtime.still < 0) {
       if (readyAt.current < 0) readyAt.current = time;

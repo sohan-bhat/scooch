@@ -85,6 +85,10 @@ export class Rig {
     return distance;
   }
 
+  settled(pointerX: number, pointerY: number) {
+    return Math.abs(pointerX * MathUtils.degToRad(1.5) - this.yaw) < 2e-5 && Math.abs(pointerY * MathUtils.degToRad(1.0) - this.pitch) < 2e-5;
+  }
+
   focusPoint(out: Vector3) {
     return out.copy(this.target);
   }

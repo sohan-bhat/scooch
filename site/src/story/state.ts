@@ -44,4 +44,12 @@ export const runtime = {
   introAt: null as number | null,
   abandoned: false,
   resume: null as (() => void) | null,
+  frozen: null as number | null,
+  timeShift: 0,
+  changedAt: 0,
+  settled: true,
 };
+
+export function changed() {
+  runtime.changedAt = performance.now();
+}

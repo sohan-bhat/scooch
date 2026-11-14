@@ -1,5 +1,6 @@
 import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Quaternion, Vector3, type Texture, type WebGLRenderer } from 'three';
 import { quiet } from '@/lib/idle';
+import { runtime } from '@/story/state';
 import { windowLit } from './window';
 import { canvasTexture, dialPainter, fontsReady, paintedTexture, sticky as stickyText, typed as typedText, type Reveal } from './captions';
 
@@ -138,7 +139,7 @@ export function labelProps(group: Object3D) {
     },
     update(amount: number) {
       typed?.reveal(amount);
-      const now = new Date();
+      const now = runtime.frozen === null ? new Date() : new Date(Math.floor(Date.now() / 1000) * 1000);
       for (const hand of hands) {
         spin.setFromAxisAngle(axis, -(hand.turn(now) * Math.PI * 2 - hand.angle));
         hand.node.quaternion.multiplyQuaternions(spin, hand.rest);

@@ -17,7 +17,7 @@ import {
 } from 'three';
 import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
-import { story } from '@/story/state';
+import { runtime, story } from '@/story/state';
 import { ICON_SLOTS, pictureBody, pictureHead, pictureUniforms } from './screen/picture';
 import type { Frame } from './screen/scenery';
 
@@ -357,7 +357,7 @@ export function useInside(
     inside.plane.scale.set(place.width / stage.width, place.height / stage.height, place.height / stage.height);
 
     const u = inside.uniforms;
-    u.uTime.value = state.clock.elapsedTime;
+    u.uTime.value = runtime.frozen ?? state.clock.elapsedTime - runtime.timeShift;
     const { from, to, s } = frame.select(story.place);
     u.uMapA.value = frame.states[from].map;
     u.uMapB.value = frame.states[to].map;
