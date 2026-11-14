@@ -208,11 +208,11 @@ export function Post({ phone }: { phone: boolean }) {
 
   return (
     <>
-      <EffectComposer ref={sharpComposer} multisampling={0} frameBufferType={HalfFloatType}>
+      <EffectComposer ref={sharpComposer} multisampling={0} frameBufferType={HalfFloatType} autoClear={false}>
         <Effects full={full} />
       </EffectComposer>
       {fast ? (
-        <EffectComposer ref={fastComposer} multisampling={0} frameBufferType={HalfFloatType}>
+        <EffectComposer ref={fastComposer} multisampling={0} frameBufferType={HalfFloatType} autoClear={false}>
           <Effects full={full} />
           {full && quality.ao ? null : <primitive object={copy} />}
         </EffectComposer>
