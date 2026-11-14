@@ -8,7 +8,10 @@ use std::collections::VecDeque;
 pub use crate::surface::{live, relive, Live};
 
 pub const P: usize = 16;
-pub const HOLD: (f32, f32) = (-0.6, 1.15);
+pub const HOLD: (f32, f32) = (-1.7, 1.15);
+pub(crate) const FLOOR: f32 = -0.6;
+pub(crate) const LABEL_TOP: f32 = 2.0 / 3.0;
+pub(crate) const LABEL_FALL: f32 = 0.7;
 pub const REACH: f32 = 1.12;
 pub const CELL: f32 = 1.1;
 pub const LIFT: f32 = 0.12;

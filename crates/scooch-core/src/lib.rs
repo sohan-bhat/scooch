@@ -26,7 +26,11 @@
 //! | `grain` (`grain_amount` in GLSL) | strength of the sand grain, a hash of the pixel |
 //! | `core_lift`, `core_drop` | span and floor of the cloud mark: a cloud's tone is scaled by `1 + mark * core_lift - core_drop` |
 //! | `volume_lit`, `volume_dark` | how far broad light lifts a cloud toward its light tone, and how far the underside darkens it |
-//! | `shadow`, `rim`, `belly`, `grain_scale`, `grain_floor`, `grain_lod` | unused, kept so the block keeps its layout |
+//! | `grain_scale` | how far a glide shrinks what only bundle A covers and grows what only bundle B covers, in units |
+//! | `grain_floor` | the field range over which a glide hands the look from A to B |
+//! | `shadow` (`shadow_at` in GLSL) | how deep an overlap of the two bundles a glide eats mid way, in units, and the change between them below which it eats nothing |
+//! | `spare` | 0 shrinks and grows scenery through a glide, 1 dissolves it instead, kept for comparison |
+//! | `rim`, `belly`, `grain_lod` | unused, kept so the block keeps its layout |
 
 mod analysis;
 mod area;
@@ -189,6 +193,15 @@ pub fn canvas(image: &RgbImage, width: u32, height: u32) -> Canvas {
 
 pub fn frame(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
     bundle::frame(a, b, s)
+}
+
+pub fn frame_dissolve(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
+    bundle::frame_with(a, b, s, bundle::Glide::Dissolve)
+}
+
+pub fn frame_dissolve_layers(a: &Bundle, b: &Bundle, s: f32) -> Layers {
+    let (picture, scenery) = bundle::layers_with(a, b, s, bundle::Glide::Dissolve);
+    Layers { picture, scenery }
 }
 
 pub fn frame_layers(a: &Bundle, b: &Bundle, s: f32) -> Layers {

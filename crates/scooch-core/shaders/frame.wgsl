@@ -72,7 +72,12 @@ fn sand_grain(pixel: vec2<u32>) -> f32 {
     return 1.0 + frame.grain * ((grain_hash(pixel.x, pixel.y) - 0.5) + 0.6 * (grain_hash(pixel.x / 2u, pixel.y / 2u) - 0.5));
 }
 
-fn paint(looks: texture_2d<f32>, paints: texture_2d_array<f32>, table: texture_2d<f32>, p: vec2<f32>, d: f32, picture: vec3<f32>, grain: f32) -> vec4<f32> {
+struct Parts {
+    shallow: vec4<f32>,
+    rest: vec4<f32>,
+}
+
+fn parts(looks: texture_2d<f32>, paints: texture_2d_array<f32>, table: texture_2d<f32>, p: vec2<f32>, d: f32, own: f32, picture: vec3<f32>, grain: f32) -> Parts {
     let here = textureSampleLevel(looks, smooth_filter, quarter(p), 0.0);
     let kind = here.r;
     let mark = here.g;
@@ -82,11 +87,12 @@ fn paint(looks: texture_2d<f32>, paints: texture_2d_array<f32>, table: texture_2
     let second = ramp(table, 1.0, d);
     let gain = layer(paints, p, 0);
     let sand = layer(paints, p, 2);
+    let keep = sand.a * (1.0 - kind);
+    var shallow = vec4<f32>(0.0);
+    shallow = over(shallow, min(picture * gain.rgb * 4.0, vec3<f32>(1.0)), ramp(table, 0.0, own).r * gain.a);
     var land = vec4<f32>(0.0);
-    land = over(land, min(picture * gain.rgb * 4.0, vec3<f32>(1.0)), first.r * gain.a);
     land = over(land, layer(paints, p, 1).rgb, first.g * mark);
     land = over(land, min(mix(sand.rgb, layer(paints, p, 3).rgb, first.a) * grain, vec3<f32>(1.0)), first.b);
-    land = land * sand.a;
     let shaded = layer(paints, p, 4);
     let lit = layer(paints, p, 5).rgb;
     let deep = layer(paints, p, 6).rgb;
@@ -95,8 +101,11 @@ fn paint(looks: texture_2d<f32>, paints: texture_2d_array<f32>, table: texture_2
     tone = mix(tone, lit, second.g * max(facing, 0.0));
     var cloud = vec4<f32>(0.0);
     cloud = over(cloud, min(tone * (1.0 + mark * frame.core_lift - frame.core_drop), vec3<f32>(1.0)), second.r);
-    cloud = cloud * shaded.a;
-    return mix(land, cloud, kind);
+    return Parts(shallow * keep, land * keep + cloud * (shaded.a * kind));
+}
+
+fn under(shallow: vec4<f32>, rest: vec4<f32>) -> vec4<f32> {
+    return rest + shallow * (1.0 - rest.a);
 }
 
 fn encode(c: vec3<f32>) -> vec3<f32> {
@@ -146,8 +155,22 @@ fn draw(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         return vec4<f32>(picture, 1.0);
     }
     let grain = sand_grain(vec2<u32>(p));
-    let a = paint(look_a, paints_a, ramps_a, p, d_a, picture, grain);
-    let b = paint(look_b, paints_b, ramps_b, p, d_b, picture, grain);
-    let land = mix(a, b, frame.s);
+    var land = vec4<f32>(0.0);
+    if (frame.spare > 0.5) {
+        let a = parts(look_a, paints_a, ramps_a, p, d_a, d_a, picture, grain);
+        let b = parts(look_b, paints_b, ramps_b, p, d_b, d_b, picture, grain);
+        land = mix(under(a.shallow, a.rest), under(b.shallow, b.rest), frame.s);
+    } else {
+        let ta = d_a + frame.s * frame.grain_scale;
+        let tb = d_b + (1.0 - frame.s) * frame.grain_scale;
+        let kept = max(d_a, d_b) + frame.shadow.x * 4.0 * frame.s * (1.0 - frame.s) * smoothstep(0.0, frame.shadow.y, abs(d_a - d_b));
+        let d = min(kept, min(ta, tb));
+        var w = smoothstep(-frame.grain_floor, frame.grain_floor, ta - tb);
+        w = w * min(4.0 * frame.s, 1.0);
+        w = 1.0 - (1.0 - w) * min(4.0 * (1.0 - frame.s), 1.0);
+        let a = parts(look_a, paints_a, ramps_a, p, d, d_a, picture, grain);
+        let b = parts(look_b, paints_b, ramps_b, p, d, d_b, picture, grain);
+        land = under(mix(a.shallow, b.shallow, frame.s), mix(a.rest, b.rest, w));
+    }
     return vec4<f32>(over_picture(picture, land), 1.0);
 }

@@ -22,6 +22,11 @@ const UNDER: f32 = 0.15;
 const BROAD_MIX: f32 = 0.9;
 const UNDER_MIX: f32 = 0.9;
 const GRAIN_DOUBLE: f32 = 0.6;
+const GLIDE_REACH: f32 = 1.8;
+const GLIDE_BLEND: f32 = 0.1;
+const GLIDE_EDGE: f32 = 4.0;
+const GLIDE_KEEP: f32 = 0.44;
+const GLIDE_GATE: f32 = 0.02;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Constants {
@@ -254,12 +259,12 @@ pub fn constants(materials: &Materials, unit: f32) -> Constants {
         ramp_low: RAMP_RANGE.0,
         ramp_high: RAMP_RANGE.1,
         reach: look::REACH,
-        shadow: [0.0; 2],
+        shadow: [GLIDE_KEEP, GLIDE_GATE],
         rim: [0.0; 2],
         belly: [0.0; 2],
         grain: materials.grain,
-        grain_scale: 1.0,
-        grain_floor: 0.0,
+        grain_scale: GLIDE_REACH,
+        grain_floor: GLIDE_BLEND,
         core_lift: look::LIFT + look::DIM,
         core_drop: look::DIM,
         volume_lit: BROAD_MIX,
@@ -535,21 +540,23 @@ fn rgb(c: [f32; 4]) -> [f32; 3] {
 }
 
 #[inline(always)]
-fn paint<L: Fn(usize) -> [f32; 4]>(c: &Constants, ramps: &[[f32; 8]], d: f32, look: [f32; 4], layer: L, picture: [f32; 3], grain: f32) -> Paint {
+fn pieces<L: Fn(usize) -> [f32; 4]>(c: &Constants, ramps: &[[f32; 8]], (d, own): (f32, f32), look: [f32; 4], layer: L, picture: [f32; 3], grain: f32) -> (Paint, Paint) {
     let [kind, mark, broad, facing] = look;
     let facing = facing * 2.0 - 1.0;
     let here = ramp(ramps, d, c);
-    let mut land = Paint::default();
+    let (mut shallow, mut rest) = (Paint::default(), Paint::default());
     if kind < 1.0 {
         let gain = layer(SHALLOW);
         let sand = layer(SAND);
-        land.over(std::array::from_fn(|k| (picture[k] * gain[k] * GAIN).min(1.0)), here.at(0) * gain[3]);
+        let keep = sand[3] * (1.0 - kind);
+        shallow.over(std::array::from_fn(|k| (picture[k] * gain[k] * GAIN).min(1.0)), ramp(ramps, own, c).at(0) * gain[3]);
+        shallow = shallow.scaled(keep);
+        let mut land = Paint::default();
         land.over(rgb(layer(FOAM)), here.at(1) * mark);
         let body = mix3(rgb(sand), rgb(layer(WET)), here.at(3));
         land.over(body.map(|v| (v * grain).min(1.0)), here.at(2));
-        land = land.scaled(sand[3]);
+        rest = land.scaled(keep);
     }
-    let mut cloud = Paint::default();
     if kind > 0.0 && here.at(4) > 0.0 {
         let shaded = layer(CLOUD);
         let (lit, deep) = (rgb(layer(LIT)), rgb(layer(DEEP)));
@@ -557,10 +564,15 @@ fn paint<L: Fn(usize) -> [f32; 4]>(c: &Constants, ramps: &[[f32; 8]], d: f32, lo
         tone = mix3(tone, deep, here.at(6) * (-facing).max(0.0) * c.volume_dark);
         tone = mix3(tone, lit, here.at(5) * facing.max(0.0));
         let lift = 1.0 + mark * c.core_lift - c.core_drop;
+        let mut cloud = Paint::default();
         cloud.over(tone.map(|v| (v * lift).min(1.0)), here.at(4));
-        cloud = cloud.scaled(shaded[3]);
+        rest = rest.plus(cloud.scaled(shaded[3] * kind));
     }
-    land.scaled(1.0 - kind).plus(cloud.scaled(kind))
+    (shallow, rest)
+}
+
+fn under((shallow, rest): (Paint, Paint)) -> Paint {
+    rest.plus(shallow.scaled(1.0 - rest.a))
 }
 
 fn crossfade(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
@@ -580,16 +592,30 @@ fn crossfade(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
 }
 
 pub fn frame(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
+    frame_with(a, b, s, Glide::Morph)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Glide {
+    Morph,
+    Dissolve,
+}
+
+pub fn frame_with(a: &Bundle, b: &Bundle, s: f32, glide: Glide) -> RgbImage {
     if !compatible(a, b) {
         return crossfade(a, b, s.clamp(0.0, 1.0));
     }
-    let (mut picture, layer) = layers(a, b, s);
+    let (mut picture, layer) = draw_with(a, b, s, &a.canvas, glide);
     paint::composite(&mut picture, &layer);
     picture
 }
 
 pub fn layers(a: &Bundle, b: &Bundle, s: f32) -> (RgbImage, RgbaImage) {
     draw(a, b, s, &a.canvas)
+}
+
+pub fn layers_with(a: &Bundle, b: &Bundle, s: f32, glide: Glide) -> (RgbImage, RgbaImage) {
+    draw_with(a, b, s, &a.canvas, glide)
 }
 
 fn dilate(cells: &[bool], grid: &Grid) -> Vec<bool> {
@@ -610,6 +636,10 @@ fn dilate(cells: &[bool], grid: &Grid) -> Vec<bool> {
 }
 
 pub fn draw(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8]) -> (RgbImage, RgbaImage) {
+    draw_with(a, b, s, canvas, Glide::Morph)
+}
+
+fn draw_with(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8], glide: Glide) -> (RgbImage, RgbaImage) {
     let s = if s.is_finite() { s.clamp(0.0, 1.0) } else { 0.0 };
     let (a, b, s) = if !compatible(a, b) {
         if s < 0.5 {
@@ -637,7 +667,7 @@ pub fn draw(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8]) -> (RgbImage, RgbaIma
     };
     let ratio = if same { a.ratio } else { a.ratio.max(b.ratio) };
     let picture = render::picture((canvas, a.canvas_width, a.canvas_height), (&xmap, &ymap), ratio, (width, height));
-    finish(a, b, s, picture, None)
+    finish_with(a, b, s, picture, None, glide)
 }
 
 pub struct Scope {
@@ -676,7 +706,11 @@ impl Scope {
     }
 }
 
-pub fn finish(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Option<&Scope>) -> (RgbImage, RgbaImage) {
+pub fn finish(a: &Bundle, b: &Bundle, s: f32, picture: RgbImage, scope: Option<&Scope>) -> (RgbImage, RgbaImage) {
+    finish_with(a, b, s, picture, scope, Glide::Morph)
+}
+
+fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Option<&Scope>, glide: Glide) -> (RgbImage, RgbaImage) {
     let same = std::ptr::eq(a, b) || s == 0.0;
     let (width, height) = (a.width, a.height);
     let mut layer = RgbaImage::new(width, height);
@@ -775,16 +809,31 @@ pub fn finish(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opti
             let p = &raw[(y * w + x) * 3..(y * w + x) * 3 + 3];
             let here = [decode[p[0] as usize], decode[p[1] as usize], decode[p[2] as usize]];
             let grain = grain_at(&c, x as u32, y as u32);
-            let mut total = Paint::default();
-            for (k, (plane, (share, x))) in planes.iter().zip(&shares).enumerate() {
-                if ds[k] > c.reach {
-                    continue;
-                }
-                let look = lerp4(&look_lines[k], column);
+            let part = |k: usize, d: f32, own: f32| {
                 let tints = &tint_lines[k];
-                let part = paint(&x.constants, &plane.ramps, ds[k], look, |layer| lerp4(&tints[layer], tint_column), here, grain);
-                total = total.plus(part.scaled(*share));
-            }
+                pieces(&shares[k].1.constants, &planes[k].ramps, (d, own), lerp4(&look_lines[k], column), |layer| lerp4(&tints[layer], tint_column), here, grain)
+            };
+            let total = if planes.len() == 1 {
+                under(part(0, ds[0], ds[0]))
+            } else if glide == Glide::Dissolve {
+                let mut sum = Paint::default();
+                for (k, (share, _)) in shares.iter().enumerate() {
+                    if ds[k] <= c.reach {
+                        sum = sum.plus(under(part(k, ds[k], ds[k])).scaled(*share));
+                    }
+                }
+                sum
+            } else {
+                let (da, db) = (ds[0], ds[1]);
+                let (ta, tb) = (da + s * c.grain_scale, db + (1.0 - s) * c.grain_scale);
+                let kept = da.max(db) + c.shadow[0] * 4.0 * s * (1.0 - s) * smoothstep(0.0, c.shadow[1], (da - db).abs());
+                let d = kept.min(ta.min(tb));
+                let mut w = smoothstep(-c.grain_floor, c.grain_floor, ta - tb);
+                w *= (GLIDE_EDGE * s).min(1.0);
+                w = 1.0 - (1.0 - w) * (GLIDE_EDGE * (1.0 - s)).min(1.0);
+                let ((sa, ra), (sb, rb)) = (part(0, d, da), part(1, d, db));
+                under((sa.scaled(1.0 - s).plus(sb.scaled(s)), ra.scaled(1.0 - w).plus(rb.scaled(w))))
+            };
             if total.a <= 1e-4 {
                 continue;
             }

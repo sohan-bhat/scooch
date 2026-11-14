@@ -16,6 +16,7 @@ uniform float grain_amount;
 uniform float grain_scale;
 uniform float grain_floor;
 uniform float grain_lod;
+uniform float spare;
 uniform float core_lift;
 uniform float core_drop;
 uniform float volume_lit;
@@ -76,7 +77,12 @@ float sand_grain(uvec2 pixel) {
     return 1.0 + grain_amount * ((grain_hash(pixel.x, pixel.y) - 0.5) + 0.6 * (grain_hash(pixel.x / 2u, pixel.y / 2u) - 0.5));
 }
 
-vec4 paint(int which, vec2 p, float d, vec3 picture, float grain) {
+struct Parts {
+    vec4 shallow;
+    vec4 rest;
+};
+
+Parts parts(int which, vec2 p, float d, float own, vec3 picture, float grain) {
     vec4 here = which == 0 ? textureLod(look_a, quarter(p), 0.0) : textureLod(look_b, quarter(p), 0.0);
     float kind = here.r;
     float mark = here.g;
@@ -86,11 +92,12 @@ vec4 paint(int which, vec2 p, float d, vec3 picture, float grain) {
     vec4 second = ramp(which, 1.0, d);
     vec4 gain = layer(which, p, 0);
     vec4 sand = layer(which, p, 2);
+    float keep = sand.a * (1.0 - kind);
+    vec4 shallow = vec4(0.0);
+    shallow = over(shallow, min(picture * gain.rgb * 4.0, vec3(1.0)), ramp(which, 0.0, own).r * gain.a);
     vec4 land = vec4(0.0);
-    land = over(land, min(picture * gain.rgb * 4.0, vec3(1.0)), first.r * gain.a);
     land = over(land, layer(which, p, 1).rgb, first.g * mark);
     land = over(land, min(mix(sand.rgb, layer(which, p, 3).rgb, first.a) * grain, vec3(1.0)), first.b);
-    land = land * sand.a;
     vec4 shaded = layer(which, p, 4);
     vec3 lit = layer(which, p, 5).rgb;
     vec3 deep = layer(which, p, 6).rgb;
@@ -99,8 +106,11 @@ vec4 paint(int which, vec2 p, float d, vec3 picture, float grain) {
     tone = mix(tone, lit, second.g * max(facing, 0.0));
     vec4 cloud = vec4(0.0);
     cloud = over(cloud, min(tone * (1.0 + mark * core_lift - core_drop), vec3(1.0)), second.r);
-    cloud = cloud * shaded.a;
-    return mix(land, cloud, kind);
+    return Parts(shallow * keep, land * keep + cloud * (shaded.a * kind));
+}
+
+vec4 under(vec4 shallow, vec4 rest) {
+    return rest + shallow * (1.0 - rest.a);
 }
 
 vec3 encode(vec3 c) {
@@ -144,8 +154,22 @@ void main() {
         return;
     }
     float grain = sand_grain(uvec2(p));
-    vec4 a = paint(0, p, d_a, picture, grain);
-    vec4 b = paint(1, p, d_b, picture, grain);
-    vec4 land = mix(a, b, s);
+    vec4 land = vec4(0.0);
+    if (spare > 0.5) {
+        Parts a = parts(0, p, d_a, d_a, picture, grain);
+        Parts b = parts(1, p, d_b, d_b, picture, grain);
+        land = mix(under(a.shallow, a.rest), under(b.shallow, b.rest), s);
+    } else {
+        float ta = d_a + s * grain_scale;
+        float tb = d_b + (1.0 - s) * grain_scale;
+        float kept = max(d_a, d_b) + shadow_at.x * 4.0 * s * (1.0 - s) * smoothstep(0.0, shadow_at.y, abs(d_a - d_b));
+        float d = min(kept, min(ta, tb));
+        float w = smoothstep(-grain_floor, grain_floor, ta - tb);
+        w = w * min(4.0 * s, 1.0);
+        w = 1.0 - (1.0 - w) * min(4.0 * (1.0 - s), 1.0);
+        Parts a = parts(0, p, d, d_a, picture, grain);
+        Parts b = parts(1, p, d, d_b, picture, grain);
+        land = under(mix(a.shallow, b.shallow, s), mix(a.rest, b.rest, w));
+    }
     color = vec4(over_picture(picture, land), 1.0);
 }
