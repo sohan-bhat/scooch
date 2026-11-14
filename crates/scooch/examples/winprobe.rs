@@ -2884,7 +2884,7 @@ mod probe {
             helper.close(*id, ANSWER)?;
             pump(Duration::from_millis(200));
         }
-        p.line(format!("- warm helper, open sent to shown {shown:?} ms by the probe and {told:?} ms by the helper"));
+        p.line(format!("- opens after the first, open sent to shown {shown:?} ms by the probe and {told:?} ms by the helper"));
         p.line(format!("- glide sent to the first moving frame captured on screen {moving:?} ms, the helper's first frame, frames and slow frames {firsts:?}"));
         p.line(format!("- open of a still that differs from the wallpaper, sent to first captured on screen {visible:?} ms"));
         let rates: Vec<f32> = firsts.iter().map(|(_, frames, _)| *frames as f32 / (GLIDE_MS as f32 / 1000.0)).collect();
@@ -3369,7 +3369,7 @@ mod probe {
                 pump(Duration::from_millis(30));
             }
             count += 1;
-            if done.is_none() && count.is_multiple_of(3) && log_lines(log).iter().skip(start).any(|line| line.contains(" tick ")) {
+            if done.is_none() && count.is_multiple_of(3) && log_lines(log).iter().skip(start).any(|line| line.contains(" tick ") && !line.contains("Unchanged)]")) {
                 done = Some(Instant::now());
             }
             if done.is_some_and(|done| done.elapsed() > Duration::from_secs(1)) {
@@ -3631,7 +3631,9 @@ mod probe {
             setup = Some(watched);
         }
         let setup = setup.context("no setup drag")?;
-        let wrote_tables = setup.log.iter().any(|line| line.contains(" tick ") && line.contains("tables "));
+        let wrote_tables = setup.log.iter().any(|line| line.contains(" tick ") && line.rsplit("] ").next().is_some_and(|laps| laps.split(", ").any(|lap| lap.starts_with("tables "))));
+        let ticks: Vec<String> = setup.log.iter().filter(|line| line.contains(" tick ")).map(|line| line.chars().take(300).collect()).collect();
+        p.line(format!("- the last setup drag's tick lines {ticks:?}"));
         p.line(format!("- the last setup drag rendered with a tables entry {wrote_tables}"));
         if !wrote_tables {
             p.failed.push("the setup drags wrote no tables, so the timed drag could not glide".into());
