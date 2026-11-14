@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Footer } from '@/components/Footer';
+import { release } from '@/lib/load';
 import { Facts } from './Facts';
 import { Install } from './Install';
 import { Nav } from './Nav';
@@ -21,8 +22,14 @@ export function App() {
 
   useEffect(() => {
     const next = storyMode();
-    if (!next.live) document.documentElement.classList.add('stills-mode');
+    if (!next.live) {
+      document.documentElement.classList.add('stills-mode');
+      release(false);
+    }
     setMode(next);
+    const fallback = () => setMode({ live: false, still: -1 });
+    window.addEventListener('scooch:stills', fallback);
+    return () => window.removeEventListener('scooch:stills', fallback);
   }, []);
 
   useStory(refs, mode.live, mode.still);

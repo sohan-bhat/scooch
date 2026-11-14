@@ -2,6 +2,7 @@ import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import Lenis from 'lenis';
 import { useEffect } from 'react';
+import { loader } from '@/lib/load';
 import { loadManifest, type DemoManifest } from '@/story/demo';
 import { runtime, story } from '@/story/state';
 import { beats as beatList, buildTimeline, TOTAL } from '@/story/timeline';
@@ -152,6 +153,16 @@ export function useStory(refs: Refs, live: boolean, still: number) {
     if (still < 0) {
       lenis = new Lenis({ autoRaf: false, lerp: 0.11, wheelMultiplier: 0.9, anchors: { immediate: true } });
       lenis.on('scroll', ScrollTrigger.update);
+      const load = loader();
+      if (load?.on) {
+        lenis.stop();
+        load.cb.push((keep) => {
+          if (disposed || !lenis) return;
+          lenis.start();
+          if (keep && load.at) lenis.scrollTo(load.at, { immediate: true, force: true });
+          ScrollTrigger.update();
+        });
+      }
       gsap.ticker.add(tick);
       gsap.ticker.lagSmoothing(0);
       window.addEventListener('resize', onResize);
@@ -191,12 +202,30 @@ export function introduce(refs: Refs, still: number) {
   }
   runtime.ready = true;
   performance.mark('scooch:ready');
-  gsap.to(picture, {
-    autoAlpha: 0,
-    duration: 0.3,
-    ease: 'power2.out',
-    onComplete: () => {
-      performance.mark('scooch:shown');
-    },
-  });
+  const load = loader();
+  load?.done();
+  const glass = document.getElementById('glass');
+  const fade = () =>
+    gsap.to([picture, glass], {
+      autoAlpha: 0,
+      duration: 0.3,
+      ease: 'power2.out',
+      onComplete: () => {
+        performance.mark('scooch:shown');
+        glass?.removeAttribute('role');
+        load?.release();
+      },
+    });
+  if (!load?.full) {
+    fade();
+    return;
+  }
+  let started = false;
+  const go = () => {
+    if (started) return;
+    started = true;
+    fade();
+  };
+  void load.full.then(go);
+  window.setTimeout(go, 400);
 }

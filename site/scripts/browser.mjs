@@ -10,11 +10,11 @@ export function launch() {
   });
 }
 
-export async function openStill(browser, { beat, width, height, scale, share = false, hero = false }) {
+export async function openStill(browser, { beat, width, height, scale, share = false, hero = false, juice = false }) {
   const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: scale });
   const page = await context.newPage();
   page.on('pageerror', (error) => console.error('pageerror', error.message));
-  const query = `still=${beat}${share ? '&share' : ''}${hero ? '&hero' : ''}`;
+  const query = `still=${beat}${share ? '&share' : ''}${hero ? '&hero' : ''}${juice ? '&juice' : ''}`;
   await page.goto(`${origin}?${query}`, { waitUntil: 'load' });
   await page.waitForFunction(() => window.__stillReady === true, null, { timeout: 60000 });
   await page.evaluate(() => document.fonts.ready);

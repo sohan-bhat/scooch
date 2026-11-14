@@ -268,3 +268,88 @@ html.still-shot.share-shot .share-only {
     display: block;
   }
 }
+
+.desk-controls:not([data-open]) {
+  clip-path: inset(50%);
+  height: 1px;
+  left: 0;
+  overflow: hidden;
+  right: auto;
+  white-space: nowrap;
+  width: 1px;
+}
+
+.js .beats [data-overlay="hint"][data-show] {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 600ms var(--ease-out);
+}
+
+.js .beats [data-overlay="hint"] {
+  transition: opacity 300ms var(--ease-out), visibility 0s linear 300ms;
+}
+
+html.loading {
+  overflow: hidden;
+  scrollbar-gutter: stable;
+}
+
+.stage-glass {
+  container-type: size;
+  overflow: hidden;
+}
+
+.stage-glass svg {
+  position: absolute;
+  display: none;
+  max-width: none;
+}
+
+.stage-glass svg[data-frame="desktop"] {
+  display: block;
+  width: auto;
+  height: min(100cqh, 100cqw / 1.6);
+  aspect-ratio: 3456 / 1350;
+  left: calc((100cqw - min(100cqh, 100cqw / 1.6) * 2.56) * 0.71);
+  top: calc((100cqh - min(100cqh, 100cqw / 1.6)) * 0.5);
+}
+
+.juice-level {
+  transform: translateY(calc((1 - var(--fill, 0)) * var(--drop) * 1px));
+}
+
+@media (max-aspect-ratio: 16/10) {
+  .stage-glass svg[data-frame="desktop"] {
+    display: none;
+  }
+
+  .stage-glass svg[data-frame="square"] {
+    display: block;
+    width: 100cqw;
+    height: auto;
+    aspect-ratio: 1920 / 1917;
+    left: 0;
+    top: calc((100cqh - 100cqw * 1278 / 1280) * 0.5);
+  }
+}
+
+@media (max-width: 767px), (orientation: portrait) {
+  .stage-glass svg[data-frame="desktop"],
+  .stage-glass svg[data-frame="square"] {
+    display: none;
+  }
+
+  .stage-glass svg[data-frame="phone"] {
+    display: block;
+    width: auto;
+    height: 100cqh;
+    aspect-ratio: 1440 / 1694;
+    left: calc((100cqw - 100cqh * 0.85) * 0.5);
+    top: 0;
+  }
+}
+
+html.still-shot .stage-glass,
+html:not(.loading):not(.story-mode) .stage-glass {
+  visibility: hidden;
+}
