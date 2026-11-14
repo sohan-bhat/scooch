@@ -8,6 +8,7 @@ import { runtime, story } from '@/story/state';
 import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
+import { still as native } from './still';
 import { labelProps } from './labels';
 import { makeLive, obstacles, rimmed } from './touch';
 import { quiet } from '@/lib/idle';
@@ -127,7 +128,7 @@ function Sharpener() {
     if (!lite) return;
     return whenReady(
       () => setIndex(0),
-      () => runtime.props && quality.tier === 'full' && layoutFor(window.innerWidth, window.innerHeight) !== 'phone',
+      () => runtime.props && (quality.tier === 'full' || native.ready) && layoutFor(window.innerWidth, window.innerHeight) !== 'phone',
     );
   }, []);
   if (index < 0 || index >= heroes.length) return null;
