@@ -26,6 +26,7 @@ import {
 } from 'three';
 import frame from '../../../../crates/scooch-core/shaders/frame.glsl?raw';
 import { asset } from '@/lib/base';
+import { quiet } from '@/lib/idle';
 import { fetchEarly } from '@/story/early';
 
 type Table = { file: string; width: number; height: number; layers?: number };
@@ -172,11 +173,15 @@ function blankLayers() {
   return texture;
 }
 
-async function canvasTexture(base: string, info: SceneryInfo) {
+async function canvasTexture(base: string, info: SceneryInfo, longest = 0) {
   const url = `${base}/${info.canvas.file}`;
   const response = await fetchEarly(url);
   if (!response.ok) throw new Error(`${response.status} ${url}`);
-  const canvas = new Texture(await createImageBitmap(await response.blob()));
+  const blob = await response.blob();
+  const { width, height } = info.canvas;
+  const shrink = longest > 0 ? Math.min(1, longest / Math.max(width, height)) : 1;
+  const bitmap = shrink < 1 ? await createImageBitmap(blob, { resizeWidth: Math.round(width * shrink), resizeHeight: Math.round(height * shrink), resizeQuality: 'high' }) : await createImageBitmap(blob);
+  const canvas = new Texture(bitmap);
   canvas.colorSpace = SRGBColorSpace;
   canvas.flipY = false;
   canvas.generateMipmaps = true;
@@ -186,10 +191,10 @@ async function canvasTexture(base: string, info: SceneryInfo) {
   return canvas;
 }
 
-export async function loadScenery(info: SceneryInfo, plainStates: boolean): Promise<Scenery> {
+export async function loadScenery(info: SceneryInfo, plainStates: boolean, longest = 0): Promise<Scenery> {
   const base = asset(`demo/${info.folder}`);
   if (!plainStates || !info.fill) {
-    const [canvas, ...states] = await Promise.all([canvasTexture(base, info), ...info.states.map((state) => lookOf(base, state))]);
+    const [canvas, ...states] = await Promise.all([canvasTexture(base, info, longest), ...info.states.map((state) => lookOf(base, state))]);
     return { info, canvas, states, complete: true };
   }
   const [canvas, fill] = await Promise.all([canvasTexture(base, info), mapTexture(`${base}/${info.fill.file}`, info.fill)]);
@@ -211,13 +216,17 @@ export async function streamScenery(scenery: Scenery) {
   scenery.complete = true;
 }
 
-export function createFrame(scenery: Scenery, scale = 1) {
+const PIXEL = 'vec2 p = vec2(gl_FragCoord.x, size.y - gl_FragCoord.y);';
+if (!frame.includes(PIXEL)) throw new Error('frame.glsl no longer reads the pixel the way the site maps it');
+
+export function createFrame(scenery: Scenery, view?: { width: number; height: number }) {
   const { info } = scenery;
   const constants = info.states[0].tables.constants;
   const number = (key: string) => Number(constants[key]);
   const pair = (key: string) => constants[key] as number[];
   const uniforms = {
     size: { value: [info.width, info.height] },
+    view: { value: [view?.width ?? info.width, view?.height ?? info.height] },
     grid: { value: [info.width / info.grid_cell, info.height / info.grid_cell] },
     paint_grid: { value: [info.width / info.paint_cell, info.height / info.paint_cell] },
     s: { value: 0 },
@@ -254,7 +263,10 @@ export function createFrame(scenery: Scenery, scale = 1) {
     name: 'scooch-frame',
     glslVersion: GLSL3,
     vertexShader: vertex,
-    fragmentShader: frame.replace(/^\s*#version 300 es\s*/, ''),
+    fragmentShader: frame
+      .replace(/^\s*#version 300 es\s*/, '')
+      .replace('uniform vec2 size;', 'uniform vec2 size;\nuniform vec2 view;')
+      .replace(PIXEL, 'vec2 p = vec2(gl_FragCoord.x, view.y - gl_FragCoord.y) * (size / view);'),
     uniforms,
     depthTest: false,
     depthWrite: false,
@@ -266,7 +278,7 @@ export function createFrame(scenery: Scenery, scale = 1) {
   const scene = new Scene();
   scene.add(mesh);
   const camera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
-  const target = new WebGLRenderTarget(Math.round(info.width * scale), Math.round(info.height * scale), {
+  const target = new WebGLRenderTarget(view?.width ?? info.width, view?.height ?? info.height, {
     colorSpace: SRGBColorSpace,
     depthBuffer: false,
     generateMipmaps: true,
@@ -330,6 +342,24 @@ export function createFrame(scenery: Scenery, scale = 1) {
       gl.render(scene, camera);
       gl.setRenderTarget(previous);
       return true;
+    },
+    async renderIdle(gl: WebGLRenderer, place: number, pixels = 120000) {
+      const { from, to, s } = select(place);
+      last = `${from}:${to}:${s.toFixed(4)}:${scenery.states.length}`;
+      const rows = Math.max(8, Math.floor(pixels / target.width));
+      for (let y = 0; y < target.height; y += rows) {
+        await quiet();
+        bind('a', scenery.states[from]);
+        bind('b', scenery.states[to]);
+        uniforms.s.value = s;
+        target.scissor.set(0, y, target.width, Math.min(rows, target.height - y));
+        target.scissorTest = true;
+        const previous = gl.getRenderTarget();
+        gl.setRenderTarget(target);
+        gl.render(scene, camera);
+        gl.setRenderTarget(previous);
+      }
+      target.scissorTest = false;
     },
     renderLooks(gl: WebGLRenderer, a: Look, b: Look, s: number, constants: Float32Array | null) {
       last = '';

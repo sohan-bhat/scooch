@@ -263,6 +263,7 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
       .catch(() => undefined)
       .then(async () => {
         target.dispose();
+        await labels.ready(gl);
         for (const texture of textures) {
           await nextFrame();
           if (stopped) return;
@@ -276,7 +277,7 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
     return () => {
       stopped = true;
     };
-  }, [group, gl, scene, camera, onExtras]);
+  }, [group, gl, scene, camera, onExtras, labels]);
 
   return <primitive object={group} />;
 }

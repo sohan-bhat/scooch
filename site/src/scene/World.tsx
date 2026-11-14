@@ -1,8 +1,9 @@
 import { ContactShadows } from '@react-three/drei';
 import { useFrame, useLoader, useThree } from '@react-three/fiber';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Color,
+  DataTexture,
   DirectionalLight,
   FogExp2,
   Group,
@@ -15,14 +16,18 @@ import {
   PointLight,
   Quaternion,
   RectAreaLight,
+  RGBAFormat,
   SpotLight,
   type Texture,
+  UnsignedByteType,
   Vector2,
   Vector3,
+  type WebGLRenderer,
   WebGLRenderTarget,
 } from 'three';
 import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import { asset } from '@/lib/base';
+import { quiet } from '@/lib/idle';
 import { stage as loadStage } from '@/lib/load';
 import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
@@ -30,11 +35,8 @@ import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
-import { Live } from './Live';
 import { Tumbler } from './Tumbler';
-import { draw, held, step } from './drag';
 import { CHANNELS, hooks, live } from './touch';
-import { play } from './sound';
 import { BULB, DESK_TOP, Desk, LAMP, type Console, type Screens } from './Desk';
 import { createCrtMaterial } from './screen/crt';
 import { useInside, type Stage } from './Inside';
@@ -45,6 +47,8 @@ import { createFrame, loadScenery, streamScenery, type Frame } from './screen/sc
 import { measureScreen, useScreens } from './screen/useScreen';
 import { keys, layoutFor } from './shots';
 import { applyEnvironment, environmentReady, precompile } from './warm';
+
+const Lively = lazy(() => import('./Lively'));
 
 const SPOT = 4;
 const BULB_GLOW = 7;
@@ -122,10 +126,34 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const screens = useScreens(manifest);
   const blinds = useMemo(() => blindsTexture(), []);
   const writing = useRef<((amount: number) => void) | null>(null);
+  const writable = useRef<((gl: WebGLRenderer) => Promise<void>) | null>(null);
   const aimed = useRef(0);
-  const onAction = useCallback((name: string) => play(name), []);
   const blindsMatrix = useMemo(() => projector(), []);
-  const painted = useMemo(() => ({ osd: paintedTexture(1024, 768, osdPainter), wall: wallTexture(blindsMatrix) }), [blindsMatrix]);
+  const [lively, setLively] = useState(false);
+  useEffect(() => {
+    if (runtime.still >= 0) return;
+    let stopped = false;
+    let timer = 0;
+    const wake = async () => {
+      if (stopped) return;
+      if (!runtime.shown) {
+        timer = window.setTimeout(() => void wake(), 200);
+        return;
+      }
+      await quiet();
+      if (!stopped) setLively(true);
+    };
+    void wake();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
+  const placeholder = useMemo(() => {
+    const texture = new DataTexture(new Uint8Array(4), 1, 1, RGBAFormat, UnsignedByteType);
+    texture.needsUpdate = true;
+    return texture;
+  }, []);
   const [built, setBuilt] = useState<Built | null>(null);
   const [extrasIn, setExtrasIn] = useState(false);
   const onExtras = useCallback(() => setExtrasIn(true), []);
@@ -227,13 +255,13 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     let timer = 0;
     const begin = async () => {
       if (stopped) return;
-      if (!runtime.ready && runtime.still < 0) {
+      if (!runtime.shown && runtime.still < 0) {
         timer = window.setTimeout(() => void begin(), 200);
         return;
       }
       const upload = async (textures: Texture[]) => {
         for (const texture of textures) {
-          await new Promise((resolve) => requestAnimationFrame(resolve));
+          await quiet();
           if (stopped) return;
           gl.initTexture(texture);
         }
@@ -241,12 +269,22 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       const ready = new Set(screens.main.textures());
       await streamScenery(screens.main.scenery);
       await upload(screens.main.textures().filter((texture) => !ready.has(texture)));
-      for (const picture of manifest.pictures) {
-        const loaded = await loadScenery(picture.scenery, false);
+      const buffer = gl.getDrawingBufferSize(new Vector2());
+      const limit = Math.round(Math.max(buffer.x, buffer.y) * 0.8);
+      const order = ['swans', 'wide', 'tall', 'city', 'moon'];
+      const rank = (id: string) => (order.includes(id) ? order.indexOf(id) : order.length);
+      for (const picture of [...manifest.pictures].sort((a, b) => rank(a.id) - rank(b.id))) {
+        const { width, height } = picture.scenery;
+        const scale = Math.min(1, limit / Math.max(width, height));
+        const view = { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+        const loaded = await loadScenery(picture.scenery, false, Math.round(Math.max(view.width, view.height) * 1.25));
         if (stopped) return;
-        const frame = createFrame(loaded);
+        const frame = createFrame(loaded, view);
+        await quiet();
         await frame.compile(gl);
         await upload(frame.textures());
+        if (stopped) return;
+        await frame.renderIdle(gl, 0);
         if (stopped) return;
         gallery.current[picture.id] = frame;
         if (picture.id === 'swans') {
@@ -349,12 +387,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     }
     wall.uniforms.uBlindsMatrix.value.copy(blindsMatrix);
     floor.uniforms.uBlindsMatrix.value.copy(blindsMatrix);
-    wall.uniforms.uCaption.value = painted.wall.texture;
-    screens.crt.uniforms.uOsd.value = painted.osd.texture;
-    void fontsReady().then(() => {
-      painted.osd.draw(1, true);
-      painted.wall.paint();
-    });
+    wall.uniforms.uCaption.value = placeholder;
+    screens.crt.uniforms.uOsd.value = placeholder;
     const tv = built.television;
     const sticky = stickyNote({
       center: tv.center,
@@ -365,6 +399,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       height: tv.screen.height,
     });
     writing.current = sticky.write;
+    writable.current = sticky.ready;
     const note = sticky.note;
     scene.add(note);
     gl.shadowMap.autoUpdate = false;
@@ -402,7 +437,40 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       cancelAnimationFrame(handle);
       scene.remove(note);
     };
-  }, [built, scene, camera, targets, gl, screens, blinds, blindsMatrix, wall, floor, onReady, painted]);
+  }, [built, scene, camera, targets, gl, screens, blinds, blindsMatrix, wall, floor, onReady, placeholder]);
+
+  useEffect(() => {
+    let stopped = false;
+    let timer = 0;
+    const paint = async () => {
+      if (stopped) return;
+      if (!runtime.shown && runtime.still < 0) {
+        timer = window.setTimeout(() => void paint(), 200);
+        return;
+      }
+      await fontsReady();
+      await quiet();
+      if (stopped) return;
+      const osd = paintedTexture(1024, 768, osdPainter);
+      await quiet();
+      gl.initTexture(osd.texture);
+      screens.crt.uniforms.uOsd.value = osd.texture;
+      const caption = wallTexture(blindsMatrix);
+      await caption.paint();
+      if (stopped) return;
+      await quiet();
+      gl.initTexture(caption.texture);
+      wall.uniforms.uCaption.value = caption.texture;
+      await writable.current?.(gl);
+      if (stopped) return;
+      runtime.painted = true;
+    };
+    timer = window.setTimeout(() => void paint(), 0);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [gl, screens, wall, blindsMatrix]);
 
   const shadowFrames = useRef(0);
   const shadowProps = useRef(false);
@@ -490,10 +558,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     wall.uniforms.uDrift.value.set(story.drift * 0.018, -story.drift * 0.028);
     floor.uniforms.uDrift.value.copy(wall.uniforms.uDrift.value);
     crt.uTime.value = time;
-    if (held.active) {
-      step(Math.min(delta, 0.05));
-      draw(gl);
-    } else screens.main.render(gl, story.place);
+    if (!hooks.drawHeld(gl, Math.min(delta, 0.05))) screens.main.render(gl, story.place);
     for (const frame of Object.values(gallery.current)) frame.render(gl, 0);
     const now = performance.now();
     crt.uOn.value = live.power ? Math.min(tubeOn, Math.min(Math.max((now - live.onAt) / 1100, 0), 1)) : tubeOn;
@@ -597,7 +662,11 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       )}
       <Desk onScreens={onScreens} onExtras={onExtras} onConsole={onConsole} phone={phone} />
       <Tumbler />
-      <Live onAction={onAction} />
+      {lively ? (
+        <Suspense fallback={null}>
+          <Lively />
+        </Suspense>
+      ) : null}
       <ContactShadows key={extrasIn ? 'extras' : 'bare'} position={[0, DESK_TOP + 0.0015, 0.0]} scale={[2.0, 0.95]} resolution={512} blur={2.4} far={0.3} opacity={0.62} frames={1} color="#0a0806" />
       <mesh position={[0, 1.6, -0.98]} material={wall}>
         <planeGeometry args={[9, 3.2]} />

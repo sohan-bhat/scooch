@@ -1,4 +1,5 @@
-import { CanvasTexture, LinearFilter, LinearMipmapLinearFilter, NoColorSpace, SRGBColorSpace, Vector4, type Matrix4 } from 'three';
+import { quiet } from '@/lib/idle';
+import { CanvasTexture, LinearFilter, LinearMipmapLinearFilter, NearestFilter, NoColorSpace, SRGBColorSpace, Vector4, type Matrix4 } from 'three';
 import content from '@/content.json';
 
 export const FONT = {
@@ -23,17 +24,29 @@ export function fontsReady() {
 
 export type Painter = (context: CanvasRenderingContext2D, width: number, height: number, amount: number) => void;
 
-export function paintedTexture(width: number, height: number, paint: Painter, flip = false) {
+export function canvasTexture(width: number, height: number, flip = false, color = true) {
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext('2d');
   const texture = new CanvasTexture(canvas);
-  texture.colorSpace = SRGBColorSpace;
   texture.flipY = flip;
-  texture.anisotropy = 8;
-  texture.magFilter = LinearFilter;
-  texture.minFilter = LinearMipmapLinearFilter;
+  if (color) {
+    texture.colorSpace = SRGBColorSpace;
+    texture.anisotropy = 8;
+    texture.magFilter = LinearFilter;
+    texture.minFilter = LinearMipmapLinearFilter;
+  } else {
+    texture.colorSpace = NoColorSpace;
+    texture.magFilter = NearestFilter;
+    texture.minFilter = NearestFilter;
+    texture.generateMipmaps = false;
+  }
+  return { canvas, context, texture };
+}
+
+export function paintedTexture(width: number, height: number, paint: Painter, flip = false, now = true) {
+  const { context, texture } = canvasTexture(width, height, flip);
   let last = -1;
   const draw = (amount = 1, force = false) => {
     if (!context || (amount === last && !force)) return;
@@ -42,7 +55,7 @@ export function paintedTexture(width: number, height: number, paint: Painter, fl
     paint(context, width, height, amount);
     texture.needsUpdate = true;
   };
-  draw(1);
+  if (now) draw(1);
   return { texture, draw };
 }
 
@@ -81,27 +94,47 @@ export const osdPainter: Painter = (context, width, height, amount) => {
   });
 };
 
-export const typedPainter: Painter = (context, width, height, amount) => {
+export type Reveal = { full: Painter; order: Painter; blank?: Painter };
+
+const gray = (value: number) => {
+  const level = Math.round(Math.min(Math.max(value, 0), 1) * 255);
+  return `rgb(${level}, ${level}, ${level})`;
+};
+
+function typedLayout(context: CanvasRenderingContext2D, width: number) {
   const text = caption('fix');
-  const shown = Math.round(text.length * Math.min(Math.max(amount, 0), 1));
-  if (shown <= 0) return;
   const size = Math.round(width * 0.112);
   context.font = `600 ${size}px ${FONT.mono}`;
   context.textBaseline = 'alphabetic';
   context.textAlign = 'left';
-  const lines = wrap(context, text, width * 0.84);
-  let left = shown;
-  lines.forEach((line, index) => {
-    const part = line.slice(0, Math.max(left, 0));
-    left -= line.length + 1;
-    if (!part) return;
+  return { text, size, lines: wrap(context, text, width * 0.84) };
+}
+
+export const typed: Reveal = {
+  full: (context, width, height) => {
+    const { size, lines } = typedLayout(context, width);
     context.fillStyle = 'rgba(28, 30, 44, 0.9)';
-    context.fillText(part, width * 0.08, height * 0.2 + index * size * 1.62);
-  });
+    lines.forEach((line, index) => context.fillText(line, width * 0.08, height * 0.2 + index * size * 1.62));
+  },
+  order: (context, width, height) => {
+    const { text, size, lines } = typedLayout(context, width);
+    context.fillStyle = gray(1);
+    context.fillRect(0, 0, width, height);
+    let start = 0;
+    lines.forEach((line, index) => {
+      const base = height * 0.2 + index * size * 1.62;
+      for (let k = 0; k < line.length; k++) {
+        const from = Math.floor(width * 0.08 + context.measureText(line.slice(0, k)).width);
+        const to = Math.ceil(width * 0.08 + context.measureText(line.slice(0, k + 1)).width);
+        context.fillStyle = gray((start + k + 0.5) / text.length);
+        context.fillRect(from, base - size, to - from, size * 1.4);
+      }
+      start += line.length + 1;
+    });
+  },
 };
 
-export const stickyPainter: Painter = (context, width, height, amount) => {
-  const text = caption('grow');
+function stickyBack(context: CanvasRenderingContext2D, width: number, height: number) {
   context.fillStyle = '#f1cf5a';
   context.fillRect(0, 0, width, height);
   const shade = context.createLinearGradient(0, 0, 0, height);
@@ -110,26 +143,43 @@ export const stickyPainter: Painter = (context, width, height, amount) => {
   shade.addColorStop(1, 'rgba(120, 84, 20, 0.12)');
   context.fillStyle = shade;
   context.fillRect(0, 0, width, height);
+}
+
+function stickyLayout(context: CanvasRenderingContext2D, width: number, height: number) {
   const size = Math.round(width * 0.158);
   context.font = `700 ${size}px ${FONT.text}`;
   context.textBaseline = 'alphabetic';
   context.textAlign = 'left';
-  context.fillStyle = 'rgba(30, 26, 36, 0.92)';
-  const lines = wrap(context, text, width * 0.82);
+  const lines = wrap(context, caption('grow'), width * 0.82);
   const top = height * 0.5 - ((lines.length - 1) * size * 1.18) / 2 + size * 0.35;
-  const total = lines.reduce((sum, line) => sum + context.measureText(line).width, 0);
-  let left = total * Math.min(Math.max(amount, 0), 1);
-  lines.forEach((line, index) => {
-    const span = context.measureText(line).width;
-    if (left <= 0) return;
-    context.save();
-    context.beginPath();
-    context.rect(0, top + (index - 1) * size * 1.18 + size * 0.2, width * 0.09 + Math.min(left, span), size * 1.18);
-    context.clip();
-    context.fillText(line, width * 0.09, top + index * size * 1.18);
-    context.restore();
-    left -= span;
-  });
+  const spans = lines.map((line) => context.measureText(line).width);
+  return { size, lines, top, spans, total: spans.reduce((sum, span) => sum + span, 0) };
+}
+
+export const sticky: Reveal = {
+  blank: stickyBack,
+  full: (context, width, height) => {
+    stickyBack(context, width, height);
+    const { size, lines, top } = stickyLayout(context, width, height);
+    context.fillStyle = 'rgba(30, 26, 36, 0.92)';
+    lines.forEach((line, index) => context.fillText(line, width * 0.09, top + index * size * 1.18));
+  },
+  order: (context, width, height) => {
+    const { size, lines, top, spans, total } = stickyLayout(context, width, height);
+    context.fillStyle = gray(1);
+    context.fillRect(0, 0, width, height);
+    let before = 0;
+    lines.forEach((_, index) => {
+      const base = top + index * size * 1.18;
+      const left = width * 0.09;
+      const ramp = context.createLinearGradient(left, 0, left + spans[index], 0);
+      ramp.addColorStop(0, gray(before / total));
+      ramp.addColorStop(1, gray((before + spans[index]) / total));
+      context.fillStyle = ramp;
+      context.fillRect(0, base - size * 0.94, width, size * 1.18);
+      before += spans[index];
+    });
+  },
 };
 
 export const dialPainter: Painter = (context, width, height) => {
@@ -167,7 +217,7 @@ export function wallTexture(projector: Matrix4) {
   const inverse = projector.clone().invert();
   const near = new Vector4();
   const far = new Vector4();
-  const paint = () => {
+  const paint = async () => {
     if (!draw || !target) return;
     draw.fillStyle = '#000';
     draw.fillRect(0, 0, width, height);
@@ -193,6 +243,7 @@ export function wallTexture(projector: Matrix4) {
     const v0 = Math.max(0, Math.floor(Math.min(...corners.map((c) => c[1])) * size) - 8);
     const v1 = Math.min(size, Math.ceil(Math.max(...corners.map((c) => c[1])) * size) + 8);
     for (let v = v0; v < v1; v++) {
+      if ((v - v0) % 16 === 0) await quiet();
       for (let u = u0; u < u1; u++) {
         const su = (u + 0.5) / size;
         const sv = (v + 0.5) / size;
@@ -223,6 +274,5 @@ export function wallTexture(projector: Matrix4) {
     target.putImageData(image, 0, 0);
     texture.needsUpdate = true;
   };
-  paint();
   return { texture, paint };
 }

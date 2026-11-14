@@ -1,5 +1,6 @@
-import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Quaternion, Vector3, type Texture } from 'three';
-import { dialPainter, fontsReady, paintedTexture, stickyPainter, typedPainter } from './captions';
+import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Quaternion, Vector3, type Texture, type WebGLRenderer } from 'three';
+import { quiet } from '@/lib/idle';
+import { canvasTexture, dialPainter, fontsReady, paintedTexture, sticky as stickyText, typed as typedText, type Reveal } from './captions';
 
 function decal(map: Texture, width: number, height: number, options: { opaque?: boolean } = {}) {
   const material = new MeshStandardMaterial({
@@ -19,6 +20,48 @@ function decal(map: Texture, width: number, height: number, options: { opaque?: 
   return mesh;
 }
 
+function revealDecal(painters: Reveal, width: number, height: number, size: number[], options: { opaque?: boolean } = {}) {
+  const blank = canvasTexture(painters.blank ? 16 : 1, painters.blank ? 128 : 1, true);
+  if (blank.context && painters.blank) painters.blank(blank.context, 16, 128, 1);
+  const hidden = canvasTexture(1, 1, true, false);
+  if (hidden.context) {
+    hidden.context.fillStyle = '#fff';
+    hidden.context.fillRect(0, 0, 1, 1);
+  }
+  const full = canvasTexture(size[0], size[1], true);
+  const order = canvasTexture(size[0], size[1], true, false);
+  const uniforms = { uReveal: { value: -1 }, uBlank: { value: blank.texture }, uOrder: { value: hidden.texture } };
+  const mesh = decal(blank.texture, width, height, options);
+  const material = mesh.material as MeshStandardMaterial;
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.fragmentShader = `uniform sampler2D uBlank;\nuniform sampler2D uOrder;\nuniform float uReveal;\n${shader.fragmentShader.replace(
+      '#include <map_fragment>',
+      '#ifdef USE_MAP\nvec4 sampledDiffuseColor = mix(texture2D(uBlank, vMapUv), texture2D(map, vMapUv), step(texture2D(uOrder, vMapUv).r, uReveal));\ndiffuseColor *= sampledDiffuseColor;\n#endif',
+    )}`;
+  };
+  material.customProgramCacheKey = () => 'reveal';
+  const ready = async (gl: WebGLRenderer) => {
+    await fontsReady();
+    await quiet();
+    if (full.context) painters.full(full.context, size[0], size[1], 1);
+    await quiet();
+    if (order.context) painters.order(order.context, size[0], size[1], 1);
+    await quiet();
+    gl.initTexture(blank.texture);
+    await quiet();
+    gl.initTexture(full.texture);
+    await quiet();
+    gl.initTexture(order.texture);
+    material.map = full.texture;
+    uniforms.uOrder.value = order.texture;
+  };
+  const reveal = (amount: number) => {
+    uniforms.uReveal.value = amount > 0 ? amount : -1;
+  };
+  return { mesh, ready, reveal };
+}
+
 export function localBox(holder: Object3D) {
   const copy = holder.children[0];
   const box = new Box3();
@@ -32,13 +75,8 @@ export function localBox(holder: Object3D) {
 }
 
 export function labelProps(group: Object3D) {
-  const typed = paintedTexture(512, 680, typedPainter, true);
-  const dial = paintedTexture(512, 512, dialPainter, true);
-  typed.draw(0, true);
-  void fontsReady().then(() => {
-    typed.draw(0, true);
-    dial.draw(1, true);
-  });
+  const dial = paintedTexture(512, 512, dialPainter, true, false);
+  let typed: ReturnType<typeof revealDecal> | null = null;
 
   const pad = group.getObjectByName('notepads_office_notepads_yellow_pad');
   if (pad) {
@@ -46,7 +84,8 @@ export function labelProps(group: Object3D) {
     const size = box.getSize(new Vector3());
     const long = Math.max(size.x, size.z);
     const short = Math.min(size.x, size.z);
-    const mesh = decal(typed.texture, short * 0.86, long * 0.84);
+    typed = revealDecal(typedText, short * 0.86, long * 0.84, [512, 680]);
+    const mesh = typed.mesh;
     mesh.rotation.set(-Math.PI / 2, 0, size.x > size.z ? Math.PI / 2 : 0);
     mesh.position.set((box.min.x + box.max.x) / 2, box.max.y + 0.0006, (box.min.z + box.max.z) / 2 + long * 0.02);
     pad.add(mesh);
@@ -86,8 +125,16 @@ export function labelProps(group: Object3D) {
   const axis = new Vector3(0, 0, 1);
 
   return {
+    async ready(gl: WebGLRenderer) {
+      await fontsReady();
+      await quiet();
+      dial.draw(1, true);
+      await quiet();
+      gl.initTexture(dial.texture);
+      await typed?.ready(gl);
+    },
     update(amount: number) {
-      typed.draw(Math.round(amount * 64) / 64);
+      typed?.reveal(amount);
       const now = new Date();
       for (const hand of hands) {
         spin.setFromAxisAngle(axis, -(hand.turn(now) * Math.PI * 2 - hand.angle));
@@ -107,10 +154,8 @@ export type Glass = {
 };
 
 export function stickyNote(glass: Glass) {
-  const sticky = paintedTexture(512, 512, stickyPainter, true);
-  sticky.draw(0, true);
-  void fontsReady().then(() => sticky.draw(0, true));
-  const note = decal(sticky.texture, 0.1, 0.1, { opaque: true });
+  const sticky = revealDecal(stickyText, 0.1, 0.1, [512, 512], { opaque: true });
+  const note = sticky.mesh;
   note.position
     .copy(glass.center)
     .addScaledVector(glass.right, glass.width * 0.32)
@@ -118,5 +163,5 @@ export function stickyNote(glass: Glass) {
     .addScaledVector(glass.normal, 0.03);
   note.lookAt(note.position.clone().add(glass.normal));
   note.rotateZ(-0.08);
-  return { note, write: (amount: number) => sticky.draw(Math.round(amount * 48) / 48) };
+  return { note, write: sticky.reveal, ready: sticky.ready };
 }
