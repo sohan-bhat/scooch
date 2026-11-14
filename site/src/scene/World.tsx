@@ -255,7 +255,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       await wait(() => runtime.painted && runtime.gallery && native.ready && (amount === 'main' || budget.stage >= 1));
       if (stopped || native.off) return;
       await calm();
-      await screens.main.sharpen(gl).catch(() => false);
+      await screens.main.sharpen(gl, calm).catch(() => false);
       advance(2);
       if (amount !== 'all') {
         finished();
@@ -265,7 +265,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       for (const frame of Object.values(gallery.current)) {
         await calm();
         if (stopped || native.off) return;
-        await frame.sharpen(gl).catch(() => false);
+        await frame.sharpen(gl, calm).catch(() => false);
       }
       finished();
     };

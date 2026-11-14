@@ -343,24 +343,44 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       if (done) last = `${a}:${b}:${s.toFixed(4)}:${scenery.states.length}:full`;
       return done;
     },
-    async sharpen(gl: WebGLRenderer) {
+    async sharpen(gl: WebGLRenderer, wait: () => Promise<void> = quiet) {
       const sharp = scenery.info.sharp;
       if (!sharp) return false;
       const response = await fetch(`${asset(`demo/${scenery.info.folder}`)}/${sharp.file}`);
       if (!response.ok) return false;
       const bitmap = await createImageBitmap(await response.blob());
-      const texture = new Texture(bitmap);
+      const { width, height } = bitmap;
+      const texture = new DataTexture(null, width, height, RGBAFormat, UnsignedByteType);
       texture.colorSpace = SRGBColorSpace;
       texture.flipY = false;
       texture.generateMipmaps = true;
       texture.minFilter = LinearMipmapLinearFilter;
+      texture.magFilter = LinearFilter;
       texture.anisotropy = 4;
       texture.needsUpdate = true;
-      await quiet();
+      await wait();
       gl.initTexture(texture);
+      const context = gl.getContext() as WebGL2RenderingContext;
+      const handle = (gl.properties.get(texture) as { __webglTexture?: WebGLTexture }).__webglTexture;
+      if (!handle) return false;
+      const rows = Math.max(64, Math.ceil(height / 12));
+      for (let y = 0; y < height; y += rows) {
+        await wait();
+        const strip = await createImageBitmap(bitmap, 0, y, width, Math.min(rows, height - y));
+        gl.state.bindTexture(context.TEXTURE_2D, handle);
+        context.pixelStorei(context.UNPACK_FLIP_Y_WEBGL, false);
+        context.pixelStorei(context.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        context.pixelStorei(context.UNPACK_COLORSPACE_CONVERSION_WEBGL, context.NONE);
+        context.texSubImage2D(context.TEXTURE_2D, 0, 0, y, width, strip.height, context.RGBA, context.UNSIGNED_BYTE, strip);
+        strip.close();
+      }
+      await wait();
+      gl.state.bindTexture(context.TEXTURE_2D, handle);
+      context.generateMipmap(context.TEXTURE_2D);
+      bitmap.close();
       const previous = uniforms.canvas.value;
       uniforms.canvas.value = texture;
-      uniforms.grain_lod.value = Math.log2((4 * bitmap.width) / scenery.info.width);
+      uniforms.grain_lod.value = Math.log2((4 * width) / scenery.info.width);
       scenery.canvas = texture;
       previous.dispose();
       last = '';
