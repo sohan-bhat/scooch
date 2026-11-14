@@ -45,6 +45,20 @@ vec2 quarter(vec2 p) {
     return p / 4.0 / grid;
 }
 
+float gap(vec2 p) {
+    vec2 top = grid - vec2(1.0);
+    vec2 g = clamp(p / 4.0 - vec2(0.5), vec2(0.0), top);
+    vec2 base = floor(g);
+    vec2 t = g - base;
+    ivec2 lo = ivec2(base);
+    ivec2 hi = ivec2(min(base + vec2(1.0), top));
+    float c00 = abs(texelFetch(field_a, lo, 0).r - texelFetch(field_b, lo, 0).r);
+    float c10 = abs(texelFetch(field_a, ivec2(hi.x, lo.y), 0).r - texelFetch(field_b, ivec2(hi.x, lo.y), 0).r);
+    float c01 = abs(texelFetch(field_a, ivec2(lo.x, hi.y), 0).r - texelFetch(field_b, ivec2(lo.x, hi.y), 0).r);
+    float c11 = abs(texelFetch(field_a, hi, 0).r - texelFetch(field_b, hi, 0).r);
+    return mix(mix(c00, c01, t.y), mix(c10, c11, t.y), t.x);
+}
+
 vec2 coarse(vec2 p) {
     return p / 16.0 / paint_grid;
 }
@@ -162,7 +176,7 @@ void main() {
     } else {
         float ta = d_a + s * grain_scale;
         float tb = d_b + (1.0 - s) * grain_scale;
-        float kept = max(d_a, d_b) + shadow_at.x * 4.0 * s * (1.0 - s) * smoothstep(0.0, shadow_at.y, abs(d_a - d_b));
+        float kept = max(d_a, d_b) + shadow_at.x * 4.0 * s * (1.0 - s) * smoothstep(0.0, shadow_at.y, gap(p));
         float d = min(kept, min(ta, tb));
         float w = smoothstep(-grain_floor, grain_floor, ta - tb);
         w = w * min(4.0 * s, 1.0);
