@@ -10,6 +10,7 @@ const KEY = 'scooch:native';
 export const still = {
   phase: 'live' as Phase,
   band: 0,
+  pass: 0,
   bands: 4,
   live: null as TextureType | null,
   image: null as TextureType | null,

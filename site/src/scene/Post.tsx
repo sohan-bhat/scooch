@@ -2,7 +2,7 @@ import { Bloom, DepthOfField, EffectComposer, N8AO, Noise, SMAA, ToneMapping, Vi
 import { useFrame, useThree } from '@react-three/fiber';
 import { BlendFunction, CopyPass, ToneMappingMode } from 'postprocessing';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinusConstantAlphaFactor, Vector2, type Texture, type WebGLRenderTarget } from 'three';
+import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinusConstantAlphaFactor, Vector2, WebGLRenderTarget, type Texture } from 'three';
 import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass } from 'postprocessing';
 import { quiet } from '@/lib/idle';
 import { runtime } from '@/story/state';
@@ -16,6 +16,12 @@ type Target = { isWebGLMultipleRenderTargets?: boolean; textures?: Texture[] & {
 const SHARP_AFTER = 250;
 const BLEND = 150;
 const STILL_AFTER = 400;
+const JITTER = [
+  [0, 0],
+  [0.5, 0.25],
+  [0.25, 0.75],
+  [0.75, 0.5],
+];
 
 function patchTargets(pass: object) {
   const fix = () => {
@@ -128,6 +134,17 @@ export function Post({ phone }: { phone: boolean }) {
     pass.fullscreenMaterial.depthWrite = false;
     return pass;
   }, []);
+  const total = useMemo(() => new WebGLRenderTarget(1, 1, { depthBuffer: false }), []);
+  const accumulate = useMemo(() => {
+    const pass = new CopyPass(total, false);
+    pass.fullscreenMaterial.transparent = true;
+    pass.fullscreenMaterial.blending = CustomBlending;
+    pass.fullscreenMaterial.blendSrc = ConstantAlphaFactor;
+    pass.fullscreenMaterial.blendDst = OneMinusConstantAlphaFactor;
+    pass.fullscreenMaterial.depthTest = false;
+    pass.fullscreenMaterial.depthWrite = false;
+    return pass;
+  }, [total]);
   const size = useMemo(() => new Vector2(), []);
 
   useEffect(() => {
@@ -146,8 +163,10 @@ export function Post({ phone }: { phone: boolean }) {
       copy.dispose();
       overlay.dispose();
       present.dispose();
+      accumulate.dispose();
+      total.dispose();
     };
-  }, [copy, overlay, present]);
+  }, [copy, overlay, present, accumulate, total]);
 
   useEffect(() => {
     const input = () => {
@@ -247,10 +266,14 @@ export function Post({ phone }: { phone: boolean }) {
       void (async () => {
         await quiet();
         await precompile(gl, scene, camera, [value]);
+        gl.getDrawingBufferSize(size);
+        total.setSize(size.x, size.y);
+        await quiet();
+        gl.initRenderTarget(total);
         if (await allocate(gl, value)) still.ready = true;
       })().catch(() => nativeOff());
     },
-    [gl, scene, camera],
+    [gl, scene, camera, size, total],
   );
 
   useEffect(() => {
@@ -294,12 +317,20 @@ export function Post({ phone }: { phone: boolean }) {
     target.scissorTest = true;
     const previous = gl.getRenderTarget();
     const clear = gl.autoClear;
+    const [jx, jy] = JITTER[still.pass] ?? [0, 0];
+    const projection = camera.projectionMatrix.elements;
+    const x = projection[8];
+    const y0 = projection[9];
+    projection[8] += (2 * jx) / target.width;
+    projection[9] += (2 * jy) / target.height;
     gl.setRenderTarget(target);
     gl.clear();
     gl.autoClear = false;
     gl.render(scene, camera);
     gl.autoClear = clear;
     gl.setRenderTarget(previous);
+    projection[8] = x;
+    projection[9] = y0;
     target.scissorTest = false;
     return true;
   }, [gl, scene, camera]);
@@ -359,6 +390,7 @@ export function Post({ phone }: { phone: boolean }) {
         const last = composer?.passes[composer.passes.length - 1];
         still.live = composer && render && last ? grab(last, () => render(0)) : null;
         still.band = 0;
+        still.pass = 0;
         still.tick = false;
         still.phase = still.live ? 'bands' : 'live';
         return;
@@ -381,25 +413,53 @@ export function Post({ phone }: { phone: boolean }) {
         }
         const first = composer.passes[0];
         first.enabled = false;
-        still.image = grab(composer.passes[composer.passes.length - 1], () => render(0));
+        const image = grab(composer.passes[composer.passes.length - 1], () => render(0));
         first.enabled = true;
-        still.phase = still.image ? 'show' : 'live';
-        if (!still.image) still.showing = false;
-        still.shownAt = now;
-        still.second = Math.floor(Date.now() / 1000);
+        if (!image) {
+          still.phase = 'live';
+          still.showing = false;
+          return;
+        }
+        accumulate.fullscreenMaterial.blendAlpha = 1 / (still.pass + 1);
+        const clear = gl.autoClear;
+        gl.autoClear = false;
+        accumulate.render(gl, { texture: image } as WebGLRenderTarget, null as never);
+        gl.autoClear = clear;
+        still.image = total.texture;
+        if (still.pass === 0 && !still.tick) {
+          still.phase = 'show';
+          still.shownAt = now;
+          still.second = Math.floor(Date.now() / 1000);
+          return;
+        }
+        if (still.pass < JITTER.length - 1) {
+          still.pass += 1;
+          still.band = 0;
+          still.phase = 'bands';
+          return;
+        }
+        still.tick = true;
+        still.phase = 'show';
         return;
       }
       if (still.phase === 'still') {
+        if (still.pass < JITTER.length - 1) {
+          still.pass += 1;
+          still.band = 0;
+          still.phase = 'bands';
+          return;
+        }
         const second = Math.floor(Date.now() / 1000);
         if (second !== still.second && inView(things.clock, camera)) {
           still.second = second;
           still.band = 0;
+          still.pass = 0;
           still.tick = true;
           still.phase = 'bands';
         }
       }
     },
-    [band, camera],
+    [band, camera, accumulate, gl, total],
   );
 
   const show = useCallback(
@@ -416,6 +476,7 @@ export function Post({ phone }: { phone: boolean }) {
         return;
       }
       still.phase = 'still';
+      still.tick = false;
     },
     [gl, overlay, present],
   );
