@@ -1,47 +1,26 @@
 import { asset } from '@/lib/base';
+import { onSound, sound } from '@/lib/sound';
 import { live } from './touch';
 
 const files: Record<string, string> = {
-  lamp: 'sounds/switch.m4a',
-  channel: 'sounds/channel.m4a',
-  power: 'sounds/power.m4a',
-  key: 'sounds/key.m4a',
+  switch: 'sounds/switch.m4a',
+  knob: 'sounds/knob.m4a',
+  tack: 'sounds/tack.m4a',
   tape: 'sounds/tape.m4a',
-  clock: 'sounds/bell.m4a',
-  stapler: 'sounds/stapler.m4a',
-  cup: 'sounds/cup.m4a',
+  bell: 'sounds/bell.m4a',
+  pour: 'sounds/pour.m4a',
 };
 
-const KEY = 'scooch:sound';
+const LOOP = 8.42;
 let context: AudioContext | null = null;
 const buffers = new Map<string, Promise<AudioBuffer | null>>();
 let loop: AudioBufferSourceNode | null = null;
 let bell: AudioBufferSourceNode | null = null;
 
-function stored() {
-  try {
-    return window.localStorage.getItem(KEY) !== 'off';
-  } catch {
-    return true;
-  }
-}
-
-export const sound = { on: typeof window === 'undefined' ? true : stored() };
-
-export function setSound(on: boolean) {
-  sound.on = on;
-  try {
-    window.localStorage.setItem(KEY, on ? 'on' : 'off');
-  } catch {
-    return;
-  }
-  if (!on) {
-    loop?.stop();
-    loop = null;
-    bell?.stop();
-    bell = null;
-  }
-}
+onSound((on) => {
+  if (!on) hush();
+  else if (live.tape && context) play('cassette');
+});
 
 function buffer(name: string) {
   const file = files[name];
@@ -58,7 +37,13 @@ function buffer(name: string) {
   return pending;
 }
 
-async function start(name: string, repeat = false, gain = 0.6) {
+function lead(data: AudioBuffer) {
+  const samples = data.getChannelData(0);
+  for (let i = 0; i < samples.length; i++) if (Math.abs(samples[i]) > 0.004) return i / data.sampleRate;
+  return 0;
+}
+
+async function start(name: string, { gain = 0.6, rate = 1, repeat = false } = {}) {
   if (!context) return null;
   const data = await buffer(name);
   if (!data || !sound.on) return null;
@@ -66,7 +51,16 @@ async function start(name: string, repeat = false, gain = 0.6) {
   const level = context.createGain();
   level.gain.value = gain;
   source.buffer = data;
-  source.loop = repeat;
+  source.playbackRate.value = rate;
+  if (repeat) {
+    const from = lead(data);
+    source.loop = true;
+    source.loopStart = from;
+    source.loopEnd = Math.min(from + LOOP, data.duration);
+    source.connect(level).connect(context.destination);
+    source.start(0, from);
+    return source;
+  }
   source.connect(level).connect(context.destination);
   source.start();
   return source;
@@ -77,19 +71,23 @@ export function play(name: string) {
   context ??= new AudioContext();
   if (context.state === 'suspended') void context.resume();
   if (name === 'cassette') {
-    void start('key', false, 0.7);
+    void start('tack', { gain: 0.7, rate: 0.82 });
     loop?.stop();
     loop = null;
-    if (live.tape) void start('tape', true, 0.45).then((source) => (loop = live.tape ? source : (source?.stop(), null)));
+    if (live.tape) void start('tape', { gain: 0.42, repeat: true }).then((source) => (loop = live.tape ? source : (source?.stop(), null)));
     return;
   }
   if (name === 'clock') {
     bell?.stop();
     bell = null;
-    if (live.ringUntil > 0) void start('clock', false, 0.5).then((source) => (bell = source));
+    if (live.ringUntil > 0) void start('bell', { gain: 0.38 }).then((source) => (bell = source));
     return;
   }
-  void start(name);
+  if (name === 'lamp') void start('switch', { gain: 0.7 });
+  else if (name === 'power') void start('switch', { gain: 0.6, rate: 0.72 });
+  else if (name === 'channel') void start('knob', { gain: 0.7 });
+  else if (name === 'stapler') void start('tack', { gain: 0.75, rate: 1.12 });
+  else if (name === 'glass' && live.juice === 4) void start('pour', { gain: 0.5 });
 }
 
 export function hush() {

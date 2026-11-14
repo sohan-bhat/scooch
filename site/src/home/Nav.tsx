@@ -1,6 +1,9 @@
-import { GithubLogo } from '@phosphor-icons/react/dist/ssr';
+import { GithubLogo, SpeakerHigh, SpeakerSlash } from '@phosphor-icons/react/dist/ssr';
+import { Toggle } from 'radix-ui';
+import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import content from '@/content.json';
+import { onSound, setSound, sound } from '@/lib/sound';
 
 type Refs = {
   header: React.Ref<HTMLElement>;
@@ -9,6 +12,11 @@ type Refs = {
 };
 
 export function Nav({ header, action, skip }: Refs) {
+  const [on, setOn] = useState(true);
+  useEffect(() => {
+    setOn(sound.on);
+    return onSound(setOn);
+  }, []);
   return (
     <header
       ref={header}
@@ -23,6 +31,14 @@ export function Nav({ header, action, skip }: Refs) {
         <a ref={skip} href="#install" className="story-only link-quiet text-[0.9375rem] font-medium">
           {content.nav.skip}
         </a>
+        <Toggle.Root
+          pressed={on}
+          onPressedChange={setSound}
+          aria-label={content.nav.sound}
+          className="story-only inline-flex size-11 cursor-pointer items-center justify-center rounded-pill text-plastic transition-colors duration-(--duration-hover) ease-(--ease-out) outline-none hover-fine:text-paper focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-pad active:text-pad"
+        >
+          {on ? <SpeakerHigh weight="bold" aria-hidden className="size-5" /> : <SpeakerSlash weight="bold" aria-hidden className="size-5" />}
+        </Toggle.Root>
         <a href={content.github} className="link-quiet inline-flex items-center gap-2 text-[0.9375rem] font-medium">
           <GithubLogo weight="bold" aria-hidden className="size-[1.15em]" />
           <span className="tall:sr-only">{content.nav.github}</span>
