@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { gzipSync } from 'node:zlib';
 import sharp from 'sharp';
 
 const run = promisify(execFile);
@@ -13,7 +14,7 @@ const bundler = resolve(site, process.env.SCOOCH_BUNDLE ?? config.bundle);
 const photo = resolve(site, config.photo);
 const work = join(site, '.cache', 'demo');
 const out = join(site, 'public', 'demo');
-const { width, height } = config.screen;
+let { width, height } = config.screen;
 const mapScale = 4;
 
 function rects(layout) {
@@ -197,10 +198,16 @@ async function scenery(id, source, layouts) {
     fail(`The scenery bundle export failed for ${id}. Build it with cargo build --release -p scooch-core --example bundle.\n${error.stderr ?? error.message}`);
   }
   const bundle = JSON.parse(await readFile(join(folder, 'bundle.json'), 'utf8'));
-  await sharp(join(folder, bundle.canvas.file)).toFile(join(target, bundle.canvas.file));
+  const longest = 1600;
+  const canvas = sharp(join(folder, bundle.canvas.file)).resize({ width: longest, height: longest, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 74, mozjpeg: true });
+  const info = await canvas.toFile(join(target, bundle.canvas.file));
+  bundle.canvas.width = info.width;
+  bundle.canvas.height = info.height;
   for (const state of bundle.states) {
     const tables = state.tables;
-    for (const key of ['map', 'field', 'look', 'pad', 'paints', 'ramps']) await writeFile(join(target, tables[key].file), await readFile(join(folder, tables[key].file)));
+    for (const key of ['map', 'look', 'pad', 'paints', 'ramps']) await writeFile(join(target, tables[key].file), await readFile(join(folder, tables[key].file)));
+    tables.field.file = `${tables.field.file}.gz`;
+    await writeFile(join(target, tables.field.file), gzipSync(await readFile(join(folder, tables.field.file.slice(0, -3))), { level: 9 }));
   }
   return { folder: `scenery/${id}`, ...bundle };
 }
@@ -217,6 +224,17 @@ async function fillMap(id, placement) {
 }
 
 async function picture(entry) {
+  const screen = entry.screen ?? config.screen;
+  width = screen.width;
+  height = screen.height;
+  try {
+    return await pictureAt(entry);
+  } finally {
+    ({ width, height } = config.screen);
+  }
+}
+
+async function pictureAt(entry) {
   const source = resolve(site, entry.photo);
   const states = [
     { id: 'before', layout: entry.layout, solve: false },
@@ -228,9 +246,10 @@ async function picture(entry) {
     console.log(entry.id, state.id, 'hidden', result.hidden.toFixed(3), 'zoom', round(result.data.placement.zoom));
     results.push(result);
   }
-  for (const result of results) check(result);
+  for (const result of results) if (result.state.solve || entry.problem !== false) check(result);
   return {
     id: entry.id,
+    screen: { width, height },
     order: states.map((state) => state.id),
     tables: tables(results),
     frames: Object.fromEntries(

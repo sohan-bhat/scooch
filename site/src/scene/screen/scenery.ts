@@ -80,7 +80,10 @@ void main() {
 async function bytes(url: string) {
   const response = await fetchEarly(url);
   if (!response.ok) throw new Error(`${response.status} ${url}`);
-  return response.arrayBuffer();
+  const buffer = await response.arrayBuffer();
+  const head = new Uint8Array(buffer, 0, Math.min(2, buffer.byteLength));
+  if (head[0] !== 0x1f || head[1] !== 0x8b) return buffer;
+  return new Response(new Blob([buffer]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
 }
 
 function data(texture: DataTexture | DataArrayTexture, filter: typeof LinearFilter | typeof NearestFilter) {
@@ -208,7 +211,7 @@ export async function streamScenery(scenery: Scenery) {
   scenery.complete = true;
 }
 
-export function createFrame(scenery: Scenery) {
+export function createFrame(scenery: Scenery, scale = 1) {
   const { info } = scenery;
   const constants = info.states[0].tables.constants;
   const number = (key: string) => Number(constants[key]);
@@ -263,7 +266,7 @@ export function createFrame(scenery: Scenery) {
   const scene = new Scene();
   scene.add(mesh);
   const camera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
-  const target = new WebGLRenderTarget(info.width, info.height, {
+  const target = new WebGLRenderTarget(Math.round(info.width * scale), Math.round(info.height * scale), {
     colorSpace: SRGBColorSpace,
     depthBuffer: false,
     generateMipmaps: true,

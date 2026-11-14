@@ -67,6 +67,110 @@
         1030,
         250
       ]
+    },
+    "left": {
+      "trip": [
+        40,
+        30
+      ],
+      "taxes": [
+        40,
+        180
+      ],
+      "notes": [
+        40,
+        330
+      ],
+      "resume": [
+        40,
+        480
+      ],
+      "shot": [
+        40,
+        630
+      ],
+      "recipes": [
+        40,
+        780
+      ]
+    },
+    "right": {
+      "trip": [
+        1090,
+        30
+      ],
+      "taxes": [
+        1090,
+        180
+      ],
+      "notes": [
+        1090,
+        330
+      ],
+      "resume": [
+        1090,
+        480
+      ],
+      "shot": [
+        1090,
+        630
+      ],
+      "recipes": [
+        1090,
+        780
+      ]
+    },
+    "wide": {
+      "trip": [
+        2350,
+        35
+      ],
+      "taxes": [
+        2350,
+        205
+      ],
+      "notes": [
+        2350,
+        375
+      ],
+      "resume": [
+        2350,
+        545
+      ],
+      "shot": [
+        2350,
+        715
+      ],
+      "recipes": [
+        2350,
+        885
+      ]
+    },
+    "tall": {
+      "trip": [
+        25,
+        1710
+      ],
+      "taxes": [
+        195,
+        1710
+      ],
+      "notes": [
+        365,
+        1710
+      ],
+      "resume": [
+        535,
+        1710
+      ],
+      "shot": [
+        705,
+        1710
+      ],
+      "recipes": [
+        875,
+        1710
+      ]
     }
   },
   "drag": {
@@ -102,7 +206,40 @@
     {
       "id": "swans",
       "photo": "../assets/photos/two-swans.jpg",
-      "layout": "start"
+      "layout": "left",
+      "problem": false
+    },
+    {
+      "id": "moon",
+      "photo": "../assets/photos/moon-sky.jpg",
+      "layout": "right",
+      "problem": false
+    },
+    {
+      "id": "city",
+      "photo": "../assets/photos/city-night.jpg",
+      "layout": "start",
+      "problem": false
+    },
+    {
+      "id": "wide",
+      "photo": "../assets/photos/balloon-sky.jpg",
+      "layout": "wide",
+      "screen": {
+        "width": 2560,
+        "height": 1080
+      },
+      "problem": false
+    },
+    {
+      "id": "tall",
+      "photo": "../assets/photos/balloon-sky.jpg",
+      "layout": "tall",
+      "screen": {
+        "width": 1080,
+        "height": 1920
+      },
+      "problem": false
     }
   ],
   "bundle": "../target/release/examples/bundle"
