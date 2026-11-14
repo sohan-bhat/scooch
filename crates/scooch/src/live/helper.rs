@@ -64,6 +64,7 @@ mod running {
     const LEAD_IN: Duration = Duration::from_millis(80);
     const SETTLE: u32 = 100;
     const FLUSH: usize = 2;
+    const COMPOSE_WAIT: Duration = Duration::from_secs(1);
 
     pub trait Platform: 'static {
         type Layer;
@@ -92,6 +93,11 @@ mod running {
             Self: Sized,
         {
             work()
+        }
+        fn composed()
+        where
+            Self: Sized,
+        {
         }
     }
 
@@ -403,6 +409,8 @@ mod running {
                         break;
                     }
                 }
+                let _ = gpu.idle(COMPOSE_WAIT);
+                P::composed();
                 shown = layers;
                 tell(Event::Settled { id });
                 settling = None;

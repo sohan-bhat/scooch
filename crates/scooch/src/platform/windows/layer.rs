@@ -357,6 +357,13 @@ impl Host {
     }
 }
 
+const COMPOSITIONS: usize = 2;
+
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmFlush() -> i32;
+}
+
 fn release(layer: Window) -> HWND {
     if !layer.hook.is_invalid() {
         let _ = unsafe { UnhookWinEvent(layer.hook) };
@@ -436,6 +443,14 @@ impl Platform for Host {
 
     fn decode(path: &Path) -> Result<RgbImage> {
         super::picture::decode(path)
+    }
+
+    fn composed() {
+        for _ in 0..COMPOSITIONS {
+            if unsafe { DwmFlush() } < 0 {
+                break;
+            }
+        }
     }
 
     fn wait(&mut self, timeout: Duration) {

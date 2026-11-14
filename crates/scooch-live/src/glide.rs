@@ -736,7 +736,7 @@ impl Gpu {
         }
     }
 
-    pub(crate) fn idle(&self, limit: Duration) -> Result<(), String> {
+    pub fn idle(&self, limit: Duration) -> Result<(), String> {
         let done = Arc::new(AtomicBool::new(false));
         let flag = done.clone();
         self.queue.on_submitted_work_done(move || flag.store(true, Ordering::Release));
