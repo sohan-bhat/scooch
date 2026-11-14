@@ -44,4 +44,9 @@ export const runtime = {
   introAt: null as number | null,
   abandoned: false,
   resume: null as (() => void) | null,
+  clockOrigin: Date.now() - performance.now(),
 };
+
+export function wallClock() {
+  return runtime.clockOrigin + performance.now();
+}
