@@ -2585,6 +2585,8 @@ mod probe {
         shown_at: Option<f64>,
         decided: Option<f64>,
         waited: Option<f64>,
+        predicted: Option<f64>,
+        split: Option<String>,
     }
 
     fn number_after(line: &str, key: &str) -> Option<f64> {
@@ -2631,6 +2633,8 @@ mod probe {
             shown_at: from_launch(", shown "),
             decided,
             waited,
+            predicted: from_launch("predicted shown "),
+            split: decision.and_then(|line| line.split("the helper made its window in ").nth(1)).map(|rest| format!("window {rest}")),
             tick: log.iter().find(|line| line.contains(" tick ") && line.contains("Rendered")).map(|line| {
                 let took = line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()).unwrap_or(0.0);
                 let began = stamp_of(line).map(|ended| ((ended - took / 1000.0 - dropped) * 1000.0).round());
@@ -2659,7 +2663,7 @@ mod probe {
             let cold = cold_drag(p, screen, name, places);
             last = Instant::now();
             p.line(format!(
-                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, ready {}, shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, canvas from {:?}, tick laps {:?}",
+                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}",
                 index + 1,
                 cold.glided,
                 cold.skip,
@@ -2669,12 +2673,14 @@ mod probe {
                 rounded(cold.hello),
                 rounded(cold.ready_at),
                 rounded(cold.shown_at),
+                rounded(cold.predicted),
                 rounded(cold.decided),
                 rounded(cold.waited),
                 cold.first,
                 cold.set,
                 cold.ready,
                 cold.shown,
+                cold.split,
                 cold.from,
                 cold.tick
             ));

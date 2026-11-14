@@ -870,7 +870,7 @@ impl Daemon {
                 (Some(from), Some(still)) => {
                     let canvas = self.store.canvas_for(&screen.id, tables_key);
                     let canvas = canvas.is_file().then_some(canvas);
-                    let prepared = glider.prepare(&Plan { screen, picture: &source, canvas: canvas.as_deref(), size: [scene.width, scene.height], still }, crate::glide::GRACE);
+                    let prepared = glider.prepare(&Plan { screen, picture: &source, canvas: canvas.as_deref(), size: [scene.width, scene.height], still });
                     lap("open", &mut clock);
                     if let Some(id) = prepared {
                         let (_, next) = self.fresh_name(&screen.id, entry.counter, format.extension(), current);
@@ -2842,7 +2842,7 @@ pub mod tests {
             fake.place(vec![subject()]);
             daemon.tick();
             let mut state = daemon.store.load();
-            state.starts.insert("Fake GPU".into(), crate::state::Start { ready, shown: 5, at: 1 });
+            state.starts.insert("Fake GPU".into(), crate::state::Start { ready, draw: 5, at: 1, ..Default::default() });
             daemon.store.save(&state).unwrap();
             script.lock().unwrap().ready_after = Duration::from_millis(ready.into());
             daemon.glider.lock().unwrap().reset_for_test();
