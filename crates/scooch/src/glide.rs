@@ -32,6 +32,8 @@ pub trait Link: Send {
     fn hear(&mut self, timeout: Duration) -> Result<Heard>;
     fn close(&mut self, id: u32);
     fn alive(&mut self) -> bool;
+    fn broke(&mut self) -> bool;
+    fn greeted(&mut self) -> bool;
     fn ready_after(&mut self) -> Option<Duration>;
 }
 
@@ -74,11 +76,12 @@ struct Real {
     readies: Vec<(Option<u32>, Adapter)>,
     warm_id: Option<u32>,
     first_ready: Option<Duration>,
+    hello: bool,
 }
 
 impl Real {
     fn new(helper: Helper) -> Self {
-        Self { helper, shown: Vec::new(), gone: Vec::new(), failed: Vec::new(), heard: Vec::new(), readies: Vec::new(), warm_id: None, first_ready: None }
+        Self { helper, shown: Vec::new(), gone: Vec::new(), failed: Vec::new(), heard: Vec::new(), readies: Vec::new(), warm_id: None, first_ready: None, hello: false }
     }
 
     fn pump(&mut self, timeout: Duration) -> Result<bool> {
@@ -103,7 +106,7 @@ impl Real {
                 self.readies.push((warm_id, Adapter { name: adapter, kind, from, scale, after }));
             }
             Reply::Hello { version, .. } if version != live::VERSION => self.failed.push((None, format!("the helper speaks version {version}, not {}", live::VERSION))),
-            Reply::Hello { .. } => {}
+            Reply::Hello { .. } => self.hello = true,
         }
         Ok(true)
     }
@@ -197,6 +200,15 @@ impl Link for Real {
 
     fn alive(&mut self) -> bool {
         !self.helper.exited()
+    }
+
+    fn broke(&mut self) -> bool {
+        self.helper.broke()
+    }
+
+    fn greeted(&mut self) -> bool {
+        while !self.hello && matches!(self.pump(Duration::ZERO), Ok(true)) {}
+        self.hello
     }
 
     fn ready_after(&mut self) -> Option<Duration> {
@@ -301,7 +313,7 @@ fn reason_of(error: &anyhow::Error) -> &'static str {
         "hidden"
     } else if text.contains("no wallpaper window below") {
         "no room"
-    } else if text.contains("was not ready within") {
+    } else if text.contains("was not ready within") || text.contains("had not started") {
         "helper cold"
     } else if text.contains("did not answer within") {
         "helper budget"
@@ -335,6 +347,7 @@ pub struct Glider {
     learned: Vec<(String, f32)>,
     prepared: Option<Ready>,
     noted: bool,
+    revived: bool,
     pub said: Vec<String>,
 }
 
@@ -361,7 +374,7 @@ fn keep(said: &mut Vec<String>, line: String) {
 impl Glider {
     pub fn new(spawner: Box<dyn Spawn>) -> Self {
         let forced = std::env::var_os(FORCE).is_some_and(|value| !value.is_empty() && value != "0");
-        Self { forced, software: false, strikes: 0, stalled: false, spawner, link: None, warmed: None, last_warm: None, ready: false, next: 0, late: 0, flights: Vec::new(), early: Vec::new(), doomed: false, huge: std::collections::HashMap::new(), adapter: None, scales: BTreeMap::new(), learned: Vec::new(), prepared: None, noted: false, said: Vec::new() }
+        Self { forced, software: false, strikes: 0, stalled: false, spawner, link: None, warmed: None, last_warm: None, ready: false, next: 0, late: 0, flights: Vec::new(), early: Vec::new(), doomed: false, huge: std::collections::HashMap::new(), adapter: None, scales: BTreeMap::new(), learned: Vec::new(), prepared: None, noted: false, revived: false, said: Vec::new() }
     }
 
     #[cfg(test)]
@@ -396,7 +409,7 @@ impl Glider {
 
     pub fn reap(&mut self) {
         if self.flights.is_empty() && self.link.as_mut().is_some_and(|link| !link.alive()) {
-            self.drop_link();
+            self.revive();
         }
         if !self.noted {
             if let Some(after) = self.link.as_mut().and_then(|link| link.ready_after()) {
@@ -543,6 +556,9 @@ impl Glider {
             self.send_warm(plan.picture, plan.size, plan.canvas)?;
             let link = self.link.as_mut().ok_or_else(|| anyhow!("no helper"))?;
             if !self.ready {
+                if !link.greeted() {
+                    return Err(anyhow!("the helper had not started when the plain swap was ready, so this move swaps plainly"));
+                }
                 let adapter = link.ready(Self::left(deadline))?;
                 if !self.forced && software(&adapter) {
                     self.software = true;
@@ -582,6 +598,7 @@ impl Glider {
         match result {
             Ok(()) => {
                 self.late = 0;
+                self.revived = false;
                 note(&mut self.said, format!("open {id} shown and gliding after {} ms{}", prepared.started.elapsed().as_millis(), if prepared.reused { ", opened after the snapshot" } else { "" }));
                 self.flights.push(Flight { id, screen: prepared.screen, size: prepared.size, settled: false, set: None });
                 true
@@ -676,16 +693,17 @@ impl Glider {
         self.doomed = true;
         if self.flights.is_empty() {
             self.doomed = false;
-            self.drop_link();
+            self.revive();
         }
     }
 
     fn revive(&mut self) {
-        let used = self.warmed.is_some();
+        let broke = self.warmed.is_some() && !self.revived && self.link.as_mut().is_some_and(|link| link.broke());
         self.drop_link();
-        if let (true, Some((picture, size, canvas))) = (used, self.last_warm.clone()) {
+        if let (true, Some((picture, size, canvas))) = (broke, self.last_warm.clone()) {
             if self.send_warm(&picture, size, canvas.as_deref()).is_ok() {
-                note(&mut self.said, "the helper stopped while in use, so a fresh one is warming for the next drag".into());
+                self.revived = true;
+                note(&mut self.said, "the helper stopped without leaving cleanly, so a fresh one is warming for the next drag".into());
             }
         }
     }
@@ -942,6 +960,14 @@ pub mod tests {
 
         fn alive(&mut self) -> bool {
             !self.dead
+        }
+
+        fn broke(&mut self) -> bool {
+            self.dead
+        }
+
+        fn greeted(&mut self) -> bool {
+            self.born.elapsed() >= self.script().slow_hello
         }
 
         fn ready_after(&mut self) -> Option<Duration> {

@@ -2759,6 +2759,7 @@ pub mod tests {
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
         let took = started.elapsed();
         assert!(inside_budget(&waits.lock().unwrap()), "{:?}", waits.lock().unwrap());
+        assert!(!waits.lock().unwrap().iter().any(|(what, _)| *what == "ready"), "{:?}", waits.lock().unwrap());
         let events = events(&fake);
         let open = at(&events, "open");
         let set = events.iter().position(|event| event.starts_with("set ")).unwrap_or_else(|| panic!("{events:?}"));
