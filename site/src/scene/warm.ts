@@ -9,9 +9,11 @@ import {
   WebGLRenderTarget,
   type Camera,
   type Material,
+  type Object3D,
   type Texture,
   type WebGLRenderer,
 } from 'three';
+import { quiet } from '@/lib/idle';
 
 type Probe = Record<string, unknown> & {
   isShaderMaterial?: boolean;
@@ -90,4 +92,25 @@ export function applyEnvironment(gl: WebGLRenderer, scene: Scene, texture: Textu
     if (scene.environment === target.texture) scene.environment = null;
     target.dispose();
   };
+}
+
+type Program = { getUniforms(): unknown; getAttributes(): unknown };
+
+export async function settle(gl: WebGLRenderer, root: Object3D) {
+  const materials = new Set<Material>();
+  root.traverse((child) => {
+    const mesh = child as Mesh;
+    if (!mesh.isMesh) return;
+    for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) materials.add(material);
+  });
+  const programs = new Set<Program>();
+  for (const material of materials) {
+    const program = (gl.properties.get(material) as { currentProgram?: Program }).currentProgram;
+    if (program) programs.add(program);
+  }
+  for (const program of programs) {
+    await quiet();
+    program.getUniforms();
+    program.getAttributes();
+  }
 }

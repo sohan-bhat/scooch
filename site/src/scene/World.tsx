@@ -45,7 +45,7 @@ import { Rig, type ScreenFrame } from './rig';
 import { createFrame, loadScenery, streamScenery, type Frame } from './screen/scenery';
 import { measureScreen, useScreens } from './screen/useScreen';
 import { keys, layoutFor } from './shots';
-import { applyEnvironment, environmentReady, precompile } from './warm';
+import { applyEnvironment, environmentReady, precompile, settle } from './warm';
 
 const Lively = lazy(() => import('./Lively'));
 
@@ -320,6 +320,9 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         .catch(() => undefined)
         .then(() => {
           target.dispose();
+          return settle(gl, inside.group);
+        })
+        .then(() => {
           if (!stopped) setInsideIn(true);
         });
     };
@@ -437,16 +440,6 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       await fontsReady();
       await quiet();
       if (stopped) return;
-      const osd = paintedTexture(1024, 768, osdPainter);
-      await quiet();
-      gl.initTexture(osd.texture);
-      screens.crt.uniforms.uOsd.value = osd.texture;
-      const caption = wallTexture(blindsMatrix);
-      await caption.paint();
-      if (stopped) return;
-      await quiet();
-      gl.initTexture(caption.texture);
-      wall.uniforms.uCaption.value = caption.texture;
       const tv = built.television;
       const sticky = stickyNote({
         center: tv.center,
@@ -466,10 +459,23 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       gl.setRenderTarget(previous);
       await pending.catch(() => undefined);
       target.dispose();
+      await settle(gl, sticky.note);
       if (stopped) return;
       note = sticky.note;
       scene.add(note);
       writing.current = sticky.write;
+      await quiet();
+      if (stopped) return;
+      const osd = paintedTexture(1024, 768, osdPainter);
+      await quiet();
+      gl.initTexture(osd.texture);
+      screens.crt.uniforms.uOsd.value = osd.texture;
+      const caption = wallTexture(blindsMatrix);
+      await caption.paint();
+      if (stopped) return;
+      await quiet();
+      gl.initTexture(caption.texture);
+      wall.uniforms.uCaption.value = caption.texture;
       runtime.painted = true;
     };
     timer = window.setTimeout(() => void paint(), 0);

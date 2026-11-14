@@ -10,6 +10,7 @@ import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
 import { labelProps } from './labels';
 import { makeLive, obstacles, rimmed } from './touch';
+import { settle } from './warm';
 
 export { BULB, DESK_TOP, LAMP, LAPTOP, TELEVISION } from './layout';
 
@@ -252,6 +253,7 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
         gl.setRenderTarget(previous);
       }
       await Promise.all(waits);
+      await settle(gl, group);
     };
     const pending = compileEach();
     const textures = new Set<Texture>();
