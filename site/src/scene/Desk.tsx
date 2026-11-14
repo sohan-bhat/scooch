@@ -9,6 +9,7 @@ import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
 import { still as native } from './still';
+import { advance, budget, calm, level } from './budget';
 import { labelProps } from './labels';
 import { makeLive, obstacles, rimmed } from './touch';
 import { quiet } from '@/lib/idle';
@@ -84,7 +85,7 @@ async function swapTextures(gl: WebGLRenderer, scene: Object3D, source: Object3D
   for (const [, , texture] of swaps) {
     if (uploaded.has(texture)) continue;
     uploaded.add(texture);
-    await quiet();
+    await calm();
     if (cancelled()) return false;
     gl.initTexture(texture);
   }
@@ -124,10 +125,13 @@ function whenReady(start: () => void, test: () => boolean) {
   return () => window.clearTimeout(timer);
 }
 
-function Sharpener({ list, when }: { list: string[]; when: () => boolean }) {
+function Sharpener({ list, when, done }: { list: string[]; when: () => boolean; done: () => void }) {
   const [index, setIndex] = useState(-1);
   const next = useCallback(() => setIndex((value) => value + 1), []);
   useEffect(() => whenReady(() => setIndex(0), when), [when]);
+  useEffect(() => {
+    if (index >= list.length) done();
+  }, [index, list, done]);
   if (index < 0 || index >= list.length) return null;
   return (
     <Suspense fallback={null}>
@@ -137,8 +141,10 @@ function Sharpener({ list, when }: { list: string[]; when: () => boolean }) {
 }
 
 const desktop = () => layoutFor(window.innerWidth, window.innerHeight) !== 'phone';
-const heroesWhen = () => lite && runtime.props && (quality.tier === 'full' || native.ready) && desktop();
-const extrasWhen = () => runtime.props && runtime.painted && native.ready && desktop();
+const heroesWhen = () => lite && runtime.props && (quality.tier === 'full' || native.ready) && desktop() && level() === 'all';
+const extrasWhen = () => runtime.painted && native.ready && desktop() && level() === 'all' && budget.stage >= 2;
+const heroesDone = () => advance(1);
+const extrasDone = () => advance(3);
 
 function prepare(root: Object3D) {
   root.traverse((child) => {
@@ -384,8 +390,8 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
         <primitive object={television.scene} />
       </primitive>
       {hero ? null : <LateExtras phone={phone} onExtras={onExtras} onConsole={onConsole} />}
-      <Sharpener list={heroUrls} when={heroesWhen} />
-      <Sharpener list={sharpUrls} when={extrasWhen} />
+      <Sharpener list={heroUrls} when={heroesWhen} done={heroesDone} />
+      <Sharpener list={sharpUrls} when={extrasWhen} done={extrasDone} />
     </group>
   );
 }

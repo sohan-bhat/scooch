@@ -33,6 +33,7 @@ import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
 import { still as native } from './still';
+import { advance, budget, calm, level } from './budget';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
 import { Tumbler } from './Tumbler';
@@ -242,14 +243,21 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   useEffect(() => {
     let stopped = false;
     let timer = 0;
+    const wait = async (test: () => boolean) => {
+      while (!stopped && !test()) await new Promise((resolve) => (timer = window.setTimeout(resolve, 500)));
+    };
     const sharpen = async () => {
-      if (stopped) return;
-      if (!(runtime.painted && runtime.gallery && native.ready)) {
-        timer = window.setTimeout(() => void sharpen(), 1000);
-        return;
-      }
-      for (const frame of [screens.main, ...Object.values(gallery.current)]) {
-        await quiet();
+      const amount = level();
+      if (amount === 'none') return;
+      await wait(() => runtime.painted && runtime.gallery && native.ready && (amount === 'main' || budget.stage >= 1));
+      if (stopped || native.off) return;
+      await calm();
+      await screens.main.sharpen(gl).catch(() => false);
+      advance(2);
+      if (amount !== 'all') return;
+      await wait(() => budget.stage >= 3);
+      for (const frame of Object.values(gallery.current)) {
+        await calm();
         if (stopped || native.off) return;
         await frame.sharpen(gl).catch(() => false);
       }
