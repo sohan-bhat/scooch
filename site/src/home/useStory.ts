@@ -200,6 +200,7 @@ export function introduce(refs: Refs, still: number) {
     requestAnimationFrame(wait);
     return;
   }
+  if (runtime.abandoned) return;
   runtime.ready = true;
   performance.mark('scooch:ready');
   const load = loader();

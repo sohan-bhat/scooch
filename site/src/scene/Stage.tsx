@@ -27,7 +27,7 @@ function Pauser({ host }: { host: React.RefObject<HTMLDivElement | null> }) {
   useEffect(() => {
     quality.setDpr = setDpr;
     let visible = true;
-    const sync = () => setFrameloop(runtime.compiled && visible && !document.hidden ? 'always' : 'never');
+    const sync = () => setFrameloop(runtime.compiled && visible && !document.hidden && !runtime.abandoned ? 'always' : 'never');
     runtime.resume = sync;
     const observer = new IntersectionObserver(([entry]) => {
       visible = entry.isIntersecting;

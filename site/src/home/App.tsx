@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Footer } from '@/components/Footer';
 import { release } from '@/lib/load';
+import { runtime } from '@/story/state';
 import { Facts } from './Facts';
 import { Install } from './Install';
 import { Nav } from './Nav';
@@ -27,7 +28,10 @@ export function App() {
       release(false);
     }
     setMode(next);
-    const fallback = () => setMode({ live: false, still: -1 });
+    const fallback = () => {
+      runtime.abandoned = true;
+      runtime.resume?.();
+    };
     window.addEventListener('scooch:stills', fallback);
     return () => window.removeEventListener('scooch:stills', fallback);
   }, []);

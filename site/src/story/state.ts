@@ -39,5 +39,6 @@ export const runtime = {
   scenery: false,
   gallery: false,
   introAt: null as number | null,
+  abandoned: false,
   resume: null as (() => void) | null,
 };
