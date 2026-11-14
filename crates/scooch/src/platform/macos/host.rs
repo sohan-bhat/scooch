@@ -14,6 +14,7 @@ use std::time::Duration;
 
 const PERIOD: Duration = Duration::from_micros(16_667);
 const SETTLE_IN: Duration = Duration::from_millis(34);
+const COMPOSITIONS: u32 = 2;
 
 pub struct Host {
     marker: MainThreadMarker,
@@ -66,6 +67,10 @@ impl Platform for Host {
 
     fn waker(&self) -> Waker {
         Arc::new(layer::nudge)
+    }
+
+    fn composed() {
+        std::thread::sleep(layer::period(layer::main_display()).unwrap_or(PERIOD) * COMPOSITIONS);
     }
 
     fn decode(path: &Path) -> Result<RgbImage> {
