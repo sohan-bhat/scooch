@@ -89,9 +89,9 @@ export function step(delta: number) {
   }
 }
 
-export function draw(gl: WebGLRenderer) {
+export function draw(gl: WebGLRenderer, part?: { width: number; height: number }) {
   if (!held.active || !held.frame || !held.a) return false;
-  held.frame.renderLooks(gl, held.a, held.b ?? held.a, held.b ? held.s : 0, held.constants);
+  held.frame.renderLooks(gl, held.a, held.b ?? held.a, held.b ? held.s : 0, held.constants, part);
   return true;
 }
 

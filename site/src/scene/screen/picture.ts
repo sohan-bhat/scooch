@@ -10,6 +10,7 @@ export const pictureHead = `
 #define GRID ${ATLAS_GRID}.0
 
 uniform sampler2D uFrame;
+uniform vec2 uFrameScale;
 uniform highp sampler2D uMapA;
 uniform highp sampler2D uMapB;
 uniform float uMix;
@@ -57,12 +58,12 @@ vec2 place(vec2 uv) {
 
 vec3 picture(vec2 uv) {
   vec2 at = clamp(uv, 0.0, 1.0);
-  return texture(uFrame, vec2(at.x, 1.0 - at.y)).rgb;
+  return texture(uFrame, vec2(at.x, 1.0 - at.y) * uFrameScale).rgb;
 }
 
 vec3 pictureSoft(vec2 uv, float lod) {
   vec2 at = clamp(uv, 0.0, 1.0);
-  return textureLod(uFrame, vec2(at.x, 1.0 - at.y), lod).rgb;
+  return textureLod(uFrame, vec2(at.x, 1.0 - at.y) * uFrameScale, max(lod + log2(uFrameScale.x), 0.0)).rgb;
 }
 
 vec4 atlasCell(float index, float row, vec2 q, vec2 dx, vec2 dy, vec2 scale) {
@@ -105,6 +106,7 @@ vec3 cursor(vec3 color, vec2 uv, vec2 dx, vec2 dy) {
 
 export type PictureUniforms = {
   uFrame: { value: Texture | null };
+  uFrameScale: { value: Vector2 };
   uMapA: { value: Texture | null };
   uMapB: { value: Texture | null };
   uMix: { value: number };
@@ -121,6 +123,7 @@ export type PictureUniforms = {
 export function pictureUniforms(): PictureUniforms {
   return {
     uFrame: { value: null },
+    uFrameScale: { value: new Vector2(1, 1) },
     uMapA: { value: null },
     uMapB: { value: null },
     uMix: { value: 0 },

@@ -1,7 +1,8 @@
 import { useTexture } from '@react-three/drei';
+import { useThree } from '@react-three/fiber';
 import { useMemo } from 'react';
 import { suspend } from 'suspend-react';
-import { ClampToEdgeWrapping, Color, Group, LinearMipmapLinearFilter, Matrix4, Mesh, SRGBColorSpace, Texture, Vector3 } from 'three';
+import { ClampToEdgeWrapping, Color, Group, LinearMipmapLinearFilter, Matrix4, Mesh, SRGBColorSpace, Texture, Vector2, Vector3 } from 'three';
 import { asset } from '@/lib/base';
 import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
@@ -42,9 +43,13 @@ function colors(averages: [number, number, number][]) {
 
 export function useScreens(manifest: DemoManifest) {
   const { saliency, atlas, main } = useScreenTextures(manifest);
+  const gl = useThree((state) => state.gl);
 
   return useMemo(() => {
-    const mainFrame = createFrame(main);
+    const buffer = gl.getDrawingBufferSize(new Vector2());
+    const { width, height } = main.info;
+    const scale = Math.min(1, Math.max(buffer.x, buffer.y) / Math.max(width, height));
+    const mainFrame = createFrame(main, { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) });
     const crt = createCrtMaterial();
     crt.uniforms.uFrame.value = mainFrame.texture;
     crt.uniforms.uAtlas.value = atlas;
@@ -67,7 +72,7 @@ export function useScreens(manifest: DemoManifest) {
       balloon: colors([before.average, fixed.average, fixed.average, moved.average]),
       secondColor: colors([picture.frames.fixed.average, picture.frames.fixed.average]),
     };
-  }, [saliency, atlas, main, manifest]);
+  }, [saliency, atlas, main, manifest, gl]);
 }
 
 export function measureScreen(mesh: Mesh, frame: Group, aspect: number, fill = [0.95, 0.93]) {

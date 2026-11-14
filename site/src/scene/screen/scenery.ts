@@ -361,7 +361,7 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       }
       target.scissorTest = false;
     },
-    renderLooks(gl: WebGLRenderer, a: Look, b: Look, s: number, constants: Float32Array | null) {
+    renderLooks(gl: WebGLRenderer, a: Look, b: Look, s: number, constants: Float32Array | null, part?: { width: number; height: number }) {
       last = '';
       bind('a', a);
       bind('b', b);
@@ -383,10 +383,19 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
         uniforms.rim_at.value = [constants[22], constants[23]];
         uniforms.belly_at.value = [constants[24], constants[25]];
       }
+      const full = uniforms.view.value;
+      if (part) {
+        target.viewport.set(0, 0, part.width, part.height);
+        uniforms.view.value = [part.width, part.height];
+      }
       const previous = gl.getRenderTarget();
       gl.setRenderTarget(target);
       gl.render(scene, camera);
       gl.setRenderTarget(previous);
+      if (part) {
+        target.viewport.set(0, 0, target.width, target.height);
+        uniforms.view.value = full;
+      }
     },
     states: scenery.states,
     scenery,
