@@ -18,6 +18,8 @@ const COMPOSITIONS: u32 = 2;
 
 pub struct Host {
     marker: MainThreadMarker,
+    busy: Option<super::Busy>,
+    app: bool,
 }
 
 impl Platform for Host {
@@ -28,6 +30,10 @@ impl Platform for Host {
     }
 
     fn open(&mut self, screen: &Screen, _hints: &Hints) -> Result<layer::Layer> {
+        if !self.app {
+            NSApplication::sharedApplication(self.marker).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            self.app = true;
+        }
         layer::open(self.marker, screen)
     }
 
@@ -74,7 +80,7 @@ impl Platform for Host {
     }
 
     fn prepare(&mut self) {
-        NSApplication::sharedApplication(self.marker).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        self.busy = Some(super::busy());
     }
 
     fn decode(path: &Path) -> Result<RgbImage> {
@@ -90,5 +96,5 @@ pub fn serve() -> ExitCode {
     let Some(marker) = MainThreadMarker::new() else {
         return helper::refuse("the helper has to run on the main thread");
     };
-    helper::serve(Host { marker })
+    helper::serve(Host { marker, busy: None, app: false })
 }

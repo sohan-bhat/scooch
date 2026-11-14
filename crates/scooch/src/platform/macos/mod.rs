@@ -58,6 +58,19 @@ fn trampoline<F: FnMut()>(_: &F) -> sys::Work {
     call::<F>
 }
 
+pub struct Busy(objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2::runtime::NSObjectProtocol>>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        unsafe { NSProcessInfo::processInfo().endActivity(&self.0) };
+    }
+}
+
+pub fn busy() -> Busy {
+    let options = objc2_foundation::NSActivityOptions::UserInitiatedAllowingIdleSystemSleep | objc2_foundation::NSActivityOptions::LatencyCritical;
+    Busy(NSProcessInfo::processInfo().beginActivityWithOptions_reason(options, ns_string!("Scooch is placing the wallpaper")))
+}
+
 struct Mac;
 
 type View = (Option<PathBuf>, Option<store::Plist>);
@@ -193,6 +206,10 @@ impl Desktop for Mac {
 
     fn hold(&self) -> Duration {
         Duration::from_millis(300)
+    }
+
+    fn busy(&self) -> Box<dyn std::any::Any> {
+        Box::new(busy())
     }
 
     fn dropped(&self) -> bool {

@@ -1295,6 +1295,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
         let mut said: Option<String> = None;
         loop {
             worker.first();
+            let busy = daemon.desktop.busy();
             if daemon.quick_look() {
                 worker.take();
             } else {
@@ -1305,6 +1306,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             }
             let started = Instant::now();
             let report = daemon.tick();
+            drop(busy);
             relieve();
             stop.end();
             if tracing {
