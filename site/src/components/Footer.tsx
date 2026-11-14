@@ -21,7 +21,12 @@ export function Footer() {
               {content.footer.sources}
             </a>
           </li>
-          <li className="text-plastic">{content.footer.license}</li>
+          <li className="text-plastic">
+            {content.footer.license}, by{' '}
+            <a href="https://sohanbhat.me/" rel="author" className="link-quiet">
+              Sohan Bhat
+            </a>
+          </li>
         </ul>
       </div>
     </footer>
