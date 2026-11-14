@@ -108,6 +108,9 @@ export default function Stage({ onReady }: { onReady: () => void }) {
         dpr={dpr}
         gl={{ antialias: false, powerPreference: 'high-performance', stencil: false, alpha: false }}
         camera={{ fov: 30, near: 0.03, far: 9, position: [0, 1.3, 1.6] }}
+        onCreated={({ gl }) => {
+          gl.debug.checkShaderErrors = import.meta.env.DEV;
+        }}
         aria-hidden
         tabIndex={-1}
       >
