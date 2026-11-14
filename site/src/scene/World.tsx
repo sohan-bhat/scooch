@@ -27,9 +27,10 @@ import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
-import { fontsReady, osdPainter, paintedTexture, wallPainter } from './captions';
+import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
-import { BULB, DESK_TOP, Desk, LAMP, type Screens } from './Desk';
+import { BULB, DESK_TOP, Desk, LAMP, type Console, type Screens } from './Desk';
+import { createCrtMaterial } from './screen/crt';
 import { useInside, type Stage } from './Inside';
 import { quality } from './quality';
 import { useRoomMaterial } from './Room';
@@ -114,8 +115,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const screens = useScreens(manifest);
   const blinds = useMemo(() => blindsTexture(), []);
   const writing = useRef<((amount: number) => void) | null>(null);
-  const painted = useMemo(() => ({ osd: paintedTexture(1024, 768, osdPainter), wall: paintedTexture(1024, 1024, wallPainter) }), []);
   const blindsMatrix = useMemo(() => projector(), []);
+  const painted = useMemo(() => ({ osd: paintedTexture(1024, 768, osdPainter), wall: wallTexture(blindsMatrix) }), [blindsMatrix]);
   const [built, setBuilt] = useState<Built | null>(null);
   const [extrasIn, setExtrasIn] = useState(false);
   const onExtras = useCallback(() => setExtrasIn(true), []);
@@ -164,7 +165,37 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   );
 
   const stage = useMemo(() => (built ? stageFor(built.television) : null), [built]);
-  const inside = useInside(manifest, screens.main, screens.saliency, screens.atlas, stage);
+  const consoleScreen = useMemo(() => {
+    const crt = createCrtMaterial();
+    crt.uniforms.uAtlas.value = screens.atlas;
+    crt.uniforms.uRim.value = tokenColor('rim');
+    crt.uniforms.uLamp.value.copy(bulbWorld);
+    const moon = manifest.pictures.find((picture) => picture.id === 'moon');
+    manifest.icons.forEach((icon, index) => {
+      const rect = moon?.icons[icon.id];
+      if (rect) crt.uniforms.uIcons.value[index]?.set(...rect);
+    });
+    return crt;
+  }, [screens, manifest]);
+  const [consoleGlass, setConsoleGlass] = useState<Glass | null>(null);
+  const onConsole = useCallback(
+    (found: Console) => {
+      const geometry = found.mesh.geometry;
+      if (!geometry.boundingBox) geometry.computeBoundingBox();
+      const box = geometry.boundingBox!;
+      const aspect = (box.max.x - box.min.x) / (box.max.y - box.min.y);
+      const measured = measureScreen(found.mesh, found.frame as Group, aspect, [1, 1]);
+      consoleScreen.uniforms.uOrigin.value.set(measured.origin.x, measured.origin.y);
+      consoleScreen.uniforms.uExtent.value.set(measured.origin.width, measured.origin.height);
+      found.mesh.material = consoleScreen.material;
+      found.mesh.castShadow = false;
+      setConsoleGlass(glassOf(found.mesh, found.frame as Group, measured.screen));
+    },
+    [consoleScreen],
+  );
+  const pads = useMemo(() => (built ? { laptop: built.laptop, console: consoleGlass } : null), [built, consoleGlass]);
+  const gallery = useRef<Record<string, Frame>>({});
+  const inside = useInside(manifest, screens.main, screens.saliency, screens.atlas, stage, gallery, pads);
   const [insideIn, setInsideIn] = useState(runtime.still >= 0);
   const second = useRef<Frame | null>(null);
 
@@ -187,15 +218,23 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       const ready = new Set(screens.main.textures());
       await streamScenery(screens.main.scenery);
       await upload(screens.main.textures().filter((texture) => !ready.has(texture)));
-      const loaded = await loadScenery(manifest.pictures[0].scenery, false);
-      if (stopped) return;
-      const frame = createFrame(loaded);
-      await frame.compile(gl);
-      await upload(frame.textures());
-      if (stopped) return;
-      second.current = frame;
-      screens.lcd.uniforms.uFrame.value = frame.texture;
+      for (const picture of manifest.pictures) {
+        const loaded = await loadScenery(picture.scenery, false);
+        if (stopped) return;
+        const longest = Math.max(loaded.info.width, loaded.info.height);
+        const frame = createFrame(loaded, Math.min(1, 1280 / longest));
+        await frame.compile(gl);
+        await upload(frame.textures());
+        if (stopped) return;
+        gallery.current[picture.id] = frame;
+        if (picture.id === 'swans') {
+          second.current = frame;
+          screens.lcd.uniforms.uFrame.value = frame.texture;
+          runtime.scenery = true;
+        }
+      }
       runtime.scenery = true;
+      runtime.gallery = true;
     };
     timer = window.setTimeout(() => void begin(), 0);
     return () => {
@@ -292,7 +331,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     screens.crt.uniforms.uOsd.value = painted.osd.texture;
     void fontsReady().then(() => {
       painted.osd.draw(1, true);
-      painted.wall.draw(1, true);
+      painted.wall.paint();
     });
     const tv = built.television;
     const sticky = stickyNote({
@@ -389,16 +428,25 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     scene.environmentIntensity = (0.05 + 0.17 * ambient) * (0.3 + 0.7 * away);
     if (rim.current) rim.current.intensity = (0.12 + 0.2 * ambient) * away;
     for (const bulb of bulbs.current) bulb.emissiveIntensity = BULB_GLOW * story.lamp * introLamp * hum;
-    fog.density = 0.32 + story.inside * 0.9;
+    fog.density = 0.32 + story.inside * 0.25;
 
     const tubeOn = Math.min(story.tubeOn, introTube);
     const crt = screens.crt.uniforms;
+    const city = gallery.current.city;
+    const channel = story.city > 0.5 && city ? city.texture : screens.main.texture;
+    if (crt.uFrame.value !== channel) crt.uFrame.value = channel;
+    const big = consoleScreen.uniforms;
+    const moon = gallery.current.moon;
+    if (moon && big.uFrame.value !== moon.texture) big.uFrame.value = moon.texture;
+    big.uTime.value = time;
+    big.uOn.value = moon ? Math.min(Math.max((story.fly - 1.7) / 0.3, 0), 1) : 0;
+    big.uLampLevel.value = story.lamp * introLamp;
     crt.uOsdLevel.value = story.osd;
     writing.current?.(story.written);
     wall.uniforms.uCaptionLevel.value = story.wall;
     crt.uTime.value = time;
     screens.main.render(gl, story.place);
-    second.current?.render(gl, 0);
+    for (const frame of Object.values(gallery.current)) frame.render(gl, 0);
     crt.uOn.value = tubeOn;
     crt.uOff.value = story.tubeOff;
     crt.uLampLevel.value = lamp;
@@ -489,7 +537,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
           <spotLight ref={televisionSpot} angle={1.1} penumbra={1} decay={2} distance={0} intensity={0} />
         </>
       )}
-      <Desk onScreens={onScreens} onExtras={onExtras} phone={phone} />
+      <Desk onScreens={onScreens} onExtras={onExtras} onConsole={onConsole} phone={phone} />
       <ContactShadows key={extrasIn ? 'extras' : 'bare'} position={[0, DESK_TOP + 0.0015, 0.0]} scale={[2.0, 0.95]} resolution={512} blur={2.4} far={0.3} opacity={0.62} frames={1} color="#0a0806" />
       <mesh position={[0, 1.6, -0.98]} material={wall}>
         <planeGeometry args={[9, 3.2]} />

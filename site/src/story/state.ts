@@ -37,6 +37,7 @@ export const runtime = {
   compiled: false,
   props: false,
   scenery: false,
+  gallery: false,
   introAt: null as number | null,
   resume: null as (() => void) | null,
 };

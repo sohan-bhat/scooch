@@ -80,6 +80,8 @@ uniform vec3 uHot;
 uniform vec4 uTiles[${ICON_SLOTS}];
 uniform float uTileHeight[${ICON_SLOTS}];
 uniform vec2 uShadowDir;
+uniform sampler2D uFrameB;
+uniform float uBlend;
 varying vec2 vUv;
 varying float vHeight;
 varying vec3 vNormal;
@@ -95,7 +97,7 @@ float box(vec2 p, vec4 rect, float blur) {
 
 void main() {
   vec2 uv = vUv;
-  vec3 photo = picture(uv);
+  vec3 photo = mix(picture(uv), texture(uFrameB, vec2(clamp(uv.x, 0.0, 1.0), 1.0 - clamp(uv.y, 0.0, 1.0))).rgb, uBlend);
   float grey = dot(photo, vec3(0.2126, 0.7152, 0.0722));
 
   float shadow = 0.0;
@@ -197,8 +199,11 @@ export function createInside(frame: Frame, saliency: Texture, atlas: Texture, st
     uTiles: { value: Array.from({ length: ICON_SLOTS }, () => new Vector4(-1, -1, 0, 0)) },
     uTileHeight: { value: new Array(ICON_SLOTS).fill(0) },
     uShadowDir: { value: [0.18, 0.26] },
+    uFrameB: { value: null as Texture | null },
+    uBlend: { value: 0 },
   };
   uniforms.uFrame.value = frame.texture;
+  uniforms.uFrameB.value = frame.texture;
   uniforms.uAtlas.value = atlas;
   const plane = new Mesh(
     geometry,
@@ -222,20 +227,131 @@ export function createInside(frame: Frame, saliency: Texture, atlas: Texture, st
   return { group, plane, tiles, uniforms, tileUniforms };
 }
 
-const scratch = { matrix: new Matrix4(), position: new Vector3(), quaternion: new Quaternion(), scale: new Vector3(), color: new Color() };
+const scratch = { matrix: new Matrix4(), position: new Vector3(), quaternion: new Quaternion(), scale: new Vector3(), color: new Color(), normal: new Vector3(), up: new Vector3(0, 1, 0) };
 
-export function useInside(manifest: DemoManifest, frame: Frame, saliency: Texture, atlas: Texture, stage: Stage | null) {
+export type Pad = { center: Vector3; quaternion: Quaternion; screen: { width: number; height: number } };
+type Pads = { laptop: Pad; console: Pad | null } | null;
+type Place = { position: Vector3; quaternion: Quaternion; width: number; height: number };
+
+const ease = (t: number) => {
+  const x = Math.min(Math.max(t, 0), 1);
+  return x * x * (3 - 2 * x);
+};
+
+const ASPECT = { wide: 2560 / 1080, tall: 1080 / 1920 };
+
+function padPlace(pad: Pad, out: Place) {
+  scratch.normal.set(0, 0, 1).applyQuaternion(pad.quaternion);
+  out.position.copy(pad.center).addScaledVector(scratch.normal, 0.008);
+  out.quaternion.copy(pad.quaternion);
+  out.width = pad.screen.width;
+  out.height = pad.screen.height;
+  return out;
+}
+
+function blendPlace(a: Place, b: Place, t: number, arc: number, out: Place) {
+  out.position.lerpVectors(a.position, b.position, t).addScaledVector(scratch.up, Math.sin(Math.PI * t) * arc);
+  out.quaternion.slerpQuaternions(a.quaternion, b.quaternion, t);
+  out.width = a.width + (b.width - a.width) * t;
+  out.height = a.height + (b.height - a.height) * t;
+  return out;
+}
+
+export function useInside(
+  manifest: DemoManifest,
+  frame: Frame,
+  saliency: Texture,
+  atlas: Texture,
+  stage: Stage | null,
+  gallery: { current: Record<string, Frame> },
+  pads: Pads,
+) {
   const inside = useMemo(() => (stage ? createInside(frame, saliency, atlas, stage) : null), [frame, saliency, atlas, stage]);
+  const places = useMemo(
+    () => ({
+      space: { position: new Vector3(), quaternion: new Quaternion(), width: 0, height: 0 } as Place,
+      from: { position: new Vector3(), quaternion: new Quaternion(), width: 0, height: 0 } as Place,
+      to: { position: new Vector3(), quaternion: new Quaternion(), width: 0, height: 0 } as Place,
+      now: { position: new Vector3(), quaternion: new Quaternion(), width: 0, height: 0 } as Place,
+    }),
+    [],
+  );
+  const layouts = useMemo(() => {
+    const ids = manifest.icons.map((icon) => icon.id);
+    const of = (id: string) => {
+      const picture = manifest.pictures.find((candidate) => candidate.id === id);
+      return picture ? ids.map((icon) => picture.icons[icon]) : null;
+    };
+    return { ids, wide: of('wide'), tall: of('tall'), swans: of('swans'), moon: of('moon') };
+  }, [manifest]);
 
   useFrame((state) => {
     if (!inside || !stage) return;
     const lift = story.lift;
-    inside.group.visible = lift > 0.0005;
+    const fly = story.fly;
+    inside.group.visible = lift > 0.0005 && fly < 1.999;
     if (!inside.group.visible) return;
     const t = lift * lift * (3 - 2 * lift);
-    inside.group.position.lerpVectors(stage.glass.position, stage.space.position, t);
-    inside.group.quaternion.slerpQuaternions(stage.glass.quaternion, stage.space.quaternion, t);
-    inside.group.scale.setScalar(stage.glass.scale + (stage.space.scale - stage.glass.scale) * t);
+    const space = places.space;
+    space.position.lerpVectors(stage.glass.position, stage.space.position, t);
+    space.quaternion.slerpQuaternions(stage.glass.quaternion, stage.space.quaternion, t);
+    const scale = stage.glass.scale + (stage.space.scale - stage.glass.scale) * t;
+    space.width = stage.width * scale;
+    space.height = stage.height * scale;
+
+    const main = manifest.frames.before.icons;
+    const { drag } = manifest;
+    const own = (index: number) => {
+      const id = layouts.ids[index];
+      const rect = main[id];
+      if (id !== drag.icon) return rect;
+      return [drag.from[0] + (drag.to[0] - drag.from[0]) * story.drag, drag.from[1] + (drag.to[1] - drag.from[1]) * story.drag, rect[2], rect[3]];
+    };
+    const frames = gallery.current;
+    const sized = (id: string, out: Place) => {
+      out.position.copy(space.position);
+      out.quaternion.copy(space.quaternion);
+      if (id === 'wide') {
+        out.width = space.width * 1.3;
+        out.height = out.width / ASPECT.wide;
+      } else if (id === 'tall') {
+        out.height = space.height * 1.24;
+        out.width = out.height * ASPECT.tall;
+      } else {
+        out.width = space.width;
+        out.height = space.height;
+      }
+      return out;
+    };
+
+    let first = 'main';
+    let second = 'main';
+    let k = 0;
+    let place = places.now;
+    let raise = 1;
+    if (fly > 0.0005 && pads) {
+      const leg = fly < 1 ? 0 : 1;
+      k = ease(fly - leg);
+      first = leg === 0 ? 'main' : 'swans';
+      second = leg === 0 ? 'swans' : 'moon';
+      const from = leg === 0 ? sized('main', places.from) : padPlace(pads.laptop, places.from);
+      const to = leg === 0 ? padPlace(pads.laptop, places.to) : pads.console ? padPlace(pads.console, places.to) : padPlace(pads.laptop, places.to);
+      place = blendPlace(from, to, k, leg === 0 ? 0.16 : 0.24, places.now);
+      raise = leg === 0 ? 1 - k : 0;
+    } else {
+      const shape = story.shape;
+      const order = ['main', 'wide', 'tall', 'main'];
+      const leg = Math.min(Math.floor(shape), 2);
+      k = shape <= 0.0005 || shape >= 2.9995 ? 0 : ease(shape - leg);
+      first = shape >= 2.9995 ? 'main' : order[leg];
+      second = shape >= 2.9995 ? 'main' : order[leg + 1];
+      place = blendPlace(sized(first, places.from), sized(second, places.to), k, 0, places.now);
+    }
+
+    inside.group.position.copy(place.position);
+    inside.group.quaternion.copy(place.quaternion);
+    inside.group.scale.setScalar(1);
+    inside.plane.scale.set(place.width / stage.width, place.height / stage.height, place.height / stage.height);
 
     const u = inside.uniforms;
     u.uTime.value = state.clock.elapsedTime;
@@ -243,26 +359,36 @@ export function useInside(manifest: DemoManifest, frame: Frame, saliency: Textur
     u.uMapA.value = frame.states[from].map;
     u.uMapB.value = frame.states[to].map;
     u.uMix.value = s;
+    const pick = (id: string) => (id === 'main' ? frame : (frames[id] ?? frame));
+    u.uFrame.value = pick(first).texture;
+    u.uFrameB.value = pick(second).texture;
+    u.uBlend.value = first === second ? 0 : Math.min(Math.max((k - 0.18) / 0.64, 0), 1);
     u.uSweep.value = story.sweep;
     u.uRelief.value = story.relief;
     u.uFade.value = 1;
-    inside.tileUniforms.uOutline.value = story.relief * 0.0;
+    inside.tileUniforms.uOutline.value = 0;
 
-    const { frames, drag } = manifest;
-    const tileHeight = Math.min(Math.max((lift - 0.15) / 0.5, 0), 1) * 0.1;
+    const rects = (id: string, index: number) => {
+      if (id === 'main') return own(index);
+      const layout = layouts[id as 'wide' | 'tall' | 'swans' | 'moon'];
+      return layout?.[index] ?? own(index);
+    };
+    const tileHeight = Math.min(Math.max((lift - 0.15) / 0.5, 0), 1) * 0.1 * raise;
     for (let i = 0; i < manifest.icons.length && i < ICON_SLOTS; i++) {
-      const id = manifest.icons[i].id;
-      let [x, y, w, h] = frames.before.icons[id];
+      const a = rects(first, i);
+      const b = rects(second, i);
+      const x = a[0] + (b[0] - a[0]) * k;
+      const y = a[1] + (b[1] - a[1]) * k;
+      const w = a[2] + (b[2] - a[2]) * k;
+      const h = a[3] + (b[3] - a[3]) * k;
       let height = tileHeight;
-      if (id === drag.icon) {
-        x = drag.from[0] + (drag.to[0] - drag.from[0]) * story.drag;
-        y = drag.from[1] + (drag.to[1] - drag.from[1]) * story.drag;
+      if (layouts.ids[i] === drag.icon && fly <= 0.0005 && story.shape <= 0.0005) {
         height += story.grab * 0.05 + Math.sin(Math.PI * Math.min(Math.max(story.drag, 0), 1)) * story.grab * 0.08;
       }
       u.uTiles.value[i].set(x, y, w, h);
       u.uTileHeight.value[i] = height;
-      scratch.position.set((x + w / 2 - 0.5) * stage.width, (0.5 - (y + h / 2)) * stage.height, height * stage.height);
-      scratch.scale.set(w * stage.width, h * stage.height, 1);
+      scratch.position.set((x + w / 2 - 0.5) * place.width, (0.5 - (y + h / 2)) * place.height, height * place.height);
+      scratch.scale.set(w * place.width, h * place.height, 1);
       scratch.matrix.compose(scratch.position, scratch.quaternion.identity(), scratch.scale);
       inside.tiles.setMatrixAt(i, scratch.matrix);
     }

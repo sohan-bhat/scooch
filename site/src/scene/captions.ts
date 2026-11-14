@@ -1,4 +1,4 @@
-import { CanvasTexture, LinearFilter, LinearMipmapLinearFilter, SRGBColorSpace } from 'three';
+import { CanvasTexture, LinearFilter, LinearMipmapLinearFilter, NoColorSpace, SRGBColorSpace, Vector4, type Matrix4 } from 'three';
 import content from '@/content.json';
 
 export const FONT = {
@@ -143,16 +143,86 @@ export const dialPainter: Painter = (context, width, height) => {
   lines.forEach((line, index) => context.fillText(line, width / 2, height * 0.66 + (index - (lines.length - 1) / 2) * size * 1.3));
 };
 
-export const wallPainter: Painter = (context, width, height) => {
-  const text = caption('shapes');
-  context.fillStyle = '#000';
-  context.fillRect(0, 0, width, height);
-  context.fillStyle = 'rgb(0, 255, 0)';
-  context.fillRect(width * 0.18, height * 0.53, width * 0.64, height * 0.22);
-  const size = Math.round(height * 0.07);
-  context.font = `800 ${size}px ${FONT.display}`;
-  context.textBaseline = 'middle';
-  context.textAlign = 'center';
-  context.fillStyle = 'rgb(255, 255, 0)';
-  context.fillText(text, width / 2, height * 0.64);
-};
+export const WALL = { left: -1.42, right: -0.16, bottom: 1.3, top: 1.62, z: -0.975 };
+
+export function wallTexture(projector: Matrix4) {
+  const size = 1024;
+  const scale = 1400;
+  const width = Math.round((WALL.right - WALL.left) * scale);
+  const height = Math.round((WALL.top - WALL.bottom) * scale);
+  const text = document.createElement('canvas');
+  text.width = width;
+  text.height = height;
+  const draw = text.getContext('2d', { willReadFrequently: true });
+  const out = document.createElement('canvas');
+  out.width = size;
+  out.height = size;
+  const target = out.getContext('2d');
+  const texture = new CanvasTexture(out);
+  texture.colorSpace = NoColorSpace;
+  texture.flipY = false;
+  texture.magFilter = LinearFilter;
+  texture.minFilter = LinearFilter;
+  texture.generateMipmaps = false;
+  const inverse = projector.clone().invert();
+  const near = new Vector4();
+  const far = new Vector4();
+  const paint = () => {
+    if (!draw || !target) return;
+    draw.fillStyle = '#000';
+    draw.fillRect(0, 0, width, height);
+    const font = Math.round(height * 0.36);
+    draw.font = `800 ${font}px ${FONT.display}`;
+    draw.textAlign = 'center';
+    draw.textBaseline = 'middle';
+    draw.fillStyle = '#fff';
+    draw.fillText(caption('shapes'), width / 2, height * 0.54, width * 0.92);
+    const letters = draw.getImageData(0, 0, width, height).data;
+    const image = target.createImageData(size, size);
+    const corners = [
+      [WALL.left, WALL.bottom],
+      [WALL.right, WALL.bottom],
+      [WALL.left, WALL.top],
+      [WALL.right, WALL.top],
+    ].map(([x, y]) => {
+      const point = new Vector4(x, y, WALL.z, 1).applyMatrix4(projector);
+      return [point.x / point.w, point.y / point.w];
+    });
+    const u0 = Math.max(0, Math.floor(Math.min(...corners.map((c) => c[0])) * size) - 8);
+    const u1 = Math.min(size, Math.ceil(Math.max(...corners.map((c) => c[0])) * size) + 8);
+    const v0 = Math.max(0, Math.floor(Math.min(...corners.map((c) => c[1])) * size) - 8);
+    const v1 = Math.min(size, Math.ceil(Math.max(...corners.map((c) => c[1])) * size) + 8);
+    for (let v = v0; v < v1; v++) {
+      for (let u = u0; u < u1; u++) {
+        const su = (u + 0.5) / size;
+        const sv = (v + 0.5) / size;
+        near.set(su, sv, 0.1, 1).applyMatrix4(inverse);
+        far.set(su, sv, 0.9, 1).applyMatrix4(inverse);
+        const ax = near.x / near.w, ay = near.y / near.w, az = near.z / near.w;
+        const bx = far.x / far.w, by = far.y / far.w, bz = far.z / far.w;
+        const t = (WALL.z - az) / (bz - az);
+        const x = ax + (bx - ax) * t;
+        const y = ay + (by - ay) * t;
+        const tx = (x - WALL.left) / (WALL.right - WALL.left);
+        const ty = (WALL.top - y) / (WALL.top - WALL.bottom);
+        const edge = Math.min(tx, 1 - tx, ty, 1 - ty);
+        if (edge <= -0.02) continue;
+        const region = Math.min(Math.max((edge + 0.02) / 0.06, 0), 1);
+        let letter = 0;
+        if (edge > 0) {
+          const px = Math.min(width - 1, Math.max(0, Math.floor(tx * width)));
+          const py = Math.min(height - 1, Math.max(0, Math.floor(ty * height)));
+          letter = letters[(py * width + px) * 4];
+        }
+        const at = (v * size + u) * 4;
+        image.data[at] = letter;
+        image.data[at + 1] = Math.round(region * 255);
+        image.data[at + 3] = 255;
+      }
+    }
+    target.putImageData(image, 0, 0);
+    texture.needsUpdate = true;
+  };
+  paint();
+  return { texture, paint };
+}

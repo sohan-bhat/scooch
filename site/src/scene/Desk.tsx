@@ -13,7 +13,7 @@ import { labelProps } from './labels';
 export { BULB, DESK_TOP, LAMP, LAPTOP, TELEVISION } from './layout';
 
 const heroes = ['desk', 'laptop', 'lamp', 'television'] as const;
-const extras = ['notepads', 'stationery', 'clock', 'cassette', 'plant', 'stapler', 'glasses', 'watch', 'gamepad'] as const;
+const extras = ['notepads', 'stationery', 'clock', 'cassette', 'plant', 'stapler', 'glasses', 'watch', 'gamepad', 'console', 'cup'] as const;
 type Hero = (typeof heroes)[number];
 type Extra = (typeof extras)[number];
 
@@ -184,7 +184,9 @@ function placeOnDesk(object: Object3D, placement: Placement, top: number) {
   return holder;
 }
 
-function Extras({ phone, onExtras }: { phone: boolean; onExtras: () => void }) {
+export type Console = { mesh: Mesh; frame: Object3D };
+
+function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () => void; onConsole: (found: Console) => void }) {
   const gl = useThree((state) => state.gl);
   const scene = useThree((state) => state.scene);
   const camera = useThree((state) => state.camera);
@@ -199,13 +201,22 @@ function Extras({ phone, onExtras }: { phone: boolean; onExtras: () => void }) {
       if (!source) continue;
       const object = placement.node ? source.scene.getObjectByName(placement.node) : source.scene;
       if (!object) continue;
-      const holder = placeOnDesk(object, placement, LAPTOP.position[1]);
+      const holder = placeOnDesk(object, placement, placement.floor ? 0 : LAPTOP.position[1]);
       holder.userData.phone = placement.phone !== false;
       placed.add(holder);
     }
     return placed;
   }, scenes);
   const labels = useMemo(() => labelProps(group), [group]);
+  useEffect(() => {
+    const holder = group.getObjectByName('console_whole');
+    let screen: Mesh | null = null;
+    holder?.traverse((child) => {
+      const mesh = child as Mesh;
+      if (mesh.isMesh && (mesh.material as MeshStandardMaterial).name === 'television_01_screen') screen = mesh;
+    });
+    if (holder && screen) onConsole({ mesh: screen, frame: holder });
+  }, [group, onConsole]);
   useFrame(() => labels.update(story.typed));
 
   useLayoutEffect(() => {
@@ -257,7 +268,7 @@ function Extras({ phone, onExtras }: { phone: boolean; onExtras: () => void }) {
   return <primitive object={group} />;
 }
 
-function LateExtras({ phone, onExtras }: { phone: boolean; onExtras: () => void }) {
+function LateExtras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () => void; onConsole: (found: Console) => void }) {
   const [go, setGo] = useState(still);
   useEffect(() => {
     if (go) return;
@@ -272,7 +283,7 @@ function LateExtras({ phone, onExtras }: { phone: boolean; onExtras: () => void 
   if (!go) return null;
   return (
     <Suspense fallback={null}>
-      <Extras phone={phone} onExtras={onExtras} />
+      <Extras phone={phone} onExtras={onExtras} onConsole={onConsole} />
     </Suspense>
   );
 }
@@ -282,7 +293,7 @@ export type Screens = {
   television: { mesh: Mesh; frame: Group };
 };
 
-export function Desk({ onScreens, onExtras, phone }: { onScreens: (screens: Screens) => void; onExtras: () => void; phone: boolean }) {
+export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (screens: Screens) => void; onExtras: () => void; onConsole: (found: Console) => void; phone: boolean }) {
   const desk = useGLTF(urls.desk, false, true, extend);
   const laptop = useGLTF(urls.laptop, false, true, extend);
   const lamp = useGLTF(urls.lamp, false, true, extend);
@@ -341,7 +352,7 @@ export function Desk({ onScreens, onExtras, phone }: { onScreens: (screens: Scre
       <primitive object={televisionFrame} position={TELEVISION.position} rotation-y={TELEVISION.rotation}>
         <primitive object={television.scene} />
       </primitive>
-      {hero ? null : <LateExtras phone={phone} onExtras={onExtras} />}
+      {hero ? null : <LateExtras phone={phone} onExtras={onExtras} onConsole={onConsole} />}
       <Sharpener />
     </group>
   );

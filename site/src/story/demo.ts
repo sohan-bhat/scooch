@@ -29,6 +29,7 @@ export type DemoManifest = {
 
 export type DemoPicture = {
   id: string;
+  screen?: { width: number; height: number };
   order: string[];
   tables: Record<string, { fx: number[]; fy: number[] }>;
   frames: Record<string, { average: [number, number, number]; hidden: number; subject: Rect }>;
