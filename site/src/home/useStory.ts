@@ -206,7 +206,8 @@ export function introduce(refs: Refs, still: number) {
   const load = loader();
   load?.done();
   const glass = document.getElementById('glass');
-  const fade = () =>
+  const fade = () => {
+    load?.release();
     gsap.to([picture, glass], {
       autoAlpha: 0,
       duration: 0.3,
@@ -214,9 +215,9 @@ export function introduce(refs: Refs, still: number) {
       onComplete: () => {
         performance.mark('scooch:shown');
         glass?.removeAttribute('role');
-        load?.release();
       },
     });
+  };
   if (!load?.full) {
     fade();
     return;
@@ -228,5 +229,5 @@ export function introduce(refs: Refs, still: number) {
     fade();
   };
   void load.full.then(go);
-  window.setTimeout(go, 400);
+  window.setTimeout(go, 1500);
 }
