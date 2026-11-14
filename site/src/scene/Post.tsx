@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinusConstantAlphaFactor, SRGBColorSpace, Vector2, WebGLRenderTarget, type Texture } from 'three';
 import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass } from 'postprocessing';
 import { quiet } from '@/lib/idle';
-import { runtime, story } from '@/story/state';
+import { runtime, story, wallClock } from '@/story/state';
 import { quality, type Toggle } from './quality';
 import { allocate, freeze, inView, nativeAllowed, nativeOff, screenBox, still, thaw } from './still';
 import { idleBudget } from './budget';
@@ -461,7 +461,7 @@ export function Post({ phone }: { phone: boolean }) {
         if (still.pass === 0 && !still.tick) {
           still.phase = 'show';
           still.shownAt = now;
-          still.second = Math.floor(Date.now() / 1000);
+          still.second = Math.floor(wallClock() / 1000);
           return;
         }
         if (still.pass < JITTER.length - 1) {
@@ -481,7 +481,7 @@ export function Post({ phone }: { phone: boolean }) {
           still.phase = 'bands';
           return;
         }
-        const second = Math.floor(Date.now() / 1000);
+        const second = Math.floor(wallClock() / 1000);
         if (second !== still.second && inView(things.clock, camera)) {
           const target = quality.nativeComposer?.inputBuffer;
           still.second = second;

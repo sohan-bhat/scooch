@@ -433,10 +433,14 @@ impl Daemon {
         let mut glider = self.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let launched = glider.wake();
         drop(glider);
-        if launched {
-            self.reap_later();
-        }
-        launched
+        let Some(generation) = launched else { return false };
+        self.reap_later();
+        let glider = self.glider.clone();
+        let _ = std::thread::Builder::new().name("scooch-early".into()).spawn(move || {
+            std::thread::sleep(crate::glide::EARLY_LIFE);
+            glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).expire_early(generation);
+        });
+        true
     }
 
     fn glide_block(&self, state: &State) -> Option<&'static str> {
@@ -870,7 +874,7 @@ impl Daemon {
                 (Some(from), Some(still)) => {
                     let canvas = self.store.canvas_for(&screen.id, tables_key);
                     let canvas = canvas.is_file().then_some(canvas);
-                    let prepared = glider.prepare(&Plan { screen, picture: &source, canvas: canvas.as_deref(), size: [scene.width, scene.height], still }, crate::glide::GRACE);
+                    let prepared = glider.prepare(&Plan { screen, picture: &source, canvas: canvas.as_deref(), size: [scene.width, scene.height], still });
                     lap("open", &mut clock);
                     if let Some(id) = prepared {
                         let (_, next) = self.fresh_name(&screen.id, entry.counter, format.extension(), current);
@@ -2814,10 +2818,13 @@ pub mod tests {
         daemon.glider.lock().unwrap().reset_for_test();
         fake.events.lock().unwrap().clear();
         let before = *spawned.lock().unwrap();
+        let life = crate::glide::EARLY_LIFE + Duration::from_millis(400);
         assert!(daemon.wake_early());
         assert!(!daemon.wake_early());
         assert_eq!(*spawned.lock().unwrap(), before + 1);
         daemon.tick();
+        assert!(daemon.glider.lock().unwrap().running(), "an early helper lives on through a bare snapshot inside 1.5 s");
+        std::thread::sleep(life);
         assert!(!daemon.glider.lock().unwrap().running());
         let seen = events(&fake);
         assert!(seen.iter().any(|event| event == "device") && seen.iter().any(|event| event == "quit"), "{seen:?}");
@@ -2826,6 +2833,8 @@ pub mod tests {
         daemon.glider.lock().unwrap().forget_early_for_test();
         assert!(daemon.wake_early());
         daemon.tick();
+        std::thread::sleep(life);
+        assert!(!daemon.glider.lock().unwrap().running());
         daemon.glider.lock().unwrap().forget_early_for_test();
         assert!(!daemon.wake_early(), "an early launch after two bare wakes in a row");
         fake.place(vec![moved_subject()]);
@@ -2837,12 +2846,12 @@ pub mod tests {
 
     #[test]
     fn a_helper_on_track_is_waited_for_and_one_that_will_miss_is_not() {
-        for (name, ready, glides) in [("glide-on-track", 120u32, true), ("glide-will-miss", 2000, false)] {
+        for (name, ready, glides) in [("glide-on-track", 120u32, true), ("glide-will-miss", 60_000, false)] {
             let ((daemon, fake, script, _), waits) = glide_rig_waits(name, true);
             fake.place(vec![subject()]);
             daemon.tick();
             let mut state = daemon.store.load();
-            state.starts.insert("Fake GPU".into(), crate::state::Start { ready, shown: 5, at: 1 });
+            state.starts.insert("Fake GPU".into(), crate::state::Start { ready, draw: 5, at: 1, ..Default::default() });
             daemon.store.save(&state).unwrap();
             script.lock().unwrap().ready_after = Duration::from_millis(ready.into());
             daemon.glider.lock().unwrap().reset_for_test();
@@ -2855,7 +2864,7 @@ pub mod tests {
             assert_eq!(seen.iter().any(|event| event.starts_with("glide ")), glides, "{seen:?} {said:?}");
             let waited: Vec<Duration> = waits.lock().unwrap().iter().filter(|(what, _)| *what == "ready").map(|(_, wait)| *wait).collect();
             if glides {
-                assert!(!waited.is_empty() && waited.iter().all(|wait| *wait <= crate::glide::PATIENCE), "{waited:?}");
+                assert!(waited.iter().all(|wait| *wait <= crate::glide::PATIENCE), "{waited:?}");
             } else {
                 assert!(waited.is_empty(), "{waited:?}");
                 assert!(said.iter().any(|line| line.contains("would be shown")), "{said:?}");

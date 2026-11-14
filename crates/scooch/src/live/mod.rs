@@ -73,6 +73,7 @@ pub enum Reply {
         scale: Option<f32>,
     },
     Shown { id: u32, ms: u64 },
+    Drawn { id: u32, window: u64, first: u64, reveal: u64 },
     Glided { id: u32, frames: u32, slow_frames: u32, first_frame_ms: u64, #[serde(default)] uploads: u32, #[serde(default = "one")] scale: f32 },
     Settled { id: u32 },
     Closed { id: u32 },

@@ -1,6 +1,7 @@
-import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Quaternion, Vector3, type Texture, type WebGLRenderer } from 'three';
+import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Vector3, type Texture, type WebGLRenderer } from 'three';
 import { quiet } from '@/lib/idle';
-import { changed, runtime } from '@/story/state';
+import { changed, runtime, wallClock } from '@/story/state';
+import { clockHands, type Turn } from './clock';
 import { stripUpload } from './upload';
 import { windowLit } from './window';
 import { canvasTexture, dialPainter, fontsReady, paintedTexture, sticky as stickyText, typed as typedText, type Reveal } from './captions';
@@ -114,7 +115,7 @@ export function labelProps(group: Object3D) {
   }
 
   const clock = group.getObjectByName('clock_whole');
-  const hands: { node: Object3D; rest: Quaternion; angle: number; turn: (date: Date) => number }[] = [];
+  let hands: ReturnType<typeof clockHands> | null = null;
   if (clock) {
     const box = localBox(clock);
     const size = box.getSize(new Vector3());
@@ -123,30 +124,14 @@ export function labelProps(group: Object3D) {
     windowLit(face);
     mesh.position.set(0, size.y * 0.48, box.max.z + 0.0015);
     clock.add(mesh);
-    const turns: Record<string, (date: Date) => number> = {
-      houd_hand: (date) => ((date.getHours() % 12) + date.getMinutes() / 60) / 12,
+    const turns: Record<string, Turn> = {
+      houd_hand: (date) => ((date.getHours() % 12) + date.getMinutes() / 60 + date.getSeconds() / 3600) / 12,
       minute_hand: (date) => (date.getMinutes() + date.getSeconds() / 60) / 60,
       second_hand: (date) => (date.getSeconds() + date.getMilliseconds() / 1000) / 60,
     };
-    for (const [name, turn] of Object.entries(turns)) {
-      const node = clock.getObjectByName(name);
-      const mesh = node?.children.find((child) => (child as Mesh).isMesh) as Mesh | undefined;
-      const target = (node as Mesh)?.isMesh ? (node as Mesh) : mesh;
-      if (!node || !target) continue;
-      target.geometry.computeBoundingBox();
-      const center = target.geometry.boundingBox!.getCenter(new Vector3());
-      if (target !== node) center.applyMatrix4(target.matrix);
-      center.applyQuaternion(node.quaternion);
-      hands.push({ node, rest: node.quaternion.clone(), angle: Math.atan2(center.x, center.y), turn });
-    }
-    if (hands.length) {
-      clock.updateWorldMatrix(true, true);
-      const pivot = clock.worldToLocal(hands[0].node.getWorldPosition(new Vector3()));
-      mesh.position.set(pivot.x, pivot.y, box.max.z + 0.0015);
-    }
+    hands = clockHands(clock, turns, box.getCenter(new Vector3()));
+    if (hands.dial) mesh.position.set(hands.dial.pivot.x, hands.dial.pivot.y, box.max.z + 0.0015);
   }
-  const spin = new Quaternion();
-  const axis = new Vector3(0, 0, 1);
 
   return {
     async ready(gl: WebGLRenderer) {
@@ -171,11 +156,8 @@ export function labelProps(group: Object3D) {
     },
     update(amount: number) {
       typed?.reveal(amount);
-      const now = runtime.frozen === null ? new Date() : new Date(Math.floor(Date.now() / 1000) * 1000);
-      for (const hand of hands) {
-        spin.setFromAxisAngle(axis, -(hand.turn(now) * Math.PI * 2 - hand.angle));
-        hand.node.quaternion.multiplyQuaternions(spin, hand.rest);
-      }
+      const at = wallClock();
+      hands?.set(new Date(runtime.frozen === null ? at : Math.floor(at / 1000) * 1000));
     },
   };
 }

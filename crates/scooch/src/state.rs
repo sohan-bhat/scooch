@@ -45,6 +45,9 @@ pub struct State {
 pub struct Start {
     pub ready: u32,
     pub shown: u32,
+    pub cold: u32,
+    pub draw: u32,
+    pub window: u32,
     pub at: u64,
 }
 
