@@ -108,6 +108,15 @@ pub fn profile() -> Option<Vec<u8>> {
     (!bytes.is_null() && length > 0).then(|| unsafe { std::slice::from_raw_parts(bytes, length) }.to_vec())
 }
 
+pub fn decode_exact(path: &Path) -> Result<RgbImage> {
+    let url = NSURL::from_file_path(path).ok_or_else(|| anyhow!("{} is not a usable path.", path.display()))?;
+    let source = Owned::new(unsafe { sys::CGImageSourceCreateWithURL(&*url as *const NSURL as Ref, null()) });
+    let source = source.with_context(|| format!("{} is not a picture macOS can read.", path.display()))?;
+    let image = Owned::new(unsafe { sys::CGImageSourceCreateImageAtIndex(source.0, 0, null()) }).with_context(|| format!("{} could not be decoded.", path.display()))?;
+    drop(source);
+    pixels(&image)
+}
+
 fn matched(path: &Path) -> Result<RgbImage> {
     let url = NSURL::from_file_path(path).ok_or_else(|| anyhow!("{} is not a usable path.", path.display()))?;
     let source = Owned::new(unsafe { sys::CGImageSourceCreateWithURL(&*url as *const NSURL as Ref, null()) });

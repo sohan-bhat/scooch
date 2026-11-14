@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const PERIOD: Duration = Duration::from_micros(16_667);
+const SETTLE_IN: Duration = Duration::from_millis(34);
 
 pub struct Host {
     marker: MainThreadMarker,
@@ -45,7 +46,9 @@ impl Platform for Host {
         layer::period(layer::main_display()).unwrap_or(PERIOD)
     }
 
-    fn show(&mut self, _layer: &layer::Layer) -> Result<()> {
+    fn show(&mut self, layer: &layer::Layer) -> Result<()> {
+        layer::spin(SETTLE_IN.as_secs_f64());
+        layer.reveal();
         Ok(())
     }
 
@@ -62,7 +65,8 @@ impl Platform for Host {
     }
 
     fn decode(path: &Path) -> Result<RgbImage> {
-        objc2::rc::autoreleasepool(|_| picture::decode(path))
+        let ours = path.parent().is_some_and(|folder| folder.ends_with("out"));
+        objc2::rc::autoreleasepool(|_| if ours { picture::decode_exact(path) } else { picture::decode(path) })
     }
 
     fn frame<T>(work: impl FnOnce() -> T) -> T {
