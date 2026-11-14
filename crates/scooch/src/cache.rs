@@ -28,9 +28,26 @@ fn stir(value: u64) -> u64 {
     (value ^ (value >> 29)).wrapping_mul(MIX).rotate_left(27)
 }
 
+type Known = (PathBuf, u64, Option<SystemTime>, u64);
+
+static KNOWN: std::sync::Mutex<Vec<Known>> = std::sync::Mutex::new(Vec::new());
+
 pub fn key(source: &Path) -> Result<u64> {
+    let meta = fs::metadata(source).with_context(|| format!("Scooch could not read {}, so check that the picture is still there.", source.display()))?;
+    let stamp = (meta.len(), meta.modified().ok());
+    if let Some(found) = KNOWN.lock().ok().and_then(|known| known.iter().find(|(path, len, modified, _)| path == source && (*len, *modified) == stamp && modified.is_some()).map(|(_, _, _, key)| *key)) {
+        return Ok(found);
+    }
     let bytes = fs::read(source).with_context(|| format!("Scooch could not read {}, so check that the picture is still there.", source.display()))?;
-    Ok(digest(&bytes) ^ digest(concat!(env!("CARGO_PKG_VERSION"), "-srgb").as_bytes()).rotate_left(17))
+    let key = digest(&bytes) ^ digest(concat!(env!("CARGO_PKG_VERSION"), "-srgb").as_bytes()).rotate_left(17);
+    if let Ok(mut known) = KNOWN.lock() {
+        known.retain(|(path, _, _, _)| path != source);
+        if known.len() >= 8 {
+            known.remove(0);
+        }
+        known.push((source.to_path_buf(), stamp.0, stamp.1, key));
+    }
+    Ok(key)
 }
 
 pub fn entry(store: &Store, key: u64) -> PathBuf {

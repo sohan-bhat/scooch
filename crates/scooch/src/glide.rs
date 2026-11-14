@@ -656,13 +656,7 @@ impl Glider {
             self.flights.clear();
             self.early.clear();
             self.doomed = false;
-            let used = self.warmed.is_some();
-            self.drop_link();
-            if let (true, Some((picture, size, canvas))) = (used, self.last_warm.clone()) {
-                if self.send_warm(&picture, size, canvas.as_deref()).is_ok() {
-                    note(&mut self.said, "the helper stopped while in use, so a fresh one is warming for the next drag".into());
-                }
-            }
+            self.revive();
             return;
         }
         let early = std::mem::take(&mut self.early);
@@ -683,6 +677,16 @@ impl Glider {
         if self.flights.is_empty() {
             self.doomed = false;
             self.drop_link();
+        }
+    }
+
+    fn revive(&mut self) {
+        let used = self.warmed.is_some();
+        self.drop_link();
+        if let (true, Some((picture, size, canvas))) = (used, self.last_warm.clone()) {
+            if self.send_warm(&picture, size, canvas.as_deref()).is_ok() {
+                note(&mut self.said, "the helper stopped while in use, so a fresh one is warming for the next drag".into());
+            }
         }
     }
 
@@ -756,6 +760,8 @@ impl Glider {
         if self.doomed {
             self.doomed = false;
             self.drop_link();
+        } else if self.link.as_mut().is_some_and(|link| !link.alive()) {
+            self.revive();
         }
     }
 }
