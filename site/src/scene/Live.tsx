@@ -6,7 +6,7 @@ import { runtime } from '@/story/state';
 import { DESK_TOP } from './layout';
 import { ask, begin, end } from './drag';
 import { warm } from './engine';
-import { CHANNELS, hooks, live, liveId, obstacles, release, rimOf, things } from './touch';
+import { CHANNELS, hooks, live, liveId, obstacles, release, rimOf, rimOn, things } from './touch';
 import { hush } from './sound';
 
 const DESK = { left: -0.98, right: 0.98, back: -0.36, front: 0.42 };
@@ -355,10 +355,16 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
     live.sway.x += live.sway.vx * step;
     live.sway.z += live.sway.vz * step;
 
+    let lit = 0;
     for (const [id, root] of Object.entries(things)) {
       const target = live.hover === id && live.quiet ? 0.55 : 0;
-      for (const level of rimOf(root)) level.value += (target - level.value) * (1 - Math.exp(-step * 10));
+      for (const level of rimOf(root)) {
+        level.value += (target - level.value) * (1 - Math.exp(-step * 10));
+        if (level.value < 0.001) level.value = 0;
+        lit = Math.max(lit, level.value);
+      }
     }
+    rimOn.value = lit > 0 ? 1 : 0;
 
     const lamp = things.lamp;
     if (lamp) lamp.rotation.y = live.aim;
