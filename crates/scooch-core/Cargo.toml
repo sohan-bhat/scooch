@@ -8,9 +8,15 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff"] }
+image = { version = "0.25", default-features = false }
 rayon = "1.10"
+libm = { version = "0.2", optional = true }
 serde = { version = "1", features = ["derive"] }
+
+[features]
+default = ["codecs"]
+codecs = ["image/jpeg", "image/png", "image/webp", "image/bmp", "image/tiff"]
+portable = ["dep:libm"]
 
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in", "glsl-in"] }

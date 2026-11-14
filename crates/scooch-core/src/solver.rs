@@ -4,7 +4,7 @@ use crate::table::{self, Curve, STEPS};
 use crate::warp::{self, Pchip, Plan, BINS};
 use crate::{look, scenery, shape, Analysis, Options, Placement, Scene, TABLE};
 use rayon::prelude::*;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const ZOOM_STEP: f64 = 0.05;
 const MOST_ZOOM: f64 = 2.0;
@@ -744,8 +744,7 @@ fn nearest_pan(slack: f64, at: f64) -> usize {
     (0..p.len()).min_by(|a, b| (p[*a] - at).abs().total_cmp(&(p[*b] - at).abs())).unwrap_or(0)
 }
 
-pub fn solve_near(analysis: &Analysis, scene: &Scene, options: &Options, previous: &Placement, budget: Duration) -> Placement {
-    let started = Instant::now();
+pub fn solve_near(analysis: &Analysis, scene: &Scene, options: &Options, previous: &Placement, budget: Duration, elapsed: &dyn Fn() -> Duration) -> Placement {
     let Some(field) = Field::new(analysis, scene) else { return previous.clone() };
     let bare = footprints(scene);
     let settings = settings(options);
@@ -781,7 +780,7 @@ pub fn solve_near(analysis: &Analysis, scene: &Scene, options: &Options, previou
     let ok = usable(&field, &boxes, previous, most_lost);
     let mut best = Choice { placement: previous.clone(), cost: held_cost };
     for (_, frame) in ranked {
-        if started.elapsed().as_secs_f64() > budget.as_secs_f64() * NEAR_SHARE {
+        if elapsed().as_secs_f64() > budget.as_secs_f64() * NEAR_SHARE {
             break;
         }
         for c in choices(&field, &boxes, &frame, &settings) {

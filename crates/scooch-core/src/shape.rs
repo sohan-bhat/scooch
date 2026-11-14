@@ -191,7 +191,7 @@ pub fn field_into(g: &Ground, grid: &Grid, [x0, y0, x1, y1]: Area, d: &mut [f32]
             for i in i0..i1 {
                 let sdf = rounded_box(grid.center(i).0, py, r, grow);
                 if sdf < cut {
-                    let e = (-sdf / k).exp();
+                    let e = crate::math::exp(-sdf / k);
                     let sum = &mut sums[i - x0];
                     sum[0] += e;
                     if *anchored {
@@ -203,7 +203,7 @@ pub fn field_into(g: &Ground, grid: &Grid, [x0, y0, x1, y1]: Area, d: &mut [f32]
         for (i, sum) in (x0..x1).zip(&sums) {
             if sum[0] > 0.0 {
                 let (shift, meander) = wobble(grid.center(i).0, py, g.u, sum[1] / sum[0]);
-                row[i] = (-k * sum[0].ln() + shift).min(far);
+                row[i] = (-k * crate::math::ln(sum[0]) + shift).min(far);
                 bends[i] = meander;
             } else {
                 row[i] = far;
