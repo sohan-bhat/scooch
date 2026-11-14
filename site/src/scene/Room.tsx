@@ -26,6 +26,8 @@ uniform mat4 uBlindsMatrix;
 uniform vec3 uBlindsColor;
 uniform float uBlindsLevel;
 uniform float uFade;
+uniform sampler2D uCaption;
+uniform float uCaptionLevel;
 varying vec3 vWorld;
 #include <fog_pars_fragment>
 
@@ -53,6 +55,8 @@ void main() {
   float front = step(0.0, projected.w) * step(0.0, window.x) * step(window.x, 1.0) * step(0.0, window.y) * step(window.y, 1.0);
   float cone = 1.0 - smoothstep(0.34, 0.5, length(window - 0.5));
   float slats = texture2D(uBlinds, window).r;
+  vec4 caption = texture2D(uCaption, window);
+  slats = mix(slats, 1.0 - caption.r, caption.g * uCaptionLevel);
   color += uBlindsColor * uColor * plaster * slats * cone * front * uBlindsLevel * 3.2;
   gl_FragColor = vec4(color * uFade, 1.0);
   #include <fog_fragment>
@@ -74,6 +78,8 @@ export function useRoomMaterial(kind: 'wall' | 'floor', center: Vector2, blinds:
         uBlindsColor: { value: new Color() },
         uBlindsLevel: { value: 0 },
         uFade: { value: 1 },
+        uCaption: { value: null as Texture | null },
+        uCaptionLevel: { value: 0 },
       },
     ]);
     uniforms.uColor.value = tokenColor(kind === 'wall' ? 'room-3' : 'room-2');

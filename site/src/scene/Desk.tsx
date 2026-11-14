@@ -1,13 +1,14 @@
 import { useGLTF } from '@react-three/drei';
-import { useThree } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { Box3, Group, HalfFloatType, Mesh, MeshStandardMaterial, Object3D, Vector3, WebGLRenderTarget, type Texture, type WebGLRenderer } from 'three';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { asset } from '@/lib/base';
-import { runtime } from '@/story/state';
+import { runtime, story } from '@/story/state';
 import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
+import { labelProps } from './labels';
 
 export { BULB, DESK_TOP, LAMP, LAPTOP, TELEVISION } from './layout';
 
@@ -204,6 +205,8 @@ function Extras({ phone, onExtras }: { phone: boolean; onExtras: () => void }) {
     }
     return placed;
   }, scenes);
+  const labels = useMemo(() => labelProps(group), [group]);
+  useFrame(() => labels.update(story.typed));
 
   useLayoutEffect(() => {
     for (const child of group.children) child.visible = !phone || child.userData.phone;

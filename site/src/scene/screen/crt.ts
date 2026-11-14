@@ -1,4 +1,4 @@
-import { Color, ShaderMaterial, Vector2, Vector3 } from 'three';
+import { Color, ShaderMaterial, Vector2, Vector3, type Texture } from 'three';
 import { pictureBody, pictureHead, pictureUniforms, type PictureUniforms } from './picture';
 
 const vertex = `
@@ -31,6 +31,8 @@ uniform float uLampLevel;
 uniform vec3 uRim;
 uniform vec3 uGlass;
 uniform float uDim;
+uniform sampler2D uOsd;
+uniform float uOsdLevel;
 
 varying vec2 vUv;
 varying vec3 vWorld;
@@ -97,6 +99,8 @@ void main() {
   vec3 color = picture(pv);
   color = icons(color, pv, dx, dy);
   color = cursor(color, pv, dx, dy);
+  vec4 osd = texture2D(uOsd, pv);
+  color = mix(color, osd.rgb, osd.a * uOsdLevel);
   vec3 halo = pictureSoft(pv, 4.5);
   float bright = dot(halo, vec3(0.2126, 0.7152, 0.0722));
   color += halo * smoothstep(0.45, 0.95, bright) * 0.35;
@@ -161,6 +165,8 @@ export type CrtUniforms = PictureUniforms & {
   uRim: { value: Color };
   uGlass: { value: Color };
   uDim: { value: number };
+  uOsd: { value: Texture | null };
+  uOsdLevel: { value: number };
 };
 
 export function createCrtMaterial() {
@@ -178,6 +184,8 @@ export function createCrtMaterial() {
     uRim: { value: new Color() },
     uGlass: { value: new Color(0.012, 0.014, 0.014) },
     uDim: { value: 0 },
+    uOsd: { value: null },
+    uOsdLevel: { value: 0 },
   };
   const material = new ShaderMaterial({ name: 'scooch-crt', vertexShader: vertex, fragmentShader: fragment, uniforms });
   return { material, uniforms };

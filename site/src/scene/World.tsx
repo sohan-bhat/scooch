@@ -27,6 +27,8 @@ import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
+import { fontsReady, osdPainter, paintedTexture, wallPainter } from './captions';
+import { stickyNote } from './labels';
 import { BULB, DESK_TOP, Desk, LAMP, type Screens } from './Desk';
 import { useInside, type Stage } from './Inside';
 import { quality } from './quality';
@@ -111,6 +113,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const { camera, size, scene, gl } = useThree();
   const screens = useScreens(manifest);
   const blinds = useMemo(() => blindsTexture(), []);
+  const writing = useRef<((amount: number) => void) | null>(null);
+  const painted = useMemo(() => ({ osd: paintedTexture(1024, 768, osdPainter), wall: paintedTexture(1024, 1024, wallPainter) }), []);
   const blindsMatrix = useMemo(() => projector(), []);
   const [built, setBuilt] = useState<Built | null>(null);
   const [extrasIn, setExtrasIn] = useState(false);
@@ -284,6 +288,24 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     }
     wall.uniforms.uBlindsMatrix.value.copy(blindsMatrix);
     floor.uniforms.uBlindsMatrix.value.copy(blindsMatrix);
+    wall.uniforms.uCaption.value = painted.wall.texture;
+    screens.crt.uniforms.uOsd.value = painted.osd.texture;
+    void fontsReady().then(() => {
+      painted.osd.draw(1, true);
+      painted.wall.draw(1, true);
+    });
+    const tv = built.television;
+    const sticky = stickyNote({
+      center: tv.center,
+      normal: new Vector3(0, 0, 1).applyQuaternion(tv.quaternion),
+      up: new Vector3(0, 1, 0).applyQuaternion(tv.quaternion),
+      right: new Vector3(1, 0, 0).applyQuaternion(tv.quaternion),
+      width: tv.screen.width,
+      height: tv.screen.height,
+    });
+    writing.current = sticky.write;
+    const note = sticky.note;
+    scene.add(note);
     gl.shadowMap.autoUpdate = false;
     gl.shadowMap.needsUpdate = true;
     screens.crt.uniforms.uLamp.value.copy(bulbWorld);
@@ -311,8 +333,9 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     return () => {
       cancelled = true;
       cancelAnimationFrame(handle);
+      scene.remove(note);
     };
-  }, [built, scene, camera, targets, gl, screens, blinds, blindsMatrix, wall, floor, onReady]);
+  }, [built, scene, camera, targets, gl, screens, blinds, blindsMatrix, wall, floor, onReady, painted]);
 
   const shadowFrames = useRef(0);
   const shadowProps = useRef(false);
@@ -370,6 +393,9 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
 
     const tubeOn = Math.min(story.tubeOn, introTube);
     const crt = screens.crt.uniforms;
+    crt.uOsdLevel.value = story.osd;
+    writing.current?.(story.written);
+    wall.uniforms.uCaptionLevel.value = story.wall;
     crt.uTime.value = time;
     screens.main.render(gl, story.place);
     second.current?.render(gl, 0);
