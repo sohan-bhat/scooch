@@ -4,7 +4,10 @@ import type { SceneryInfo, Tables } from './screen/scenery';
 export type Live = {
   drop(icons: Float32Array): Promise<Tables>;
   drag(icons: Float32Array, held: number, budget: number): Promise<Tables | null>;
+  free(): Promise<void>;
 };
+
+const IDLE = 30000;
 
 async function rgb(url: string) {
   const response = await fetch(url);
@@ -32,6 +35,43 @@ async function unzip(buffer: ArrayBuffer) {
 }
 
 const started = new Map<string, Promise<Live>>();
+const warmed = new Map<string, Promise<unknown>>();
+let idle = 0;
+
+export function freeEngines() {
+  for (const pending of started.values()) void pending.then((remote) => remote.free()).catch(() => undefined);
+  started.clear();
+  warmed.clear();
+}
+
+function later() {
+  window.clearTimeout(idle);
+  idle = window.setTimeout(freeEngines, IDLE);
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) later();
+    else window.clearTimeout(idle);
+  });
+  const story = document.getElementById('story');
+  if (story) {
+    new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) window.clearTimeout(idle);
+      else later();
+    }).observe(story);
+  }
+}
+
+export function warm(info: SceneryInfo & { analysis?: { file: string } }, icons: Float32Array) {
+  let pending = warmed.get(info.folder);
+  if (!pending) {
+    pending = engineFor(info).then((remote) => remote.drop(icons));
+    warmed.set(info.folder, pending);
+    pending.catch(() => warmed.delete(info.folder));
+  }
+  return pending;
+}
 
 export function engineFor(info: SceneryInfo & { analysis?: { file: string } }) {
   let pending = started.get(info.folder);

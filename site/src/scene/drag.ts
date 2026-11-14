@@ -2,7 +2,7 @@ import type { WebGLRenderer } from 'three';
 import { engineFor } from './engine';
 import { disposeLook, lookFromTables, type Frame, type Look, type Tables } from './screen/scenery';
 
-const BUDGET = 15;
+const BUDGET = 5;
 
 export const held = {
   active: false,
@@ -18,6 +18,8 @@ export const held = {
   answers: 0,
   started: 0,
   spent: [] as number[],
+  lastAt: 0,
+  rate: 80,
 };
 
 export function begin(frame: Frame, place: number) {
@@ -30,6 +32,7 @@ export function begin(frame: Frame, place: number) {
   held.b = null;
   held.s = 1;
   held.next = null;
+  held.lastAt = 0;
 }
 
 export async function ask(rects: Float32Array, index: number, final: boolean) {
@@ -45,6 +48,10 @@ export async function ask(rects: Float32Array, index: number, final: boolean) {
     const engine = await engineFor(frame.scenery.info);
     const tables = final ? await engine.drop(rects) : await engine.drag(rects, index, BUDGET);
     if (tables && held.frame === frame) {
+      const now = performance.now();
+      const gap = held.lastAt ? now - held.lastAt : 35;
+      held.lastAt = now;
+      held.rate = Math.min(Math.max(3000 / Math.max(gap, 30), 10), 90);
       held.next = tables;
       held.answers += 1;
       held.spent.push(performance.now() - start);
@@ -63,7 +70,7 @@ export async function ask(rects: Float32Array, index: number, final: boolean) {
 export function step(delta: number) {
   if (!held.active) return;
   if (held.s < 1) {
-    held.s += (1 - held.s) * (1 - Math.exp(-delta * 22));
+    held.s += (1 - held.s) * (1 - Math.exp(-delta * held.rate));
     if (held.s > 0.985) held.s = 1;
   }
   if (held.s >= 1 && held.next) {
