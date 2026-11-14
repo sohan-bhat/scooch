@@ -111,7 +111,7 @@ export function buildTimeline(elements: Elements, manifest: DemoManifest): Built
 
   to(timeline, s, { sweep: 1 }, { sweep: 0 }, 132, 2.2, EASE.camera);
   to(timeline, s, { fly: 0 }, { fly: 1 }, 132.6, 8.4, EASE.camera);
-  to(timeline, s, { inside: 0.3 }, { inside: 0 }, 132.4, 5.2, EASE.camera);
+  to(timeline, s, { inside: 0.3 }, { inside: 0 }, 102.4, 5.2, EASE.camera);
   to(timeline, s, { city: 0 }, { city: 1 }, 134.4, 0.05, 'none');
   to(timeline, s, { tubeOff: 1 }, { tubeOff: 0 }, 134.4, 0.05, 'none');
   to(timeline, s, { tubeOn: 1 }, { tubeOn: 0 }, 134.4, 0.05, 'none');

@@ -143,7 +143,7 @@ export const dialPainter: Painter = (context, width, height) => {
   lines.forEach((line, index) => context.fillText(line, width / 2, height * 0.8 + (index - (lines.length - 1) / 2) * size * 1.3));
 };
 
-export const WALL = { left: -1.42, right: -0.16, bottom: 1.3, top: 1.62, z: -0.975 };
+export const WALL = { left: -0.45, right: 0.75, bottom: 1.84, top: 2.08, z: -0.975 };
 
 export function wallTexture(projector: Matrix4) {
   const size = 1024;
