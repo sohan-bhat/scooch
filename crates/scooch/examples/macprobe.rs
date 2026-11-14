@@ -1704,7 +1704,7 @@ mod probe {
         layer.commit();
         layer.reveal();
         p.gpu = Some(gpu.clone());
-        p.line(format!("- layer number {} at level {}, {}x{} pixels, adapter {}, device ready after {} ms", layer.number(), layer.level, width, height, gpu.name, device_ready.as_millis()));
+        p.line(format!("- layer number {} at level {}, {}x{} pixels, adapter {}, device ready after {} ms, render threads read visibility from the layer's own watcher {}", layer.number(), layer.level, width, height, gpu.name, device_ready.as_millis(), layer.watched()));
         let row = (height as f32 * 0.55) as usize;
         let samples: Vec<(usize, usize)> = [(0.1, 0.7), (0.5, 0.7), (0.7, 0.7), (0.9, 0.7), (0.55, 0.45), (0.85, 0.45)].iter().map(|(x, y)| ((width as f32 * x) as usize, (height as f32 * y) as usize)).collect();
         let set_after = opened.elapsed().as_secs_f64() * 1000.0 + cross * 1000.0 + 400.0;
@@ -1739,6 +1739,9 @@ mod probe {
         }
         let (renderer, run) = worker.join().map_err(|_| anyhow::anyhow!("the render thread panicked"))?;
         drop(renderer);
+        if !layer.watched() {
+            p.fail("the layer lost its watcher, so wgpu asks AppKit from the render thread");
+        }
         let traces = layer.traces();
         layer.close();
         let closed = Instant::now();
