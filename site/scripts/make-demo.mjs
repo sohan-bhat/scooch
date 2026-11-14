@@ -203,6 +203,11 @@ async function scenery(id, source, layouts) {
   const info = await canvas.toFile(join(target, bundle.canvas.file));
   bundle.canvas.width = info.width;
   bundle.canvas.height = info.height;
+  if (bundle.analysis && id === 'main') {
+    const file = `${bundle.analysis.file}.gz`;
+    await writeFile(join(target, file), gzipSync(await readFile(join(folder, bundle.analysis.file)), { level: 9 }));
+    bundle.analysis.file = file;
+  } else delete bundle.analysis;
   for (const state of bundle.states) {
     const tables = state.tables;
     for (const key of ['map', 'look', 'pad', 'paints', 'ramps']) await writeFile(join(target, tables[key].file), await readFile(join(folder, tables[key].file)));

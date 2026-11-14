@@ -1797,6 +1797,10 @@
   },
   "scenery": {
     "folder": "scenery/main",
+    "analysis": {
+      "file": "analysis.bin.gz",
+      "format": "scooch analysis v1"
+    },
     "canvas": {
       "file": "canvas.jpg",
       "height": 807,
@@ -3066,10 +3070,6 @@
       },
       "scenery": {
         "folder": "scenery/swans",
-        "analysis": {
-          "file": "analysis.bin",
-          "format": "scooch analysis v1"
-        },
         "canvas": {
           "file": "canvas.jpg",
           "height": 900,
@@ -4269,10 +4269,6 @@
       },
       "scenery": {
         "folder": "scenery/moon",
-        "analysis": {
-          "file": "analysis.bin",
-          "format": "scooch analysis v1"
-        },
         "canvas": {
           "file": "canvas.jpg",
           "height": 1067,
@@ -5472,10 +5468,6 @@
       },
       "scenery": {
         "folder": "scenery/city",
-        "analysis": {
-          "file": "analysis.bin",
-          "format": "scooch analysis v1"
-        },
         "canvas": {
           "file": "canvas.jpg",
           "height": 1067,
@@ -6675,10 +6667,6 @@
       },
       "scenery": {
         "folder": "scenery/wide",
-        "analysis": {
-          "file": "analysis.bin",
-          "format": "scooch analysis v1"
-        },
         "canvas": {
           "file": "canvas.jpg",
           "height": 900,
@@ -7878,10 +7866,6 @@
       },
       "scenery": {
         "folder": "scenery/tall",
-        "analysis": {
-          "file": "analysis.bin",
-          "format": "scooch analysis v1"
-        },
         "canvas": {
           "file": "canvas.jpg",
           "height": 900,

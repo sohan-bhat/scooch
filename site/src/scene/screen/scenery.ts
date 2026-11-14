@@ -274,6 +274,9 @@ export function createFrame(scenery: Scenery, scale = 1) {
     magFilter: LinearFilter,
   });
   let last = '';
+  let custom = false;
+  const keys = ['unit', 'ramp_low', 'ramp_high', 'reach', 'grain_amount', 'grain_scale', 'grain_floor', 'core_lift', 'core_drop', 'volume_lit', 'volume_dark', 'shadow_at', 'rim_at', 'belly_at'] as const;
+  const defaults = Object.fromEntries(keys.map((key) => [key, uniforms[key].value]));
 
   const bind = (suffix: 'a' | 'b', look: Look) => {
     uniforms[`map_${suffix}`].value = look.map;
@@ -311,6 +314,10 @@ export function createFrame(scenery: Scenery, scale = 1) {
       return pending;
     },
     render(gl: WebGLRenderer, place: number) {
+      if (custom) {
+        custom = false;
+        for (const key of keys) (uniforms[key] as { value: unknown }).value = defaults[key];
+      }
       const { from, to, s } = select(place);
       const key = `${from}:${to}:${s.toFixed(4)}:${scenery.states.length}`;
       if (key === last) return false;
@@ -324,6 +331,33 @@ export function createFrame(scenery: Scenery, scale = 1) {
       gl.setRenderTarget(previous);
       return true;
     },
+    renderLooks(gl: WebGLRenderer, a: Look, b: Look, s: number, constants: Float32Array | null) {
+      last = '';
+      bind('a', a);
+      bind('b', b);
+      uniforms.s.value = s;
+      if (constants) {
+        custom = true;
+        uniforms.unit.value = constants[7];
+        uniforms.ramp_low.value = constants[8];
+        uniforms.ramp_high.value = constants[9];
+        uniforms.reach.value = constants[10];
+        uniforms.grain_amount.value = constants[11];
+        uniforms.grain_scale.value = constants[12];
+        uniforms.grain_floor.value = constants[13];
+        uniforms.core_lift.value = constants[15];
+        uniforms.core_drop.value = constants[16];
+        uniforms.volume_lit.value = constants[17];
+        uniforms.volume_dark.value = constants[18];
+        uniforms.shadow_at.value = [constants[20], constants[21]];
+        uniforms.rim_at.value = [constants[22], constants[23]];
+        uniforms.belly_at.value = [constants[24], constants[25]];
+      }
+      const previous = gl.getRenderTarget();
+      gl.setRenderTarget(target);
+      gl.render(scene, camera);
+      gl.setRenderTarget(previous);
+    },
     states: scenery.states,
     scenery,
     dispose() {
@@ -335,3 +369,45 @@ export function createFrame(scenery: Scenery, scale = 1) {
 }
 
 export type Frame = ReturnType<typeof createFrame>;
+
+export type Tables = {
+  width: number;
+  height: number;
+  gridWidth: number;
+  gridHeight: number;
+  paintWidth: number;
+  paintHeight: number;
+  mapWidth: number;
+  canvasFits: boolean;
+  map: Float32Array;
+  field: Uint16Array;
+  look: Uint8Array;
+  pad: Uint8Array;
+  paints: Uint8Array;
+  ramps: Uint8Array;
+  constants: Float32Array;
+};
+
+export function lookFromTables(tables: Tables): Look {
+  const rgba = (bytes: Uint8Array, width: number, height: number, srgb: boolean) => {
+    const texture = data(new DataTexture(bytes, width, height, RGBAFormat, UnsignedByteType), LinearFilter);
+    texture.colorSpace = srgb ? SRGBColorSpace : NoColorSpace;
+    return texture;
+  };
+  const paints = data(new DataArrayTexture(tables.paints, tables.paintWidth, tables.paintHeight, 8), LinearFilter);
+  paints.format = RGBAFormat;
+  paints.type = UnsignedByteType;
+  paints.colorSpace = SRGBColorSpace;
+  return {
+    map: data(new DataTexture(tables.map, tables.mapWidth, 2, RedFormat, FloatType), NearestFilter),
+    field: data(new DataTexture(tables.field, tables.gridWidth, tables.gridHeight, RedFormat, HalfFloatType), LinearFilter),
+    look: rgba(tables.look, tables.gridWidth, tables.gridHeight, false),
+    pad: rgba(tables.pad, tables.gridWidth, tables.gridHeight, true),
+    paints,
+    ramps: rgba(tables.ramps, tables.ramps.length / 8, 2, false),
+  };
+}
+
+export function disposeLook(look: Look) {
+  for (const texture of Object.values(look)) texture.dispose();
+}

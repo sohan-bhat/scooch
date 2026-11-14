@@ -9,7 +9,8 @@ export default defineConfig({
   base: '/scooch/',
   appType: 'mpa',
   plugins: [react(), tailwindcss()],
-  resolve: { alias: { '@': resolve(root, 'src') } },
+  resolve: { alias: { '@engine': resolve(root, '../crates/scooch-web/pkg'), '@': resolve(root, 'src') } },
+  worker: { format: 'es' },
   server: { port: 5179, strictPort: true },
   preview: { port: 4173, strictPort: true },
   build: {
