@@ -3537,6 +3537,13 @@ mod probe {
         automation_rects(&automation, view.list).unwrap_or_default().into_iter().filter(|(seen, _)| seen != moving).map(|(_, rect)| Rect { x: rect.x - screen.frame.x, y: rect.y - screen.frame.y, ..rect }).collect()
     }
 
+    fn icon_spot(name: &str, folder: bool) -> Option<(f32, f32)> {
+        let view = shell::view().ok()?;
+        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.ok()?;
+        let shown = shown_name(name, folder);
+        automation_rects(&automation, view.list).ok()?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| (rect.x + rect.w / 2.0, rect.y))
+    }
+
     fn drag_icon(name: &str, folder: bool, to: POINT) -> bool {
         let Ok(view) = shell::view() else { return false };
         let automation: ::windows::core::Result<IUIAutomation> = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) };
@@ -3652,8 +3659,9 @@ mod probe {
         let mut setup = None;
         for (step, target) in [(1, lower), (2, aside)] {
             let calm = quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
+            let from = icon_spot(name, folder);
             let watched = watch_change(&log, &screen, || drag_icon(name, folder, target), false);
-            p.line(format!("- setup drag {step} to {},{} after a quiet log {calm}: new wallpaper {}, log {:?}", target.x, target.y, watched.new != watched.old, watched.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
+            p.line(format!("- setup drag {step} from {from:?} to {},{} after a quiet log {calm}, icon now at {:?}: new wallpaper {}, log {:?}", target.x, target.y, icon_spot(name, folder), watched.new != watched.old, watched.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
             setup = Some(watched);
         }
         let setup = setup.context("no setup drag")?;
@@ -3669,7 +3677,9 @@ mod probe {
         let old_tables = desktop.wallpaper(&screen).ok().flatten().and_then(|old| tables_file(&p.home, &old));
         park_cursor();
         let before = settle(area, Duration::from_secs(3))?;
+        let from = icon_spot(name, folder);
         let watched = watch_change(&log, &screen, || drag_icon(name, folder, centre), true);
+        p.line(format!("- the timed drag from {from:?} to {},{}, icon now at {:?}", centre.x, centre.y, icon_spot(name, folder)));
         let earlier_ready = logged(&setup, " glide ready");
         let given = Judged { source: &source, old_tables: old_tables.as_deref(), before: &before, still_icons: &still_icons, earlier_ready };
         let good = judge_daemon_glide(p, &watched, &screen, &given, "glide on, a real drag onto the subject", Some("daemon-glide-strip"));
