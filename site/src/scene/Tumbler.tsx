@@ -8,7 +8,7 @@ import { runtime, story } from '@/story/state';
 import { STREET } from './Blinds';
 import { DESK_TOP } from './layout';
 import { quality } from './quality';
-import { live, makeLive, things } from './touch';
+import { live, makeLive, rimmed, things } from './touch';
 
 const url = asset('models/tumbler.glb');
 const HOME = { x: 0.235, z: 0.15 };
@@ -35,30 +35,25 @@ function stripeTexture() {
   return texture;
 }
 
-function glassMaterial() {
-  const material = new MeshStandardMaterial({ color: '#e7eef0', transparent: true, opacity: 1, roughness: 0.2, metalness: 0, depthWrite: false });
-  material.onBeforeCompile = (shader) => {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <opaque_fragment>',
-      'float edge = pow(1.0 - abs(dot(normal, normalize(vViewPosition))), 2.2);\ndiffuseColor.a = mix(0.05, 0.5, edge);\noutgoingLight = min(outgoingLight + vec3(0.62, 0.66, 0.68) * edge * 0.09, vec3(0.5));\n#include <opaque_fragment>',
-    );
-  };
-  material.customProgramCacheKey = () => 'tumbler-glass';
-  return material;
-}
+const wrapped = ShaderChunk.lights_physical_pars_fragment.replace(
+  'reflectedLight.directDiffuse += irradiance * diffuseBRDF * ( 1.0 - F );',
+  'reflectedLight.directDiffuse += mix( irradiance, saturate( ( dot( geometryNormal, directLight.direction ) + 0.75 ) / 1.75 ) * directLight.color, uJuice ) * diffuseBRDF * ( 1.0 - F );',
+);
 
-function juiceMaterial() {
-  const material = new MeshStandardMaterial({ color: tokenColor('lamp'), roughness: 0.24, metalness: 0 });
+const edge =
+  'if ( uJuice < 0.5 ) {\nfloat edge = pow(1.0 - abs(dot(normal, normalize(vViewPosition))), 2.2);\ndiffuseColor.a = mix(0.05, 0.5, edge);\noutgoingLight = min(outgoingLight + vec3(0.62, 0.66, 0.68) * edge * 0.09, vec3(0.5));\n}\n#include <opaque_fragment>';
+
+function tumblerMaterial(juice: boolean) {
+  const material = juice
+    ? new MeshStandardMaterial({ color: tokenColor('lamp'), transparent: true, opacity: 1, roughness: 0.24, metalness: 0 })
+    : new MeshStandardMaterial({ color: '#e7eef0', transparent: true, opacity: 1, roughness: 0.2, metalness: 0, depthWrite: false });
+  const kind = { value: juice ? 1 : 0 };
   material.onBeforeCompile = (shader) => {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <lights_physical_pars_fragment>',
-      ShaderChunk.lights_physical_pars_fragment.replace(
-        'reflectedLight.directDiffuse += irradiance * diffuseBRDF * ( 1.0 - F );',
-        'reflectedLight.directDiffuse += saturate( ( dot( geometryNormal, directLight.direction ) + 0.75 ) / 1.75 ) * directLight.color * diffuseBRDF * ( 1.0 - F );',
-      ),
-    );
+    shader.uniforms.uJuice = kind;
+    shader.fragmentShader = `uniform float uJuice;\n${shader.fragmentShader.replace('#include <lights_physical_pars_fragment>', wrapped).replace('#include <opaque_fragment>', edge)}`;
   };
-  material.customProgramCacheKey = () => 'tumbler-juice';
+  material.customProgramCacheKey = () => 'tumbler';
+  rimmed(material);
   return material;
 }
 
@@ -134,11 +129,11 @@ export function Tumbler() {
     const holder = new Group();
     holder.name = 'tumbler';
     holder.position.set(HOME.x, DESK_TOP, HOME.z);
-    const glass = new Mesh(source.geometry, glassMaterial());
+    const glass = new Mesh(source.geometry, tumblerMaterial(false));
     source.updateWorldMatrix(true, false);
     glass.applyMatrix4(source.matrixWorld);
     glass.renderOrder = 2;
-    const juice = new Mesh(juiceShape(extras.inner, extras.floor, 1), juiceMaterial());
+    const juice = new Mesh(juiceShape(extras.inner, extras.floor, 1), tumblerMaterial(true));
     juice.name = 'juice';
     juice.castShadow = true;
     juice.receiveShadow = true;
