@@ -81,7 +81,7 @@ export function Story({ live, beats, canvas, still, section, onReady }: Props) {
         <picture ref={still} className="stage-still pointer-events-none absolute inset-0" aria-hidden>
           <source media="(max-width: 767px), (orientation: portrait)" srcSet={asset('stills/hero-phone.webp')} width={1440} height={1694} />
           <source media="(max-aspect-ratio: 16/10)" srcSet={asset('stills/hero-square.webp')} width={1920} height={1917} />
-          <img src={asset('stills/hero-desktop.webp')} alt="" width={3456} height={1350} fetchPriority="high" decoding="sync" />
+          <img src={asset('stills/hero-desktop.webp')} alt="" width={3456} height={1350} fetchPriority="high" decoding="sync" {...{ elementtiming: 'hero' }} />
         </picture>
         <Juice />
         <div aria-hidden className="stage-scrim pointer-events-none absolute inset-x-0 bottom-0 h-[46svh] bg-gradient-to-t from-room via-room/85 to-transparent wide:h-[16svh] wide:via-room/40" />
