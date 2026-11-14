@@ -276,7 +276,7 @@ fn reason_of(error: &anyhow::Error) -> &'static str {
     let text = format!("{error:#}");
     if text.contains("software renderer") {
         "software adapter"
-    } else if text.contains("never reported the live layer as visible") {
+    } else if text.contains("never reported the live layer as visible") || text.contains("cover the whole desktop") {
         "hidden"
     } else if text.contains("no wallpaper window below") {
         "no room"

@@ -2360,7 +2360,9 @@ mod probe {
         let rate = span.map(|span| dragged.seen.iter().filter(|seen| glide_at.is_some_and(|at| seen.at >= at) && seen.at <= glide_at.unwrap_or(0.0) + span).count() as f64 / span.max(0.001));
         let expected = rate.map(|rate| rate * 0.45 * 0.64);
         let inked = dragged.seen.iter().map(|seen| seen.inked).fold(0.0, f32::max);
-        let handed = settled.and_then(|settled| dragged.seen.iter().filter(|seen| seen.at > settled && closed.is_none_or(|closed| seen.at <= closed + 1.0)).max_by_key(|seen| seen.step.worst));
+        let handed = settled.and_then(|settled| dragged.seen.windows(2).filter(|pair| pair[0].at >= settled && closed.is_none_or(|closed| pair[1].at <= closed + 1.0)).map(|pair| &pair[1]).max_by_key(|seen| seen.step.worst));
+        let fade = settled.and_then(|settled| dragged.seen.windows(2).find(|pair| pair[0].at < settled && pair[1].at >= settled).map(|pair| pair[1].step));
+        let layered = settled.zip(closed).map(|(settled, closed)| dragged.seen.iter().filter(|seen| seen.at >= settled && seen.at < closed).count());
         let hand_over = settled.map(|_| handed.map_or(0, |seen| seen.step.worst));
         let hand_spot = handed.map(|seen| format!("{} ms after the drop at pixel {},{} from {:?} to {:?}", ((seen.at - dragged.dropped) * 1000.0).round(), seen.step.x, seen.step.y, seen.step.before, seen.step.after));
         let at = |time: Option<f64>| time.map(|time| ((time - dragged.dropped) * 1000.0).round());
@@ -2375,7 +2377,8 @@ mod probe {
         ));
         p.line(format!("  - captures a second during the glide {:?}, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95", rate.map(|rate| rate.round()), expected.map(|value| value.round())));
         p.line(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(closed)));
-        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
+        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, captures of the settled layer before close {layered:?}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
+        p.line(format!("  - the change across the settle fade from the glide's last frame to the still, which ends before settled, {:?} of 255 at pixel {:?} from {:?} to {:?}", fade.map(|step| step.worst), fade.map(|step| (step.x, step.y)), fade.map(|step| step.before), fade.map(|step| step.after)));
         p.line(format!("  - daemon log {:?}", dragged.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         if let Some(name) = evidence {
             let folder = p.out.join(name);

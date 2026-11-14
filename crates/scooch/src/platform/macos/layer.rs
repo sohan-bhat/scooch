@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 
 pub const NO_ROOM: &str = "macOS shows no wallpaper window below and icon window above the desktop level on this screen, so Scooch keeps the plain swap.";
 pub const HIDDEN: &str = "macOS never reported the live layer as visible, so Scooch keeps the plain swap.";
+pub const COVERED: &str = "Windows cover the whole desktop on this screen, so Scooch keeps the plain swap.";
+const APP_LEVELS: std::ops::Range<i64> = 0..20;
+const COVER_GRID: usize = 24;
 const SHOW_WAIT: Duration = Duration::from_millis(400);
 
 const ON_SCREEN: u32 = 1;
@@ -35,6 +38,7 @@ pub struct Seen {
     pub name: String,
     pub bounds: Rect,
     pub on_screen: bool,
+    pub alpha: f32,
 }
 
 #[repr(C)]
@@ -237,6 +241,7 @@ fn read(list: Ref, on_screen: bool) -> Vec<Seen> {
                 name: entry.get("kCGWindowName").and_then(Plist::text).unwrap_or_default().to_string(),
                 bounds: Rect { x: edge("X"), y: edge("Y"), w: edge("Width"), h: edge("Height") },
                 on_screen: on_screen || entry.get("kCGWindowIsOnscreen").and_then(Plist::number).is_some_and(|value| value != 0.0),
+                alpha: number(entry, "kCGWindowAlpha") as f32,
             }
         })
         .collect()
@@ -256,6 +261,20 @@ fn overlaps(a: &Rect, b: &Rect) -> bool {
 
 pub fn is_picture(window: &Seen) -> bool {
     window.owner == "Dock" || window.owner.contains("Wallpaper") || window.name.starts_with("Wallpaper")
+}
+
+pub fn covered(seen: &[Seen], screen: &Rect, ours: i64) -> bool {
+    let opaque: Vec<&Rect> = seen.iter().filter(|window| window.pid != ours && APP_LEVELS.contains(&window.layer) && window.alpha >= 1.0 && overlaps(&window.bounds, screen)).map(|window| &window.bounds).collect();
+    if opaque.is_empty() || screen.w <= 0.0 || screen.h <= 0.0 {
+        return false;
+    }
+    let step = |index: usize, length: f32| (index as f32 + 0.5) / COVER_GRID as f32 * length;
+    (0..COVER_GRID).all(|row| {
+        (0..COVER_GRID).all(|column| {
+            let (x, y) = (screen.x + step(column, screen.w), screen.y + step(row, screen.h));
+            opaque.iter().any(|window| x >= window.x && x < window.x + window.w && y >= window.y && y < window.y + window.h)
+        })
+    })
 }
 
 pub fn choose(seen: &[Seen], screen: &Rect, desktop: i64, ours: i64) -> Option<i64> {
@@ -372,7 +391,12 @@ pub fn open(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
 fn build(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
     let (display, number) = super::picture::screen_for(marker, &screen.id)?;
     let (desktop, _) = levels();
-    let level = choose(&listing(), &screen.frame, desktop, std::process::id() as i64).context(NO_ROOM)?;
+    let seen = listing();
+    let ours = std::process::id() as i64;
+    if covered(&seen, &screen.frame, ours) {
+        anyhow::bail!(COVERED);
+    }
+    let level = choose(&seen, &screen.frame, desktop, ours).context(NO_ROOM)?;
     let frame = display.frame();
     let scale = display.backingScaleFactor();
     let local = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
@@ -479,7 +503,25 @@ mod tests {
     use super::*;
 
     fn window(owner: &str, layer: i64, name: &str) -> Seen {
-        Seen { owner: owner.into(), pid: 7, layer, number: 1, name: name.into(), bounds: Rect { x: 0.0, y: 0.0, w: 1440.0, h: 900.0 }, on_screen: true }
+        Seen { owner: owner.into(), pid: 7, layer, number: 1, name: name.into(), bounds: Rect { x: 0.0, y: 0.0, w: 1440.0, h: 900.0 }, on_screen: true, alpha: 1.0 }
+    }
+
+    #[test]
+    fn opaque_app_windows_over_the_whole_screen_cover_the_desktop() {
+        let whole = window("Safari", 0, "");
+        assert!(covered(std::slice::from_ref(&whole), &SCREEN, 99));
+        let left = Seen { bounds: Rect { x: 0.0, y: 0.0, w: 720.0, h: 900.0 }, ..whole.clone() };
+        let right = Seen { bounds: Rect { x: 720.0, y: 0.0, w: 720.0, h: 900.0 }, ..whole.clone() };
+        assert!(covered(&[left.clone(), right], &SCREEN, 99));
+        assert!(!covered(std::slice::from_ref(&left), &SCREEN, 99));
+        let below_menu = Seen { bounds: Rect { x: 0.0, y: 25.0, w: 1440.0, h: 875.0 }, ..whole.clone() };
+        assert!(!covered(&[below_menu], &SCREEN, 99));
+        assert!(!covered(&[Seen { alpha: 0.9, ..whole.clone() }], &SCREEN, 99));
+        assert!(!covered(&[Seen { layer: 20, ..whole.clone() }], &SCREEN, 99));
+        assert!(!covered(&[Seen { layer: -2147483623, ..whole.clone() }], &SCREEN, 99));
+        assert!(!covered(&[Seen { pid: 99, ..whole.clone() }], &SCREEN, 99));
+        let elsewhere = Seen { bounds: Rect { x: 1440.0, y: 0.0, w: 1920.0, h: 1080.0 }, ..whole };
+        assert!(!covered(&[elsewhere], &SCREEN, 99));
     }
 
     const DESKTOP: i64 = -2147483623;
