@@ -8,13 +8,13 @@ import { ask, begin, end } from './drag';
 import { warm } from './engine';
 import { CHANNELS, hooks, live, liveId, obstacles, release, rimOf, things } from './touch';
 import { hush } from './sound';
-import { quiet } from '@/lib/idle';
-import { acceleratedRaycast, computeBoundsTree } from 'three-mesh-bvh';
+import { bounds } from './bounds';
 
 const DESK = { left: -0.98, right: 0.98, back: -0.36, front: 0.42 };
 const QUIET = 250;
 const HINT = 'scooch:hint';
 
+const scan = { at: 0 };
 const hint = { element: null as HTMLElement | null, done: false, shownAt: 0, readyAt: 0, point: new Vector3() };
 
 function hinted() {
@@ -52,24 +52,6 @@ function screenPoint(mesh: Object3D, point: Vector3) {
   const u = (local.x - hooks.origin.x) / hooks.extent.x;
   const v = 1 - (local.y - hooks.origin.y) / hooks.extent.y;
   return barrel((u - 0.5) / 0.94 + 0.5, (v - 0.5) / 0.93 + 0.5);
-}
-
-const bounded = new WeakSet<Object3D>();
-
-function bounds(root: Object3D) {
-  if (bounded.has(root)) return;
-  bounded.add(root);
-  const meshes: Mesh[] = [];
-  root.traverse((child) => {
-    if ((child as Mesh).isMesh) meshes.push(child as Mesh);
-  });
-  void (async () => {
-    for (const mesh of meshes) {
-      await quiet();
-      if (!mesh.geometry.boundsTree) computeBoundsTree.call(mesh.geometry);
-      mesh.raycast = acceleratedRaycast;
-    }
-  })();
 }
 
 function rects(index: number, x: number, y: number) {
@@ -359,6 +341,10 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
 
   useFrame(({ camera }, delta) => {
     const now = performance.now();
+    if (runtime.painted && now - scan.at > 1000) {
+      scan.at = now;
+      for (const root of Object.values(things)) if (root) bounds(root);
+    }
     const quiet = now - live.lastScroll > QUIET;
     if (live.quiet && !quiet) {
       release(now);
