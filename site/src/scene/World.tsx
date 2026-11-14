@@ -406,6 +406,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       frames += 1;
       if (frames === 1) {
         performance.mark('scooch:frame');
+        quality.warmFast?.();
         loadStage(0.95);
       }
       if (frames < 2) handle = requestAnimationFrame(wait);
@@ -415,7 +416,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     loadStage(0.15);
     environmentReady(scene)
       .then(() => loadStage(0.35))
-      .then(() => precompile(gl, scene, camera, quality.composer, [screens.main.compile(gl)]))
+      .then(() => precompile(gl, scene, camera, [quality.composer, quality.fastComposer], [screens.main.compile(gl)]))
       .catch(() => undefined)
       .then(() => {
         if (cancelled) return;

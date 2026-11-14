@@ -84,6 +84,7 @@ class Quality {
   blendAt = -1e9;
   lastFast: Texture | null = null;
   fastReady = false;
+  warmFast: (() => void) | null = null;
   moving = false;
   period = 1000 / 60;
   allowed = false;

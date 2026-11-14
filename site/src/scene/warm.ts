@@ -54,10 +54,11 @@ function stage(materials: Iterable<Material>, triangle: BufferGeometry) {
   return scene;
 }
 
-export function precompile(gl: WebGLRenderer, scene: Scene, camera: Camera, composer: { passes?: Pass[] } | null, extra: Promise<unknown>[] = []) {
+export function precompile(gl: WebGLRenderer, scene: Scene, camera: Camera, chains: ({ passes?: Pass[] } | null)[], extra: Promise<unknown>[] = []) {
   const materials = new Set<Material>();
-  if (composer) collect(composer, materials, new Set(), 0);
-  const final = (composer?.passes ?? []).filter((pass) => pass.renderToScreen && pass.fullscreenMaterial).map((pass) => pass.fullscreenMaterial as Material);
+  const seen = new Set<unknown>();
+  for (const chain of chains) if (chain) collect(chain, materials, seen, 0);
+  const final = chains.flatMap((chain) => (chain?.passes ?? []).filter((pass) => pass.renderToScreen && pass.fullscreenMaterial).map((pass) => pass.fullscreenMaterial as Material));
   const triangle = new BufferGeometry();
   triangle.setAttribute('position', new Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
   triangle.setAttribute('uv', new Float32BufferAttribute([0, 0, 2, 0, 0, 2], 2));

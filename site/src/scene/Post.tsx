@@ -134,6 +134,14 @@ export function Post({ phone }: { phone: boolean }) {
       if (!value) return;
       const render = value.render.bind(value);
       fastRender.current = render;
+      quality.warmFast = () => {
+        if (quality.fastReady || !value.passes.length) return;
+        const last = value.passes[value.passes.length - 1];
+        last.renderToScreen = false;
+        render(0);
+        last.renderToScreen = true;
+        quality.fastReady = true;
+      };
       value.render = (delta?: number) => {
         if (quality.chain !== 'fast') return;
         const last = value.passes[value.passes.length - 1];
@@ -159,15 +167,16 @@ export function Post({ phone }: { phone: boolean }) {
     let timer = 0;
     const warm = async () => {
       if (stopped) return;
+      if (quality.fastReady) return;
       if (!(runtime.shown && quality.fastComposer && fastRender.current)) {
         timer = window.setTimeout(() => void warm(), 250);
         return;
       }
       await quiet();
       if (stopped) return;
-      await precompile(gl, scene, camera, quality.fastComposer);
+      await precompile(gl, scene, camera, [quality.fastComposer]);
       await quiet();
-      if (stopped || !fastRender.current) return;
+      if (stopped || !fastRender.current || quality.fastReady) return;
       const last = quality.fastComposer.passes[quality.fastComposer.passes.length - 1];
       if (last) last.renderToScreen = false;
       fastRender.current(0);
