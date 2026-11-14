@@ -6,6 +6,7 @@ declare module '@engine/engine.js' {
     screen(width: number, height: number): Promise<null>;
     drop(icons: Float32Array): Promise<Tables>;
     drag(icons: Float32Array, held: number, budget: number): Promise<Tables | null>;
+    memory(): Promise<number>;
     free(): Promise<void>;
   }
 }
