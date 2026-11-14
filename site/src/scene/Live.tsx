@@ -6,7 +6,7 @@ import { runtime } from '@/story/state';
 import { DESK_TOP } from './layout';
 import { ask, begin, end } from './drag';
 import { warm } from './engine';
-import { hooks, live, liveId, obstacles, release, rimOf, things } from './touch';
+import { CHANNELS, hooks, live, liveId, obstacles, release, rimOf, things } from './touch';
 import { hush } from './sound';
 
 const DESK = { left: -0.98, right: 0.98, back: -0.36, front: 0.42 };
@@ -124,7 +124,13 @@ export function actions(now = performance.now()) {
     },
     channel() {
       if (!live.power) return;
-      live.channel = (Math.max(live.channel, 0) + 1) % 4;
+      const busy = hooks.showing();
+      let next = live.channel >= 0 ? live.channel : CHANNELS.indexOf(hooks.current());
+      for (let step = 0; step < CHANNELS.length; step++) {
+        next = (next + 1) % CHANNELS.length;
+        if (!busy.includes(CHANNELS[next])) break;
+      }
+      live.channel = next;
       live.noiseAt = now;
     },
     power() {

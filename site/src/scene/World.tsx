@@ -33,7 +33,7 @@ import { stickyNote } from './labels';
 import { Live } from './Live';
 import { Tumbler } from './Tumbler';
 import { draw, held, step } from './drag';
-import { hooks, live } from './touch';
+import { CHANNELS, hooks, live } from './touch';
 import { play } from './sound';
 import { BULB, DESK_TOP, Desk, LAMP, type Console, type Screens } from './Desk';
 import { createCrtMaterial } from './screen/crt';
@@ -209,6 +209,15 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   );
   const pads = useMemo(() => (built ? { laptop: built.laptop, console: consoleGlass } : null), [built, consoleGlass]);
   const gallery = useRef<Record<string, Frame>>({});
+  useEffect(() => {
+    hooks.showing = () => {
+      const busy: string[] = [];
+      if (second.current && screens.lcd.uniforms.uPower.value > 0.05) busy.push('swans');
+      if (consoleScreen.uniforms.uOn.value > 0.05) busy.push('moon');
+      return busy;
+    };
+    hooks.current = () => (story.city > 0.5 && gallery.current.city ? 'city' : 'main');
+  }, [screens, consoleScreen]);
   const inside = useInside(manifest, screens.main, screens.saliency, screens.atlas, stage, gallery, pads);
   const [insideIn, setInsideIn] = useState(runtime.still >= 0);
   const second = useRef<Frame | null>(null);
@@ -490,8 +499,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     crt.uOn.value = live.power ? Math.min(tubeOn, Math.min(Math.max((now - live.onAt) / 1100, 0), 1)) : tubeOn;
     crt.uOff.value = live.power ? story.tubeOff : Math.max(story.tubeOff, Math.min(Math.max((now - live.offAt) / 700, 0), 1));
     crt.uStatic.value = Math.max(0, 1 - (now - live.noiseAt) / 380);
-    const channels = ['main', 'swans', 'moon', 'city'];
-    const tuned = live.channel >= 0 ? channels[live.channel] : '';
+    const tuned = live.channel >= 0 ? CHANNELS[live.channel] : '';
     const tunedFrame = tuned === 'main' ? screens.main : tuned ? gallery.current[tuned] : null;
     if (tunedFrame && crt.uFrame.value !== tunedFrame.texture) crt.uFrame.value = tunedFrame.texture;
     const tunedIcons = tuned && tuned !== 'main' ? manifest.pictures.find((picture) => picture.id === tuned)?.icons : null;

@@ -4,7 +4,11 @@ import type { Frame } from './screen/scenery';
 export const things: Record<string, Object3D | undefined> = {};
 export const obstacles: Object3D[] = [];
 
+export const CHANNELS = ['main', 'swans', 'moon', 'city'];
+
 export const hooks = {
+  showing: () => [] as string[],
+  current: () => 'main',
   frame: null as Frame | null,
   icons: null as Vector4[] | null,
   origin: null as Vector2 | null,
