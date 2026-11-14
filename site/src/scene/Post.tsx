@@ -7,7 +7,7 @@ import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEff
 import { quiet } from '@/lib/idle';
 import { runtime } from '@/story/state';
 import { quality, type Toggle } from './quality';
-import { live } from './touch';
+import { animating, live } from './touch';
 import { precompile } from './warm';
 
 type Target = { isWebGLMultipleRenderTargets?: boolean; textures?: Texture[] & { mipmaps?: unknown[] } };
@@ -56,7 +56,7 @@ function Effects({ full }: { full: boolean }) {
   );
 }
 
-const motion = { until: 0, restAt: 0 };
+const motion = { until: 0, was: false };
 
 export function Post({ phone }: { phone: boolean }) {
   const gl = useThree((state) => state.gl);
@@ -152,7 +152,7 @@ export function Post({ phone }: { phone: boolean }) {
     let timer = 0;
     const warm = async () => {
       if (stopped) return;
-      if (!(runtime.props && runtime.painted && runtime.inside && quality.fastComposer && fastRender.current)) {
+      if (!(runtime.shown && quality.fastComposer && fastRender.current)) {
         timer = window.setTimeout(() => void warm(), 250);
         return;
       }
@@ -173,13 +173,19 @@ export function Post({ phone }: { phone: boolean }) {
     };
   }, [fast, gl, scene, camera, copy]);
 
-  useFrame(() => {
+  useFrame((_, delta) => {
     const now = performance.now();
-    const moving = now < motion.until || live.pressing;
-    if (moving) motion.restAt = now;
-    const want = fast && quality.needsFast && runtime.shown && quality.fastReady && (moving || now - motion.restAt < SHARP_AFTER) ? 'fast' : 'sharp';
+    if (live.pressing || animating(now)) motion.until = Math.max(motion.until, now + SHARP_AFTER);
+    const moving = now < motion.until;
+    const before = motion.was;
+    if (moving && !before) quality.motionSharp = quality.allowed;
+    motion.was = moving;
+    quality.moving = moving;
+    if (before && moving && quality.motionSharp && quality.chain === 'sharp' && now - quality.switchAt > 100 && delta * 1000 > quality.period * 1.5) quality.miss();
+    const want = fast && runtime.shown && quality.fastReady && moving && !quality.motionSharp ? 'fast' : 'sharp';
     if (want === quality.chain) return;
     if (want === 'sharp') quality.blendAt = now;
+    quality.switchAt = now;
     quality.chain = want;
   });
 

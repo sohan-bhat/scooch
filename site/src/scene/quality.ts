@@ -58,6 +58,10 @@ const settings: Record<GpuClass, Settings> = {
 };
 
 const FAST = 0.7;
+const EARN = 2000;
+const EARN_LIMIT = 32000;
+const COMFORT = 0.6;
+const REFRESH = [1000 / 240, 1000 / 165, 1000 / 144, 1000 / 120, 1000 / 100, 1000 / 90, 1000 / 75, 1000 / 60];
 const MAX_BOKEH = 3.2;
 const GRAIN = 0.05;
 
@@ -75,12 +79,17 @@ class Quality {
   grain = true;
   sharpDpr = 1;
   fastScale = 1;
-  needsFast = false;
-  decided = false;
   chain: Chain = 'sharp';
+  switchAt = -1e9;
   blendAt = -1e9;
   lastFast: Texture | null = null;
   fastReady = false;
+  moving = false;
+  period = 1000 / 60;
+  allowed = false;
+  motionSharp = false;
+  earned = 0;
+  earnFor = EARN;
 
   configure(phone: boolean, deviceDpr: number, gpu: GpuClass) {
     this.gpu = phone ? 'low' : gpu;
@@ -91,11 +100,33 @@ class Quality {
     this.grain = chosen.grain;
     this.sharpDpr = Math.min(chosen.sharp, Math.max(deviceDpr, 1));
     this.fastScale = Math.min(1, FAST / this.sharpDpr);
-    this.needsFast = this.gpu !== 'high' && this.fastScale < 0.99;
   }
 
   get hasFast() {
     return this.fastScale < 0.99;
+  }
+
+  refresh(interval: number) {
+    let best = this.period;
+    for (const rate of REFRESH) if (Math.abs(Math.log(rate / interval)) < Math.abs(Math.log(best / interval))) best = rate;
+    if (best < this.period * 0.8) this.period = best;
+  }
+
+  earn(gpu: number | null, frame: number) {
+    if (this.allowed) return;
+    const fits = frame <= this.period * 1.25 && (gpu === null || gpu / (this.fastScale * this.fastScale) <= this.period * COMFORT);
+    this.earned = fits ? this.earned + Math.min(frame, 50) : 0;
+    if (this.earned < this.earnFor) return;
+    this.allowed = true;
+    this.earned = 0;
+  }
+
+  miss() {
+    if (!this.motionSharp && !this.allowed) return;
+    this.motionSharp = false;
+    this.allowed = false;
+    this.earned = 0;
+    this.earnFor = Math.min(this.earnFor * 2, EARN_LIMIT);
   }
 
   grainOpacity() {

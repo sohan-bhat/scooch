@@ -45,6 +45,22 @@ export const live = {
 
 export type Live = typeof live;
 
+export function animating(now: number) {
+  return (
+    Math.abs(live.lampTarget - live.lamp) > 0.01 ||
+    Math.abs(live.aimTarget - live.aim) > 0.002 ||
+    Math.abs(live.look.tx - live.look.x) > 0.01 ||
+    Math.abs(live.look.ty - live.look.y) > 0.01 ||
+    Math.abs(live.sway.vx) + Math.abs(live.sway.vz) > 0.002 ||
+    live.ringUntil > now ||
+    now - live.noiseAt < 380 ||
+    now - live.onAt < 1100 ||
+    now - live.offAt < 700 ||
+    now - live.sipAt < 1600 ||
+    now - live.stapleAt < 500
+  );
+}
+
 const rimColor = new Color('#ffd9a8');
 const rims = new WeakMap<Object3D, { value: number }[]>();
 

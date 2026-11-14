@@ -1,15 +1,10 @@
 import { useFrame, useThree } from '@react-three/fiber';
 import { useEffect, useMemo } from 'react';
-import { runtime } from '@/story/state';
-import { quality } from './quality';
+import { quality, type Chain } from './quality';
 
 const SIZE = 512;
 const WINDOW = 1500;
-const GPU_ON = 10.5;
-const GPU_OFF = 6;
-const FRAME_BUDGET = 17.5;
-const REST = 1000;
-const SETTLE = 600;
+const SETTLE = 100;
 
 type Timer = {
   TIME_ELAPSED_EXT: number;
@@ -29,35 +24,23 @@ class Ring {
     this.count = Math.min(this.count + 1, SIZE);
   }
 
-  clear() {
-    this.count = 0;
-  }
+  sorted = new Float64Array(SIZE);
 
-  result = { mean: 0, max: 0, n: 0, steady: 0 };
-
-  stats(now: number, window: number) {
-    let sum = 0;
-    let max = 0;
-    let next = 0;
+  quarter(now: number, window: number) {
     let n = 0;
     for (let i = 1; i <= this.count; i++) {
       const at = (this.head - i + SIZE) % SIZE;
       if (now - this.times[at] > window) break;
-      const value = this.values[at];
-      sum += value;
-      if (value > max) {
-        next = max;
-        max = value;
-      } else if (value > next) next = value;
+      this.sorted[n] = this.values[at];
       n += 1;
     }
-    this.result.mean = n ? sum / n : 0;
-    this.result.max = max;
-    this.result.n = n;
-    this.result.steady = n > 2 ? (sum - max - next) / (n - 2) : this.result.mean;
-    return this.result;
+    if (n < 30) return 0;
+    const list = this.sorted.subarray(0, n).sort();
+    return list[Math.floor(n / 4)];
   }
 }
+
+type Tag = { chain: Chain; moving: boolean; settled: boolean; frame: number };
 
 export function Governor() {
   const gl = useThree((state) => state.gl);
@@ -69,24 +52,13 @@ export function Governor() {
       timer,
       pool: [] as WebGLQuery[],
       pending: [] as WebGLQuery[],
+      tags: new Map<WebGLQuery, Tag>(),
       current: null as WebGLQuery | null,
       frames: new Ring(),
-      gpu: new Ring(),
-      input: performance.now(),
-      restSince: performance.now(),
+      checked: 0,
+      ms: 0,
     };
   }, [gl]);
-
-  useEffect(() => {
-    const mark = () => {
-      state.input = performance.now();
-    };
-    const events = ['scroll', 'wheel', 'pointerdown', 'keydown', 'touchmove'] as const;
-    for (const name of events) window.addEventListener(name, mark, { passive: true });
-    return () => {
-      for (const name of events) window.removeEventListener(name, mark);
-    };
-  }, [state]);
 
   useEffect(
     () => () => {
@@ -99,13 +71,24 @@ export function Governor() {
   useFrame((_, delta) => {
     const now = performance.now();
     const ms = delta * 1000;
+    state.ms = ms;
     if (ms > 0 && ms < 120) state.frames.push(now, ms);
+    if (now - state.checked > 1000) {
+      state.checked = now;
+      const interval = state.frames.quarter(now, WINDOW);
+      if (interval > 0) quality.refresh(interval);
+    }
     const { context, timer } = state;
     if (!timer) return;
     while (state.pending.length > 0) {
       const query = state.pending[0];
       if (!context.getQueryParameter(query, context.QUERY_RESULT_AVAILABLE)) break;
-      if (!context.getParameter(timer.GPU_DISJOINT_EXT)) state.gpu.push(now, context.getQueryParameter(query, context.QUERY_RESULT) / 1e6);
+      const tag = state.tags.get(query);
+      if (tag && !context.getParameter(timer.GPU_DISJOINT_EXT)) {
+        const gpu = context.getQueryParameter(query, context.QUERY_RESULT) / 1e6;
+        if (tag.moving && tag.settled && tag.chain === 'fast') quality.earn(gpu, tag.frame);
+        if (tag.moving && tag.settled && tag.chain === 'sharp' && quality.motionSharp && gpu > quality.period) quality.miss();
+      }
       state.pending.shift();
       state.pool.push(query);
     }
@@ -116,32 +99,24 @@ export function Governor() {
   });
 
   useFrame(() => {
-    const now = performance.now();
+    const settled = performance.now() - quality.switchAt > SETTLE;
     const { context, timer } = state;
-    if (timer && state.current) {
-      context.endQuery(timer.TIME_ELAPSED_EXT);
-      state.pending.push(state.current);
-      state.current = null;
-    }
-    const warm = runtime.ready && runtime.props && runtime.scenery && runtime.gallery && runtime.painted && runtime.inside;
-    const resting = now - state.input > REST && quality.chain === 'sharp' && now - quality.blendAt > 300;
-    if (!warm || !resting || !quality.hasFast) {
-      state.restSince = now;
-      state.frames.clear();
-      state.gpu.clear();
+    if (!timer) {
+      if (quality.moving && quality.chain === 'fast' && settled) quality.earn(null, state.ms);
       return;
     }
-    if (now - state.restSince < SETTLE) return;
-    const frames = state.frames.stats(now, WINDOW);
-    const gpu = state.gpu.stats(now, WINDOW);
-    const enough = timer ? gpu.n >= 45 : frames.n >= 45;
-    if (!enough) return;
-    const needs = (timer ? gpu.steady > (quality.needsFast ? GPU_OFF : GPU_ON) : quality.needsFast) || frames.steady > FRAME_BUDGET;
-    quality.needsFast = needs;
-    quality.decided = true;
-    state.restSince = now;
-    state.frames.clear();
-    state.gpu.clear();
+    const query = state.current;
+    if (!query) return;
+    context.endQuery(timer.TIME_ELAPSED_EXT);
+    const tag = state.tags.get(query);
+    if (tag) {
+      tag.chain = quality.chain;
+      tag.moving = quality.moving;
+      tag.settled = settled;
+      tag.frame = state.ms;
+    } else state.tags.set(query, { chain: quality.chain, moving: quality.moving, settled, frame: state.ms });
+    state.pending.push(query);
+    state.current = null;
   }, 2);
 
   return null;
