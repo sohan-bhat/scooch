@@ -30,6 +30,8 @@ pub struct Gpu {
     pipelines: Arc<Mutex<Vec<Pipeline>>>,
     scenes: Arc<Result<glide::Pipes, String>>,
     small: Arc<Mutex<Option<glide::Small>>>,
+    fault: Arc<Mutex<Option<String>>>,
+    turn: Arc<Mutex<()>>,
     pub name: String,
     pub kind: &'static str,
 }
@@ -42,6 +44,7 @@ struct Pipeline {
 }
 
 pub struct Renderer {
+    gpu: Gpu,
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
@@ -57,6 +60,16 @@ static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::ne
 
 pub fn devices_made() -> usize {
     MADE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+impl Gpu {
+    pub fn fault(&self) -> Option<String> {
+        self.fault.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    pub(crate) fn healthy(&self) -> Result<(), String> {
+        self.fault().map_or(Ok(()), Err)
+    }
 }
 
 fn composition(target: &Target) -> bool {
@@ -92,8 +105,21 @@ impl Gpu {
         let descriptor = wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() };
         let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).map_err(|error| format!("request device {error}"))?;
         MADE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let fault = Arc::new(Mutex::new(None::<String>));
+        let seen = fault.clone();
+        device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+            if let Ok(mut slot) = seen.lock() {
+                slot.get_or_insert_with(|| format!("the GPU reported {error}"));
+            }
+        }));
+        let lost = fault.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            if let Ok(mut slot) = lost.lock() {
+                slot.get_or_insert_with(|| format!("the GPU was lost, {reason:?} {message}"));
+            }
+        });
         let scenes = Arc::new(glide::pipes(&device));
-        let gpu = Self { instance, adapter, device, queue, composition, pipelines: Arc::new(Mutex::new(Vec::new())), scenes, small: Arc::new(Mutex::new(None)), name, kind };
+        let gpu = Self { instance, adapter, device, queue, composition, pipelines: Arc::new(Mutex::new(Vec::new())), scenes, small: Arc::new(Mutex::new(None)), fault, turn: Arc::new(Mutex::new(())), name, kind };
         gpu.pipeline(wgpu::TextureFormat::Bgra8Unorm);
         Ok(gpu)
     }
@@ -187,7 +213,7 @@ impl Renderer {
         if capabilities.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
             config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
         }
-        surface.configure(&device, &config);
+        gpu.configure(&surface, &config)?;
         let size = wgpu::Extent3d { width: pattern.width, height: pattern.height, depth_or_array_layers: 1 };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("picture"),
@@ -213,7 +239,7 @@ impl Renderer {
             layout: &layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) }],
         });
-        Ok(Self { device, queue, surface, pipeline, bind, uniform, width: pattern.width, height: pattern.height, adapter: name })
+        Ok(Self { gpu: gpu.clone(), device, queue, surface, pipeline, bind, uniform, width: pattern.width, height: pattern.height, adapter: name })
     }
 
     pub fn frame(&mut self, bar: Option<f32>) -> Result<(), String> {
@@ -248,14 +274,13 @@ impl Renderer {
             pass.set_bind_group(0, &self.bind, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.queue.submit([encoder.finish()]);
-        self.queue.present(texture);
+        self.gpu.submit(encoder, Some(texture));
         Ok(())
     }
 }
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(1)) });
+        let _ = self.gpu.idle(std::time::Duration::from_secs(1));
     }
 }
