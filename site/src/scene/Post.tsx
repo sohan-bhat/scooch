@@ -267,7 +267,7 @@ export function Post({ phone }: { phone: boolean }) {
       value.render = () => undefined;
       void (async () => {
         await quiet();
-        await precompile(gl, scene, camera, [value]);
+        await precompile(gl, scene, camera, [value, { passes: [present, overlay, accumulate] }]);
         gl.getDrawingBufferSize(size);
         total.setSize(size.x, size.y);
         await quiet();
@@ -277,7 +277,7 @@ export function Post({ phone }: { phone: boolean }) {
         if (await allocate(gl, value)) still.ready = true;
       })().catch(() => nativeOff());
     },
-    [gl, scene, camera, size, total],
+    [gl, scene, camera, size, total, present, overlay, accumulate],
   );
 
   useEffect(() => {

@@ -121,7 +121,15 @@ export function Surroundings() {
   useLayoutEffect(() => {
     scene.environmentRotation.set(0, Math.PI * 0.7, 0);
     scene.environmentIntensity = 0.22;
-    return applyEnvironment(gl, scene, texture);
+    let release = applyEnvironment(gl, scene, texture);
+    const restored = () => {
+      release = applyEnvironment(gl, scene, texture);
+    };
+    gl.domElement.addEventListener('webglcontextrestored', restored);
+    return () => {
+      gl.domElement.removeEventListener('webglcontextrestored', restored);
+      release();
+    };
   }, [gl, scene, texture]);
   return null;
 }

@@ -3,6 +3,7 @@ import { useFrame, useThree } from '@react-three/fiber';
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { Box3, Group, HalfFloatType, Mesh, MeshStandardMaterial, Object3D, Vector3, WebGLRenderTarget, type Texture, type WebGLRenderer } from 'three';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { asset } from '@/lib/base';
 import { runtime, story } from '@/story/state';
 import { gpuClass, quality } from './quality';
@@ -47,8 +48,11 @@ ktx2.detectSupport({
   },
 } as never);
 
-function extend(loader: { setKTX2Loader: (value: never) => unknown }) {
+MeshoptDecoder.useWorkers(2);
+
+function extend(loader: { setKTX2Loader: (value: never) => unknown; setMeshoptDecoder: (value: never) => unknown }) {
   loader.setKTX2Loader(ktx2 as never);
+  loader.setMeshoptDecoder(MeshoptDecoder as never);
 }
 
 for (const name of heroes) useGLTF.preload(urls[name], false, true, extend as never);
