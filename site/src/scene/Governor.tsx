@@ -11,6 +11,7 @@ const DOWN_LIMIT = 18;
 const WARMUP = 1500;
 const SETTLE = 700;
 const RETRY = 30000;
+const REST = 1000;
 
 type Timer = {
   TIME_ELAPSED_EXT: number;
@@ -77,9 +78,21 @@ export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | n
       changed: performance.now(),
       fading: 0,
       failedAt: new Float64Array(16).fill(-Infinity),
+      input: performance.now(),
       failures: new Uint8Array(16),
     };
   }, [gl]);
+
+  useEffect(() => {
+    const mark = () => {
+      state.input = performance.now();
+    };
+    const events = ['scroll', 'wheel', 'pointerdown', 'pointermove', 'keydown', 'touchmove'] as const;
+    for (const name of events) window.addEventListener(name, mark, { passive: true });
+    return () => {
+      for (const name of events) window.removeEventListener(name, mark);
+    };
+  }, [state]);
 
   useEffect(
     () => () => {
@@ -123,7 +136,7 @@ export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | n
         fade.current.style.opacity = '0';
       }
     }
-    if (!runtime.ready || !runtime.props || !runtime.scenery) {
+    if (!runtime.ready || !runtime.props || !runtime.scenery || !runtime.gallery || !runtime.painted || !runtime.inside) {
       state.start = now;
       state.frames.clear();
       state.gpu.clear();
@@ -134,13 +147,14 @@ export function Governor({ fade }: { fade: React.RefObject<HTMLCanvasElement | n
     const slowFrames = frames.n >= 8 && frames.steady > DOWN_LIMIT;
     const gpuShort = state.gpu.stats(now, DOWN_WINDOW);
     const slow = slowFrames || (gpuShort.n >= 8 && gpuShort.steady > DOWN_LIMIT);
-    if (slow && quality.canDown()) {
+    const resting = now - state.input > REST;
+    if (slow && quality.canDown() && (quality.sameSize(quality.level + 1) || (quality.tier === 'light' && resting))) {
       state.failedAt[quality.level] = now;
       state.failures[quality.level] += 1;
       change(() => quality.down());
       return;
     }
-    if (!timer || !quality.canUp()) return;
+    if (!timer || !quality.canUp() || !quality.sameSize(quality.level - 1)) return;
     const gpuLong = state.gpu.stats(now, UP_WINDOW);
     const quiet = gpuLong.n >= 90 && gpuLong.max < UP_LIMIT;
     const framesLong = state.frames.stats(now, UP_WINDOW);

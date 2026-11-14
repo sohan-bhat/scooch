@@ -304,6 +304,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   }, [screens, manifest, gl]);
 
   useEffect(() => {
+    if (!inside) runtime.inside = true;
     if (!inside || insideIn) return;
     let stopped = false;
     let timer = 0;
@@ -328,6 +329,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         .then(() => {
           if (stopped) return;
           warmDraw(gl, scene, camera, inside.group);
+          runtime.inside = true;
           setInsideIn(true);
         });
     };

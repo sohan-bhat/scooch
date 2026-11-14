@@ -35,6 +35,7 @@ export const runtime = {
   ready: false,
   shown: false,
   painted: false,
+  inside: false,
   posed: false,
   compiled: false,
   props: false,

@@ -110,6 +110,11 @@ class Quality {
     return this.steps[Math.min(this.level, this.steps.length - 1)];
   }
 
+  sameSize(level: number) {
+    const next = this.steps[Math.min(Math.max(level, 0), this.steps.length - 1)];
+    return next.dpr === this.step.dpr;
+  }
+
   canDown() {
     return this.level < this.steps.length - 1;
   }
