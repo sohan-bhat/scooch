@@ -26,7 +26,8 @@ const GLIDE_REACH: f32 = 1.8;
 const GLIDE_BLEND: f32 = 0.1;
 const GLIDE_EDGE: f32 = 4.0;
 const GLIDE_KEEP: f32 = 0.3;
-const GLIDE_GATE: f32 = 0.01;
+const GLIDE_GATE: f32 = 0.2;
+const GLIDE_SPAN: f32 = 0.3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Constants {
@@ -472,14 +473,21 @@ fn line1(values: &[f32], w: usize, row: &Probe, (lo, hi): (usize, usize)) -> Vec
     out
 }
 
-fn gap_line(a: &[f32], b: &[f32], w: usize, row: &Probe, (lo, hi): (usize, usize)) -> Vec<f32> {
-    let mut out = vec![0.0f32; w];
-    for (x, o) in out.iter_mut().enumerate().take(hi).skip(lo) {
-        let (top, bottom) = (row.a * w + x, row.b * w + x);
-        let (high, low) = ((a[top] - b[top]).abs(), (a[bottom] - b[bottom]).abs());
-        *o = high + (low - high) * row.t;
-    }
-    out
+fn field_at(field: &[f32], grid: &Grid, x: f32, y: f32) -> f32 {
+    let probe = |v: f32, n: usize| {
+        let g = (v / Q as f32 - 0.5).clamp(0.0, (n - 1) as f32);
+        let a = g as usize;
+        (a, (a + 1).min(n - 1), g - a as f32)
+    };
+    let ((xa, xb, tx), (ya, yb, ty)) = (probe(x, grid.w), probe(y, grid.h));
+    let top = field[ya * grid.w + xa] + (field[ya * grid.w + xb] - field[ya * grid.w + xa]) * tx;
+    let bottom = field[yb * grid.w + xa] + (field[yb * grid.w + xb] - field[yb * grid.w + xa]) * tx;
+    top + (bottom - top) * ty
+}
+
+fn gap(a: &[f32], b: &[f32], grid: &Grid, (x, y): (f32, f32), here: f32, reach: f32) -> f32 {
+    let change = |dx: f32, dy: f32| (field_at(a, grid, x + dx, y + dy) - field_at(b, grid, x + dx, y + dy)).abs();
+    here.max(change(reach, 0.0)).max(change(-reach, 0.0)).max(change(0.0, reach)).max(change(0.0, -reach))
 }
 
 struct Plane {
@@ -809,7 +817,6 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
         let span = ((first / Q).saturating_sub(1), (last / Q + 2).min(grid.w));
         let tint_span = ((first / P).saturating_sub(1), (last / P + 2).min(paint_grid.w));
         let field_lines: Vec<Vec<f32>> = fields.iter().map(|f| line1(f, grid.w, row, span)).collect();
-        let gaps = if fields.len() == 2 && glide == Glide::Morph { gap_line(fields[0], fields[1], grid.w, row, span) } else { Vec::new() };
         let look_lines: Vec<Vec<[f32; 4]>> = planes.iter().map(|p| line4(&p.look, grid.w, row, span)).collect();
         let tint_lines: Vec<Vec<Vec<[f32; 4]>>> = planes.iter().map(|p| p.paints.iter().map(|layer| line4(layer, paint_grid.w, tint_row, tint_span)).collect()).collect();
         let cells = line.as_chunks_mut::<4>().0;
@@ -847,8 +854,8 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
             } else {
                 let (da, db) = (ds[0], ds[1]);
                 let (ta, tb) = (da + s * c.grain_scale, db + (1.0 - s) * c.grain_scale);
-                let gap = gaps[column.a] + (gaps[column.b] - gaps[column.a]) * column.t;
-                let kept = da.max(db) + c.shadow[0] * 4.0 * s * (1.0 - s) * smoothstep(0.0, c.shadow[1], gap);
+                let change = gap(fields[0], fields[1], &grid, (x as f32 + 0.5, y as f32 + 0.5), (da - db).abs(), GLIDE_SPAN * c.unit);
+                let kept = da.max(db) + c.shadow[0] * 4.0 * s * (1.0 - s) * smoothstep(0.0, c.shadow[1], change);
                 let d = kept.min(ta.min(tb));
                 let mut w = smoothstep(-c.grain_floor, c.grain_floor, ta - tb);
                 w *= (GLIDE_EDGE * s).min(1.0);

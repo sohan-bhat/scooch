@@ -28,7 +28,7 @@
 //! | `volume_lit`, `volume_dark` | how far broad light lifts a cloud toward its light tone, and how far the underside darkens it |
 //! | `grain_scale` | how far a glide shrinks what only bundle A covers and grows what only bundle B covers, in units |
 //! | `grain_floor` | the field range over which a glide hands the look from A to B |
-//! | `shadow` (`shadow_at` in GLSL) | how deep an overlap of the two bundles a glide eats mid way, in units, and the change between them below which it eats nothing |
+//! | `shadow` (`shadow_at` in GLSL) | how deep an overlap of the two bundles a glide eats mid way, in units, and the change between them, the largest at the pixel and at four points 0.3 units around it, below which it eats nothing |
 //! | `spare` | 0 shrinks and grows scenery through a glide, 1 dissolves it instead, kept for comparison |
 //! | `rim`, `belly`, `grain_lod` | unused, kept so the block keeps its layout |
 

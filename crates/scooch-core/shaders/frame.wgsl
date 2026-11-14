@@ -42,18 +42,15 @@ fn quarter(p: vec2<f32>) -> vec2<f32> {
     return p / 4.0 / frame.grid;
 }
 
-fn gap(p: vec2<f32>) -> f32 {
-    let top = frame.grid - vec2<f32>(1.0);
-    let g = clamp(p / 4.0 - vec2<f32>(0.5), vec2<f32>(0.0), top);
-    let base = floor(g);
-    let t = g - base;
-    let lo = vec2<i32>(base);
-    let hi = vec2<i32>(min(base + vec2<f32>(1.0), top));
-    let c00 = abs(textureLoad(field_a, lo, 0).r - textureLoad(field_b, lo, 0).r);
-    let c10 = abs(textureLoad(field_a, vec2<i32>(hi.x, lo.y), 0).r - textureLoad(field_b, vec2<i32>(hi.x, lo.y), 0).r);
-    let c01 = abs(textureLoad(field_a, vec2<i32>(lo.x, hi.y), 0).r - textureLoad(field_b, vec2<i32>(lo.x, hi.y), 0).r);
-    let c11 = abs(textureLoad(field_a, hi, 0).r - textureLoad(field_b, hi, 0).r);
-    return mix(mix(c00, c01, t.y), mix(c10, c11, t.y), t.x);
+fn change(p: vec2<f32>) -> f32 {
+    return abs(textureSampleLevel(field_a, smooth_filter, quarter(p), 0.0).r - textureSampleLevel(field_b, smooth_filter, quarter(p), 0.0).r);
+}
+
+fn gap(p: vec2<f32>, here: f32) -> f32 {
+    let r = 0.3 * frame.unit;
+    let across = max(change(p + vec2<f32>(r, 0.0)), change(p - vec2<f32>(r, 0.0)));
+    let down = max(change(p + vec2<f32>(0.0, r)), change(p - vec2<f32>(0.0, r)));
+    return max(here, max(across, down));
 }
 
 fn coarse(p: vec2<f32>) -> vec2<f32> {
@@ -177,7 +174,7 @@ fn draw(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     } else {
         let ta = d_a + frame.s * frame.grain_scale;
         let tb = d_b + (1.0 - frame.s) * frame.grain_scale;
-        let kept = max(d_a, d_b) + frame.shadow.x * 4.0 * frame.s * (1.0 - frame.s) * smoothstep(0.0, frame.shadow.y, gap(p));
+        let kept = max(d_a, d_b) + frame.shadow.x * 4.0 * frame.s * (1.0 - frame.s) * smoothstep(0.0, frame.shadow.y, gap(p, abs(d_a - d_b)));
         let d = min(kept, min(ta, tb));
         var w = smoothstep(-frame.grain_floor, frame.grain_floor, ta - tb);
         w = w * min(4.0 * frame.s, 1.0);
