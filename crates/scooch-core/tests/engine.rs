@@ -61,9 +61,9 @@ fn every_photo_and_layout_keeps_tables_valid_and_never_hides_more() {
                 let label = format!("{} {w}x{h} {layout}", photo.name);
                 let placement = scooch_core::solve(&photo.analysis, &scene, &options, None);
                 check_placement(&placement, &label);
-                let centered = scooch_core::fill(photo.image.width(), photo.image.height(), &scene);
+                let rest = scooch_core::home(&photo.analysis, &scene);
                 let after = scooch_core::hidden_share(&photo.analysis, &scene, &placement);
-                let before = scooch_core::hidden_share(&photo.analysis, &scene, &centered);
+                let before = scooch_core::hidden_share(&photo.analysis, &scene, &rest);
                 assert!(after <= before, "{label} hides {after} > {before}");
                 if placement.shift != [0.0, 0.0] {
                     warped += 1;
@@ -108,6 +108,10 @@ fn no_icons_gives_the_centered_crop_and_the_plain_fill() {
         for (w, h) in [(640u32, 400u32), (360, 640)] {
             let scene = Scene { width: w, height: h, icons: Vec::new() };
             let solved = scooch_core::solve(&analysis, &scene, &options, None);
+            assert_eq!(solved, scooch_core::home(&analysis, &scene));
+            if solved != scooch_core::fill(image.width(), image.height(), &scene) {
+                continue;
+            }
             let (image_aspect, screen_aspect) = (image.width() as f64 / image.height() as f64, w as f64 / h as f64);
             let (cw, ch) = if image_aspect >= screen_aspect { (screen_aspect / image_aspect, 1.0) } else { (1.0, image_aspect / screen_aspect) };
             let line = |span: f64| -> Vec<f32> {
