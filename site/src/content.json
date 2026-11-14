@@ -8,7 +8,8 @@
     "skip": "Skip the story",
     "github": "GitHub",
     "install": "Install",
-    "home": "Scooch home"
+    "home": "Scooch home",
+    "sound": "Sound"
   },
   "beats": [
     {
@@ -261,6 +262,20 @@
     "end": "Mac, Windows and Linux",
     "action": "Install",
     "hint": "The desk works. Try the lamp.",
-    "label": "Scooch in eleven steps"
+    "label": "Scooch in eleven steps",
+    "desk": {
+      "label": "The desk",
+      "lampOff": "Turn the lamp off",
+      "lampOn": "Turn the lamp on",
+      "channel": "Change the channel",
+      "tvOff": "Turn the TV off",
+      "tvOn": "Turn the TV on",
+      "play": "Play the tape",
+      "stop": "Stop the tape",
+      "ring": "Ring the clock",
+      "sip": "Sip the coffee",
+      "staple": "Press the stapler"
+    },
+    "loading": "Page loading"
   }
 }

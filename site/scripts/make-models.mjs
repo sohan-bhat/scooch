@@ -82,7 +82,6 @@ const models = [
     glass: { material: 'television_01_screen', uv: [0.04, 0.338, 0.712, 0.962], facing: 0.7 },
     paint: [[0.494, 0.526, 0.733, 0.838, 0.51, 0.722]],
   },
-  { id: 'tea_set_01', resolution: '1k', file: 'cup.glb', textures: small, keep: ['tea_set_01_cup_small_01'] },
 ];
 
 const environment = { id: 'studio_small_08', resolution: '1k', file: 'studio.hdr', width: 256 };

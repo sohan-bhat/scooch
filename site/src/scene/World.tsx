@@ -23,6 +23,7 @@ import {
 } from 'three';
 import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import { asset } from '@/lib/base';
+import { stage as loadStage } from '@/lib/load';
 import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
@@ -30,6 +31,7 @@ import { STREET, blindsTexture, projector } from './Blinds';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
 import { Live } from './Live';
+import { Tumbler } from './Tumbler';
 import { draw, held, step } from './drag';
 import { hooks, live } from './touch';
 import { play } from './sound';
@@ -366,17 +368,23 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     let cancelled = false;
     const wait = () => {
       frames += 1;
-      if (frames === 1) performance.mark('scooch:frame');
+      if (frames === 1) {
+        performance.mark('scooch:frame');
+        loadStage(0.95);
+      }
       if (frames < 2) handle = requestAnimationFrame(wait);
       else onReady();
     };
     performance.mark('scooch:assets');
+    loadStage(0.15);
     environmentReady(scene)
+      .then(() => loadStage(0.35))
       .then(() => precompile(gl, scene, camera, quality.composer, [screens.main.compile(gl)]))
       .catch(() => undefined)
       .then(() => {
         if (cancelled) return;
         performance.mark('scooch:compiled');
+        loadStage(0.8);
         runtime.compiled = true;
         runtime.resume?.();
         handle = requestAnimationFrame(wait);
@@ -581,6 +589,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         </>
       )}
       <Desk onScreens={onScreens} onExtras={onExtras} onConsole={onConsole} phone={phone} />
+      <Tumbler />
       <Live onAction={onAction} />
       <ContactShadows key={extrasIn ? 'extras' : 'bare'} position={[0, DESK_TOP + 0.0015, 0.0]} scale={[2.0, 0.95]} resolution={512} blur={2.4} far={0.3} opacity={0.62} frames={1} color="#0a0806" />
       <mesh position={[0, 1.6, -0.98]} material={wall}>

@@ -2,6 +2,7 @@ import { Color, Mesh, type Material, type MeshStandardMaterial, type Object3D, t
 import type { Frame } from './screen/scenery';
 
 export const things: Record<string, Object3D | undefined> = {};
+export const obstacles: Object3D[] = [];
 
 export const hooks = {
   frame: null as Frame | null,
@@ -29,8 +30,8 @@ export const live = {
   ringUntil: 0,
   stapleAt: -1e9,
   sipAt: -1e9,
-  coffee: 4,
-  cup: { x: 0, z: 0, homeX: 0, homeZ: 0, ready: false },
+  juice: 4,
+  glass: { x: 0, z: 0, ready: false },
   look: { x: 0, y: 0, tx: 0, ty: 0 },
   sway: { x: 0, z: 0, vx: 0, vz: 0 },
   icon: { index: -1, x: 0, y: 0 },
@@ -42,7 +43,10 @@ const rimColor = new Color('#ffd9a8');
 const rims = new WeakMap<Object3D, { value: number }[]>();
 
 function withRim(material: MeshStandardMaterial, level: { value: number }) {
-  material.onBeforeCompile = (shader) => {
+  const previous = material.onBeforeCompile;
+  const key = material.customProgramCacheKey();
+  material.onBeforeCompile = (shader, renderer) => {
+    previous.call(material, shader, renderer);
     shader.uniforms.uRimLevel = level;
     shader.uniforms.uRimColor = { value: rimColor };
     shader.fragmentShader = shader.fragmentShader
@@ -52,7 +56,7 @@ function withRim(material: MeshStandardMaterial, level: { value: number }) {
         'outgoingLight += uRimColor * pow(1.0 - saturate(dot(normal, normalize(vViewPosition))), 3.0) * uRimLevel;\n#include <opaque_fragment>',
       );
   };
-  material.customProgramCacheKey = () => 'rim';
+  material.customProgramCacheKey = () => `${key}|rim`;
 }
 
 export function makeLive(root: Object3D, id: string) {

@@ -1,14 +1,41 @@
 import { useFrame, useThree } from '@react-three/fiber';
 import { useEffect, useMemo } from 'react';
 import { Box3, Mesh, Object3D, Plane, Raycaster, Vector2, Vector3 } from 'three';
+import content from '@/content.json';
 import { runtime } from '@/story/state';
 import { DESK_TOP } from './layout';
 import { ask, begin, end } from './drag';
-import { hooks, live, liveId, release, rimOf, things } from './touch';
+import { warm } from './engine';
+import { hooks, live, liveId, obstacles, release, rimOf, things } from './touch';
 import { hush } from './sound';
 
 const DESK = { left: -0.98, right: 0.98, back: -0.36, front: 0.42 };
 const QUIET = 250;
+const HINT = 'scooch:hint';
+
+const hint = { element: null as HTMLElement | null, done: false, shownAt: 0, readyAt: 0, point: new Vector3() };
+
+function hinted() {
+  try {
+    return window.sessionStorage.getItem(HINT) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function markHinted() {
+  try {
+    window.sessionStorage.setItem(HINT, '1');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hideHint() {
+  if (hint.shownAt && hint.element) hint.element.removeAttribute('data-show');
+  hint.shownAt = 0;
+}
 
 function barrel(x: number, y: number) {
   const cx = x * 2 - 1;
@@ -35,6 +62,45 @@ function rects(index: number, x: number, y: number) {
     out[i * 4 + 3] = rect.w * 960;
   });
   return out;
+}
+
+const blocks: { minX: number; maxX: number; minZ: number; maxZ: number }[] = [];
+
+function footprints(held: Object3D) {
+  if (blocks.length) return;
+  const box = new Box3();
+  const size = new Box3().setFromObject(held).getSize(new Vector3());
+  const pad = Math.max(size.x, size.z) * 0.5 + 0.008;
+  for (const object of obstacles) {
+    if (!visible(object)) continue;
+    box.setFromObject(object);
+    if (box.isEmpty() || box.max.y < DESK_TOP + 0.004) continue;
+    blocks.push({ minX: box.min.x - pad, maxX: box.max.x + pad, minZ: box.min.z - pad, maxZ: box.max.z + pad });
+  }
+}
+
+function settle(x: number, z: number, fromX: number, fromZ: number) {
+  let px = x;
+  let pz = z;
+  for (let round = 0; round < 4; round++) {
+    let moved = false;
+    for (const block of blocks) {
+      if (px <= block.minX || px >= block.maxX || pz <= block.minZ || pz >= block.maxZ) continue;
+      const exits = [
+        { d: px - block.minX, x: block.minX, z: pz },
+        { d: block.maxX - px, x: block.maxX, z: pz },
+        { d: pz - block.minZ, x: px, z: block.minZ },
+        { d: block.maxZ - pz, x: px, z: block.maxZ },
+      ].filter((exit) => exit.x >= DESK.left && exit.x <= DESK.right && exit.z >= DESK.back && exit.z <= DESK.front);
+      if (!exits.length) return [fromX, fromZ];
+      exits.sort((a, b) => a.d - b.d);
+      px = exits[0].x;
+      pz = exits[0].z;
+      moved = true;
+    }
+    if (!moved) return [px, pz];
+  }
+  return [fromX, fromZ];
 }
 
 function visible(object: Object3D) {
@@ -74,7 +140,7 @@ export function actions(now = performance.now()) {
     sip() {
       if (now - live.sipAt < 1600) return;
       live.sipAt = now;
-      live.coffee = live.coffee <= 0 ? 4 : live.coffee - 1;
+      live.juice = live.juice <= 0 ? 4 : live.juice - 1;
     },
   };
 }
@@ -85,7 +151,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
 
   useEffect(() => {
     const element = gl.domElement;
-    const press = { id: '', x: 0, y: 0, moved: false, region: '', startX: 0, startZ: 0, aim: 0, mesh: null as Object3D | null, dx: 0, dy: 0 };
+    const press = { id: '', x: 0, y: 0, moved: false, region: '', startX: 0, startZ: 0, aim: 0, mesh: null as Object3D | null, dx: 0, dy: 0, rest: 0 };
     const onScroll = () => {
       live.lastScroll = performance.now();
     };
@@ -126,11 +192,13 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
           }
           return;
         }
-        if (press.id === 'cup') {
+        if (press.id === 'glass') {
           const point = deskPoint(event);
-          if (point) {
-            live.cup.x = Math.min(Math.max(point.x, DESK.left), DESK.right);
-            live.cup.z = Math.min(Math.max(point.z, DESK.back), DESK.front);
+          if (point && things.glass) {
+            footprints(things.glass);
+            const [x, z] = settle(Math.min(Math.max(point.x, DESK.left), DESK.right), Math.min(Math.max(point.z, DESK.back), DESK.front), live.glass.x, live.glass.z);
+            live.glass.x = x;
+            live.glass.z = z;
           }
         } else if (press.id === 'lamp') {
           live.aimTarget = Math.min(Math.max(press.aim + dx * 0.0016, -0.3), 0.3);
@@ -141,6 +209,14 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
         return;
       }
       const found = pick(event);
+      window.clearTimeout(press.rest);
+      const crt = found.id === 'tv' && found.object && ((found.object as Mesh).material as { name?: string }).name === 'scooch-crt';
+      if (crt && live.channel < 0 && live.power && hooks.frame) {
+        const frame = hooks.frame;
+        press.rest = window.setTimeout(() => {
+          if (live.quiet && live.hover === 'tv') void warm(frame.scenery.info, rects(-1, 0, 0)).catch(() => undefined);
+        }, 160);
+      }
       if (found.id === 'plant' && found.object) {
         live.sway.vx += event.movementX * 0.0009;
         live.sway.vz += event.movementY * 0.0009;
@@ -171,13 +247,14 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
           live.icon.index = index;
           live.icon.x = rect.x;
           live.icon.y = rect.y;
+          void warm(hooks.frame.scenery.info, rects(-1, 0, 0)).catch(() => undefined);
           begin(hooks.frame, hooks.place());
           void ask(rects(index, rect.x, rect.y), index, false);
           element.setPointerCapture(event.pointerId);
           return;
         }
       }
-      if (press.id === 'cup' || press.id === 'lamp' || press.id === 'space') element.setPointerCapture(event.pointerId);
+      if (press.id === 'glass' || press.id === 'lamp' || press.id === 'space') element.setPointerCapture(event.pointerId);
     };
     const onUp = (event: PointerEvent) => {
       if (!press.id) return;
@@ -192,12 +269,13 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       }
       if (press.moved) return;
       const act = actions();
+      hideHint();
       if (id === 'lamp') act.lamp();
       else if (id === 'tv') press.region === 'power' ? act.power() : act.channel();
       else if (id === 'cassette') act.tape();
       else if (id === 'clock') act.ring();
       else if (id === 'stapler') act.staple();
-      else if (id === 'cup') act.sip();
+      else if (id === 'glass') act.sip();
       else return;
       onAction(id === 'tv' ? press.region : id);
     };
@@ -213,6 +291,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
     element.addEventListener('pointercancel', onUp);
     element.addEventListener('pointerleave', onLeave);
     return () => {
+      window.clearTimeout(press.rest);
       window.removeEventListener('scroll', onScroll);
       window.removeEventListener('wheel', onScroll);
       element.removeEventListener('pointermove', onMove);
@@ -223,7 +302,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
     };
   }, [camera, gl, tools, onAction]);
 
-  useFrame((_, delta) => {
+  useFrame(({ camera }, delta) => {
     const now = performance.now();
     const quiet = now - live.lastScroll > QUIET;
     if (live.quiet && !quiet) {
@@ -234,6 +313,23 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       gl.domElement.style.cursor = '';
     }
     live.quiet = quiet;
+    if (!quiet) hideHint();
+    if (runtime.ready && !hint.readyAt) {
+      hint.readyAt = now;
+      hint.done = hinted() || runtime.still >= 0;
+      hint.element = document.querySelector<HTMLElement>('[data-overlay="hint"]');
+    }
+    if (hint.readyAt && !hint.done && quiet && now - Math.max(live.lastScroll, hint.readyAt) > 2000 && things.lamp && hint.element) {
+      things.lamp.getWorldPosition(hint.point).project(camera);
+      if (Math.abs(hint.point.x) < 0.85 && Math.abs(hint.point.y) < 0.85 && hint.point.z < 1) {
+        hint.done = true;
+        markHinted();
+        hint.element.textContent = content.story.hint;
+        hint.element.setAttribute('data-show', '');
+        hint.shownAt = now;
+      }
+    }
+    if (hint.shownAt && now - hint.shownAt > 7000) hideHint();
     const step = Math.min(delta, 0.05);
     const warm = live.lampTarget > live.lamp ? 2.2 : 7;
     live.lamp += (live.lampTarget - live.lamp) * (1 - Math.exp(-step * warm));
@@ -283,28 +379,6 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       plant.rotation.set(base.x + live.sway.z, base.y, base.z - live.sway.x);
     }
 
-    const cup = things.cup;
-    if (cup) {
-      if (!live.cup.ready) {
-        live.cup.homeX = live.cup.x = cup.position.x;
-        live.cup.homeZ = live.cup.z = cup.position.z;
-        cup.userData.y = cup.position.y;
-        live.cup.ready = true;
-      }
-      cup.position.x += (live.cup.x - cup.position.x) * (1 - Math.exp(-step * 12));
-      cup.position.z += (live.cup.z - cup.position.z) * (1 - Math.exp(-step * 12));
-      const t = (now - live.sipAt) / 1000;
-      const lift = t < 0 || t > 1.5 ? 0 : Math.sin(Math.min(t / 1.5, 1) * Math.PI);
-      cup.position.y = cup.userData.y + lift * 0.11;
-      cup.rotation.x = -Math.max(0, Math.sin(Math.min(t / 1.5, 1) * Math.PI) - 0.4) * (t < 1.5 && t > 0 ? 0.9 : 0);
-      const coffee = cup.getObjectByName('coffee');
-      if (coffee) {
-        const level = live.coffee / 4;
-        coffee.visible = live.coffee > 0;
-        coffee.position.y = coffee.userData.low + (coffee.userData.high - coffee.userData.low) * level;
-        coffee.scale.setScalar(0.72 + 0.28 * level);
-      }
-    }
   });
 
   return null;

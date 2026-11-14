@@ -6,6 +6,7 @@ import { suspend } from 'suspend-react';
 import { loadManifest } from '@/story/demo';
 import { pointer, runtime } from '@/story/state';
 import { Post } from './Post';
+import { Controls } from './Controls';
 import { Governor } from './Governor';
 import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
@@ -104,6 +105,7 @@ export default function Stage({ onReady }: { onReady: () => void }) {
         {runtime.still < 0 && <Governor fade={fade} />}
       </Canvas>
       <canvas ref={fade} aria-hidden className="pointer-events-none absolute inset-0 h-full w-full opacity-0" />
+      {runtime.still < 0 && <Controls />}
     </div>
   );
 }
