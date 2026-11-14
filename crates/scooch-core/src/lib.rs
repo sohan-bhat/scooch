@@ -224,6 +224,10 @@ pub fn pads_active(analysis: &Analysis, placement: &Placement, scene: &Scene, op
     pads::active(analysis, placement, scene, options)
 }
 
+pub fn home(analysis: &Analysis, scene: &Scene) -> Placement {
+    solver::home(analysis, scene)
+}
+
 pub fn fill(image_width: u32, image_height: u32, scene: &Scene) -> Placement {
     table::fill(image_width, image_height, scene.width, scene.height)
 }

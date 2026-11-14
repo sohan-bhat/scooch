@@ -1,7 +1,8 @@
 use crate::{surface_target, Gpu, Target};
 use scooch_core::{Bundle, Canvas, Constants, RgbImage};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const FRAME: &str = include_str!("../../scooch-core/shaders/frame.wgsl");
 const STILL: &str = include_str!("still.wgsl");
@@ -12,6 +13,7 @@ const ROOM: f64 = 0.4;
 pub const OUTPUT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 const LAYERS: u32 = 8;
 const RAMP: u32 = 512;
+const PATIENCE: Duration = Duration::from_secs(30);
 
 pub(crate) struct Pipes {
     sampler: wgpu::Sampler,
@@ -399,6 +401,7 @@ impl Gpu {
     }
 
     pub fn try_picture(&self, canvas: &Canvas) -> Result<Picture, String> {
+        self.healthy()?;
         let (width, height) = (canvas.width.max(1), canvas.height.max(1));
         self.fits(width, height)?;
         let levels = 32 - width.max(height).leading_zeros();
@@ -416,6 +419,7 @@ impl Gpu {
     }
 
     pub fn still(&self, image: &RgbImage) -> Result<Still, String> {
+        self.healthy()?;
         let pipes = self.pipes()?;
         let (width, height) = (image.width().max(1), image.height().max(1));
         self.fits(width, height)?;
@@ -517,6 +521,7 @@ impl Gpu {
     }
 
     pub fn glide(&self, picture: &Picture, a: &Bundle, b: &Bundle) -> Result<Glide, String> {
+        self.healthy()?;
         let pipes = self.pipes()?;
         if a.canvas_width != picture.width || a.canvas_height != picture.height || b.canvas_width != picture.width || b.canvas_height != picture.height {
             return Err("the tables were made for another picture".into());
@@ -693,20 +698,68 @@ impl Gpu {
         })
     }
 
+    pub(crate) fn submit(&self, encoder: wgpu::CommandEncoder, texture: Option<wgpu::SurfaceTexture>) {
+        let _turn = self.turn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.queue.submit([encoder.finish()]);
+        if let Some(texture) = texture {
+            self.queue.present(texture);
+        }
+    }
+
+    pub(crate) fn configure(&self, surface: &wgpu::Surface<'static>, config: &wgpu::SurfaceConfiguration) -> Result<(), String> {
+        let _turn = self.turn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        surface.configure(&self.device, config);
+        match pollster::block_on(scope.pop()) {
+            Some(error) => Err(format!("the surface could not be set up {error}")),
+            None => Ok(()),
+        }
+    }
+
+    fn drain(&self, limit: Duration, finished: impl Fn() -> bool) -> Result<(), String> {
+        let started = Instant::now();
+        loop {
+            self.device.poll(wgpu::PollType::Poll).map_err(|error| format!("the GPU could not be polled {error}"))?;
+            if finished() {
+                return Ok(());
+            }
+            self.healthy()?;
+            let waited = started.elapsed();
+            if waited > limit {
+                return Err(format!("the GPU did not finish within {} ms", limit.as_millis()));
+            }
+            if waited < Duration::from_millis(4) {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(Duration::from_micros(500));
+            }
+        }
+    }
+
+    pub(crate) fn idle(&self, limit: Duration) -> Result<(), String> {
+        let done = Arc::new(AtomicBool::new(false));
+        let flag = done.clone();
+        self.queue.on_submitted_work_done(move || flag.store(true, Ordering::Release));
+        self.drain(limit, || done.load(Ordering::Acquire))
+    }
+
     pub fn time(&self, width: u32, height: u32, layers: &[(Look, f32)]) -> Result<Duration, String> {
         self.time_at(width, height, layers, 1.0)
     }
 
     pub fn time_at(&self, width: u32, height: u32, layers: &[(Look, f32)], scale: f32) -> Result<Duration, String> {
+        self.healthy()?;
         self.fits(width, height)?;
         let target = self.target(width, height);
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|error| format!("the device did not go idle {error}"))?;
-        let started = std::time::Instant::now();
+        self.idle(PATIENCE).map_err(|why| format!("the device did not go idle, {why}"))?;
+        let started = Instant::now();
         let encoder = self.encode(&view, (width, height), layers, scale)?;
-        self.queue.submit([encoder.finish()]);
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|error| format!("the frame did not finish {error}"))?;
-        Ok(started.elapsed())
+        self.submit(encoder, None);
+        self.idle(PATIENCE).map_err(|why| format!("the frame did not finish, {why}"))?;
+        let took = started.elapsed();
+        self.healthy()?;
+        Ok(took)
     }
 
     pub fn snapshot(&self, width: u32, height: u32, layers: &[(Look, f32)]) -> Result<RgbImage, String> {
@@ -714,6 +767,7 @@ impl Gpu {
     }
 
     pub fn snapshot_at(&self, width: u32, height: u32, layers: &[(Look, f32)], scale: f32) -> Result<RgbImage, String> {
+        self.healthy()?;
         self.fits(width, height)?;
         let target = self.target(width, height);
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
@@ -725,7 +779,7 @@ impl Gpu {
             wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(height) } },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
-        self.queue.submit([encoder.finish()]);
+        self.submit(encoder, None);
         let done = Arc::new(Mutex::new(None));
         let told = done.clone();
         buffer.map_async(wgpu::MapMode::Read, .., move |result| {
@@ -733,7 +787,7 @@ impl Gpu {
                 *told = Some(result.is_ok());
             }
         });
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|error| format!("the readback did not finish {error}"))?;
+        self.drain(PATIENCE, || done.lock().ok().is_some_and(|done| done.is_some())).map_err(|why| format!("the readback did not finish, {why}"))?;
         if done.lock().ok().and_then(|done| *done) != Some(true) {
             return Err("the readback could not be mapped".into());
         }
@@ -747,10 +801,12 @@ impl Gpu {
         }
         drop(mapped);
         buffer.unmap();
+        self.healthy()?;
         RgbImage::from_raw(width, height, out).ok_or_else(|| "the readback has the wrong size".to_string())
     }
 
     pub fn screen(&self, target: Target, width: u32, height: u32) -> Result<Screen, String> {
+        self.healthy()?;
         self.pipes()?;
         self.fits(width, height)?;
         let surface = unsafe { self.instance.create_surface_unsafe(surface_target(&target)?) }.map_err(|error| format!("create surface {error}"))?;
@@ -771,7 +827,7 @@ impl Gpu {
         if capabilities.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
             config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
         }
-        surface.configure(&self.device, &config);
+        self.configure(&surface, &config)?;
         Ok(Screen { gpu: self.clone(), surface, width: config.width, height: config.height, scale: 1.0 })
     }
 }
@@ -795,15 +851,16 @@ impl Screen {
             wgpu::CurrentSurfaceTexture::Validation => return Err("the surface failed validation".into()),
         };
         let view = texture.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(OUTPUT), ..Default::default() });
+        self.gpu.healthy()?;
         let encoder = self.gpu.encode(&view, (self.width, self.height), layers, self.scale)?;
-        self.gpu.queue.submit([encoder.finish()]);
-        self.gpu.queue.present(texture);
+        self.gpu.submit(encoder, Some(texture));
+        self.gpu.healthy()?;
         Ok(())
     }
 }
 
 impl Drop for Screen {
     fn drop(&mut self) {
-        let _ = self.gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(1)) });
+        let _ = self.gpu.idle(Duration::from_secs(1));
     }
 }

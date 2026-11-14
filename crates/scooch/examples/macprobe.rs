@@ -1704,7 +1704,7 @@ mod probe {
         layer.commit();
         layer.reveal();
         p.gpu = Some(gpu.clone());
-        p.line(format!("- layer number {} at level {}, {}x{} pixels, adapter {}, device ready after {} ms", layer.number(), layer.level, width, height, gpu.name, device_ready.as_millis()));
+        p.line(format!("- layer number {} at level {}, {}x{} pixels, adapter {}, device ready after {} ms, render threads read visibility from the layer's own watcher {}", layer.number(), layer.level, width, height, gpu.name, device_ready.as_millis(), layer.watched()));
         let row = (height as f32 * 0.55) as usize;
         let samples: Vec<(usize, usize)> = [(0.1, 0.7), (0.5, 0.7), (0.7, 0.7), (0.9, 0.7), (0.55, 0.45), (0.85, 0.45)].iter().map(|(x, y)| ((width as f32 * x) as usize, (height as f32 * y) as usize)).collect();
         let set_after = opened.elapsed().as_secs_f64() * 1000.0 + cross * 1000.0 + 400.0;
@@ -1739,6 +1739,9 @@ mod probe {
         }
         let (renderer, run) = worker.join().map_err(|_| anyhow::anyhow!("the render thread panicked"))?;
         drop(renderer);
+        if !layer.watched() {
+            p.fail("the layer lost its watcher, so wgpu asks AppKit from the render thread");
+        }
         let traces = layer.traces();
         layer.close();
         let closed = Instant::now();
@@ -2357,7 +2360,9 @@ mod probe {
         let rate = span.map(|span| dragged.seen.iter().filter(|seen| glide_at.is_some_and(|at| seen.at >= at) && seen.at <= glide_at.unwrap_or(0.0) + span).count() as f64 / span.max(0.001));
         let expected = rate.map(|rate| rate * 0.45 * 0.64);
         let inked = dragged.seen.iter().map(|seen| seen.inked).fold(0.0, f32::max);
-        let handed = settled.and_then(|settled| dragged.seen.iter().filter(|seen| seen.at > settled && closed.is_none_or(|closed| seen.at <= closed + 1.0)).max_by_key(|seen| seen.step.worst));
+        let handed = settled.and_then(|settled| dragged.seen.windows(2).filter(|pair| pair[0].at >= settled && closed.is_none_or(|closed| pair[1].at <= closed + 1.0)).map(|pair| &pair[1]).max_by_key(|seen| seen.step.worst));
+        let fade = settled.and_then(|settled| dragged.seen.windows(2).find(|pair| pair[0].at < settled && pair[1].at >= settled).map(|pair| pair[1].step));
+        let layered = settled.zip(closed).map(|(settled, closed)| dragged.seen.iter().filter(|seen| seen.at >= settled && seen.at < closed).count());
         let hand_over = settled.map(|_| handed.map_or(0, |seen| seen.step.worst));
         let hand_spot = handed.map(|seen| format!("{} ms after the drop at pixel {},{} from {:?} to {:?}", ((seen.at - dragged.dropped) * 1000.0).round(), seen.step.x, seen.step.y, seen.step.before, seen.step.after));
         let at = |time: Option<f64>| time.map(|time| ((time - dragged.dropped) * 1000.0).round());
@@ -2372,7 +2377,8 @@ mod probe {
         ));
         p.line(format!("  - captures a second during the glide {:?}, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95", rate.map(|rate| rate.round()), expected.map(|value| value.round())));
         p.line(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(closed)));
-        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
+        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, captures of the settled layer before close {layered:?}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
+        p.line(format!("  - the change across the settle fade from the glide's last frame to the still, which ends before settled, {:?} of 255 at pixel {:?} from {:?} to {:?}", fade.map(|step| step.worst), fade.map(|step| (step.x, step.y)), fade.map(|step| step.before), fade.map(|step| step.after)));
         p.line(format!("  - daemon log {:?}", dragged.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         if let Some(name) = evidence {
             let folder = p.out.join(name);
@@ -2447,6 +2453,10 @@ mod probe {
         std::thread::sleep(Duration::from_millis(600));
         let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(180).collect()).collect();
         (changed, log)
+    }
+
+    fn commanded(line: &str) -> bool {
+        ["glide open", "glide warm", "glide helper started", "glide closed", "glide settle", "glide ready", "glide glided", "glide interrupted"].iter().any(|marker| line.contains(marker))
     }
 
     fn cover(marker: MainThreadMarker, screen: &Screen) -> Result<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
@@ -2586,11 +2596,10 @@ mod probe {
         }
         let _ = scooch_core::encode_png(&before.image()).map(|bytes| fs::write(p.out.join("idle-wake-before.png"), bytes));
         let woke: Vec<String> = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(180).collect()).collect();
-        let opened = woke.iter().any(|line| line.contains("glide early open"));
-        let closed = woke.iter().any(|line| line.contains("closed early open"));
-        p.line(format!("- a wake that changes nothing: early open {opened}, closed again {closed}, {shots} captures over 2.5 s, largest change from before the wake {} of 255 at {worst_at} ms at pixel {},{} from {:?} to {:?}, captures kept as idle-wake-before.png and idle-wake-worst.png, log {woke:?}", worst.worst, worst.x, worst.y, worst.before, worst.after));
-        if !opened || !closed || worst.worst > 2 {
-            p.fail("an early open with nothing to glide was not invisible");
+        let sent = woke.iter().filter(|line| commanded(line)).count();
+        p.line(format!("- a wake that changes nothing: helper commands {sent}, {shots} captures over 2.5 s, largest change from before the wake {} of 255 at {worst_at} ms at pixel {},{} from {:?} to {:?}, captures kept as idle-wake-before.png and idle-wake-worst.png, log {woke:?}", worst.worst, worst.x, worst.y, worst.before, worst.after));
+        if sent > 0 || worst.worst > 2 {
+            p.fail("a wake that changed nothing reached the helper or changed the screen");
         }
         let calm_a = (screen.frame.x + screen.frame.w * 0.15, screen.frame.y + screen.frame.h * 0.75);
         let calm_b = (screen.frame.x + screen.frame.w * 0.25, screen.frame.y + screen.frame.h * 0.75);
@@ -2644,14 +2653,16 @@ mod probe {
         }
         let ran = p.scooch(&["glide"], LIMIT);
         p.line(format!("- scooch glide said {:?}", ran.text()));
-        let back = position(p, name).unwrap_or(aside);
-        let (off, off_log) = wallpaper_after(p, &screen, |_| drag(back, subject));
+        let back = position(p, name).unwrap_or(subject);
+        let away = if (back.0 - subject.0).abs() < 5.0 { aside } else { subject };
+        let (off, off_log) = wallpaper_after(p, &screen, |_| drag(back, away));
         p.line(format!("- glide off, the same drag back: new wallpaper after {off:?} ms, log {off_log:?}"));
         let ran = p.scooch(&["glide"], LIMIT);
         p.line(format!("- scooch glide said {:?}", ran.text()));
         let wrote = set_motion(p, true);
         let back = position(p, name).unwrap_or(subject);
-        let (time, log) = wallpaper_after(p, &screen, |_| drag(back, aside));
+        let away = if (back.0 - subject.0).abs() < 5.0 { aside } else { subject };
+        let (time, log) = wallpaper_after(p, &screen, |_| drag(back, away));
         let glided = log.iter().any(|line| line.contains(" glide open"));
         let read = log.iter().any(|line| line.contains("glide skipped, reduce motion"));
         p.line(format!("- reduce motion on {wrote}, drag: new wallpaper after {time:?} ms, glided {glided}, the daemon logged reduce motion {read}, log {log:?}"));
@@ -2675,10 +2686,13 @@ mod probe {
         window.close();
         drop(window);
         spin(0.4);
-        let tick = |log: &[String]| log.iter().find_map(|line| line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<u64>().ok()));
+        let rendered = |log: &[String]| log.iter().find(|line| line.contains(" tick ") && line.contains("Rendered")).cloned();
+        let tick = |log: &[String]| rendered(log).and_then(|line| line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<u64>().ok()));
+        let laps = |log: &[String], names: &[&str]| rendered(log).map(|line| line.split(", ").filter_map(|part| part.rsplit_once(' ')).filter(|(name, _)| names.iter().any(|wanted| name.ends_with(wanted))).filter_map(|(_, ms)| ms.parse::<u64>().ok()).sum::<u64>());
         let hidden = covered_log.iter().any(|line| line.contains("glide skipped, hidden") || line.contains("glide skipped, helper budget"));
-        p.line(format!("- a move while a window covers the whole desktop: new wallpaper after {covered:?} ms, the daemon answered hidden {hidden}, tick {:?} ms against {:?} ms with glide off, log {covered_log:?}", tick(&covered_log), tick(&off_log)));
-        if covered.is_none() || !hidden || tick(&covered_log).zip(tick(&off_log)).is_some_and(|(with, without)| with > without + 400 + 300) {
+        let delay = laps(&covered_log, &["early", "tables", "open"]);
+        p.line(format!("- a move while a window covers the whole desktop: new wallpaper after {covered:?} ms, the daemon answered hidden {hidden}, time the glide added to the tick {delay:?} ms, tick {:?} ms against {:?} ms for the glide off move, log {covered_log:?}", tick(&covered_log), tick(&off_log)));
+        if covered.is_none() || !hidden || delay.is_none_or(|delay| delay > 400) {
             p.fail("a covered desktop delayed the plain swap");
         }
         std::thread::sleep(Duration::from_millis(1500));
@@ -2713,7 +2727,19 @@ mod probe {
             p.fail("killing the helper mid glide was not handled cleanly");
         }
         let last = Instant::now();
-        let gone = wait_until(Duration::from_secs(40), || helper_pids(p).is_empty());
+        let lines = daemon_log(p).lines().count();
+        for _ in 0..30 {
+            poke(p);
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        let woken = new_lines(&daemon_log(p), lines);
+        let ticks = woken.iter().filter(|line| line.contains(" tick ")).count();
+        let sent: Vec<String> = woken.iter().filter(|line| commanded(line)).map(|line| line.chars().take(160).collect()).collect();
+        p.line(format!("- thirty wakes with nothing moved over {} s after the last drag: ticks {ticks}, helper commands {} {sent:?}", last.elapsed().as_secs(), sent.len()));
+        if !sent.is_empty() {
+            p.fail("a wake with nothing moved sent the helper a command");
+        }
+        let gone = wait_until(Duration::from_secs(40).saturating_sub(last.elapsed()), || helper_pids(p).is_empty());
         p.line(format!("- no helper process {:?} s after the last drag", gone.map(|_| last.elapsed().as_secs())));
         std::thread::sleep(Duration::from_secs(35).saturating_sub(last.elapsed()));
         let pids = helper_pids(p);

@@ -2193,33 +2193,48 @@ mod probe {
         (total as f32 / (count * 3) as f32, high.unwrap_or(0) as u8, spread.iter().rposition(|n| *n > 0).unwrap_or(0) as u8)
     }
 
-    fn strong(baseline: &RgbImage, still: &RgbImage, icons: &[Rect]) -> Vec<usize> {
+    fn strong(baseline: &RgbImage, still: &RgbImage, icons: &[Rect]) -> Vec<Vec<usize>> {
         let width = baseline.width();
-        let mut mask = Vec::new();
+        let mut mask = vec![Vec::new(); icons.len()];
         for (index, (p, q)) in baseline.as_raw().as_chunks::<3>().0.iter().zip(still.as_raw().as_chunks::<3>().0.iter()).enumerate() {
+            if !(0..3).any(|c| p[c].abs_diff(q[c]) > 60) {
+                continue;
+            }
             let (x, y) = (index as u32 % width, index as u32 / width);
-            if inside(icons, x as f32, y as f32, 0.0) && (0..3).any(|c| p[c].abs_diff(q[c]) > 60) {
-                mask.push(index);
+            if let Some(icon) = icons.iter().position(|rect| inside(std::slice::from_ref(rect), x as f32, y as f32, 0.0)) {
+                mask[icon].push(index);
             }
         }
         mask
     }
 
-    fn covered(shot: &RgbImage, baseline: &RgbImage, expected: &[&RgbImage], mask: &[usize]) -> (usize, usize) {
+    fn total(mask: &[Vec<usize>]) -> usize {
+        mask.iter().map(Vec::len).sum()
+    }
+
+    fn covered(shot: &RgbImage, baseline: &RgbImage, expected: &[&RgbImage], mask: &[Vec<usize>]) -> (usize, usize) {
         let (s, b) = (shot.as_raw(), baseline.as_raw());
         let (mut hidden, mut redrawn) = (0usize, 0usize);
-        for index in mask {
-            let at = index * 3;
-            if !(0..3).any(|c| s[at + c].abs_diff(b[at + c]) > 40) {
-                continue;
+        for icon in mask {
+            let (mut gone, mut changed, mut kept) = (0usize, 0usize, 0usize);
+            for index in icon {
+                let at = index * 3;
+                if !(0..3).any(|c| s[at + c].abs_diff(b[at + c]) > 40) {
+                    kept += 1;
+                } else if expected.iter().any(|image| {
+                    let e = image.as_raw();
+                    (0..3).all(|c| e.get(at + c).is_some_and(|value| s[at + c].abs_diff(*value) <= 16))
+                }) {
+                    gone += 1;
+                } else {
+                    changed += 1;
+                }
             }
-            if expected.iter().any(|image| {
-                let e = image.as_raw();
-                (0..3).all(|c| e.get(at + c).is_some_and(|value| s[at + c].abs_diff(*value) <= 16))
-            }) {
-                hidden += 1;
+            redrawn += changed;
+            if (kept + changed) * 4 >= icon.len() {
+                redrawn += gone;
             } else {
-                redrawn += 1;
+                hidden += gone;
             }
         }
         (hidden, redrawn)
@@ -2430,8 +2445,10 @@ mod probe {
         let desktop = platform::current()?;
         let area = screen_rect(screen);
         let (width, height) = (kit.size[0], kit.size[1]);
-        let keep = outside(width, height, &kit.icons, 2);
-        let wide = outside(width, height, &kit.icons, 1);
+        let mut icons = kit.icons.clone();
+        icons.extend(icon_rects().unwrap_or_default().into_iter().map(|rect| Rect { x: rect.x - screen.frame.x, y: rect.y - screen.frame.y, ..rect }));
+        let keep = outside(width, height, &icons, 2);
+        let wide = outside(width, height, &icons, 1);
         p.line(format!("- **{}**, {} ms, scale {}", run.label, run.ms, run.scale.map_or("chosen by the helper".to_string(), |scale| format!("pinned at {scale}"))));
         helper.warm(Hints { scale: run.scale, ..bare() }, None, None, ANSWER)?;
         let asked_old = Instant::now();
@@ -2439,7 +2456,7 @@ mod probe {
         let (landed, landed_gap, missed) = equal_until(area, &run.old.1, &run.new.1, &wide, Duration::from_secs(6));
         park_cursor();
         let baseline = settle(area, Duration::from_secs(3))?;
-        let mask = strong(&baseline, &run.old.1, &kit.icons);
+        let mask = strong(&baseline, &run.old.1, &icons);
         let system = difference(&baseline, &run.old.1, &wide);
         p.line(format!(
             "  - the old still was set and a capture equalled it after {:?} ms of {} ms waited (last gap mean {:.2} 99th {} largest {}), the system against the file mean {:.2} 99th {} largest {}",
@@ -2626,7 +2643,7 @@ mod probe {
         if !progress.is_empty() {
             p.line(format!("  - subject progress from A to B in {places} distinct places, steps back {slipped}: {:?}", progress.iter().map(|t| (t * 100.0).round() / 100.0).collect::<Vec<_>>()));
         }
-        let mut line = format!("  - icon pixels covered by the layer in the worst capture {} of {}, icon pixels the desktop drew differently but not covered {}", worst_cover.0, mask.len(), worst_cover.1);
+        let mut line = format!("  - icon pixels covered by the layer in the worst capture {} of {}, icon pixels the desktop drew differently but not covered {}", worst_cover.0, total(&mask), worst_cover.1);
         if worst_cover.0 > 0 {
             let (at, shot) = &shots[worst_cover.2];
             line += &format!(", {}", evidence(p, &format!("{}-covered", run.name), shot, &baseline, &(0..(width * height) as usize).collect::<Vec<_>>(), &marks(*at)));
@@ -2662,7 +2679,7 @@ mod probe {
                 let _ = save_png(&p.out.join(format!("{}-strip.png", run.name)), &image);
             }
         }
-        if worst_cover.0 * 100 > mask.len().max(1) {
+        if worst_cover.0 * 100 > total(&mask).max(1) {
             p.failed.push(format!("{}: icons were covered in a capture", run.label));
         }
         if backwards > 0 || slipped > 0 {
@@ -3345,6 +3362,7 @@ mod probe {
         shots: Vec<(f64, RgbImage)>,
         log: Vec<String>,
         old: Option<PathBuf>,
+        kept: Option<PathBuf>,
         new: Option<PathBuf>,
         sent: bool,
     }
@@ -3353,6 +3371,13 @@ mod probe {
         let desktop = platform::current().ok();
         let area = screen_rect(screen);
         let old = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
+        let kept = old.as_ref().and_then(|path| {
+            static KEPT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let number = KEPT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let extension = path.extension().map_or("png".to_string(), |extension| extension.to_string_lossy().into_owned());
+            let kept = std::env::temp_dir().join(format!("scooch-judged-{}-{number}.{extension}", std::process::id()));
+            fs::copy(path, &kept).ok().map(|_| kept)
+        });
         let start = log_lines(log).len();
         let sent = act();
         let dropped = epoch();
@@ -3378,12 +3403,26 @@ mod probe {
             drain();
         }
         let log: Vec<String> = log_lines(log).into_iter().skip(start).filter(|line| line.contains(" glide ") || line.contains(" tick ") || line.contains(" wake ") || line.contains(" set ")).collect();
-        let new = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
-        Watched { dropped, shots, log, old, new, sent }
+        let set = log.iter().rev().find_map(|line| line.split_once(' ').and_then(|(_, rest)| rest.strip_prefix("set ")).map(|path| PathBuf::from(path.trim())));
+        let new = set.or_else(|| desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten()));
+        Watched { dropped, shots, log, old, kept, new, sent }
     }
 
     fn logged(watched: &Watched, word: &str) -> Option<f64> {
-        watched.log.iter().find(|line| line.contains(word)).and_then(|line| stamp_of(line))
+        logged_from(watched, word, f64::MIN)
+    }
+
+    fn logged_from(watched: &Watched, word: &str, from: f64) -> Option<f64> {
+        let word = word.trim_start();
+        watched.log.iter().filter(|line| line.split_once(' ').is_some_and(|(_, rest)| rest.starts_with(word))).filter_map(|line| stamp_of(line)).find(|stamp| *stamp >= from)
+    }
+
+    fn gliding_id(watched: &Watched) -> Option<String> {
+        watched.log.iter().find_map(|line| {
+            let (_, rest) = line.split_once(' ')?;
+            let (id, tail) = rest.strip_prefix("glide open ")?.split_once(' ')?;
+            tail.starts_with("shown and gliding").then(|| id.to_string())
+        })
     }
 
     fn tables_file(home: &Path, output: &Path) -> Option<Vec<u8>> {
@@ -3397,17 +3436,18 @@ mod probe {
         old_tables: Option<&'a [u8]>,
         before: &'a RgbImage,
         still_icons: &'a [Rect],
-        earlier_ready: Option<f64>,
+        warmed: bool,
     }
 
     fn judge_daemon_glide(p: &mut Probe, watched: &Watched, screen: &Screen, given: &Judged, label: &str, strip_name: Option<&str>) -> bool {
-        let Judged { source, old_tables, before, still_icons, earlier_ready } = *given;
-        let (Some(old_path), Some(new_path)) = (&watched.old, &watched.new) else {
-            p.line(format!("- {label}: the wallpaper before {:?} or after {:?} is unknown", watched.old, watched.new));
+        let Judged { source, old_tables, before, still_icons, warmed } = *given;
+        let (Some(old_path), Some(new_path)) = (&watched.kept, &watched.new) else {
+            p.line(format!("- {label}: the wallpaper before {:?}, kept as {:?}, or after {:?} is unknown", watched.old, watched.kept, watched.new));
             return false;
         };
-        let (Ok(old), Ok(new)) = (picture::decode(old_path), picture::decode(new_path)) else {
-            p.line(format!("- {label}: the two stills could not be read"));
+        let (old, new) = (picture::decode(old_path), picture::decode(new_path));
+        let (Ok(old), Ok(new)) = (old, new) else {
+            p.line(format!("- {label}: the two stills could not be read, old kept as {} and new {}", old_path.display(), new_path.display()));
             return false;
         };
         let (width, height) = old.dimensions();
@@ -3428,14 +3468,16 @@ mod probe {
             _ => Vec::new(),
         };
         let classes: Vec<char> = watched.shots.iter().map(|(_, shot)| side(shot, &old, &new, &apart)).collect();
-        let open = logged(watched, " glide open");
-        let settled = logged(watched, " glide settled");
-        let closed = logged(watched, " glide closed");
-        let settle = logged(watched, " glide settle ");
-        let glided = logged(watched, " glide glided");
-        let ready = logged(watched, " glide ready").or(earlier_ready);
-        let tick = watched.log.iter().find(|line| line.contains(" tick ")).cloned();
+        let id = gliding_id(watched);
+        let named = |what: &str| id.as_ref().and_then(|id| logged(watched, &format!("glide {what} {id} ")));
+        let open = named("open");
+        let settle = named("settle");
+        let glided = named("glided");
+        let closed = named("closed");
+        let settled = settle.or(open).and_then(|from| logged_from(watched, "glide settled", from));
+        let ready = logged(watched, " glide ready");
         let set = logged(watched, " set ");
+        let tick = watched.log.iter().filter(|line| line.contains(" tick ")).find(|line| set.is_none_or(|set| stamp_of(line).is_some_and(|stamp| stamp >= set))).cloned();
         let wake = logged(watched, " wake ");
         let fitted: Vec<Option<(f32, f32)>> = watched.shots.iter().map(|(_, shot)| (!frames.is_empty()).then(|| best_frame(shot, &frames, &keep))).collect();
         let window: Vec<f32> = watched.shots.iter().enumerate().filter(|(_, (at, _))| open.is_some_and(|open| *at >= open) && settled.is_none_or(|settled| *at <= settled)).filter_map(|(index, _)| fitted[index].map(|(s, _)| s)).collect();
@@ -3461,12 +3503,17 @@ mod probe {
             watched.shots.iter().filter(|(at, _)| *at > settled && closed.is_none_or(|closed| *at <= closed + 1.0)).map(|(_, shot)| difference(shot, &new, &wide)).fold((0.0f32, 0u8, 0u8), |w, d| (w.0.max(d.0), w.1.max(d.1), w.2.max(d.2)))
         });
         let since = |time: Option<f64>| time.map(|time| ((time - watched.dropped) * 1000.0).round());
-        let order: Vec<(&str, Option<f64>)> = vec![("ready", ready), ("open and glide", open), ("settle after the set", settle), ("glided", glided), ("settled", settled), ("closed", closed)];
+        let ready_text = match (since(ready), warmed) {
+            (Some(ms), _) => format!("ready {ms}"),
+            (None, true) => "ready earlier".to_string(),
+            (None, false) => "ready missing".to_string(),
+        };
+        let order: Vec<String> = std::iter::once(ready_text).chain([("open and glide", open), ("settle after the set", settle), ("glided", glided), ("settled", settled), ("closed", closed)].into_iter().map(|(name, at)| format!("{name} {:?}", since(at)))).collect();
         let in_order = match (open, settle, settled, closed) {
             (Some(open), Some(settle), Some(settled), Some(closed)) => open <= settle && settled >= settle && closed >= settled && closed + 0.02 >= settle + HOLD as f64 / 1000.0,
             _ => false,
         };
-        let counts = watched.log.iter().find(|line| line.contains(" glide glided")).and_then(|line| line.split(" glide glided ").nth(1)).map(str::to_string).unwrap_or_default();
+        let counts = id.as_ref().and_then(|id| watched.log.iter().find_map(|line| line.split_once(" glide glided ").map(|(_, rest)| rest).filter(|rest| rest.starts_with(&format!("{id} "))))).map(str::to_string).unwrap_or_default();
         let laps = tick.as_deref().map(|line| line.split(" ms ").nth(1).and_then(|rest| rest.split("] ").nth(1)).unwrap_or("").to_string()).unwrap_or_default();
         let tick_ms = tick.as_deref().and_then(|line| line.split(" tick ").nth(1)).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok());
         let tick_start = tick.as_deref().and_then(stamp_of).zip(tick_ms).map(|(end, ms)| end - ms / 1000.0);
@@ -3478,7 +3525,7 @@ mod probe {
             apart.len(),
             classes.iter().collect::<String>()
         ));
-        p.line(format!("  - daemon times after the drop {:?}, open before the set, settle after it, close after settled and {HOLD} ms after the set {in_order}, glided `{counts}`", order.iter().map(|(name, at)| format!("{name} {:?}", since(*at))).collect::<Vec<_>>()));
+        p.line(format!("  - daemon times after the drop {:?}, open before the set, settle after it, close after settled and {HOLD} ms after the set {in_order}, glided `{counts}`", order));
         p.line(format!(
             "  - drop to first moving frame on screen {:?} ms, wake {:?} ms, tick started {:?} ms, wallpaper set {:?} ms, settled {:?} ms, closed {:?} ms, tick laps `{laps}`",
             first_move.map(f64::round),
@@ -3489,7 +3536,7 @@ mod probe {
             since(closed)
         ));
         p.line(format!("  - {} captures fitted to {} CPU frames during the glide, {distinct} distinct s, steady {steady}: {:?}", window.len(), frames.len(), window.iter().map(|s| (s * 100.0).round() / 100.0).collect::<Vec<_>>()));
-        p.line(format!("  - icon pixels covered {hidden} of {}, from settled to a second after close against the new still {hand_over:?}, old picture after the new {returned}", mask.len()));
+        p.line(format!("  - icon pixels covered {hidden} of {}, from settled to a second after close against the new still {hand_over:?}, old picture after the new {returned}", total(&mask)));
         p.line(format!("  - daemon log {:?}", watched.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         if let Some(name) = strip_name {
             let picked: Vec<(f64, RgbImage)> = watched.shots.iter().filter(|(at, _)| open.is_none_or(|open| *at >= open - 0.05) && settled.is_none_or(|settled| *at <= settled + 0.1)).map(|(at, shot)| (*at, shot.clone())).collect();
@@ -3501,7 +3548,7 @@ mod probe {
                 }
             }
         }
-        returned == 0 && steady && distinct >= 3 && hidden * 100 <= mask.len().max(1) && hand_over.is_some_and(|d| d.1 <= 2) && in_order
+        returned == 0 && steady && distinct >= 3 && hidden * 100 <= total(&mask).max(1) && hand_over.is_some_and(|d| d.1 <= 2) && in_order
     }
 
     fn icons_except(screen: &Screen, moving: &str) -> Vec<Rect> {
@@ -3509,6 +3556,13 @@ mod probe {
         let automation: ::windows::core::Result<IUIAutomation> = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) };
         let Ok(automation) = automation else { return Vec::new() };
         automation_rects(&automation, view.list).unwrap_or_default().into_iter().filter(|(seen, _)| seen != moving).map(|(_, rect)| Rect { x: rect.x - screen.frame.x, y: rect.y - screen.frame.y, ..rect }).collect()
+    }
+
+    fn icon_spot(name: &str, folder: bool) -> Option<(f32, f32)> {
+        let view = shell::view().ok()?;
+        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.ok()?;
+        let shown = shown_name(name, folder);
+        automation_rects(&automation, view.list).ok()?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| (rect.x + rect.w / 2.0, rect.y))
     }
 
     fn drag_icon(name: &str, folder: bool, to: POINT) -> bool {
@@ -3626,8 +3680,9 @@ mod probe {
         let mut setup = None;
         for (step, target) in [(1, lower), (2, aside)] {
             let calm = quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
+            let from = icon_spot(name, folder);
             let watched = watch_change(&log, &screen, || drag_icon(name, folder, target), false);
-            p.line(format!("- setup drag {step} to {},{} after a quiet log {calm}: new wallpaper {}, log {:?}", target.x, target.y, watched.new != watched.old, watched.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
+            p.line(format!("- setup drag {step} from {from:?} to {},{} after a quiet log {calm}, icon now at {:?}: new wallpaper {}, log {:?}", target.x, target.y, icon_spot(name, folder), watched.new != watched.old, watched.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
             setup = Some(watched);
         }
         let setup = setup.context("no setup drag")?;
@@ -3643,9 +3698,11 @@ mod probe {
         let old_tables = desktop.wallpaper(&screen).ok().flatten().and_then(|old| tables_file(&p.home, &old));
         park_cursor();
         let before = settle(area, Duration::from_secs(3))?;
+        let from = icon_spot(name, folder);
+        let warmed = log_lines(&log).iter().any(|line| line.contains(" glide ready"));
         let watched = watch_change(&log, &screen, || drag_icon(name, folder, centre), true);
-        let earlier_ready = logged(&setup, " glide ready");
-        let given = Judged { source: &source, old_tables: old_tables.as_deref(), before: &before, still_icons: &still_icons, earlier_ready };
+        p.line(format!("- the timed drag from {from:?} to {},{}, icon now at {:?}", centre.x, centre.y, icon_spot(name, folder)));
+        let given = Judged { source: &source, old_tables: old_tables.as_deref(), before: &before, still_icons: &still_icons, warmed };
         let good = judge_daemon_glide(p, &watched, &screen, &given, "glide on, a real drag onto the subject", Some("daemon-glide-strip"));
         pump(Duration::from_millis(1000));
         let left = layer::ours_left();

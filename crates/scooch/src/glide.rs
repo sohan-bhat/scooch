@@ -236,11 +236,47 @@ pub fn skipped(reason: &str, detail: &str) {
     }
 }
 
+pub fn exact(still: &Path) -> bool {
+    use std::io::Read;
+    let mut head = Vec::new();
+    if std::fs::File::open(still).and_then(|file| file.take(1 << 16).read_to_end(&mut head)).is_err() {
+        return true;
+    }
+    sampling(&head).is_none_or(|factors| factors.iter().all(|factor| *factor == factors[0]))
+}
+
+fn sampling(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.get(..2) != Some(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut at = 2;
+    while at + 4 <= bytes.len() {
+        if bytes[at] != 0xFF {
+            return None;
+        }
+        let marker = bytes[at + 1];
+        if marker == 0xFF {
+            at += 1;
+            continue;
+        }
+        if (0xD0..=0xD9).contains(&marker) || marker == 0x01 {
+            at += 2;
+            continue;
+        }
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            let count = usize::from(*bytes.get(at + 9)?);
+            return (0..count).map(|index| bytes.get(at + 11 + index * 3).copied()).collect();
+        }
+        at += 2 + usize::from(u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]));
+    }
+    None
+}
+
 fn reason_of(error: &anyhow::Error) -> &'static str {
     let text = format!("{error:#}");
     if text.contains("software renderer") {
         "software adapter"
-    } else if text.contains("never reported the live layer as visible") {
+    } else if text.contains("never reported the live layer as visible") || text.contains("cover the whole desktop") {
         "hidden"
     } else if text.contains("no wallpaper window below") {
         "no room"
@@ -347,15 +383,6 @@ impl Glider {
         self.link.as_mut().ok_or_else(|| anyhow!("no helper"))
     }
 
-    pub fn warm(&mut self, picture: &Path, size: [u32; 2]) {
-        if !self.usable() {
-            return;
-        }
-        if let Err(error) = self.send_warm(picture, size, SPAWN_WAIT) {
-            self.give_up(None, &error);
-        }
-    }
-
     fn send_warm(&mut self, picture: &Path, size: [u32; 2], wait: Duration) -> Result<()> {
         let wanted = (picture.to_path_buf(), size);
         self.connect(wait)?;
@@ -391,7 +418,7 @@ impl Glider {
     }
 
     pub fn open_early(&mut self, screen: &Screen, picture: &Path, size: [u32; 2], still: &Path) {
-        if !self.usable() || self.doomed || self.too_large(&screen.id, size) || self.early.iter().any(|early| early.screen == screen.id) {
+        if !self.usable() || self.doomed || self.too_large(&screen.id, size) || self.early.iter().any(|early| early.screen == screen.id) || !exact(still) {
             return;
         }
         let id = self.fresh_id();
@@ -401,7 +428,7 @@ impl Glider {
         })();
         match result {
             Ok(()) => {
-                note(&mut self.said, format!("early open {id} on {}", still.display()));
+                note(&mut self.said, format!("open after snapshot {id} on {}", still.display()));
                 self.early.push(Early { id, screen: screen.id.clone(), size, still: still.to_path_buf() });
             }
             Err(error) => self.give_up(None, &error),
@@ -421,7 +448,7 @@ impl Glider {
         let Some(link) = self.link.as_mut() else { return };
         let shown = link.shown(unused.id, BUDGET);
         link.close(unused.id);
-        note(&mut self.said, format!("closed early open {} with nothing to glide", unused.id));
+        note(&mut self.said, format!("closed open after snapshot {} with nothing to glide", unused.id));
         if let Err(error) = shown {
             self.remember_size(&unused.screen, unused.size, &error);
         }
@@ -435,6 +462,11 @@ impl Glider {
         if self.too_large(&plan.screen.id, plan.size) || self.doomed {
             self.close_early_for(&plan.screen.id);
             skipped(if self.doomed { "helper failed" } else { "too large" }, "");
+            return None;
+        }
+        if !exact(plan.still) {
+            self.close_early_for(&plan.screen.id);
+            skipped("old still", "the picture on screen was saved with less color detail than the layer shows, so this move swaps it plainly");
             return None;
         }
         let started = Instant::now();
@@ -471,7 +503,7 @@ impl Glider {
         match result {
             Ok(()) => {
                 self.late = 0;
-                note(&mut self.said, format!("open {id} shown and gliding after {} ms{}", started.elapsed().as_millis(), if reused.is_some() { ", opened early" } else { "" }));
+                note(&mut self.said, format!("open {id} shown and gliding after {} ms{}", started.elapsed().as_millis(), if reused.is_some() { ", opened after the snapshot" } else { "" }));
                 self.flights.push(Flight { id, screen: plan.screen.id.clone(), settled: false, set: None });
                 Some(id)
             }

@@ -3,7 +3,7 @@ use crate::state::{display_of, file_safe, parse, same, write_atomic, Entry, Lock
 use crate::glide::{Glider, Plan, Program};
 use crate::{cache, poke, scene};
 use anyhow::{Context, Result};
-use scooch_core::{Analysis, Options, Placement, RgbImage, Scene};
+use scooch_core::{Analysis, Options, Placement, Rect, RgbImage, Scene};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -362,6 +362,7 @@ pub struct Daemon {
     sessions: Arc<Mutex<HashMap<String, (u64, scooch_core::Session)>>>,
     used: Arc<Mutex<Instant>>,
     seen: Mutex<Option<u64>>,
+    prints: Mutex<HashMap<String, u64>>,
 }
 
 #[derive(Default)]
@@ -405,7 +406,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()) }
     }
 
     pub fn quick_look(&self) -> bool {
@@ -444,34 +445,16 @@ impl Daemon {
         reduce
     }
 
-    fn glide_wanted(&self, state: &State) -> bool {
-        state.on && self.glide_block(state).is_none()
-    }
-
-    pub fn warm(&self) {
-        if !self.desktop.live() {
-            return;
-        }
-        let state = self.store.load();
-        if !self.glide_wanted(&state) {
-            return;
-        }
-        let Ok(screens) = self.desktop.screens() else { return };
-        let Ok(mut glider) = self.glider.try_lock() else { return };
-        glider.reap();
-        for screen in &screens {
-            let Some(entry) = state.screens.get(&screen.id) else { continue };
-            let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { continue };
-            let Ok(key) = tables_key(&entry.source, &state.options) else { continue };
-            if !self.store.tables_for(output, key).is_file() {
-                continue;
+    fn moved_screens(&self, snapshot: &Snapshot) -> Vec<String> {
+        let mut prints = self.prints.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut moved = Vec::new();
+        for screen in &snapshot.screens {
+            let now = screen_print(snapshot, screen);
+            if prints.insert(screen.id.clone(), now).is_some_and(|before| before != now) {
+                moved.push(screen.id.clone());
             }
-            let scene = scene::scene(screen, &[]);
-            glider.warm(&entry.source, [scene.width, scene.height]);
-            break;
         }
-        drop(glider);
-        self.reap_later();
+        moved
     }
 
     fn session_still(&self, screen: &str, key: u64, (image, analysis, placement, scene, options): (&RgbImage, &Analysis, &Placement, &Scene, &Options)) -> (Arc<scooch_core::Bundle>, Arc<RgbImage>) {
@@ -562,10 +545,6 @@ impl Daemon {
             let glider = self.glider.clone();
             let blocked = self.glide_block(&state);
             let mut gliding = blocked.is_none().then(|| glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
-            if let Some(glider) = gliding.as_deref_mut() {
-                self.open_early(&state, glider);
-                lap("early", &mut clock);
-            }
             let snapshot = self.desktop.snapshot();
             lap("snapshot", &mut clock);
             if let Ok(snapshot) = &snapshot {
@@ -573,6 +552,11 @@ impl Daemon {
                 *self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(print);
                 if trace() {
                     eprintln!("{} snapshot icons {print:016x}", stamp());
+                }
+                let moved = self.moved_screens(snapshot);
+                if let (Some(glider), false) = (gliding.as_deref_mut(), moved.is_empty()) {
+                    self.open_after_snapshot(&state, snapshot, &moved, glider);
+                    lap("early", &mut clock);
                 }
             }
             match snapshot {
@@ -628,9 +612,8 @@ impl Daemon {
         }
     }
 
-    fn open_early(&self, state: &State, glider: &mut Glider) {
-        let Ok(screens) = self.desktop.screens() else { return };
-        for screen in &screens {
+    fn open_after_snapshot(&self, state: &State, snapshot: &Snapshot, moved: &[String], glider: &mut Glider) {
+        for screen in snapshot.screens.iter().filter(|screen| moved.contains(&screen.id)) {
             let Some(entry) = state.screens.get(&screen.id) else { continue };
             let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { continue };
             let Ok(key) = tables_key(&entry.source, &state.options) else { continue };
@@ -855,7 +838,7 @@ impl Daemon {
         };
         drop(decoded);
         drop(analysis);
-        let bytes = match encode(&picture, format, self.desktop.profile().as_deref()) {
+        let bytes = match encode(&picture, format, self.desktop.profile().as_deref(), self.desktop.live()) {
             Ok(bytes) => bytes,
             Err(error) => {
                 undo(glider.as_deref_mut(), flight, &tables);
@@ -1043,7 +1026,19 @@ pub fn merge(mine: &State, before: &State, fresh: &State) -> State {
 pub const QUICK: Duration = Duration::from_millis(60);
 
 pub fn icon_print(snapshot: &Snapshot) -> u64 {
-    let mut rects: Vec<[i64; 4]> = snapshot.icons.iter().map(|icon| [icon.x.round() as i64, icon.y.round() as i64, icon.w.round() as i64, icon.h.round() as i64]).collect();
+    print_of(snapshot.icons.iter())
+}
+
+pub fn screen_print(snapshot: &Snapshot, screen: &Screen) -> u64 {
+    let frame = &screen.frame;
+    print_of(snapshot.icons.iter().filter(|icon| {
+        let (x, y) = (icon.x + icon.w / 2.0, icon.y + icon.h / 2.0);
+        x >= frame.x && x < frame.x + frame.w && y >= frame.y && y < frame.y + frame.h
+    }))
+}
+
+fn print_of<'a>(icons: impl Iterator<Item = &'a Rect>) -> u64 {
+    let mut rects: Vec<[i64; 4]> = icons.map(|icon| [icon.x.round() as i64, icon.y.round() as i64, icon.w.round() as i64, icon.h.round() as i64]).collect();
     rects.sort_unstable();
     cache::digest(&rects.iter().flat_map(|rect| rect.iter().flat_map(|value| value.to_le_bytes())).collect::<Vec<u8>>())
 }
@@ -1072,20 +1067,20 @@ fn flip_check(analysis: &Analysis, scene: &Scene, options: &Options, placement: 
     flip_helps(hidden, scooch_core::hidden_share(analysis, scene, &flipped))
 }
 
-pub fn encode(picture: &RgbImage, format: Format, profile: Option<&[u8]>) -> Result<Vec<u8>> {
+pub fn encode(picture: &RgbImage, format: Format, profile: Option<&[u8]>, full_color: bool) -> Result<Vec<u8>> {
     Ok(match format {
-        Format::Jpeg => jpeg(picture, profile)?,
+        Format::Jpeg => jpeg(picture, profile, full_color)?,
         Format::Png => scooch_core::encode_png(picture)?,
     })
 }
 
-fn jpeg(picture: &RgbImage, profile: Option<&[u8]>) -> Result<Vec<u8>> {
+fn jpeg(picture: &RgbImage, profile: Option<&[u8]>, full_color: bool) -> Result<Vec<u8>> {
     let (Ok(width), Ok(height)) = (u16::try_from(picture.width()), u16::try_from(picture.height())) else {
         return Ok(scooch_core::encode_jpeg(picture, QUALITY)?);
     };
     let mut out = Vec::with_capacity(picture.as_raw().len() / 6);
     let mut encoder = jpeg_encoder::Encoder::new(&mut out, QUALITY);
-    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+    encoder.set_sampling_factor(if full_color { jpeg_encoder::SamplingFactor::F_1_1 } else { jpeg_encoder::SamplingFactor::F_2_2 });
     if let Some(profile) = profile {
         encoder.add_icc_profile(profile)?;
     }
@@ -1245,7 +1240,6 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
         let mut said: Option<String> = None;
         loop {
             worker.first();
-            daemon.warm();
             if daemon.quick_look() {
                 worker.take();
             } else {
@@ -1850,12 +1844,24 @@ pub mod tests {
         assert!(!adoptable(&entry, &picture, false));
     }
 
+    fn luma_sampling(bytes: &[u8]) -> Option<u8> {
+        let start = bytes.windows(2).position(|pair| pair == [0xFF, 0xC0])?;
+        bytes.get(start + 11).copied()
+    }
+
+    #[test]
+    fn stills_that_may_glide_keep_full_color_detail() {
+        let picture = scene::sample(64, 40);
+        assert_eq!(luma_sampling(&encode(&picture, Format::Jpeg, None, false).unwrap()), Some(0x22));
+        assert_eq!(luma_sampling(&encode(&picture, Format::Jpeg, None, true).unwrap()), Some(0x11));
+    }
+
     #[test]
     fn jpeg_output_decodes_to_the_same_size_and_close_colors() {
         let picture = scene::sample(301, 157);
-        let bytes = encode(&picture, Format::Jpeg, None).unwrap();
+        let bytes = encode(&picture, Format::Jpeg, None, false).unwrap();
         assert!(!bytes.windows(12).any(|window| window == b"ICC_PROFILE\0"));
-        let marked = encode(&picture, Format::Jpeg, Some(&[7u8; 300])).unwrap();
+        let marked = encode(&picture, Format::Jpeg, Some(&[7u8; 300]), false).unwrap();
         assert!(marked.windows(12).any(|window| window == b"ICC_PROFILE\0"));
         let folder = scratch("jpeg");
         std::fs::write(folder.join("a.jpg"), &bytes).unwrap();
@@ -2641,7 +2647,8 @@ pub mod tests {
     }
 
     fn today(name: &str) -> Vec<u8> {
-        let (daemon, fake, _, _) = glide_rig(name, false);
+        let (daemon, fake, _, _) = glide_rig(name, true);
+        *fake.reduce.lock().unwrap() = true;
         assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
         std::fs::read(fake.showing("main")).unwrap()
     }
@@ -2690,24 +2697,51 @@ pub mod tests {
         }
     }
 
+    fn helper_commands(fake: &Fake) -> Vec<String> {
+        events(fake).into_iter().filter(|event| ["spawn", "warm ", "open ", "glide ", "settle ", "close "].iter().any(|command| event.starts_with(command))).collect()
+    }
+
     #[test]
-    fn the_layer_opens_before_the_snapshot_and_an_unused_one_closes_with_nothing_set() {
+    fn the_layer_opens_after_a_snapshot_that_moved_icons_and_before_the_glide() {
         let (daemon, fake, _, _) = glide_rig("glide-early", true);
         fake.place(vec![subject()]);
         daemon.tick();
+        assert!(helper_commands(&fake).is_empty(), "{:?}", events(&fake));
         fake.place(vec![moved_subject()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
         let events = events(&fake);
         let open = at(&events, "open");
-        assert!(open < events.iter().rposition(|event| event == "snapshot").unwrap() && open < at(&events, "glide"), "{events:?}");
-        assert!(daemon.glider.lock().unwrap().said.iter().any(|line| line.ends_with("opened early")));
+        assert!(events.iter().rposition(|event| event == "snapshot").unwrap() < open && open < at(&events, "glide"), "{events:?}");
+        assert!(daemon.glider.lock().unwrap().said.iter().any(|line| line.ends_with("opened after the snapshot")));
+        assert!(daemon.held_bytes() > 0);
+    }
+
+    #[test]
+    fn thirty_wakes_with_nothing_moved_send_the_helper_nothing() {
+        let (daemon, fake, _, spawned) = glide_rig("glide-quiet-wakes", true);
+        assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
         fake.events.lock().unwrap().clear();
         let sets = fake.sets.load(Ordering::SeqCst);
-        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
-        let events: Vec<String> = fake.events.lock().unwrap().iter().map(|(event, _)| event.clone()).collect();
-        assert!(at(&events, "open") < at(&events, "close") && !events.iter().any(|event| event.starts_with("glide ") || event.starts_with("set ")), "{events:?}");
+        for _ in 0..30 {
+            assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        }
+        assert!(helper_commands(&fake).is_empty(), "{:?}", events(&fake));
         assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
-        assert!(daemon.held_bytes() > 0);
+        assert_eq!(*spawned.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn icons_that_move_without_moving_the_picture_open_and_close_with_nothing_set() {
+        let (daemon, fake, _, _) = glide_rig("glide-moved-kept", true);
+        assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
+        fake.events.lock().unwrap().clear();
+        let sets = fake.sets.load(Ordering::SeqCst);
+        fake.place(vec![moved_subject(), Rect { x: 2.0, y: 2.0, w: 4.0, h: 4.0 }]);
+        let ticked = outcome(&daemon.tick());
+        let events = events(&fake);
+        assert!(matches!(ticked, Outcome::Unchanged | Outcome::Kept), "{ticked:?}");
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
+        assert!(at(&events, "open") < at(&events, "close") && !events.iter().any(|event| event.starts_with("glide ")), "{events:?}");
     }
 
     #[test]
@@ -2799,6 +2833,39 @@ pub mod tests {
         assert_eq!(*spawned.lock().unwrap(), 1);
         let said = daemon.glider.lock().unwrap().said.clone();
         assert_eq!(said.iter().filter(|line| line.contains("larger than the GPU can draw")).count(), 1, "{said:?}");
+    }
+
+    #[test]
+    fn a_still_saved_with_less_color_detail_swaps_plainly() {
+        let (daemon, fake, _, _) = glide_rig("glide-old-still", true);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let still = fake.shown.lock().unwrap().get("main").cloned().unwrap();
+        assert!(crate::glide::exact(&still));
+        std::fs::write(&still, encode(&scene::sample(64, 40), Format::Jpeg, None, false).unwrap()).unwrap();
+        assert!(!crate::glide::exact(&still));
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let seen = events(&fake);
+        assert!(seen.iter().any(|event| event.starts_with("set ")) && !seen.iter().any(|event| event.starts_with("open") || event.starts_with("glide ")), "{seen:?}");
+        let now = fake.shown.lock().unwrap().get("main").cloned().unwrap();
+        assert!(crate::glide::exact(&now));
+        fake.place(vec![Rect { x: 40.0, ..moved_subject() }]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert!(events(&fake).iter().any(|event| event.starts_with("glide ")), "{:?}", events(&fake));
+    }
+
+    #[test]
+    fn a_png_or_unreadable_still_counts_as_exact() {
+        let folder = crate::state::scratch("exact-still");
+        let png = folder.join("still.png");
+        std::fs::write(&png, encode(&scene::sample(16, 16), Format::Png, None, false).unwrap()).unwrap();
+        assert!(crate::glide::exact(&png));
+        assert!(crate::glide::exact(&folder.join("missing.jpg")));
+        let full = folder.join("full.jpg");
+        std::fs::write(&full, encode(&scene::sample(16, 16), Format::Jpeg, Some(&[7u8; 300]), true).unwrap()).unwrap();
+        assert!(crate::glide::exact(&full));
     }
 
     #[test]

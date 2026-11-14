@@ -3,20 +3,25 @@ use super::sys::{self, Ref};
 use crate::platform::Screen;
 use anyhow::{Context, Result};
 use objc2::rc::{Retained, Weak};
-use objc2::runtime::AnyObject;
-use objc2::{MainThreadMarker, MainThreadOnly, Message};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{NSBackingStoreType, NSColor, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowStyleMask};
 use objc2_foundation::{NSPoint, NSRect};
 use objc2_core_graphics::{kCGColorSpaceSRGB, CGColorSpace};
-use objc2_quartz_core::{CAMetalLayer, CATransaction};
+use objc2_quartz_core::{CALayerDelegate, CAMetalLayer, CATransaction};
 use scooch_core::Rect;
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const NO_ROOM: &str = "macOS shows no wallpaper window below and icon window above the desktop level on this screen, so Scooch keeps the plain swap.";
 pub const HIDDEN: &str = "macOS never reported the live layer as visible, so Scooch keeps the plain swap.";
+pub const COVERED: &str = "Windows cover the whole desktop on this screen, so Scooch keeps the plain swap.";
+const APP_LEVELS: std::ops::Range<i64> = 0..20;
+const COVER_GRID: usize = 24;
 const SHOW_WAIT: Duration = Duration::from_millis(400);
 
 const ON_SCREEN: u32 = 1;
@@ -33,6 +38,7 @@ pub struct Seen {
     pub name: String,
     pub bounds: Rect,
     pub on_screen: bool,
+    pub alpha: f32,
 }
 
 #[repr(C)]
@@ -117,7 +123,77 @@ pub fn spin(seconds: f64) {
 }
 
 pub fn wait(timeout: Duration) {
+    refresh();
     unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, timeout.as_secs_f64(), 1) };
+    refresh();
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "ScoochLayerWatch"]
+    #[ivars = Arc<AtomicUsize>]
+    struct Watch;
+
+    unsafe impl NSObjectProtocol for Watch {}
+
+    unsafe impl CALayerDelegate for Watch {}
+
+    impl Watch {
+        #[unsafe(method_id(window))]
+        fn window(&self) -> Retained<Watch> {
+            self.retain()
+        }
+
+        #[unsafe(method(occlusionState))]
+        fn occlusion_state(&self) -> usize {
+            self.ivars().load(Ordering::Acquire)
+        }
+    }
+);
+
+impl Watch {
+    fn new(state: Arc<AtomicUsize>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(state);
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+#[link(name = "objc")]
+extern "C" {
+    fn objc_setAssociatedObject(object: *mut AnyObject, key: *const c_void, value: *mut AnyObject, policy: usize);
+}
+
+static WATCH_KEY: u8 = 0;
+const RETAIN_NONATOMIC: usize = 1;
+
+thread_local! {
+    static WATCHED: RefCell<Vec<(Weak<NSWindow>, Arc<AtomicUsize>)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn refresh() {
+    WATCHED.with(|watched| {
+        watched.borrow_mut().retain(|(window, state)| match window.load() {
+            Some(window) => {
+                state.store(window.occlusionState().0, Ordering::Release);
+                true
+            }
+            None => false,
+        })
+    });
+}
+
+fn unwatch(state: &Arc<AtomicUsize>) {
+    state.store(0, Ordering::Release);
+    let _ = WATCHED.try_with(|watched| watched.borrow_mut().retain(|(_, other)| !Arc::ptr_eq(other, state)));
+}
+
+fn watch(window: &NSWindow, metal: &CAMetalLayer) -> Arc<AtomicUsize> {
+    let state = Arc::new(AtomicUsize::new(window.occlusionState().0));
+    let watcher = Watch::new(state.clone());
+    unsafe { objc_setAssociatedObject(metal as *const CAMetalLayer as *mut AnyObject, &WATCH_KEY as *const u8 as *const c_void, Retained::as_ptr(&watcher) as *mut AnyObject, RETAIN_NONATOMIC) };
+    metal.setDelegate(Some(ProtocolObject::from_ref(&*watcher)));
+    WATCHED.with(|watched| watched.borrow_mut().push((Weak::new(window), state.clone())));
+    state
 }
 
 extern "C" fn nothing(_context: *mut c_void) {}
@@ -165,6 +241,7 @@ fn read(list: Ref, on_screen: bool) -> Vec<Seen> {
                 name: entry.get("kCGWindowName").and_then(Plist::text).unwrap_or_default().to_string(),
                 bounds: Rect { x: edge("X"), y: edge("Y"), w: edge("Width"), h: edge("Height") },
                 on_screen: on_screen || entry.get("kCGWindowIsOnscreen").and_then(Plist::number).is_some_and(|value| value != 0.0),
+                alpha: number(entry, "kCGWindowAlpha") as f32,
             }
         })
         .collect()
@@ -184,6 +261,20 @@ fn overlaps(a: &Rect, b: &Rect) -> bool {
 
 pub fn is_picture(window: &Seen) -> bool {
     window.owner == "Dock" || window.owner.contains("Wallpaper") || window.name.starts_with("Wallpaper")
+}
+
+pub fn covered(seen: &[Seen], screen: &Rect, ours: i64) -> bool {
+    let opaque: Vec<&Rect> = seen.iter().filter(|window| window.pid != ours && APP_LEVELS.contains(&window.layer) && window.alpha >= 1.0 && overlaps(&window.bounds, screen)).map(|window| &window.bounds).collect();
+    if opaque.is_empty() || screen.w <= 0.0 || screen.h <= 0.0 {
+        return false;
+    }
+    let step = |index: usize, length: f32| (index as f32 + 0.5) / COVER_GRID as f32 * length;
+    (0..COVER_GRID).all(|row| {
+        (0..COVER_GRID).all(|column| {
+            let (x, y) = (screen.x + step(column, screen.w), screen.y + step(row, screen.h));
+            opaque.iter().any(|window| x >= window.x && x < window.x + window.w && y >= window.y && y < window.y + window.h)
+        })
+    })
 }
 
 pub fn choose(seen: &[Seen], screen: &Rect, desktop: i64, ours: i64) -> Option<i64> {
@@ -216,6 +307,7 @@ pub struct Layer {
     window: ManuallyDrop<Retained<NSWindow>>,
     view: ManuallyDrop<Retained<NSView>>,
     metal: ManuallyDrop<Retained<CAMetalLayer>>,
+    seen: Arc<AtomicUsize>,
     pub level: i64,
     pub pixels: (u32, u32),
     pub display: u32,
@@ -250,8 +342,14 @@ impl Layer {
         CATransaction::flush();
     }
 
+    pub fn watched(&self) -> bool {
+        self.metal.delegate().is_some_and(|delegate| AsRef::<AnyObject>::as_ref(&*delegate).class().name() == c"ScoochLayerWatch")
+    }
+
     pub fn visible(&self) -> bool {
-        self.window.occlusionState().contains(NSWindowOcclusionState::Visible)
+        let state = self.window.occlusionState();
+        self.seen.store(state.0, Ordering::Release);
+        state.contains(NSWindowOcclusionState::Visible)
     }
 
     pub fn shown_after(&self) -> Option<Duration> {
@@ -268,6 +366,7 @@ impl Layer {
 
 impl Drop for Layer {
     fn drop(&mut self) {
+        unwatch(&self.seen);
         objc2::rc::autoreleasepool(|_| {
             self.window.orderOut(None);
             self.window.close();
@@ -292,7 +391,12 @@ pub fn open(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
 fn build(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
     let (display, number) = super::picture::screen_for(marker, &screen.id)?;
     let (desktop, _) = levels();
-    let level = choose(&listing(), &screen.frame, desktop, std::process::id() as i64).context(NO_ROOM)?;
+    let seen = listing();
+    let ours = std::process::id() as i64;
+    if covered(&seen, &screen.frame, ours) {
+        anyhow::bail!(COVERED);
+    }
+    let level = choose(&seen, &screen.frame, desktop, ours).context(NO_ROOM)?;
     let frame = display.frame();
     let scale = display.backingScaleFactor();
     let local = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
@@ -315,12 +419,12 @@ fn build(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
     metal.setHidden(true);
     view.setLayer(Some(&**metal));
     view.setWantsLayer(true);
-    metal.setDelegate(None);
     window.setContentView(Some(&view));
+    let seen = watch(&window, &metal);
     window.orderFrontRegardless();
     CATransaction::flush();
     let pixels = ((frame.size.width * scale).round() as u32, (frame.size.height * scale).round() as u32);
-    let layer = Layer { window: ManuallyDrop::new(window), view: ManuallyDrop::new(view), metal: ManuallyDrop::new(metal), level, pixels, display: number };
+    let layer = Layer { window: ManuallyDrop::new(window), view: ManuallyDrop::new(view), metal: ManuallyDrop::new(metal), seen, level, pixels, display: number };
     layer.shown_after().context(HIDDEN)?;
     Ok(layer)
 }
@@ -399,7 +503,25 @@ mod tests {
     use super::*;
 
     fn window(owner: &str, layer: i64, name: &str) -> Seen {
-        Seen { owner: owner.into(), pid: 7, layer, number: 1, name: name.into(), bounds: Rect { x: 0.0, y: 0.0, w: 1440.0, h: 900.0 }, on_screen: true }
+        Seen { owner: owner.into(), pid: 7, layer, number: 1, name: name.into(), bounds: Rect { x: 0.0, y: 0.0, w: 1440.0, h: 900.0 }, on_screen: true, alpha: 1.0 }
+    }
+
+    #[test]
+    fn opaque_app_windows_over_the_whole_screen_cover_the_desktop() {
+        let whole = window("Safari", 0, "");
+        assert!(covered(std::slice::from_ref(&whole), &SCREEN, 99));
+        let left = Seen { bounds: Rect { x: 0.0, y: 0.0, w: 720.0, h: 900.0 }, ..whole.clone() };
+        let right = Seen { bounds: Rect { x: 720.0, y: 0.0, w: 720.0, h: 900.0 }, ..whole.clone() };
+        assert!(covered(&[left.clone(), right], &SCREEN, 99));
+        assert!(!covered(std::slice::from_ref(&left), &SCREEN, 99));
+        let below_menu = Seen { bounds: Rect { x: 0.0, y: 25.0, w: 1440.0, h: 875.0 }, ..whole.clone() };
+        assert!(!covered(&[below_menu], &SCREEN, 99));
+        assert!(!covered(&[Seen { alpha: 0.9, ..whole.clone() }], &SCREEN, 99));
+        assert!(!covered(&[Seen { layer: 20, ..whole.clone() }], &SCREEN, 99));
+        assert!(!covered(&[Seen { layer: -2147483623, ..whole.clone() }], &SCREEN, 99));
+        assert!(!covered(&[Seen { pid: 99, ..whole.clone() }], &SCREEN, 99));
+        let elsewhere = Seen { bounds: Rect { x: 1440.0, y: 0.0, w: 1920.0, h: 1080.0 }, ..whole };
+        assert!(!covered(&[elsewhere], &SCREEN, 99));
     }
 
     const DESKTOP: i64 = -2147483623;
@@ -433,5 +555,28 @@ mod tests {
     fn the_levels_sit_in_the_documented_order() {
         let (desktop, icons) = levels();
         assert!(desktop < icons);
+    }
+
+    #[test]
+    fn a_render_thread_reads_visibility_from_the_layer_and_never_from_appkit() {
+        let metal = CAMetalLayer::new();
+        let state = Arc::new(AtomicUsize::new(NSWindowOcclusionState::Visible.0));
+        let watcher = Watch::new(state.clone());
+        unsafe { objc_setAssociatedObject(Retained::as_ptr(&metal) as *mut AnyObject, &WATCH_KEY as *const u8 as *const c_void, Retained::as_ptr(&watcher) as *mut AnyObject, RETAIN_NONATOMIC) };
+        metal.setDelegate(Some(ProtocolObject::from_ref(&*watcher)));
+        drop(watcher);
+        let address = Retained::as_ptr(&metal) as usize;
+        let asked = std::thread::spawn(move || {
+            let metal = unsafe { &*(address as *const CAMetalLayer) };
+            let delegate = metal.delegate().expect("the layer lost its watcher");
+            let window: Option<Retained<NSObject>> = unsafe { msg_send![&*delegate, window] };
+            let window = window.expect("the watcher gave no window");
+            let first: usize = unsafe { msg_send![&*window, occlusionState] };
+            state.store(0, Ordering::Release);
+            let second: usize = unsafe { msg_send![&*window, occlusionState] };
+            (first, second)
+        });
+        assert_eq!(asked.join().unwrap(), (NSWindowOcclusionState::Visible.0, 0));
+        drop(metal);
     }
 }
