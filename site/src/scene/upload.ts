@@ -5,9 +5,16 @@ export type Pixels = { data: Uint8Array | Uint8ClampedArray; width: number; heig
 
 const STRIP = 1 << 20;
 
-type Source = HTMLCanvasElement | OffscreenCanvas | ImageBitmap | Pixels;
+type Source = HTMLCanvasElement | ImageBitmap | Pixels;
 
 export async function stripUpload(gl: WebGLRenderer, texture: Texture, source: Source, wait: () => Promise<void> = quiet) {
+  if (!('data' in source) && !(source instanceof ImageBitmap)) {
+    texture.needsUpdate = true;
+    await wait();
+    if ((gl.getContext() as WebGL2RenderingContext).isContextLost()) return false;
+    gl.initTexture(texture);
+    return true;
+  }
   texture.source.dataReady = false;
   texture.mipmapsAutoUpdate = false;
   texture.needsUpdate = true;
@@ -29,27 +36,21 @@ async function strips(gl: WebGLRenderer, texture: Texture, source: Source, wait:
   if (!handle) return false;
   const alive = () => !context.isContextLost() && (gl.properties.get(texture) as { __webglTexture?: WebGLTexture }).__webglTexture === handle;
   const rows = Math.max(16, Math.floor(STRIP / (width * 4)));
-  const image = 'data' in source ? null : source;
+  const image = source instanceof ImageBitmap ? source : null;
   for (let y = 0; y < height; y += rows) {
     await wait();
     if (!alive()) return false;
     const count = Math.min(rows, height - y);
-    const part = image
-      ? await createImageBitmap(image, 0, y, width, count, {
-          imageOrientation: texture.flipY ? 'flipY' : 'from-image',
-          premultiplyAlpha: texture.premultiplyAlpha ? 'premultiply' : 'none',
-          colorSpaceConversion: texture.colorSpace === NoColorSpace ? 'none' : 'default',
-        })
-      : null;
+    const part = image ? await createImageBitmap(image, 0, y, width, count, { imageOrientation: texture.flipY ? 'flipY' : 'from-image' }) : null;
     if (!alive()) {
       part?.close();
       return false;
     }
     gl.state.bindTexture(context.TEXTURE_2D, handle);
-    context.pixelStorei(context.UNPACK_FLIP_Y_WEBGL, texture.flipY);
-    context.pixelStorei(context.UNPACK_PREMULTIPLY_ALPHA_WEBGL, texture.premultiplyAlpha);
-    context.pixelStorei(context.UNPACK_COLORSPACE_CONVERSION_WEBGL, texture.colorSpace === NoColorSpace ? context.NONE : context.BROWSER_DEFAULT_WEBGL);
-    context.pixelStorei(context.UNPACK_ALIGNMENT, 4);
+    gl.state.pixelStorei(context.UNPACK_FLIP_Y_WEBGL, texture.flipY);
+    gl.state.pixelStorei(context.UNPACK_PREMULTIPLY_ALPHA_WEBGL, texture.premultiplyAlpha);
+    gl.state.pixelStorei(context.UNPACK_COLORSPACE_CONVERSION_WEBGL, texture.colorSpace === NoColorSpace ? context.NONE : context.BROWSER_DEFAULT_WEBGL);
+    gl.state.pixelStorei(context.UNPACK_ALIGNMENT, 4);
     const at = texture.flipY ? height - y - count : y;
     if (part) {
       context.texSubImage2D(context.TEXTURE_2D, 0, 0, at, width, count, context.RGBA, context.UNSIGNED_BYTE, part);

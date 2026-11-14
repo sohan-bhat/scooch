@@ -92,12 +92,8 @@ export async function allocate(gl: WebGLRenderer, composer: EffectComposer) {
   for (const target of found) {
     if (unused.has(target.texture.name)) continue;
     await quiet();
-    if (still.off) return false;
+    if (still.off || context.isContextLost()) return false;
     gl.initRenderTarget(target);
-    if (context.getError() === context.OUT_OF_MEMORY) {
-      nativeOff();
-      return false;
-    }
   }
   return true;
 }

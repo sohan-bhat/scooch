@@ -340,12 +340,10 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       last = '';
       generation += 1;
       if (!plain || scenery.canvas === plain.texture) return false;
-      const sharp = scenery.canvas;
       uniforms.canvas.value = plain.texture;
       uniforms.grain_lod.value = plain.lod;
       scenery.canvas = plain.texture;
       plain.texture.needsUpdate = true;
-      sharp.dispose();
       return true;
     },
     prepare(gl: WebGLRenderer) {
@@ -414,9 +412,9 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
         }
         const strip = await createImageBitmap(bitmap, 0, y, width, Math.min(rows, height - y));
         gl.state.bindTexture(context.TEXTURE_2D, handle);
-        context.pixelStorei(context.UNPACK_FLIP_Y_WEBGL, false);
-        context.pixelStorei(context.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-        context.pixelStorei(context.UNPACK_COLORSPACE_CONVERSION_WEBGL, context.NONE);
+        gl.state.pixelStorei(context.UNPACK_FLIP_Y_WEBGL, false);
+        gl.state.pixelStorei(context.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        gl.state.pixelStorei(context.UNPACK_COLORSPACE_CONVERSION_WEBGL, context.NONE);
         context.texSubImage2D(context.TEXTURE_2D, 0, 0, y, width, strip.height, context.RGBA, context.UNSIGNED_BYTE, strip);
         strip.close();
       }

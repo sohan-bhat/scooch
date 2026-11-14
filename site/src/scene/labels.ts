@@ -1,6 +1,6 @@
 import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Quaternion, Vector3, type Texture, type WebGLRenderer } from 'three';
 import { quiet } from '@/lib/idle';
-import { runtime } from '@/story/state';
+import { changed, runtime } from '@/story/state';
 import { stripUpload } from './upload';
 import { windowLit } from './window';
 import { canvasTexture, dialPainter, fontsReady, paintedTexture, sticky as stickyText, typed as typedText, type Reveal } from './captions';
@@ -74,6 +74,7 @@ function revealDecal(painters: Reveal, width: number, height: number, size: numb
     material.map = full.texture;
     uniforms.uOrder.value = order.texture;
     for (const texture of previous) texture.dispose();
+    changed();
     return true;
   };
   const reveal = (amount: number) => {
@@ -165,6 +166,7 @@ export function labelProps(group: Object3D) {
       dial = next;
       if (face) face.map = next.texture;
       previous.dispose();
+      changed();
       return (await typed?.sharpen(gl, [1024, 1360], wait)) ?? true;
     },
     update(amount: number) {
