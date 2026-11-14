@@ -269,7 +269,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       const ready = new Set(screens.main.textures());
       await streamScenery(screens.main.scenery);
       await upload(screens.main.textures().filter((texture) => !ready.has(texture)));
-      const buffer = gl.getDrawingBufferSize(new Vector2());
+      const buffer = quality.liveSize(gl, new Vector2());
       const limit = Math.round(Math.max(buffer.x, buffer.y) * 0.8);
       const order = ['swans', 'wide', 'tall', 'city', 'moon'];
       const rank = (id: string) => (order.includes(id) ? order.indexOf(id) : order.length);
@@ -498,7 +498,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const heldPart = useCallback(() => {
     if (!built) return undefined;
     const tv = built.television;
-    const buffer = gl.getDrawingBufferSize(scratch.buffer);
+    const buffer = quality.liveSize(gl, scratch.buffer);
     scratch.right.set(1, 0, 0).applyQuaternion(tv.quaternion).multiplyScalar(tv.screen.width / 2);
     scratch.up.set(0, 1, 0).applyQuaternion(tv.quaternion).multiplyScalar(tv.screen.height / 2);
     let minX = Infinity;

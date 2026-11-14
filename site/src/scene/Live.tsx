@@ -169,7 +169,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       live.lastScroll = performance.now();
     };
     const pick = (event: PointerEvent) => {
-      const rect = element.getBoundingClientRect();
+      const rect = (element.parentElement ?? element).getBoundingClientRect();
       tools.ndc.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
       tools.ray.setFromCamera(tools.ndc, camera);
       const roots = Object.values(things).filter((thing): thing is Object3D => !!thing && visible(thing));
@@ -183,7 +183,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       return { id, point: chosen.point.clone(), object: chosen.object };
     };
     const deskPoint = (event: PointerEvent) => {
-      const rect = element.getBoundingClientRect();
+      const rect = (element.parentElement ?? element).getBoundingClientRect();
       tools.ndc.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
       tools.ray.setFromCamera(tools.ndc, camera);
       return tools.ray.ray.intersectPlane(tools.plane, tools.hit);
@@ -196,7 +196,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
         if (Math.hypot(dx, dy) > 6) press.moved = true;
         if (!press.moved) return;
         if (press.id === 'icon' && press.mesh) {
-          const rect = element.getBoundingClientRect();
+          const rect = (element.parentElement ?? element).getBoundingClientRect();
           tools.ndc.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
           tools.ray.setFromCamera(tools.ndc, camera);
           const hit = tools.ray.intersectObject(press.mesh, false)[0];

@@ -1,5 +1,5 @@
 import type { DepthOfFieldEffect, EffectComposer, NoiseEffect } from 'postprocessing';
-import type { Texture, Vector3 } from 'three';
+import type { Texture, Vector2, Vector3, WebGLRenderer } from 'three';
 
 export type Toggle = { enabled: boolean };
 
@@ -58,6 +58,7 @@ const settings: Record<GpuClass, Settings> = {
 };
 
 const FAST = 0.7;
+const NATIVE = 2;
 const EARN = 2000;
 const EARN_LIMIT = 32000;
 const COMFORT = 0.6;
@@ -78,6 +79,8 @@ class Quality {
   ao = true;
   grain = true;
   sharpDpr = 1;
+  nativeDpr = 1;
+  liveScale = 1;
   fastScale = 1;
   chain: Chain = 'sharp';
   switchAt = -1e9;
@@ -99,8 +102,15 @@ class Quality {
     this.dof = chosen.dof;
     this.ao = chosen.ao;
     this.grain = chosen.grain;
-    this.sharpDpr = Math.min(chosen.sharp, Math.max(deviceDpr, 1));
+    this.nativeDpr = Math.min(Math.max(deviceDpr, 1), NATIVE);
+    this.sharpDpr = Math.min(chosen.sharp, this.nativeDpr);
+    this.liveScale = this.sharpDpr / this.nativeDpr;
     this.fastScale = Math.min(1, FAST / this.sharpDpr);
+  }
+
+  liveSize(gl: WebGLRenderer, out: Vector2) {
+    gl.getSize(out);
+    return out.set(Math.max(1, Math.round(out.x * this.sharpDpr)), Math.max(1, Math.round(out.y * this.sharpDpr)));
   }
 
   get hasFast() {

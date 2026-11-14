@@ -56,6 +56,16 @@ function Effects({ full }: { full: boolean }) {
 }
 
 const motion = { until: 0, was: false };
+const corner = { scale: '' };
+
+type Sized = EffectComposerType & { depthRenderTarget?: { setSize: (width: number, height: number) => void } | null };
+
+function sizeTo(composer: EffectComposerType, width: number, height: number) {
+  composer.inputBuffer.setSize(width, height);
+  composer.outputBuffer.setSize(width, height);
+  (composer as Sized).depthRenderTarget?.setSize(width, height);
+  for (const pass of composer.passes) pass.setSize(width, height);
+}
 const captured = new WeakSet<CopyPass>();
 
 function capture(pass: CopyPass) {
@@ -111,6 +121,10 @@ export function Post({ phone }: { phone: boolean }) {
     (value: EffectComposerType | null) => {
       quality.composer = value;
       if (!value) return;
+      value.setSize = () => {
+        quality.liveSize(gl, size);
+        sizeTo(value, size.x, size.y);
+      };
       const render = value.render.bind(value);
       value.render = (delta?: number) => {
         if (quality.chain !== 'sharp') return;
@@ -125,7 +139,7 @@ export function Post({ phone }: { phone: boolean }) {
         gl.autoClear = clear;
       };
     },
-    [gl, overlay],
+    [gl, overlay, size],
   );
 
   const fastComposer = useCallback(
@@ -149,13 +163,8 @@ export function Post({ phone }: { phone: boolean }) {
         render(delta);
       };
       value.setSize = () => {
-        gl.getDrawingBufferSize(size);
-        const width = Math.max(1, Math.round(size.x * quality.fastScale));
-        const height = Math.max(1, Math.round(size.y * quality.fastScale));
-        value.inputBuffer.setSize(width, height);
-        value.outputBuffer.setSize(width, height);
-        (value as unknown as { depthRenderTarget?: { setSize: (w: number, h: number) => void } | null }).depthRenderTarget?.setSize(width, height);
-        for (const pass of value.passes) pass.setSize(width, height);
+        quality.liveSize(gl, size);
+        sizeTo(value, Math.max(1, Math.round(size.x * quality.fastScale)), Math.max(1, Math.round(size.y * quality.fastScale)));
       };
     },
     [gl, size],
@@ -191,6 +200,17 @@ export function Post({ phone }: { phone: boolean }) {
   }, [fast, gl, scene, camera]);
 
   useFrame((_, delta) => {
+    if (quality.liveScale < 0.999) {
+      gl.getSize(size);
+      const r = quality.liveScale;
+      gl.setViewport(0, size.y * (1 - r), size.x * r, size.y * r);
+      const scale = `scale(${1 / r})`;
+      if (corner.scale !== scale) {
+        corner.scale = scale;
+        gl.domElement.style.transformOrigin = '0 0';
+        gl.domElement.style.transform = scale;
+      }
+    }
     const now = performance.now();
     if (live.pressing || animating(now)) motion.until = Math.max(motion.until, now + SHARP_AFTER);
     const moving = now < motion.until;

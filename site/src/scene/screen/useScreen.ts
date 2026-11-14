@@ -7,6 +7,7 @@ import { asset } from '@/lib/base';
 import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
 import type { ScreenFrame } from '../rig';
+import { quality } from '../quality';
 import { createCrtMaterial } from './crt';
 import { createLcdMaterial } from './material';
 import { createFrame, loadScenery } from './scenery';
@@ -46,7 +47,7 @@ export function useScreens(manifest: DemoManifest) {
   const gl = useThree((state) => state.gl);
 
   return useMemo(() => {
-    const buffer = gl.getDrawingBufferSize(new Vector2());
+    const buffer = quality.liveSize(gl, new Vector2());
     const { width, height } = main.info;
     const scale = Math.min(1, Math.max(buffer.x, buffer.y) / Math.max(width, height));
     const mainFrame = createFrame(main, { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) });
