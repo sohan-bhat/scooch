@@ -1419,8 +1419,89 @@ mod probe {
         }
         let best = scores.iter().max_by(|a, b| a.2.unwrap_or(0.0).total_cmp(&b.2.unwrap_or(0.0)));
         p.line(format!("- Windows keeps {} closer, scores {:?}", best.map_or("neither", |best| best.0), scores));
+        formats(p, desktop.as_ref(), &screen, &source);
         restore(p);
         Ok(())
+    }
+
+    fn bmp(image: &RgbImage) -> Vec<u8> {
+        let (width, height) = image.dimensions();
+        let row = (width * 3).div_ceil(4) * 4;
+        let size = 54 + row * height;
+        let mut out = Vec::with_capacity(size as usize);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&54u32.to_le_bytes());
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&(width as i32).to_le_bytes());
+        out.extend_from_slice(&(height as i32).to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&24u16.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&(row * height).to_le_bytes());
+        out.extend_from_slice(&2835i32.to_le_bytes());
+        out.extend_from_slice(&2835i32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        for y in (0..height).rev() {
+            let start = out.len();
+            for x in 0..width {
+                let [r, g, b] = image.get_pixel(x, y).0;
+                out.extend_from_slice(&[b, g, r]);
+            }
+            out.resize(start + row as usize, 0);
+        }
+        out
+    }
+
+    fn formats(p: &mut Probe, desktop: &dyn platform::Desktop, screen: &Screen, detail: &RgbImage) {
+        let (width, height) = (screen.frame.w as u32, screen.frame.h as u32);
+        let photo = picture::decode(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/photos/balloon-sky.jpg")).ok().and_then(|image| {
+            let left = (image.width().saturating_sub(width) / 2) as i32;
+            let top = (image.height().saturating_sub(height) / 2) as i32;
+            crop(&image, RECT { left, top, right: left + width as i32, bottom: top + height as i32 }, (0, 0)).filter(|cut| cut.dimensions() == (width, height))
+        });
+        let icons: Vec<Rect> = icon_rects().unwrap_or_default().into_iter().map(|rect| Rect { x: rect.x - screen.frame.x, y: rect.y - screen.frame.y, ..rect }).collect();
+        let keep = outside(width, height, &icons, 1);
+        p.line("- what Windows shows for each wallpaper format, the screen against the system's own decode of the file outside the icons and the taskbar".to_string());
+        for (label, image) in [("the fine detail picture", Some(detail)), ("the balloon photo", photo.as_ref())] {
+            let Some(image) = image else {
+                p.line(format!("  - {label} could not be made"));
+                continue;
+            };
+            for (kind, bytes) in [("PNG", scooch_core::encode_png(image).ok()), ("JPEG", jpeg(image).ok()), ("BMP", Some(bmp(image)))] {
+                let Some(bytes) = bytes else { continue };
+                let path = p.home.join(format!("format-{}-{}.{}", label.split_whitespace().last().unwrap_or("picture"), kind.to_lowercase(), kind.to_lowercase()));
+                if fs::write(&path, &bytes).is_err() {
+                    continue;
+                }
+                let when = SystemTime::now();
+                let set = desktop.set_wallpaper(screen, &path);
+                pump(Duration::from_millis(1500));
+                let shown = capture(screen_rect(screen));
+                let file = picture::system_decode(&path);
+                let measured = match (&shown, &file) {
+                    (Ok(shot), Ok(file)) => format!("{:?}", difference(shot, file, &keep)),
+                    _ => format!("not measured, capture {} decode {}", shown.is_ok(), file.is_ok()),
+                };
+                let copies: Vec<String> = themes_since(when).iter().filter(|copy| copy.file_name().is_some_and(|name| name.to_string_lossy().starts_with("Transcoded"))).map(|copy| {
+                    let copied = fs::read(copy).unwrap_or_default();
+                    let against = picture::system_decode(copy).ok().zip(file.as_ref().ok()).map(|(decoded, file)| difference(&decoded, file, &keep));
+                    format!("{} {} bytes equal {} against the file {:?}", copy.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(), copied.len(), copied == bytes, against)
+                }).collect();
+                p.line(format!("  - {label} as {kind}, {} bytes, set {:?}: screen against the file (mean, 99th, largest) {measured}, Themes copies {copies:?}", bytes.len(), set.map_err(|error| error.to_string())));
+                if let Ok(shot) = &shown {
+                    if let Ok(file) = &file {
+                        if difference(shot, file, &keep).1 > 2 {
+                            let name = format!("format-{}-{}", label.split_whitespace().last().unwrap_or("picture"), kind.to_lowercase());
+                            let said = evidence(p, &name, shot, file, &keep, &[]);
+                            p.line(format!("    - {said}"));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn restore(p: &mut Probe) {
