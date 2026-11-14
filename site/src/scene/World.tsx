@@ -643,8 +643,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         distance={0}
         intensity={SPOT}
         castShadow
-        shadow-mapSize={phone ? [1024, 1024] : [2048, 2048]}
-        shadow-radius={5}
+        shadow-mapSize={phone || quality.tier === 'light' ? [1024, 1024] : [2048, 2048]}
+        shadow-radius={!phone && quality.tier === 'light' ? 2.5 : 5}
         shadow-bias={-0.0003}
         shadow-normalBias={0.012}
         shadow-camera-near={0.2}
