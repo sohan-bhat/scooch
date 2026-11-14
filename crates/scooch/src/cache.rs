@@ -35,12 +35,13 @@ static KNOWN: std::sync::Mutex<Vec<Known>> = std::sync::Mutex::new(Vec::new());
 pub fn key(source: &Path) -> Result<u64> {
     let meta = fs::metadata(source).with_context(|| format!("Scooch could not read {}, so check that the picture is still there.", source.display()))?;
     let stamp = (meta.len(), meta.modified().ok());
-    if let Some(found) = KNOWN.lock().ok().and_then(|known| known.iter().find(|(path, len, modified, _)| path == source && (*len, *modified) == stamp && modified.is_some()).map(|(_, _, _, key)| *key)) {
+    let settled = stamp.1.and_then(|modified| modified.elapsed().ok()).is_some_and(|age| age > std::time::Duration::from_secs(2));
+    if let Some(found) = KNOWN.lock().ok().filter(|_| settled).and_then(|known| known.iter().find(|(path, len, modified, _)| path == source && (*len, *modified) == stamp).map(|(_, _, _, key)| *key)) {
         return Ok(found);
     }
     let bytes = fs::read(source).with_context(|| format!("Scooch could not read {}, so check that the picture is still there.", source.display()))?;
     let key = digest(&bytes) ^ digest(concat!(env!("CARGO_PKG_VERSION"), "-srgb").as_bytes()).rotate_left(17);
-    if let Ok(mut known) = KNOWN.lock() {
+    if let (true, Ok(mut known)) = (settled, KNOWN.lock()) {
         known.retain(|(path, _, _, _)| path != source);
         if known.len() >= 8 {
             known.remove(0);

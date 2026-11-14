@@ -168,7 +168,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const targets = useMemo(() => ({ lamp: new Object3D(), street: new Object3D(), laptop: new Object3D(), television: new Object3D() }), []);
   const bulbs = useRef<MeshStandardMaterial[]>([]);
   const scratch = useMemo(
-    () => ({ color: new Color(), white: new Color(1, 1, 1), focus: new Vector3(), lampColor: new Color('#ffb46b'), street: tokenColor('rim'), window: new Color(), stripe: new Color() }),
+    () => ({ color: new Color(), white: new Color(1, 1, 1), focus: new Vector3(), lampColor: new Color('#ffb46b'), street: tokenColor('rim'), window: new Color(), stripe: new Color(), buffer: new Vector2(), part: new Vector2(), right: new Vector3(), up: new Vector3(), corner: new Vector3() }),
     [],
   );
   const room = useMemo(() => tokenColor('room'), []);
@@ -304,6 +304,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   }, [screens, manifest, gl]);
 
   useEffect(() => {
+    if (!inside) runtime.inside = true;
     if (!inside || insideIn) return;
     let stopped = false;
     let timer = 0;
@@ -328,6 +329,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         .then(() => {
           if (stopped) return;
           warmDraw(gl, scene, camera, inside.group);
+          runtime.inside = true;
           setInsideIn(true);
         });
     };
@@ -492,6 +494,29 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     };
   }, [built, gl, camera, scene, screens, wall, blindsMatrix]);
 
+  const heldPart = useCallback(() => {
+    if (!built) return undefined;
+    const tv = built.television;
+    const buffer = gl.getDrawingBufferSize(scratch.buffer);
+    scratch.right.set(1, 0, 0).applyQuaternion(tv.quaternion).multiplyScalar(tv.screen.width / 2);
+    scratch.up.set(0, 1, 0).applyQuaternion(tv.quaternion).multiplyScalar(tv.screen.height / 2);
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const [a, b] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+      scratch.corner.copy(tv.center).addScaledVector(scratch.right, a).addScaledVector(scratch.up, b).project(camera);
+      minX = Math.min(minX, scratch.corner.x);
+      maxX = Math.max(maxX, scratch.corner.x);
+      minY = Math.min(minY, scratch.corner.y);
+      maxY = Math.max(maxY, scratch.corner.y);
+    }
+    const size = screens.main.texture.image as { width: number; height: number };
+    const fit = Math.min(1, Math.max(((maxX - minX) / 2) * buffer.x / size.width, ((maxY - minY) / 2) * buffer.y / size.height) * 1.25);
+    if (fit >= 1) return undefined;
+    return { width: Math.max(64, Math.ceil(size.width * fit)), height: Math.max(48, Math.ceil(size.height * fit)) };
+  }, [built, gl, camera, scratch, screens]);
+
   const shadowFrames = useRef(0);
   const shadowProps = useRef(false);
   const readyAt = useRef(-1);
@@ -578,7 +603,17 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     wall.uniforms.uDrift.value.set(story.drift * 0.018, -story.drift * 0.028);
     floor.uniforms.uDrift.value.copy(wall.uniforms.uDrift.value);
     crt.uTime.value = time;
-    if (!hooks.drawHeld(gl, Math.min(delta, 0.05))) screens.main.render(gl, story.place);
+    const frameSize = screens.main.texture.image as { width: number; height: number };
+    const part = inside?.group.visible ? undefined : heldPart();
+    const holding = hooks.drawHeld(gl, Math.min(delta, 0.05), part);
+    const moving = quality.chain === 'fast' && quality.fastScale < 1 ? scratch.part.set(Math.max(1, Math.round(frameSize.width * quality.fastScale)), Math.max(1, Math.round(frameSize.height * quality.fastScale))) : null;
+    const movingPart = moving ? { width: moving.x, height: moving.y } : undefined;
+    if (!holding) screens.main.render(gl, story.place, movingPart);
+    const shownPart = holding ? part : movingPart;
+    const sx = shownPart ? shownPart.width / frameSize.width : 1;
+    const sy = shownPart ? shownPart.height / frameSize.height : 1;
+    crt.uFrameScale.value.set(crt.uFrame.value === screens.main.texture ? sx : 1, crt.uFrame.value === screens.main.texture ? sy : 1);
+    if (inside) inside.uniforms.uFrameScale.value.set(inside.uniforms.uFrame.value === screens.main.texture ? sx : 1, inside.uniforms.uFrame.value === screens.main.texture ? sy : 1);
     for (const frame of Object.values(gallery.current)) frame.render(gl, 0);
     const now = performance.now();
     crt.uOn.value = live.power ? Math.min(tubeOn, Math.min(Math.max((now - live.onAt) / 1100, 0), 1)) : tubeOn;

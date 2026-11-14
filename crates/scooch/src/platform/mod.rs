@@ -88,6 +88,9 @@ pub trait Desktop: Send + Sync {
     fn hold(&self) -> Duration {
         Duration::from_millis(250)
     }
+    fn busy(&self) -> Box<dyn std::any::Any> {
+        Box::new(())
+    }
     fn dropped(&self) -> bool {
         false
     }

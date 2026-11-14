@@ -1,31 +1,7 @@
 import type { DepthOfFieldEffect, EffectComposer, NoiseEffect } from 'postprocessing';
-import type { Vector3 } from 'three';
+import type { Texture, Vector3 } from 'three';
 
 export type Toggle = { enabled: boolean };
-
-type Step = { dpr: number; dof: boolean; ao: boolean; grain: boolean };
-
-const fullSteps: Step[] = [
-  { dpr: 2, dof: true, ao: true, grain: true },
-  { dpr: 1.75, dof: true, ao: true, grain: true },
-  { dpr: 1.5, dof: true, ao: true, grain: true },
-  { dpr: 1.25, dof: true, ao: true, grain: true },
-  { dpr: 1, dof: true, ao: true, grain: true },
-  { dpr: 1, dof: true, ao: false, grain: true },
-  { dpr: 1, dof: false, ao: false, grain: true },
-  { dpr: 0.85, dof: false, ao: false, grain: true },
-  { dpr: 0.7, dof: false, ao: false, grain: true },
-  { dpr: 0.7, dof: false, ao: false, grain: false },
-];
-
-const lightSteps: Step[] = [
-  { dpr: 1.5, dof: false, ao: false, grain: true },
-  { dpr: 1.25, dof: false, ao: false, grain: true },
-  { dpr: 1, dof: false, ao: false, grain: true },
-  { dpr: 0.85, dof: false, ao: false, grain: true },
-  { dpr: 0.7, dof: false, ao: false, grain: true },
-  { dpr: 0.7, dof: false, ao: false, grain: false },
-];
 
 export type Tier = 'full' | 'light';
 export type GpuClass = 'low' | 'mid' | 'high';
@@ -73,74 +49,93 @@ export function gpuClass(): Probe {
   return probed;
 }
 
-const starts: Record<GpuClass, Step> = {
-  high: { dpr: 1.5, dof: true, ao: true, grain: true },
-  mid: { dpr: 0.85, dof: false, ao: false, grain: true },
-  low: { dpr: 0.7, dof: false, ao: false, grain: true },
+type Settings = { sharp: number; dof: boolean; ao: boolean; grain: boolean };
+
+const settings: Record<GpuClass, Settings> = {
+  high: { sharp: 1.5, dof: true, ao: true, grain: true },
+  mid: { sharp: 1, dof: false, ao: false, grain: true },
+  low: { sharp: 0.85, dof: false, ao: false, grain: true },
 };
 
+const FAST = 0.7;
+const EARN = 2000;
+const EARN_LIMIT = 32000;
+const COMFORT = 0.6;
+const REFRESH = [1000 / 240, 1000 / 165, 1000 / 144, 1000 / 120, 1000 / 100, 1000 / 90, 1000 / 75, 1000 / 60];
 const MAX_BOKEH = 3.2;
 const GRAIN = 0.05;
 
+export type Chain = 'sharp' | 'fast';
+
 class Quality {
-  steps: Step[] = fullSteps;
-  level = 0;
-  dof: DepthOfFieldEffect | null = null;
-  ao: Toggle | null = null;
-  noise: NoiseEffect | null = null;
+  dofs: DepthOfFieldEffect[] = [];
   composer: EffectComposer | null = null;
-  setDpr: ((dpr: number) => void) | null = null;
-  onChange: (() => void) | null = null;
+  fastComposer: EffectComposer | null = null;
 
   tier: Tier = 'full';
   gpu: GpuClass = 'high';
+  dof = true;
+  ao = true;
+  grain = true;
+  sharpDpr = 1;
+  fastScale = 1;
+  chain: Chain = 'sharp';
+  switchAt = -1e9;
+  blendAt = -1e9;
+  lastFast: Texture | null = null;
+  fastReady = false;
+  moving = false;
+  period = 1000 / 60;
+  allowed = false;
+  motionSharp = false;
+  earned = 0;
+  earnFor = EARN;
 
   configure(phone: boolean, deviceDpr: number, gpu: GpuClass) {
     this.gpu = phone ? 'low' : gpu;
     this.tier = this.gpu === 'low' ? 'light' : 'full';
-    const all = this.tier === 'light' ? lightSteps : fullSteps;
-    const fit = all.filter((step) => step.dpr <= Math.max(deviceDpr, 1) + 0.01);
-    this.steps = fit.length > 0 ? fit : [all[all.length - 1]];
-    const start = phone ? { dpr: 1, dof: false, ao: false, grain: true } : starts[this.gpu];
-    const index = this.steps.findIndex((step) => step.dpr <= start.dpr && step.ao === start.ao && step.dof === start.dof && step.grain === start.grain);
-    this.level = index >= 0 ? index : 0;
+    const chosen = phone ? { sharp: 1, dof: false, ao: false, grain: true } : settings[this.gpu];
+    this.dof = chosen.dof;
+    this.ao = chosen.ao;
+    this.grain = chosen.grain;
+    this.sharpDpr = Math.min(chosen.sharp, Math.max(deviceDpr, 1));
+    this.fastScale = Math.min(1, FAST / this.sharpDpr);
   }
 
-  get step() {
-    return this.steps[Math.min(this.level, this.steps.length - 1)];
+  get hasFast() {
+    return this.fastScale < 0.99;
   }
 
-  canDown() {
-    return this.level < this.steps.length - 1;
+  refresh(interval: number) {
+    let best = this.period;
+    for (const rate of REFRESH) if (Math.abs(Math.log(rate / interval)) < Math.abs(Math.log(best / interval))) best = rate;
+    if (best < this.period * 0.8) this.period = best;
   }
 
-  canUp() {
-    return this.level > 0;
+  earn(gpu: number | null, frame: number) {
+    if (this.allowed) return;
+    const fits = frame <= this.period * 1.25 && (gpu === null || gpu / (this.fastScale * this.fastScale) <= this.period * COMFORT);
+    this.earned = fits ? this.earned + Math.min(frame, 50) : 0;
+    if (this.earned < this.earnFor) return;
+    this.allowed = true;
+    this.earned = 0;
   }
 
-  down() {
-    if (!this.canDown()) return;
-    this.level += 1;
-    this.apply();
+  miss() {
+    if (!this.motionSharp && !this.allowed) return;
+    this.motionSharp = false;
+    this.allowed = false;
+    this.earned = 0;
+    this.earnFor = Math.min(this.earnFor * 2, EARN_LIMIT);
   }
 
-  up() {
-    if (!this.canUp()) return;
-    this.level -= 1;
-    this.apply();
-  }
-
-  apply() {
-    const step = this.step;
-    this.setDpr?.(Math.min(step.dpr, window.devicePixelRatio || 1));
-    if (this.ao) this.ao.enabled = step.ao;
-    if (this.noise) this.noise.blendMode.opacity.value = step.grain ? GRAIN : 0;
-    this.onChange?.();
+  grainOpacity() {
+    return this.grain ? GRAIN : 0;
   }
 
   attachDof(effect: DepthOfFieldEffect | null) {
-    this.dof = effect;
-    if (!effect) return;
+    if (!effect || this.dofs.includes(effect)) return;
+    this.dofs.push(effect);
     const update = effect.update.bind(effect);
     effect.update = (renderer, input, delta) => {
       if (effect.blendMode.opacity.value > 0) update(renderer, input, delta);
@@ -149,17 +144,17 @@ class Quality {
   }
 
   focus(screen: Vector3, camera: Vector3, mix: number, wide: Vector3, out: Vector3, amount: number) {
-    const effect = this.dof;
-    if (!effect) return;
-    const on = this.step.dof && amount > 0.002;
-    effect.blendMode.opacity.value = on ? 1 : 0;
-    if (!on) return;
-    out.copy(wide).lerp(screen, mix);
-    effect.cocMaterial.focusDistance = camera.distanceTo(out);
-    effect.cocMaterial.focusRange = 0.06 + camera.distanceTo(out) * 0.08;
-    effect.bokehScale = amount * MAX_BOKEH;
+    if (!this.dofs.length) return;
+    const on = this.dof && amount > 0.002;
+    if (on) out.copy(wide).lerp(screen, mix);
+    for (const effect of this.dofs) {
+      effect.blendMode.opacity.value = on ? 1 : 0;
+      if (!on) continue;
+      effect.cocMaterial.focusDistance = camera.distanceTo(out);
+      effect.cocMaterial.focusRange = 0.06 + camera.distanceTo(out) * 0.08;
+      effect.bokehScale = amount * MAX_BOKEH;
+    }
   }
 }
 
 export const quality = new Quality();
-export const GRAIN_OPACITY = GRAIN;

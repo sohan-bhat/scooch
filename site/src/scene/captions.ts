@@ -227,6 +227,7 @@ export function wallTexture(projector: Matrix4) {
     draw.textBaseline = 'middle';
     draw.fillStyle = '#fff';
     draw.fillText(caption('shapes'), width / 2, height * 0.54, width * 0.92);
+    await quiet();
     const letters = draw.getImageData(0, 0, width, height).data;
     const image = target.createImageData(size, size);
     const corners = [
@@ -242,8 +243,12 @@ export function wallTexture(projector: Matrix4) {
     const u1 = Math.min(size, Math.ceil(Math.max(...corners.map((c) => c[0])) * size) + 8);
     const v0 = Math.max(0, Math.floor(Math.min(...corners.map((c) => c[1])) * size) - 8);
     const v1 = Math.min(size, Math.ceil(Math.max(...corners.map((c) => c[1])) * size) + 8);
+    let until = 0;
     for (let v = v0; v < v1; v++) {
-      if ((v - v0) % 16 === 0) await quiet();
+      if (performance.now() > until) {
+        await quiet();
+        until = performance.now() + 4;
+      }
       for (let u = u0; u < u1; u++) {
         const su = (u + 0.5) / size;
         const sv = (v + 0.5) / size;
@@ -271,6 +276,7 @@ export function wallTexture(projector: Matrix4) {
         image.data[at + 3] = 255;
       }
     }
+    await quiet();
     target.putImageData(image, 0, 0);
     texture.needsUpdate = true;
   };

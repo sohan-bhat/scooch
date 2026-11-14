@@ -6,10 +6,10 @@ import { hooks } from './touch';
 
 export default function Lively() {
   useEffect(() => {
-    hooks.drawHeld = (gl, delta) => {
+    hooks.drawHeld = (gl, delta, part) => {
       if (!held.active) return false;
       step(delta);
-      return draw(gl);
+      return draw(gl, part);
     };
     return () => {
       hooks.drawHeld = () => false;

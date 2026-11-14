@@ -294,6 +294,10 @@ impl Helper {
         self.child.try_wait().ok().flatten().is_some()
     }
 
+    pub fn broke(&mut self) -> bool {
+        self.child.try_wait().ok().flatten().is_some_and(|status| !status.success())
+    }
+
     pub fn wait_exit(&mut self, limit: Duration) -> Option<Duration> {
         let started = Instant::now();
         while started.elapsed() < limit {

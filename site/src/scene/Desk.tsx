@@ -63,10 +63,6 @@ function standardMaterials(root: Object3D) {
   return found;
 }
 
-function nextFrame() {
-  return new Promise((resolve) => requestAnimationFrame(resolve));
-}
-
 async function swapTextures(gl: WebGLRenderer, scene: Object3D, source: Object3D, cancelled: () => boolean) {
   const sources = standardMaterials(source);
   const targets = standardMaterials(scene);
@@ -84,7 +80,7 @@ async function swapTextures(gl: WebGLRenderer, scene: Object3D, source: Object3D
   for (const [, , texture] of swaps) {
     if (uploaded.has(texture)) continue;
     uploaded.add(texture);
-    await nextFrame();
+    await quiet();
     if (cancelled()) return false;
     gl.initTexture(texture);
   }
@@ -248,12 +244,16 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
     const target = new WebGLRenderTarget(1, 1, { type: HalfFloatType });
     const compileEach = async () => {
       const waits: Promise<unknown>[] = [];
-      for (const holder of group.children) {
-        await nextFrame();
+      const meshes: Mesh[] = [];
+      group.traverse((child) => {
+        if ((child as Mesh).isMesh) meshes.push(child as Mesh);
+      });
+      for (const mesh of meshes) {
+        await quiet();
         if (stopped) return;
         const previous = gl.getRenderTarget();
         gl.setRenderTarget(target);
-        waits.push(gl.compileAsync(holder, camera, scene));
+        waits.push(gl.compileAsync(mesh, camera, scene));
         gl.setRenderTarget(previous);
       }
       await Promise.all(waits);
