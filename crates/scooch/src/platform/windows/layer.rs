@@ -357,6 +357,15 @@ impl Host {
     }
 }
 
+fn release(layer: Window) -> HWND {
+    if !layer.hook.is_invalid() {
+        let _ = unsafe { UnhookWinEvent(layer.hook) };
+    }
+    ORDERED.with(|ordered| ordered.borrow_mut().retain(|(ours, _)| *ours != layer.window.0 as isize));
+    let _ = unsafe { ShowWindow(layer.window, SW_HIDE) };
+    layer.window
+}
+
 impl Platform for Host {
     type Layer = Window;
 
@@ -409,12 +418,12 @@ impl Platform for Host {
     }
 
     fn close(&mut self, layer: Window) {
-        if !layer.hook.is_invalid() {
-            let _ = unsafe { UnhookWinEvent(layer.hook) };
-        }
-        ORDERED.with(|ordered| ordered.borrow_mut().retain(|(ours, _)| *ours != layer.window.0 as isize));
-        let _ = unsafe { ShowWindow(layer.window, SW_HIDE) };
-        let _ = unsafe { DestroyWindow(layer.window) };
+        let window = release(layer);
+        let _ = unsafe { DestroyWindow(window) };
+    }
+
+    fn abandon(&mut self, layer: Window) {
+        release(layer);
     }
 
     fn period(&self, _layer: &Window) -> Duration {
