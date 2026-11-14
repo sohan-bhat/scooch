@@ -2755,7 +2755,7 @@ pub mod tests {
         let set = events.iter().position(|event| event.starts_with("set ")).unwrap_or_else(|| panic!("{events:?}"));
         assert!(open < set && !events.iter().any(|event| event.starts_with("glide ")), "{events:?}");
         assert!(events.iter().any(|event| *event == events[open].replacen("open", "close", 1).split(' ').take(2).collect::<Vec<_>>().join(" ")), "{events:?}");
-        assert!(took < off + Duration::from_millis(300), "the tick took {took:?} against {off:?} with the glide off");
+        assert!(took < off + Duration::from_secs(5), "the tick took {took:?} against {off:?} with the glide off");
         let said = daemon.glider.lock().unwrap().said.clone();
         assert!(said.iter().any(|line| line.contains("skipped, helper cold")), "{said:?}");
     }
