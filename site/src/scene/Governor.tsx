@@ -5,7 +5,8 @@ import { quality } from './quality';
 
 const SIZE = 512;
 const WINDOW = 1500;
-const GPU_BUDGET = 10.5;
+const GPU_ON = 10.5;
+const GPU_OFF = 6;
 const FRAME_BUDGET = 17.5;
 const REST = 1000;
 const SETTLE = 600;
@@ -135,7 +136,7 @@ export function Governor() {
     const gpu = state.gpu.stats(now, WINDOW);
     const enough = timer ? gpu.n >= 45 : frames.n >= 45;
     if (!enough) return;
-    const needs = (timer ? gpu.steady > GPU_BUDGET : false) || frames.steady > FRAME_BUDGET;
+    const needs = (timer ? gpu.steady > (quality.needsFast ? GPU_OFF : GPU_ON) : quality.needsFast) || frames.steady > FRAME_BUDGET;
     quality.needsFast = needs;
     quality.decided = true;
     state.restSince = now;

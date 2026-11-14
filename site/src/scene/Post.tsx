@@ -137,6 +137,7 @@ export function Post({ phone }: { phone: boolean }) {
         const height = Math.max(1, Math.round(size.y * quality.fastScale));
         value.inputBuffer.setSize(width, height);
         value.outputBuffer.setSize(width, height);
+        (value as unknown as { depthRenderTarget?: { setSize: (w: number, h: number) => void } | null }).depthRenderTarget?.setSize(width, height);
         for (const pass of value.passes) pass.setSize(width, height);
       };
     },
