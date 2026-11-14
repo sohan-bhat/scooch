@@ -8,6 +8,7 @@ import {
   Scene,
   WebGLRenderTarget,
   type Camera,
+  type Light,
   type Material,
   type Object3D,
   type Texture,
@@ -112,5 +113,43 @@ export async function settle(gl: WebGLRenderer, root: Object3D) {
     await quiet();
     program.getUniforms();
     program.getAttributes();
+  }
+}
+
+const WARM_LAYER = 31;
+
+export function warmDraw(gl: WebGLRenderer, scene: Scene, camera: Camera, root: Object3D) {
+  const view = camera.clone();
+  view.layers.set(WARM_LAYER);
+  scene.traverse((object) => {
+    if ((object as Light).isLight) object.layers.enable(WARM_LAYER);
+  });
+  const masks = new Map<Object3D, [number, boolean]>();
+  root.traverse((object) => {
+    masks.set(object, [object.layers.mask, object.frustumCulled]);
+    object.layers.set(WARM_LAYER);
+    object.frustumCulled = false;
+  });
+  const parent = root.parent;
+  if (!parent) scene.add(root);
+  const hidden: Object3D[] = [];
+  for (let at: Object3D | null = root; at; at = at.parent) {
+    if (!at.visible) hidden.push(at);
+    at.visible = true;
+  }
+  const shadows = gl.shadowMap.needsUpdate;
+  gl.shadowMap.needsUpdate = false;
+  const target = new WebGLRenderTarget(1, 1, { type: HalfFloatType });
+  const previous = gl.getRenderTarget();
+  gl.setRenderTarget(target);
+  gl.render(scene, view);
+  gl.setRenderTarget(previous);
+  target.dispose();
+  gl.shadowMap.needsUpdate = shadows;
+  for (const object of hidden) object.visible = false;
+  if (!parent) scene.remove(root);
+  for (const [object, [mask, culled]] of masks) {
+    object.layers.mask = mask;
+    object.frustumCulled = culled;
   }
 }

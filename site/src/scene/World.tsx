@@ -38,14 +38,14 @@ import { Tumbler } from './Tumbler';
 import { CHANNELS, hooks, live } from './touch';
 import { BULB, DESK_TOP, Desk, LAMP, type Console, type Screens } from './Desk';
 import { createCrtMaterial } from './screen/crt';
-import { useInside, type Stage } from './Inside';
+import { INSIDE_LAYER, useInside, type Stage } from './Inside';
 import { quality } from './quality';
 import { useRoomMaterial } from './Room';
 import { Rig, type ScreenFrame } from './rig';
 import { createFrame, loadScenery, streamScenery, type Frame } from './screen/scenery';
 import { measureScreen, useScreens } from './screen/useScreen';
 import { keys, layoutFor } from './shots';
-import { applyEnvironment, environmentReady, precompile, settle } from './warm';
+import { applyEnvironment, environmentReady, precompile, settle, warmDraw } from './warm';
 
 const Lively = lazy(() => import('./Lively'));
 
@@ -153,7 +153,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     return texture;
   }, []);
   const [built, setBuilt] = useState<Built | null>(null);
-  const [extrasIn, setExtrasIn] = useState(false);
+  const [, setExtrasIn] = useState(false);
   const onExtras = useCallback(() => setExtrasIn(true), []);
   const spot = useRef<SpotLight>(null);
   const street = useRef<SpotLight>(null);
@@ -322,8 +322,11 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
           target.dispose();
           return settle(gl, inside.group);
         })
+        .then(() => quiet())
         .then(() => {
-          if (!stopped) setInsideIn(true);
+          if (stopped) return;
+          warmDraw(gl, scene, camera, inside.group);
+          setInsideIn(true);
         });
     };
     timer = window.setTimeout(begin, 0);
@@ -338,6 +341,10 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const space = new Matrix4().compose(stage.space.position, stage.space.quaternion, new Vector3(1, 1, 1));
     return new Rig(keys[layout], { world: new Matrix4(), glass: built.television.matrix, space }, size.width / size.height);
   }, [built, stage, layout, size.width, size.height]);
+
+  useLayoutEffect(() => {
+    camera.layers.enable(INSIDE_LAYER);
+  }, [camera]);
 
   useLayoutEffect(() => {
     scene.background = room;
@@ -460,9 +467,11 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       await pending.catch(() => undefined);
       target.dispose();
       await settle(gl, sticky.note);
+      await quiet();
       if (stopped) return;
       note = sticky.note;
       scene.add(note);
+      warmDraw(gl, scene, camera, note);
       writing.current = sticky.write;
       await quiet();
       if (stopped) return;
@@ -682,7 +691,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
           <Lively />
         </Suspense>
       ) : null}
-      <ContactShadows key={extrasIn ? 'extras' : 'bare'} position={[0, DESK_TOP + 0.0015, 0.0]} scale={[2.0, 0.95]} resolution={512} blur={2.4} far={0.3} opacity={0.62} frames={1} color="#0a0806" />
+      <ContactShadows position={[0, DESK_TOP + 0.0015, 0.0]} scale={[2.0, 0.95]} resolution={512} blur={2.4} far={0.3} opacity={0.62} frames={1} color="#0a0806" />
       <mesh position={[0, 1.6, -0.98]} material={wall}>
         <planeGeometry args={[9, 3.2]} />
       </mesh>

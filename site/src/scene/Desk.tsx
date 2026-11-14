@@ -10,7 +10,8 @@ import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
 import { labelProps } from './labels';
 import { makeLive, obstacles, rimmed } from './touch';
-import { settle } from './warm';
+import { quiet } from '@/lib/idle';
+import { settle, warmDraw } from './warm';
 
 export { BULB, DESK_TOP, LAMP, LAPTOP, TELEVISION } from './layout';
 
@@ -198,6 +199,7 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
     const loaded = Object.fromEntries(extras.map((name, index) => [name, { scene: scenes[index] }])) as Record<Extra, { scene: Group }>;
     const placed = new Group();
     placed.name = 'extras';
+    placed.visible = false;
     for (const model of Object.values(loaded)) prepare(model.scene);
     for (const placement of placements) {
       const source = loaded[placement.model as Extra];
@@ -268,9 +270,14 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
         target.dispose();
         await labels.ready(gl);
         for (const texture of textures) {
-          await nextFrame();
+          await quiet();
           if (stopped) return;
           gl.initTexture(texture);
+        }
+        for (const holder of [...group.children]) {
+          await quiet();
+          if (stopped) return;
+          warmDraw(gl, scene, camera, holder);
         }
         if (stopped) return;
         group.visible = true;

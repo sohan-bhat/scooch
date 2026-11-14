@@ -223,9 +223,12 @@ export function createInside(frame: Frame, saliency: Texture, atlas: Texture, st
 
   const group = new Object3D();
   group.add(plane, tiles);
+  group.traverse((object) => object.layers.set(INSIDE_LAYER));
   group.visible = false;
   return { group, plane, tiles, uniforms, tileUniforms };
 }
+
+export const INSIDE_LAYER = 1;
 
 const scratch = { matrix: new Matrix4(), position: new Vector3(), quaternion: new Quaternion(), scale: new Vector3(), color: new Color(), normal: new Vector3(), up: new Vector3(0, 1, 0) };
 
