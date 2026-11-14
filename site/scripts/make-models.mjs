@@ -67,12 +67,12 @@ const models = [
       'stationery_supplies_eraser',
     ],
   },
-  { id: 'alarm_clock_01', resolution: '1k', file: 'clock.glb', textures: small },
-  { id: 'cassette_player', resolution: '1k', file: 'cassette.glb', textures: small, merge: true },
-  { id: 'potted_plant_04', resolution: '1k', file: 'plant.glb', textures: small, merge: true },
-  { id: 'vintage_stapler', resolution: '1k', file: 'stapler.glb', textures: small, merge: true },
-  { id: 'round_spectacles', resolution: '1k', file: 'glasses.glb', textures: small, merge: true },
-  { id: 'gamepad', resolution: '1k', file: 'gamepad.glb', textures: small, merge: true },
+  { id: 'alarm_clock_01', resolution: '1k', sharp: true, file: 'clock.glb', textures: small },
+  { id: 'cassette_player', resolution: '1k', sharp: true, file: 'cassette.glb', textures: small, merge: true },
+  { id: 'potted_plant_04', resolution: '1k', sharp: true, file: 'plant.glb', textures: small, merge: true },
+  { id: 'vintage_stapler', resolution: '1k', sharp: true, file: 'stapler.glb', textures: small, merge: true },
+  { id: 'round_spectacles', resolution: '1k', sharp: true, file: 'glasses.glb', textures: small, merge: true },
+  { id: 'gamepad', resolution: '1k', sharp: true, file: 'gamepad.glb', textures: small, merge: true },
   {
     id: 'Television_01',
     resolution: '1k',
@@ -88,6 +88,7 @@ const environment = { id: 'studio_small_08', resolution: '1k', file: 'studio.hdr
 const variants = [
   { name: 'full', folder: out, scale: 1 },
   { name: 'lite', folder: joinPath(out, 'lite'), scale: 0.5 },
+  { name: 'sharp', folder: joinPath(out, 'sharp'), scale: 4, detail: 2, resolution: '2k' },
 ];
 const only = process.argv.find((arg) => arg.startsWith('--variant='))?.slice(10);
 
@@ -218,7 +219,7 @@ const data = { isUASTC: false, qualityLevel: 190, compressionLevel: 3, isSetKTX2
 const normal = { isUASTC: true, needSupercompression: true, enableRDO: true, rdoQualityLevel: 2.5, isSetKTX2SRGBTransferFunc: false, isPerceptual: false, generateMipmap: true, imageDecoder };
 
 async function buildModel(io, model, variant) {
-  const document = await io.read(await fetchModel(model));
+  const document = await io.read(await fetchModel({ ...model, resolution: variant.resolution ?? model.resolution }));
   if (model.keep) keepOnly(document, model.keep);
   if (model.pivots) addPivots(document, model.pivots);
   if (model.glass) splitGlass(document, model.glass);
@@ -229,8 +230,8 @@ async function buildModel(io, model, variant) {
   steps.push(
     weld(),
     resized(/baseColor/, model.textures.color * variant.scale),
-    resized(/normal/, model.textures.normal * variant.scale),
-    resized(/metallicRoughness|occlusion/, model.textures.arm * variant.scale),
+    resized(/normal/, model.textures.normal * (variant.detail ?? variant.scale)),
+    resized(/metallicRoughness|occlusion/, model.textures.arm * (variant.detail ?? variant.scale)),
     ktx2({ ...color, slots: /baseColor/ }),
     ktx2({ ...data, slots: /metallicRoughness|occlusion/ }),
     ktx2({ ...normal, slots: /normal/ }),
@@ -329,7 +330,7 @@ const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies(
 for (const variant of variants.filter((candidate) => !only || candidate.name === only)) {
   await mkdir(variant.folder, { recursive: true });
   let total = 0;
-  for (const model of models.filter((candidate) => variant.name === 'full' || candidate.lite)) {
+  for (const model of models.filter((candidate) => (variant.name === 'sharp' ? candidate.sharp : variant.name === 'full' || candidate.lite))) {
     if (process.argv.includes('--only') && !process.argv.includes(model.file)) continue;
     const size = await buildModel(io, model, variant);
     total += size;
