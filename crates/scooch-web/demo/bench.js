@@ -33,6 +33,7 @@ async function main() {
     let t = performance.now();
     const engine = await Remote.create(picture, meta.width, meta.height, analysis);
     const create = performance.now() - t;
+    const created = await engine.memory();
     await engine.screen(width, height);
     const set = icons(width, height, 12);
     t = performance.now();
@@ -55,9 +56,31 @@ async function main() {
       await engine.drag(set, held, 15);
       drags.push(performance.now() - t);
     }
+    const quick = [];
+    for (let k = 0; k < 16; k++) {
+      set[held * 4] += 12;
+      set[held * 4 + 1] -= 6;
+      t = performance.now();
+      await engine.drag(set, held, 5);
+      quick.push(performance.now() - t);
+    }
     await engine.drop(set);
+    const memory = { afterCreate: created, afterCreateAndDrops: await engine.memory() };
+    if (width === 1280) {
+      const until = performance.now() + 60000;
+      let n = 0;
+      while (performance.now() < until) {
+        set[held * 4] = 300 + 250 * Math.sin(n / 10);
+        set[held * 4 + 1] = 240 + 180 * Math.cos(n / 13);
+        await engine.drag(set, held, 15);
+        n++;
+      }
+      await engine.drop(set);
+      memory.afterMinuteOfDrags = await engine.memory();
+      memory.drags = n;
+    }
     await engine.free();
-    results[`${width}x${height}`] = { create, first, drop: median(drops), dropMax: Math.max(...drops), drag: median(drags), dragMax: Math.max(...drags) };
+    results[`${width}x${height}`] = { create, first, drop: median(drops), dropMax: Math.max(...drops), drag: median(drags), dragMax: Math.max(...drags), dragFive: median(quick), dragFiveMax: Math.max(...quick), memory };
   }
   /** @type {any} */ (window).result = results;
 }

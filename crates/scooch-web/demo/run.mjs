@@ -28,14 +28,22 @@ const server = createServer(async (req, res) => {
 });
 await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
 const profile = await mkdtemp(join(tmpdir(), 'scooch-web-chrome-'));
-const browser = spawn(chrome, ['--headless=new', `--remote-debugging-port=${debug}`, `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-background-timer-throttling', 'about:blank'], { stdio: 'ignore' });
+const browser = spawn(chrome, ['--headless=new', `--remote-debugging-port=${debug}`, `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-background-timer-throttling', 'about:blank'], { stdio: 'ignore', detached: true });
 
 /** @param {number} ms */
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function finish(code) {
-  browser.kill('SIGTERM');
-  await new Promise((resolve) => (browser.exitCode !== null ? resolve(null) : browser.once('exit', resolve)));
+  const gone = new Promise((resolve) => (browser.exitCode !== null ? resolve(null) : browser.once('exit', resolve)));
+  try {
+    process.kill(-browser.pid, 'SIGTERM');
+  } catch {
+    browser.kill('SIGTERM');
+  }
+  await gone;
+  await sleep(500);
+  spawn('pkill', ['-f', profile], { stdio: 'ignore' });
+  await sleep(500);
   server.close();
   await rm(profile, { recursive: true, force: true });
   process.exit(code);
@@ -57,6 +65,8 @@ try {
   const pending = new Map();
   socket.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
+    if (message.method === 'Runtime.exceptionThrown') console.error('page error:', JSON.stringify(message.params.exceptionDetails).slice(0, 600));
+    if (message.method === 'Runtime.consoleAPICalled') console.error('page log:', message.params.args.map((a) => a.value ?? a.description).join(' '));
     if (message.id && pending.has(message.id)) {
       pending.get(message.id)(message.result);
       pending.delete(message.id);
@@ -69,10 +79,11 @@ try {
   });
   const value = async (expression) => (await send('Runtime.evaluate', { expression, returnByValue: true })).result.value;
   await send('Page.enable');
-  await send('Page.navigate', { url: `http://127.0.0.1:${port}/scooch-web/demo/${page}.html` });
+  await send('Runtime.enable');
+  await send('Page.navigate', { url: `http://127.0.0.1:${port}/scooch-web/demo/${page === 'demo' ? 'index' : page}.html` });
   const key = page === 'bench' ? 'result' : 'strip';
   let done = null;
-  for (let i = 0; i < 1200 && done === null; i++) {
+  for (let i = 0; i < (page === 'bench' ? 1200 : 240) && done === null; i++) {
     await sleep(250);
     done = await value(`window.${key} === undefined ? null : window.${key}`);
   }

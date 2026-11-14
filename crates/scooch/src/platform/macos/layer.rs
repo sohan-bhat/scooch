@@ -242,6 +242,14 @@ impl Layer {
         CATransaction::flush();
     }
 
+    pub fn reveal(&self) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.metal.setHidden(false);
+        CATransaction::commit();
+        CATransaction::flush();
+    }
+
     pub fn visible(&self) -> bool {
         self.window.occlusionState().contains(NSWindowOcclusionState::Visible)
     }
@@ -304,8 +312,10 @@ fn build(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
     metal.setContentsScale(scale);
     metal.setOpaque(true);
     metal.setColorspace(CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).as_deref());
+    metal.setHidden(true);
     view.setLayer(Some(&**metal));
     view.setWantsLayer(true);
+    metal.setDelegate(None);
     window.setContentView(Some(&view));
     window.orderFrontRegardless();
     CATransaction::flush();

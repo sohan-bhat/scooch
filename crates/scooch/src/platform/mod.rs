@@ -88,6 +88,9 @@ pub trait Desktop: Send + Sync {
     fn hold(&self) -> Duration {
         Duration::from_millis(250)
     }
+    fn dropped(&self) -> bool {
+        false
+    }
 }
 
 pub const AGREE: Duration = Duration::from_millis(500);

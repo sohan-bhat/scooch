@@ -1602,6 +1602,7 @@ mod probe {
             };
             let mut renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &pattern(&layer)).map_err(anyhow::Error::msg)?;
             layer.commit();
+            layer.reveal();
             layer::present(|| renderer.frame(Some(0.2))).map_err(anyhow::Error::msg)?;
             opens.push(started.elapsed().as_secs_f64() * 1000.0);
             layer::present(|| renderer.frame(Some(0.5))).map_err(anyhow::Error::msg)?;
@@ -1701,6 +1702,7 @@ mod probe {
         let device_ready = opened.elapsed();
         let renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &Pattern { width, height, rgba: rgba(&field.image(), width, height) }).map_err(anyhow::Error::msg)?;
         layer.commit();
+        layer.reveal();
         p.gpu = Some(gpu.clone());
         p.line(format!("- layer number {} at level {}, {}x{} pixels, adapter {}, device ready after {} ms", layer.number(), layer.level, width, height, gpu.name, device_ready.as_millis()));
         let row = (height as f32 * 0.55) as usize;
@@ -1822,6 +1824,7 @@ mod probe {
             let (width, height) = layer.pixels;
             let mut renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &Pattern { width, height, rgba: GRAY.iter().copied().chain([255]).cycle().take(width as usize * height as usize * 4).collect() }).map_err(anyhow::Error::msg)?;
             layer.commit();
+            layer.reveal();
             layer::present(|| renderer.frame(Some(0.0))).map_err(anyhow::Error::msg)?;
             say("frame", String::new());
             for index in 1..30 {
@@ -1883,6 +1886,7 @@ mod probe {
         let (width, height) = layer.pixels;
         let mut renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &Pattern { width, height, rgba: GRAY.iter().copied().chain([255]).cycle().take(width as usize * height as usize * 4).collect() }).map_err(anyhow::Error::msg)?;
         layer.commit();
+        layer.reveal();
         layer::present(|| renderer.frame(Some(0.5))).map_err(anyhow::Error::msg)?;
         let number = layer.number();
         let showing = || layer::listing().iter().any(|window| window.number == number);
@@ -1925,6 +1929,7 @@ mod probe {
                 let rgba = field.get_or_insert_with(|| rgba(&picture, width, height)).clone();
                 let renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &Pattern { width, height, rgba }).map_err(anyhow::Error::msg)?;
                 layer.commit();
+                layer.reveal();
                 let (renderer, run) = animate(renderer, layer.display, 0.5, 0.6, None).join().map_err(|_| anyhow::anyhow!("the render thread panicked"))?;
                 drop(renderer);
                 let traces = layer.traces();
@@ -2156,7 +2161,30 @@ mod probe {
         at: f64,
         half: RgbImage,
         inked: f32,
-        step: u8,
+        step: Spot,
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct Spot {
+        worst: u8,
+        x: usize,
+        y: usize,
+        before: [u8; 3],
+        after: [u8; 3],
+    }
+
+    fn spot(a: &Shot, b: &Shot, from_row: usize) -> Spot {
+        let mut found = Spot::default();
+        for y in from_row..a.height.min(b.height) {
+            for x in 0..a.width.min(b.width) {
+                let (one, two) = (a.at(x, y), b.at(x, y));
+                let worst = (0..3).map(|channel| one[channel].abs_diff(two[channel])).max().unwrap_or(0);
+                if worst > found.worst {
+                    found = Spot { worst, x, y, before: one, after: two };
+                }
+            }
+        }
+        found
     }
 
     struct Dragged {
@@ -2236,11 +2264,11 @@ mod probe {
             let at = epoch();
             let Some(shot) = grab(display) else { continue };
             let inked = masks.iter().map(|ink| ink.iter().filter(|(x, y)| !near(shot.at(*x, *y), baseline.at(*x, *y))).count() as f32 / ink.len().max(1) as f32).fold(0.0, f32::max);
-            let step = previous.as_ref().map_or(0, |previous| difference(previous, &shot, &|_, y| y >= menu).max);
+            let step = previous.as_ref().map_or_else(Spot::default, |previous| spot(previous, &shot, menu));
             seen.push(Seen { at, half: half_shot(&shot), inked, step });
             previous = Some(shot);
             checks += 1;
-            if done.is_none() && checks % 3 == 0 && new_lines(&daemon_log(p), lines).iter().any(|line| line.contains(" tick ")) {
+            if done.is_none() && checks % 3 == 0 && new_lines(&daemon_log(p), lines).iter().any(|line| line.contains(" tick ") && !line.contains("Unchanged")) {
                 done = Some(epoch());
             }
             if done.is_some_and(|done| epoch() > done + 1.0) {
@@ -2313,9 +2341,9 @@ mod probe {
         };
         let classes: Vec<char> = dragged.seen.iter().map(|seen| side(&seen.half, &old_still, &new_still, &apart)).collect();
         let fitted: Vec<Option<(f32, f32)>> = dragged.seen.iter().map(|seen| frames.iter().map(|(s, frame)| (*s, mean_gap(&seen.half, frame, &keep))).min_by(|a, b| a.1.total_cmp(&b.1))).collect();
-        let glide_at = logged(dragged, " glide open");
+        let glide_at = logged(dragged, "shown and gliding");
         let settled = logged(dragged, " glide settled");
-        let closed = logged(dragged, " glide closed");
+        let closed = logged(dragged, "after its wallpaper was set");
         let set = logged(dragged, " glide settle ");
         let glided = logged(dragged, " glide glided");
         let appeared = classes.iter().position(|class| *class == 'B');
@@ -2323,12 +2351,15 @@ mod probe {
         let moving: Vec<usize> = (0..classes.len()).filter(|index| classes[*index] == '~' && fitted[*index].is_some_and(|(s, _)| s > 0.04 && s < 0.96)).collect();
         let window: Vec<f32> = (0..classes.len()).filter(|index| glide_at.is_some_and(|at| dragged.seen[*index].at >= at) && settled.is_none_or(|settled| dragged.seen[*index].at <= settled)).filter_map(|index| fitted[index].map(|(s, _)| s)).collect();
         let steady = window.windows(2).all(|pair| pair[1] >= pair[0] - 0.1);
-        let first_move = (0..classes.len()).find(|index| classes[*index] != 'A' && classes[*index] != '=').map(|index| (dragged.seen[index].at - dragged.dropped) * 1000.0);
+        let settled_old = classes.iter().position(|class| *class == 'A');
+        let first_move = settled_old.and_then(|from| (from..classes.len()).find(|index| classes[*index] != 'A' && classes[*index] != '=')).map(|index| (dragged.seen[index].at - dragged.dropped) * 1000.0);
         let span = glide_at.zip(glided).map(|(from, to)| to - from);
         let rate = span.map(|span| dragged.seen.iter().filter(|seen| glide_at.is_some_and(|at| seen.at >= at) && seen.at <= glide_at.unwrap_or(0.0) + span).count() as f64 / span.max(0.001));
         let expected = rate.map(|rate| rate * 0.45 * 0.64);
         let inked = dragged.seen.iter().map(|seen| seen.inked).fold(0.0, f32::max);
-        let hand_over = settled.map(|settled| dragged.seen.iter().filter(|seen| seen.at > settled && closed.is_none_or(|closed| seen.at <= closed + 1.0)).map(|seen| seen.step).max().unwrap_or(0));
+        let handed = settled.and_then(|settled| dragged.seen.iter().filter(|seen| seen.at > settled && closed.is_none_or(|closed| seen.at <= closed + 1.0)).max_by_key(|seen| seen.step.worst));
+        let hand_over = settled.map(|_| handed.map_or(0, |seen| seen.step.worst));
+        let hand_spot = handed.map(|seen| format!("{} ms after the drop at pixel {},{} from {:?} to {:?}", ((seen.at - dragged.dropped) * 1000.0).round(), seen.step.x, seen.step.y, seen.step.before, seen.step.after));
         let at = |time: Option<f64>| time.map(|time| ((time - dragged.dropped) * 1000.0).round());
         p.line(format!(
             "- {label}: {} captures in {:.0} ms, {} pixels differ between the two stills, classes {}, {} moving between the two places, old picture after the new {returned}, glide progress steady {steady} over {} captures",
@@ -2341,7 +2372,7 @@ mod probe {
         ));
         p.line(format!("  - captures a second during the glide {:?}, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95", rate.map(|rate| rate.round()), expected.map(|value| value.round())));
         p.line(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(closed)));
-        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255, CPU frames to fit {}", frames.len()));
+        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
         p.line(format!("  - daemon log {:?}", dragged.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         if let Some(name) = evidence {
             let folder = p.out.join(name);
@@ -2483,6 +2514,7 @@ mod probe {
         };
         p.line(format!("- glide setting `{}`, scenery `{}`, daemon {daemon}", state(p)["glide"], state(p)["options"]["scenery"].as_str().unwrap_or("missing")));
         let calm = quiet_log(p, Duration::from_millis(1500), Duration::from_secs(15));
+        let rest_before = memory(daemon);
         let found = motion_now(p);
         let wrote = set_motion(p, false);
         let now = motion_now(p);
@@ -2521,7 +2553,10 @@ mod probe {
         p.line(format!("- solid icon ink pixels of the still icons {:?}", masks.iter().map(Vec::len).collect::<Vec<_>>()));
         let start = position(p, name).unwrap_or(subject);
         let dragged = watch_drag(p, display, &screen, start, aside, &masks).context("the glide drag could not be watched")?;
+        let during = memory(daemon);
+        let held = daemon_log(p).lines().rev().find_map(|line| line.split("sessions hold ").nth(1).map(str::to_string));
         let good = judge_glide(p, &dragged, &screen, "glide on, CGEvent drag", Some("glide"));
+        p.line(format!("  - daemon {daemon} before the burst {rest_before}, right after the glide {during}, its sessions hold {held:?}"));
         std::thread::sleep(Duration::from_millis(1000));
         let pids = helper_pids(p);
         let left = layer::every_window().into_iter().filter(|window| pids.contains(&(window.pid as i32))).count();
@@ -2535,19 +2570,26 @@ mod probe {
         let lines = daemon_log(p).lines().count();
         poke(p);
         let poked = Instant::now();
-        let mut worst = 0u8;
+        let mut worst = Spot::default();
+        let mut worst_at = 0;
         let mut shots = 0;
         while poked.elapsed() < Duration::from_millis(2500) {
             if let Some(shot) = grab(display) {
-                worst = worst.max(difference(&before, &shot, &|_, y| y >= menu).max);
+                let found = spot(&before, &shot, menu);
+                if found.worst > worst.worst {
+                    worst = found;
+                    worst_at = poked.elapsed().as_millis();
+                    let _ = scooch_core::encode_png(&shot.image()).map(|bytes| fs::write(p.out.join("idle-wake-worst.png"), bytes));
+                }
                 shots += 1;
             }
         }
+        let _ = scooch_core::encode_png(&before.image()).map(|bytes| fs::write(p.out.join("idle-wake-before.png"), bytes));
         let woke: Vec<String> = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(180).collect()).collect();
         let opened = woke.iter().any(|line| line.contains("glide early open"));
         let closed = woke.iter().any(|line| line.contains("closed early open"));
-        p.line(format!("- a wake that changes nothing: early open {opened}, closed again {closed}, {shots} captures over 2.5 s, largest change from before the wake {worst} of 255, log {woke:?}"));
-        if !opened || !closed || worst > 2 {
+        p.line(format!("- a wake that changes nothing: early open {opened}, closed again {closed}, {shots} captures over 2.5 s, largest change from before the wake {} of 255 at {worst_at} ms at pixel {},{} from {:?} to {:?}, captures kept as idle-wake-before.png and idle-wake-worst.png, log {woke:?}", worst.worst, worst.x, worst.y, worst.before, worst.after));
+        if !opened || !closed || worst.worst > 2 {
             p.fail("an early open with nothing to glide was not invisible");
         }
         let calm_a = (screen.frame.x + screen.frame.w * 0.15, screen.frame.y + screen.frame.h * 0.75);
@@ -2561,6 +2603,45 @@ mod probe {
             laps.push(format!("move {} new wallpaper {time:?} ms, tick {render:?}", index + 1));
         }
         p.line(format!("- scenery moves on calm ground, the first leaves the subject and the rest hold the placement {laps:?}"));
+        let (mut looked, mut moved, mut right, mut half) = (0, 0, 0, 0);
+        let mut seen = Vec::new();
+        for index in 0..12 {
+            quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
+            let lines = daemon_log(p).lines().count();
+            let from = position(p, name).unwrap_or(subject);
+            let target = if index % 2 == 0 { aside } else { subject };
+            drag(from, target);
+            let home = p.home.clone();
+            let ticked = |count: usize| {
+                let home = home.clone();
+                move || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().filter(|line| line.contains(" tick ")).count() >= count
+            };
+            let _ = wait_until(Duration::from_secs(6), ticked(1));
+            std::thread::sleep(Duration::from_millis(1500));
+            poke(p);
+            let _ = wait_until(Duration::from_secs(4), ticked(2));
+            let log = new_lines(&daemon_log(p), lines);
+            let prints: Vec<(String, bool)> = log.iter().enumerate().filter_map(|(at, line)| line.split("snapshot icons ").nth(1).map(|print| (print.trim().to_string(), log[at..].iter().find(|later| later.contains(" tick ")).is_some_and(|tick| tick.contains("Rendered"))))).collect();
+            let last = prints.last().map(|(print, _)| print.clone()).unwrap_or_default();
+            let quick = log.iter().find_map(|line| line.split("quick look after ").nth(1).map(str::to_string));
+            if let Some(quick) = &quick {
+                looked += 1;
+                let went = quick.ends_with("moved true");
+                let print = quick.split("icons ").nth(1).and_then(|rest| rest.split_whitespace().next()).unwrap_or_default().to_string();
+                if went {
+                    moved += 1;
+                    if print == last {
+                        right += 1;
+                    }
+                }
+            }
+            half += prints.iter().filter(|(print, rendered)| *rendered && *print != last).count();
+            seen.push(format!("{}: {}", index + 1, quick.unwrap_or_else(|| "no quick look".into())));
+        }
+        p.line(format!("- twelve drags: quick looks {looked}, saw the icons moved {moved}, of those had the final layout {right}, renders from a layout that was not the final one {half}, per drag {seen:?}"));
+        if half > 0 {
+            p.fail("a quick look rendered a half finished move");
+        }
         let ran = p.scooch(&["glide"], LIMIT);
         p.line(format!("- scooch glide said {:?}", ran.text()));
         let back = position(p, name).unwrap_or(aside);
@@ -2636,7 +2717,7 @@ mod probe {
         p.line(format!("- no helper process {:?} s after the last drag", gone.map(|_| last.elapsed().as_secs())));
         std::thread::sleep(Duration::from_secs(35).saturating_sub(last.elapsed()));
         let pids = helper_pids(p);
-        p.line(format!("- 35 s after the last drag helper processes {pids:?}"));
+        p.line(format!("- 35 s after the last drag helper processes {pids:?}, daemon {}, its log after the rest {:?}", memory(daemon), daemon_log(p).lines().rev().find(|line| line.contains("sessions let go")).map(|line| line.chars().take(120).collect::<String>())));
         if !pids.is_empty() {
             p.fail("a helper was still running 35 s after the last drag");
         }

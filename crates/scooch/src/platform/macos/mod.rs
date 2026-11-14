@@ -195,6 +195,10 @@ impl Desktop for Mac {
         Duration::from_millis(300)
     }
 
+    fn dropped(&self) -> bool {
+        watch::DROPPED.swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn reduce_motion(&self) -> bool {
         let saved = finder::preference("com.apple.universalaccess", "reduceMotion").and_then(|value| value.downcast_ref::<objc2_foundation::NSNumber>().map(|number| number.boolValue()));
         saved.unwrap_or_else(|| on_main(|_| objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()))
