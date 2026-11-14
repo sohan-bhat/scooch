@@ -24,7 +24,7 @@ function decal(map: Texture, width: number, height: number, options: { emissive?
   return mesh;
 }
 
-function top(holder: Object3D) {
+export function localBox(holder: Object3D) {
   const copy = holder.children[0];
   const box = new Box3();
   const saved = holder.matrixWorld.clone();
@@ -47,7 +47,7 @@ export function labelProps(group: Object3D) {
 
   const pad = group.getObjectByName('notepads_office_notepads_yellow_pad');
   if (pad) {
-    const box = top(pad);
+    const box = localBox(pad);
     const size = box.getSize(new Vector3());
     const long = Math.max(size.x, size.z);
     const short = Math.min(size.x, size.z);
@@ -61,7 +61,7 @@ export function labelProps(group: Object3D) {
   let glow: MeshStandardMaterial | null = null;
   const hands: { node: Object3D; rest: Quaternion; angle: number; turn: (date: Date) => number }[] = [];
   if (clock) {
-    const box = top(clock);
+    const box = localBox(clock);
     const size = box.getSize(new Vector3());
     const mesh = decal(dial.texture, size.x * 0.62, size.x * 0.62, { emissive: true });
     mesh.position.set(0, size.y * 0.48, box.max.z + 0.0015);
@@ -113,11 +113,11 @@ export function stickyNote(glass: Glass) {
   const sticky = paintedTexture(512, 512, stickyPainter, true);
   sticky.draw(0, true);
   void fontsReady().then(() => sticky.draw(0, true));
-  const note = decal(sticky.texture, 0.122, 0.122, { opaque: true });
+  const note = decal(sticky.texture, 0.1, 0.1, { opaque: true });
   note.position
     .copy(glass.center)
-    .addScaledVector(glass.right, glass.width * 0.5 - 0.012)
-    .addScaledVector(glass.up, -glass.height * 0.5 + 0.012)
+    .addScaledVector(glass.right, glass.width * 0.32)
+    .addScaledVector(glass.up, -glass.height * 0.5 - 0.068)
     .addScaledVector(glass.normal, 0.03);
   note.lookAt(note.position.clone().add(glass.normal));
   note.rotateZ(-0.08);

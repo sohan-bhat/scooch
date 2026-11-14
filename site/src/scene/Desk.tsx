@@ -1,14 +1,15 @@
 import { useGLTF } from '@react-three/drei';
 import { useFrame, useThree } from '@react-three/fiber';
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
-import { Box3, Group, HalfFloatType, Mesh, MeshStandardMaterial, Object3D, Vector3, WebGLRenderTarget, type Texture, type WebGLRenderer } from 'three';
+import { Box3, CircleGeometry, Group, HalfFloatType, Mesh, MeshStandardMaterial, Object3D, Vector3, WebGLRenderTarget, type Texture, type WebGLRenderer } from 'three';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { asset } from '@/lib/base';
 import { runtime, story } from '@/story/state';
 import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
-import { labelProps } from './labels';
+import { labelProps, localBox } from './labels';
+import { makeLive } from './touch';
 
 export { BULB, DESK_TOP, LAMP, LAPTOP, TELEVISION } from './layout';
 
@@ -205,6 +206,29 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
       holder.userData.phone = placement.phone !== false;
       placed.add(holder);
     }
+    const named: Record<string, string> = {
+      cassette_whole: 'cassette',
+      clock_whole: 'clock',
+      stapler_whole: 'stapler',
+      plant_whole: 'plant',
+      cup_tea_set_01_cup_small_01: 'cup',
+    };
+    for (const holder of placed.children) {
+      const id = named[holder.name];
+      if (!id) continue;
+      makeLive(holder, id);
+      if (id === 'cup') {
+        const box = localBox(holder);
+        const size = box.getSize(new Vector3());
+        const coffee = new Mesh(new CircleGeometry(Math.min(size.x, size.z) * 0.4, 40), new MeshStandardMaterial({ color: '#1c0f07', roughness: 0.32, metalness: 0 }));
+        coffee.name = 'coffee';
+        coffee.rotation.x = -Math.PI / 2;
+        coffee.userData.high = box.max.y * 0.82;
+        coffee.userData.low = box.max.y * 0.3;
+        coffee.position.set((box.min.x + box.max.x) / 2, coffee.userData.high, (box.min.z + box.max.z) / 2);
+        holder.add(coffee);
+      }
+    }
     return placed;
   }, scenes);
   const labels = useMemo(() => labelProps(group), [group]);
@@ -315,6 +339,8 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
     });
     const pivot = laptop.scene.getObjectByName('classic_laptop_screen_pivot');
     if (pivot) pivot.rotation.x = LAPTOP.lid;
+    makeLive(lamp.scene, 'lamp');
+    makeLive(television.scene, 'tv');
   }, [desk, laptop, lamp, television]);
 
   const laptopFrame = useMemo(() => new Group(), []);

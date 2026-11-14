@@ -33,6 +33,7 @@ uniform vec3 uGlass;
 uniform float uDim;
 uniform sampler2D uOsd;
 uniform float uOsdLevel;
+uniform float uStatic;
 
 varying vec2 vUv;
 varying vec3 vWorld;
@@ -99,6 +100,8 @@ void main() {
   vec3 color = picture(pv);
   color = icons(color, pv, dx, dy);
   color = cursor(color, pv, dx, dy);
+  float snow = hash(floor(pv * vec2(320.0, 240.0)) + floor(uTime * 60.0));
+  color = mix(color, vec3(snow * 0.9 + 0.05), uStatic);
   vec4 osd = texture2D(uOsd, pv);
   color = mix(color, osd.rgb, osd.a * uOsdLevel);
   vec3 halo = pictureSoft(pv, 4.5);
@@ -167,6 +170,7 @@ export type CrtUniforms = PictureUniforms & {
   uDim: { value: number };
   uOsd: { value: Texture | null };
   uOsdLevel: { value: number };
+  uStatic: { value: number };
 };
 
 export function createCrtMaterial() {
@@ -186,6 +190,7 @@ export function createCrtMaterial() {
     uDim: { value: 0 },
     uOsd: { value: null },
     uOsdLevel: { value: 0 },
+    uStatic: { value: 0 },
   };
   const material = new ShaderMaterial({ name: 'scooch-crt', vertexShader: vertex, fragmentShader: fragment, uniforms });
   return { material, uniforms };

@@ -29,6 +29,10 @@ import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
+import { Live } from './Live';
+import { draw, held, step } from './drag';
+import { hooks, live } from './touch';
+import { play } from './sound';
 import { BULB, DESK_TOP, Desk, LAMP, type Console, type Screens } from './Desk';
 import { createCrtMaterial } from './screen/crt';
 import { useInside, type Stage } from './Inside';
@@ -54,6 +58,7 @@ function toWorld(local: Vector3, position: readonly [number, number, number], ro
 
 export const bulbWorld = toWorld(BULB, LAMP.position, LAMP.rotation);
 const wallCenter = new Vector2(bulbWorld.x + 0.05, bulbWorld.y - 0.2);
+const lampAim = new Vector3(LAMP.position[0] + 0.12, DESK_TOP + 0.05, LAMP.position[2] + 0.42);
 const floorCenter = new Vector2(bulbWorld.x, bulbWorld.z + 0.4);
 
 type Glass = { mesh: Mesh; frame: Group; screen: ScreenFrame; center: Vector3; matrix: Matrix4; quaternion: Quaternion };
@@ -115,6 +120,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const screens = useScreens(manifest);
   const blinds = useMemo(() => blindsTexture(), []);
   const writing = useRef<((amount: number) => void) | null>(null);
+  const aimed = useRef(0);
+  const onAction = useCallback((name: string) => play(name), []);
   const blindsMatrix = useMemo(() => projector(), []);
   const painted = useMemo(() => ({ osd: paintedTexture(1024, 768, osdPainter), wall: wallTexture(blindsMatrix) }), [blindsMatrix]);
   const [built, setBuilt] = useState<Built | null>(null);
@@ -155,6 +162,11 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       screens.crt.uniforms.uOrigin.value.set(television.origin.x, television.origin.y);
       screens.crt.uniforms.uExtent.value.set(television.origin.width, television.origin.height);
       found.television.mesh.material = screens.crt.material;
+      hooks.frame = screens.main;
+      hooks.icons = screens.crt.uniforms.uIcons.value;
+      hooks.origin = screens.crt.uniforms.uOrigin.value;
+      hooks.extent = screens.crt.uniforms.uExtent.value;
+      hooks.place = () => story.place;
       found.television.mesh.castShadow = false;
       setBuilt({
         laptop: glassOf(found.laptop.mesh, found.laptop.frame, laptop.screen),
@@ -281,7 +293,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   useLayoutEffect(() => {
     scene.background = room;
     scene.fog = fog;
-    targets.lamp.position.set(LAMP.position[0] + 0.12, DESK_TOP + 0.05, LAMP.position[2] + 0.42);
+    targets.lamp.position.copy(lampAim);
     targets.street.position.copy(STREET.target);
     for (const target of Object.values(targets)) scene.add(target);
     return () => {
@@ -393,7 +405,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const time = state.clock.elapsedTime;
     const idle = runtime.idle;
     const motion = idle ? 1 : 0;
-    rig.apply(camera as PerspectiveCamera, story.camera, time, pointer.x * motion, pointer.y * motion, Math.min(delta, 0.1), size.width, size.height, idle);
+    rig.apply(camera as PerspectiveCamera, story.camera, time, pointer.x * motion + live.look.x, pointer.y * motion + live.look.y, Math.min(delta, 0.1), size.width, size.height, idle);
 
     if (runtime.introAt === null && runtime.ready && runtime.still < 0) {
       if (readyAt.current < 0) readyAt.current = time;
@@ -413,7 +425,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
 
     const away = 1 - story.inside;
     const hum = idle ? 1 + Math.sin(time * 13.1) * 0.006 + Math.sin(time * 29.7 + 1.1) * 0.004 + Math.sin(time * 7.3) * 0.003 : 1;
-    const lamp = story.lamp * introLamp * hum * away;
+    const lamp = story.lamp * live.lamp * introLamp * hum * away;
     if (spot.current) spot.current.intensity = SPOT * lamp;
     if (inner.current) inner.current.intensity = INNER * lamp;
     wall.uniforms.uLevel.value = lamp;
@@ -424,10 +436,25 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     wall.uniforms.uFade.value = 0.25 + 0.75 * away;
     floor.uniforms.uFade.value = 0.25 + 0.75 * away;
     if (street.current) street.current.intensity = STREET_LEVEL * streetLevel * introStreet;
-    const ambient = Math.min(story.lamp, 1) * introLamp * away;
+    const ambient = Math.min(story.lamp * live.lamp, 1) * introLamp * away;
     scene.environmentIntensity = (0.05 + 0.17 * ambient) * (0.3 + 0.7 * away);
     if (rim.current) rim.current.intensity = (0.12 + 0.2 * ambient) * away;
-    for (const bulb of bulbs.current) bulb.emissiveIntensity = BULB_GLOW * story.lamp * introLamp * hum;
+    for (const bulb of bulbs.current) bulb.emissiveIntensity = BULB_GLOW * story.lamp * live.lamp * introLamp * hum;
+    if (Math.abs(live.aim - aimed.current) > 0.0005 && spot.current) {
+      aimed.current = live.aim;
+      const cos = Math.cos(live.aim);
+      const sin = Math.sin(live.aim);
+      const turn = (point: Vector3, out: Vector3) => {
+        const x = point.x - LAMP.position[0];
+        const z = point.z - LAMP.position[2];
+        return out.set(LAMP.position[0] + x * cos + z * sin, point.y, LAMP.position[2] - x * sin + z * cos);
+      };
+      turn(bulbWorld, spot.current.position);
+      turn(lampAim, targets.lamp.position);
+      targets.lamp.updateMatrixWorld();
+      if (inner.current) inner.current.position.copy(spot.current.position);
+      gl.shadowMap.needsUpdate = true;
+    }
     fog.density = 0.32 + story.inside * 0.25;
 
     const tubeOn = Math.min(story.tubeOn, introTube);
@@ -447,16 +474,30 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     wall.uniforms.uDrift.value.set(story.drift * 0.018, -story.drift * 0.028);
     floor.uniforms.uDrift.value.copy(wall.uniforms.uDrift.value);
     crt.uTime.value = time;
-    screens.main.render(gl, story.place);
+    if (held.active) {
+      step(Math.min(delta, 0.05));
+      draw(gl);
+    } else screens.main.render(gl, story.place);
     for (const frame of Object.values(gallery.current)) frame.render(gl, 0);
-    crt.uOn.value = tubeOn;
-    crt.uOff.value = story.tubeOff;
+    const now = performance.now();
+    crt.uOn.value = live.power ? Math.min(tubeOn, Math.min(Math.max((now - live.onAt) / 1100, 0), 1)) : tubeOn;
+    crt.uOff.value = live.power ? story.tubeOff : Math.max(story.tubeOff, Math.min(Math.max((now - live.offAt) / 700, 0), 1));
+    crt.uStatic.value = Math.max(0, 1 - (now - live.noiseAt) / 380);
+    const channels = ['main', 'swans', 'moon', 'city'];
+    const tuned = live.channel >= 0 ? channels[live.channel] : '';
+    const tunedFrame = tuned === 'main' ? screens.main : tuned ? gallery.current[tuned] : null;
+    if (tunedFrame && crt.uFrame.value !== tunedFrame.texture) crt.uFrame.value = tunedFrame.texture;
+    const tunedIcons = tuned && tuned !== 'main' ? manifest.pictures.find((picture) => picture.id === tuned)?.icons : null;
     crt.uLampLevel.value = lamp;
     const { frames, drag } = manifest;
     for (let i = 0; i < manifest.icons.length && i < crt.uIcons.value.length; i++) {
       const id = manifest.icons[i].id;
-      const [x, y, w, h] = frames.before.icons[id];
-      if (id === drag.icon) {
+      const [x, y, w, h] = tunedIcons?.[id] ?? frames.before.icons[id];
+      if (tunedIcons) {
+        crt.uIcons.value[i].set(x, y, w, h);
+      } else if (live.icon.index === i) {
+        crt.uIcons.value[i].set(live.icon.x, live.icon.y, w, h);
+      } else if (id === drag.icon) {
         crt.uIcons.value[i].set(drag.from[0] + (drag.to[0] - drag.from[0]) * story.drag, drag.from[1] + (drag.to[1] - drag.from[1]) * story.drag, w, h);
       } else {
         crt.uIcons.value[i].set(x, y, w, h);
@@ -540,6 +581,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         </>
       )}
       <Desk onScreens={onScreens} onExtras={onExtras} onConsole={onConsole} phone={phone} />
+      <Live onAction={onAction} />
       <ContactShadows key={extrasIn ? 'extras' : 'bare'} position={[0, DESK_TOP + 0.0015, 0.0]} scale={[2.0, 0.95]} resolution={512} blur={2.4} far={0.3} opacity={0.62} frames={1} color="#0a0806" />
       <mesh position={[0, 1.6, -0.98]} material={wall}>
         <planeGeometry args={[9, 3.2]} />
