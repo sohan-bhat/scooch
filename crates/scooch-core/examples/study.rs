@@ -288,15 +288,33 @@ fn study(out: &Path, name: &str, photo: &str, scene: Scene) {
     let belong: Vec<f32> = (0..cells).map(|i| { let (x, y) = center(i); quarter(&|p| p[1] as f32 / 255.0, x, y) }).collect();
     let (aw, ah) = (analysis.width as usize, analysis.height as usize);
     let far_px = 1e6f32;
-    let mut subject: Vec<f32> = (0..cells)
-        .map(|i| {
-            let (x, y) = center(i);
-            let (sx, sy) = (table_at(&placement.fx, x / w as f32), table_at(&placement.fy, y / h as f32));
-            let (ax, ay) = (((sx * aw as f32) as usize).min(aw - 1), ((sy * ah as f32) as usize).min(ah - 1));
-            if analysis.saliency[ay * aw + ax] >= 0.35 { 0.0 } else { far_px }
+    let distance_to = |level: f32| {
+        let mut field: Vec<f32> = (0..cells)
+            .map(|i| {
+                let (x, y) = center(i);
+                let (sx, sy) = (table_at(&placement.fx, x / w as f32), table_at(&placement.fy, y / h as f32));
+                let (ax, ay) = (((sx * aw as f32) as usize).min(aw - 1), ((sy * ah as f32) as usize).min(ah - 1));
+                if analysis.saliency[ay * aw + ax] >= level { 0.0 } else { far_px }
+            })
+            .collect();
+        chamfer(&mut field, &grid);
+        field
+    };
+    let subject = distance_to(0.35);
+    let backdrop: Vec<Vec<f32>> = (0..3)
+        .map(|k| {
+            let mut channel: Vec<f32> = lab.iter().map(|c| c[k]).collect();
+            blur(&mut channel, grid.w, grid.h, 16.0, 16.0);
+            channel
         })
         .collect();
-    chamfer(&mut subject, &grid);
+    let mut solid_subject: Vec<f32> = (0..cells)
+        .map(|i| {
+            let apart = (0..3).map(|k| (lab[i][k] - backdrop[k][i]).powi(2)).sum::<f32>().sqrt();
+            if subject[i] == 0.0 && apart > 0.1 { 0.0 } else { far_px }
+        })
+        .collect();
+    chamfer(&mut solid_subject, &grid);
     let icons: Vec<(f32, f32, f32, f32, f32, f32)> = scene
         .icons
         .iter()
@@ -312,13 +330,15 @@ fn study(out: &Path, name: &str, photo: &str, scene: Scene) {
         let reach = 0.4 + spread(x, y);
         for (x0, y0, x1, y1, sx, sy) in &icons {
             let (dx, dy) = ((x0 - x).max(x - x1).max(0.0), (y0 - y).max(y - y1).max(0.0));
-            keep *= 1.0 - (-0.5 * (dx / (sx * reach)).powi(2) - 0.5 * (dy / sy).powi(2)).exp();
+            let flare = 1.0 + 0.8 * smoothstep(0.0, 0.25 * unit, y - y1);
+            let sy = if y > *y1 { 0.6 * sy } else { *sy };
+            keep *= 1.0 - (-0.5 * (dx / (sx * reach * flare)).powi(2) - 0.5 * (dy / sy).powi(2)).exp();
         }
         1.0 - keep
     };
     let anchors: Vec<(f32, f32, f32, f32)> = scene.icons.iter().map(|r| (r.x, r.y, r.x + r.w, r.y + r.h)).collect();
     let hold = |x: f32, y: f32| if anchors.iter().any(|(x0, y0, x1, y1)| x > x0 - 0.12 * unit && x < x1 + 0.12 * unit && y > y0 - 0.12 * unit && y < y1 + 0.12 * unit) { 0.3 } else { 0.0 };
-    let (mut big, mut small, mut land) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut big, mut land) = (Vec::new(), Vec::new());
     let spacing = unit / 3.0;
     let (nx, ny) = ((w as f32 / spacing).ceil() as i32 + 6, (h as f32 / spacing).ceil() as i32 + 6);
     for j in -3..ny {
@@ -342,22 +362,57 @@ fn study(out: &Path, name: &str, photo: &str, scene: Scene) {
                     let wide = (r * (1.0 + 0.8 * base)).min(clear).min(0.95 * unit);
                     big.push(Puff { x, y: y - (wide - r), r: wide });
                 }
-            } else {
-                let r = ((0.15 + 0.2 * hash(i, j, 14)) * (1.0 - 0.4 * base) * unit * smoothstep(0.1, 0.3, c) * airy).min(clear);
-                if r > 0.06 * unit {
-                    small.push(Puff { x, y, r });
-                }
             }
             if (i + 2 * j).rem_euclid(3) == 0 {
-                let r = ((0.6 + 0.35 * hash(i, j, 15)) * unit * smoothstep(0.35, 0.75, c) * (1.0 - s) * gate * swell).min(clear);
+                let natural = (0.6 + 0.35 * hash(i, j, 15)) * unit * smoothstep(0.35, 0.75, c) * (1.0 - s) * gate * swell;
+                let (mut lx, mut ly) = (x, y);
+                if natural > clear {
+                    let (gx, gy) = (grid.at(&subject, x + grid.step, y) - grid.at(&subject, x - grid.step, y), grid.at(&subject, x, y + grid.step) - grid.at(&subject, x, y - grid.step));
+                    let m = (gx * gx + gy * gy).sqrt();
+                    if m > 1e-3 {
+                        let push = (natural - clear).min(0.6 * unit);
+                        (lx, ly) = (x + gx / m * push, y + gy / m * push);
+                    }
+                }
+                let r = natural.min(grid.at(&subject, lx, ly) - 0.45 * unit);
                 if r > 0.4 * unit {
-                    land.push(Puff { x, y, r });
+                    land.push(Puff { x: lx, y: ly, r });
                 }
             }
         }
     }
+    let mut bare = vec![false; anchors.len()];
+    for (k, (x0, y0, x1, y1)) in anchors.iter().enumerate() {
+        let (cx, cy) = (0.5 * (x0 + x1), 0.5 * (y0 + y1));
+        if grid.at(&sky, cx, cy) < 0.5 {
+            let (qx, qy) = (0.25 * (x1 - x0), 0.25 * (y1 - y0));
+            let core: Vec<Puff> = [(-qx, -qy), (qx, -qy), (-qx, qy), (qx, qy)].iter().map(|(dx, dy)| Puff { x: cx + dx, y: cy + dy, r: 0.5 * unit }).collect();
+            if core.iter().all(|p| grid.at(&solid_subject, p.x, p.y) - p.r >= 0.2 * unit) {
+                land.extend(core);
+            } else {
+                bare[k] = true;
+            }
+        }
+    }
+    let nearest = |p: &Puff| {
+        (0..anchors.len())
+            .min_by(|a, b| {
+                let d = |k: usize| (p.x - 0.5 * (anchors[k].0 + anchors[k].2)).hypot(p.y - 0.5 * (anchors[k].1 + anchors[k].3));
+                d(*a).total_cmp(&d(*b))
+            })
+            .unwrap_or(0)
+    };
+    land.retain(|p| !bare[nearest(p)]);
     let body = Buckets::new(keep_touching(big, &anchors, 1.0), unit, w, h);
-    let inner = Buckets::new(small.into_iter().filter(|p| body.field(p.x, p.y, 0.1 * unit, 4.0 * unit, [0.0, 0.0]).0 < -p.r - 0.05 * unit).collect(), unit, w, h);
+    let mut ranked: Vec<&Puff> = body.puffs.iter().collect();
+    ranked.sort_by(|a, b| b.r.total_cmp(&a.r));
+    let mut chosen: Vec<Puff> = Vec::new();
+    for p in ranked {
+        if chosen.iter().all(|q| (p.x - q.x).hypot(p.y - q.y) > 0.9 * (p.r + q.r)) {
+            chosen.push(Puff { x: p.x, y: p.y, r: p.r });
+        }
+    }
+    let piles = Buckets::new(chosen, 2.0 * unit, w, h);
     let islands = Buckets::new(keep_touching(land, &anchors, 0.0), 2.2 * unit, w, h);
     let total = |x0: u32, x1: u32, y0: u32, y1: u32| {
         let mut s = 0.0;
@@ -404,6 +459,52 @@ fn study(out: &Path, name: &str, photo: &str, scene: Scene) {
     let mut depths: Vec<f32> = open.iter().map(|o| if *o { 0.0 } else { 1e6 }).collect();
     chamfer(&mut depths, &fine);
     blur(&mut depths, fine.w, fine.h, 1.0, 1.0);
+    let mut glow: Vec<f32> = (0..cells).map(|i| lab[i][0] * smoothstep(0.01, 0.06, lab[i][2]) * sky[i]).collect();
+    let spread_cells = 0.15 * grid.w.max(grid.h) as f32;
+    blur(&mut glow, grid.w, grid.h, spread_cells, spread_cells);
+    let glow_top = glow.iter().copied().fold(0.0f32, f32::max);
+    let lights: Vec<[f32; 2]> = (0..fine.w * fine.h)
+        .map(|i| {
+            let (x, y) = (((i % fine.w) as f32 + 0.5) * fine.step, ((i / fine.w) as f32 + 0.5) * fine.step);
+            if glow_top < 0.01 {
+                return light;
+            }
+            let weight = smoothstep(0.15, 0.6, grid.at(&glow, x, y) / glow_top);
+            let (gx, gy) = (grid.at(&glow, x + 3.0 * grid.step, y) - grid.at(&glow, x - 3.0 * grid.step, y), grid.at(&glow, x, y + 3.0 * grid.step) - grid.at(&glow, x, y - 3.0 * grid.step));
+            let m = (gx * gx + gy * gy).sqrt();
+            if m < 1e-6 {
+                return light;
+            }
+            let (lx, ly) = (light[0] + (gx / m - light[0]) * weight, light[1] + (gy / m - light[1]) * weight);
+            let n = (lx * lx + ly * ly).sqrt().max(1e-6);
+            [lx / n, ly / n]
+        })
+        .collect();
+    let toward: Vec<f32> = (0..fine.w * fine.h)
+        .into_par_iter()
+        .map(|i| {
+            if open[i] {
+                return 0.0;
+            }
+            let (x, y) = (((i % fine.w) as f32 + 0.5) * fine.step, ((i / fine.w) as f32 + 0.5) * fine.step);
+            let mut t = 0.0;
+            while t < 4.0 * unit {
+                t += 0.5 * fine.step;
+                let (sx, sy) = (x + lights[i][0] * t, y + lights[i][1] * t);
+                if sx < 0.0 || sy < 0.0 || sx >= w as f32 || sy >= h as f32 {
+                    break;
+                }
+                let k = ((sy / fine.step) as usize).min(fine.h - 1) * fine.w + ((sx / fine.step) as usize).min(fine.w - 1);
+                if open[k] {
+                    break;
+                }
+            }
+            t
+        })
+        .collect();
+    let mut toward = toward;
+    blur(&mut toward, fine.w, fine.h, 1.5, 1.5);
+    let (lights_x, lights_y): (Vec<f32>, Vec<f32>) = lights.iter().map(|l| (l[0], l[1])).unzip();
     let mut pixels = vec![[0u8; 3]; (w * h) as usize];
     let mut layer = vec![false; (w * h) as usize];
     pixels.par_chunks_mut(w as usize).zip(layer.par_chunks_mut(w as usize)).enumerate().for_each(|(y, (row, marks))| {
@@ -412,17 +513,18 @@ fn study(out: &Path, name: &str, photo: &str, scene: Scene) {
             let mut c = picture[y * w as usize + x];
             let (land, _) = islands.field(fx, fy, k_land, far, light);
             let land = land + 0.14 * unit * noise(fx / (1.5 * unit), fy / (1.5 * unit), 21);
-            let reach = (0.6 + 0.4 * (0.5 + 0.5 * noise(fx / (0.9 * unit), fy / (0.9 * unit), 25))) * unit;
+            let reach = (0.7 + 0.8 * smoothstep(0.2, 0.8, 0.5 + 0.5 * noise(fx / (2.0 * unit), fy / (2.0 * unit), 25))) * unit;
             if land < reach {
                 marks[x] = true;
                 if land > 0.0 {
-                    let t = (1.0 - land / reach).clamp(0.0, 1.0);
+                    let guard = smoothstep(0.1 * unit, 0.6 * unit, grid.at(&solid_subject, fx, fy));
+                    let t = (1.0 - land / reach).clamp(0.0, 1.0).powf(2.2) * guard;
                     let lab = to_lab(c);
-                    let shallow = to_linear([(lab[0] + 0.08 + 0.16 * t).min(0.96), lab[1] * (1.25 + 0.4 * t), lab[2] * (1.25 + 0.4 * t)]);
-                    c = mix(c, shallow, smoothstep(0.0, 0.4, t));
+                    let shallow = to_linear([(lab[0] + 0.24).min(0.96), lab[1] * 1.65, lab[2] * 1.65]);
+                    c = mix(c, shallow, t);
                     let along = 0.5 + 0.5 * noise(fx / (0.3 * unit), fy / (0.3 * unit), 24);
                     let strength = 0.5 + 0.5 * noise(fx / (0.8 * unit), fy / (0.8 * unit), 28);
-                    let line = smoothstep(0.05 * unit, 0.01 * unit, land) * smoothstep(0.4, 0.7, along) * (0.35 + 0.5 * strength);
+                    let line = smoothstep(0.05 * unit, 0.01 * unit, land) * smoothstep(0.4, 0.7, along) * (0.35 + 0.5 * strength) * guard;
                     c = mix(c, to_linear([0.96, sand_lab[1] * 0.2, sand_lab[2] * 0.2]), line);
                 }
                 let inside = smoothstep(0.75, -0.75, land);
@@ -435,13 +537,17 @@ fn study(out: &Path, name: &str, photo: &str, scene: Scene) {
                     c = mix(c, sand, inside);
                 }
             }
-            let (d, arcs) = body.field(fx, fy, k_cloud, far, light);
+            let d = body.field(fx, fy, k_cloud, far, light).0;
             let d = if fine.at(&depths, fx, fy) > 0.15 * unit + 0.5 * fine.step { d.min(-1.0) } else { d };
             if d < 1.0 {
                 marks[x] = true;
                 let alpha = (0.5 - d).clamp(0.0, 1.0);
                 let e = 1.5;
-                let arcs = arcs.max(inner.field(fx, fy, k_cloud, far, light).1);
+                let light = {
+                    let (lx, ly) = (fine.at(&lights_x, fx, fy), fine.at(&lights_y, fx, fy));
+                    let n = (lx * lx + ly * ly).sqrt().max(1e-6);
+                    [lx / n, ly / n]
+                };
                 let gx = body.field(fx + e, fy, k_cloud, far, light).0 - body.field(fx - e, fy, k_cloud, far, light).0;
                 let gy = body.field(fx, fy + e, k_cloud, far, light).0 - body.field(fx, fy - e, k_cloud, far, light).0;
                 let n = (gx * gx + gy * gy).sqrt().max(1e-6);
@@ -453,13 +559,32 @@ fn study(out: &Path, name: &str, photo: &str, scene: Scene) {
                 let facing = near + ((hx * light[0] + hy * light[1]) / m - near) * smoothstep(0.03 * unit, 0.2 * unit, depth);
                 let sky_here = to_lab(grid_color(&mean, &grid, fx, fy));
                 let chroma = (sky_here[1].powi(2) + sky_here[2].powi(2)).sqrt().max(1e-6);
-                let hue = |l: f32, k: f32| to_linear([l, sky_here[1] / chroma * (chroma * k).min(0.08), sky_here[2] / chroma * (chroma * k).min(0.08)]);
-                let (shaded, lit, deep) = (hue(0.82, 0.5), hue(0.965, 0.14), hue(0.76, 0.55));
-                let band = smoothstep(0.38 * unit, 0.0, depth) * facing.max(0.0).powf(0.8);
+                let warmth = smoothstep(0.01, 0.05, sky_here[2]);
+                let hue = |l: f32, k: f32| to_linear([l, sky_here[1] / chroma * (chroma * k).min(0.04), sky_here[2] / chroma * (chroma * k).min(0.04)]);
+                let (shaded, lit, deep) = (hue(0.81, 0.25), hue(0.97, 0.07 + 0.35 * warmth), hue(0.75, 0.28));
+                let broad = 1.0 - smoothstep(0.1 * unit, 1.3 * unit, fine.at(&toward, fx, fy));
+                let band = smoothstep(0.3 * unit, 0.0, depth) * facing.max(0.0).powf(0.8);
                 let under = smoothstep(0.15 * unit, 0.0, depth) * (-facing).max(0.0) * 0.9;
-                let mut tone = mix(shaded, lit, 0.055 * arcs);
+                let (mut front, mut arc, mut shade) = (f32::MIN, 0.0f32, 0.0f32);
+                for p in piles.near(fx, fy) {
+                    let length = (fx - p.x).hypot(fy - p.y).max(1e-3);
+                    if length < p.r && p.y + p.r > front {
+                        front = p.y + p.r;
+                        let toward_light = ((fx - p.x) * light[0] + (fy - p.y) * light[1]) / length;
+                        arc = smoothstep(-0.3 * p.r, -0.03 * p.r, length - p.r) * toward_light.max(0.0).powf(1.5);
+                    }
+                }
+                for p in piles.near(fx, fy) {
+                    let length = (fx - p.x).hypot(fy - p.y).max(1e-3);
+                    if length >= p.r && p.y + p.r > front {
+                        let away = -((fx - p.x) * light[0] + (fy - p.y) * light[1]) / length;
+                        shade = shade.max(smoothstep(0.25 * p.r, 0.0, length - p.r) * away.max(0.0).powf(1.5));
+                    }
+                }
+                let mut tone = mix(shaded, lit, 0.9 * broad);
                 tone = mix(tone, deep, under);
                 tone = mix(tone, lit, band);
+                tone = tone.map(|v| v * (1.0 + 0.12 * arc) * (1.0 - 0.05 * shade));
                 c = mix(c, tone, alpha);
             }
             *px = [encode(c[0]), encode(c[1]), encode(c[2])];
@@ -526,7 +651,7 @@ fn study(out: &Path, name: &str, photo: &str, scene: Scene) {
         image::imageops::crop_imm(&still, x0, y0, x1 - x0, y1 - y0).to_image().save(out.join(format!("{name}-crop{k}.png"))).expect("crop");
         k += 1;
     }
-    println!("{name}: {} cloud puffs, {} island blobs, {k} crops", body.puffs.len() + inner.puffs.len(), islands.puffs.len());
+    println!("{name}: {} cloud puffs, {} island blobs, {k} crops", body.puffs.len(), islands.puffs.len());
 }
 
 fn main() {
