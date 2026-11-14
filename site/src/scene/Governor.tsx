@@ -60,13 +60,26 @@ export function Governor() {
     };
   }, [gl]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    const lost = () => {
+      state.pool.length = 0;
+      state.pending.length = 0;
+      state.tags.clear();
+      state.current = null;
+    };
+    const restored = () => {
+      state.timer = state.context.getExtension('EXT_disjoint_timer_query_webgl2') as Timer | null;
+    };
+    gl.domElement.addEventListener('webglcontextlost', lost);
+    gl.domElement.addEventListener('webglcontextrestored', restored);
+    return () => {
+      gl.domElement.removeEventListener('webglcontextlost', lost);
+      gl.domElement.removeEventListener('webglcontextrestored', restored);
+      if (state.context.isContextLost()) return;
       for (const query of [...state.pool, ...state.pending]) state.context.deleteQuery(query);
       if (state.current) state.context.deleteQuery(state.current);
-    },
-    [state],
-  );
+    };
+  }, [gl, state]);
 
   useFrame((_, delta) => {
     const now = performance.now();
@@ -79,7 +92,7 @@ export function Governor() {
       if (interval > 0) quality.refresh(interval);
     }
     const { context, timer } = state;
-    if (!timer) return;
+    if (!timer || context.isContextLost()) return;
     while (state.pending.length > 0) {
       const query = state.pending[0];
       if (!context.getQueryParameter(query, context.QUERY_RESULT_AVAILABLE)) break;

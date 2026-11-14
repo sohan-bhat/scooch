@@ -237,6 +237,16 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   );
   const pads = useMemo(() => (built ? { laptop: built.laptop, console: consoleGlass } : null), [built, consoleGlass]);
   const gallery = useRef<Record<string, Frame>>({});
+
+  useEffect(() => {
+    const restored = () => {
+      screens.main.invalidate();
+      for (const frame of Object.values(gallery.current)) frame.invalidate();
+      gl.shadowMap.needsUpdate = true;
+    };
+    gl.domElement.addEventListener('webglcontextrestored', restored);
+    return () => gl.domElement.removeEventListener('webglcontextrestored', restored);
+  }, [gl, screens]);
   useEffect(() => {
     hooks.showing = () => {
       const busy: string[] = [];

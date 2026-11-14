@@ -319,6 +319,9 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
     material,
     select,
     textures,
+    invalidate() {
+      last = '';
+    },
     compile(gl: WebGLRenderer) {
       const previous = gl.getRenderTarget();
       gl.setRenderTarget(target);
