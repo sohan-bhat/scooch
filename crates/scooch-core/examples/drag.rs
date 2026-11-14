@@ -44,6 +44,40 @@ fn layer_gap(a: &RgbaImage, b: &RgbaImage, held: (&Rect, &Rect), cell: f32) -> (
     (alpha, color, farthest, 100.0 * changed as f64 / (a.width() * a.height()) as f64)
 }
 
+fn whole(before: &[bool], after: &[bool], w: usize, h: usize) -> (usize, usize) {
+    let mut seen = vec![false; after.len()];
+    let (mut count, mut largest) = (0usize, 0usize);
+    for start in 0..after.len() {
+        if !after[start] || seen[start] {
+            continue;
+        }
+        let (mut stack, mut size, mut touches) = (vec![start], 0usize, false);
+        seen[start] = true;
+        while let Some(i) = stack.pop() {
+            size += 1;
+            touches |= before[i];
+            let (x, y) = (i % w, i / w);
+            for dy in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+                    if nx >= 0 && ny >= 0 && (nx as usize) < w && (ny as usize) < h {
+                        let n = ny as usize * w + nx as usize;
+                        if after[n] && !seen[n] {
+                            seen[n] = true;
+                            stack.push(n);
+                        }
+                    }
+                }
+            }
+        }
+        if !touches {
+            count += 1;
+            largest = largest.max(size);
+        }
+    }
+    (count, largest)
+}
+
 fn crop(image: &RgbImage, around: &Rect, side: u32) -> RgbImage {
     let (w, h) = image.dimensions();
     let x = ((around.x + around.w / 2.0) as i64 - side as i64 / 2).clamp(0, (w - side.min(w)) as i64) as u32;
@@ -74,7 +108,6 @@ fn main() {
         let cell = 110.0;
         let mut worst = (0u8, 0u8, 0.0f32, 0.0f64, 0u8);
         let mut shifted = 0;
-        let mut tiles = Vec::new();
         let start = scene.icons[held];
         for step in 1..=STEPS {
             let before = scene.icons[held];
@@ -99,29 +132,42 @@ fn main() {
         println!("{label} walk worst over the {} steps that kept the wallpaper still: scenery alpha {} color {} farthest {:.2} cells changed {:.2}% picture largest {}", STEPS - shifted, worst.0, worst.1, worst.2, worst.3, worst.4);
         let end = scene.icons[held];
         let (last_bundle, _) = session.still_shared(&image, &analysis, &placement, &scene, &options);
-        let mut previous: Option<RgbImage> = None;
-        let (mut most, mut mean) = (0u8, 0.0f64);
         let middle = Rect { x: (start.x + end.x) / 2.0, y: (start.y + end.y) / 2.0, w: start.w, h: start.h };
-        for k in 0..FRAMES {
-            let s = k as f32 / (FRAMES - 1) as f32;
-            let mut frame = scooch_core::frame(&first_bundle, &last_bundle, s);
-            if let Some(p) = &previous {
-                let (m, a) = gap(p, &frame);
-                most = most.max(m);
-                mean = mean.max(a);
+        for (mode, dissolve) in [("morph", false), ("dissolve", true)] {
+            let mut previous: Option<(RgbImage, Vec<bool>)> = None;
+            let (mut most, mut share, mut appeared, mut vanished, mut biggest) = (0u8, 0.0f64, 0usize, 0usize, 0usize);
+            let mut tiles = Vec::new();
+            for k in 0..FRAMES {
+                let s = k as f32 / (FRAMES - 1) as f32;
+                let layers = if dissolve { scooch_core::frame_dissolve_layers(&first_bundle, &last_bundle, s) } else { scooch_core::frame_layers(&first_bundle, &last_bundle, s) };
+                let mask: Vec<bool> = layers.scenery.pixels().map(|p| p[3] >= 128).collect();
+                let mut frame = layers.picture.clone();
+                scooch_core::composite(&mut frame, &layers.scenery);
+                if let Some((p, before)) = &previous {
+                    let (m, _) = gap(p, &frame);
+                    most = most.max(m);
+                    let far = p.pixels().zip(frame.pixels()).filter(|(a, b)| (0..3).any(|c| a[c].abs_diff(b[c]) > 32)).count();
+                    share = share.max(100.0 * far as f64 / (w * h) as f64);
+                    let (count, size) = whole(before, &mask, w as usize, h as usize);
+                    appeared += count;
+                    biggest = biggest.max(size);
+                    let (count, size) = whole(&mask, before, w as usize, h as usize);
+                    vanished += count;
+                    biggest = biggest.max(size);
+                }
+                previous = Some((frame.clone(), mask));
+                let shown = Rect { x: start.x + (end.x - start.x) * s, y: start.y + (end.y - start.y) * s, ..start };
+                let mut icons_now = scene.icons.clone();
+                icons_now[held] = shown;
+                desk::draw_icons(&mut frame, &icons_now);
+                tiles.push(imageops::resize(&crop(&frame, &middle, 960), 480, 300, imageops::FilterType::Triangle));
             }
-            previous = Some(frame.clone());
-            let shown = Rect { x: start.x + (end.x - start.x) * s, y: start.y + (end.y - start.y) * s, ..start };
-            let mut icons_now = scene.icons.clone();
-            icons_now[held] = shown;
-            desk::draw_icons(&mut frame, &icons_now);
-            tiles.push(imageops::resize(&crop(&frame, &middle, 960), 480, 300, imageops::FilterType::Triangle));
+            println!("{label} {mode} glide: pixels changed by more than 32 between neighbouring frames at most {share:.2}%, pieces appearing whole {appeared}, vanishing whole {vanished}, largest such piece {biggest} px, largest single pixel change {most}");
+            let mut sheet = RgbImage::from_pixel(480 * 6 + 5 * 6, 300 * 2 + 6, Rgb([0, 0, 0]));
+            for (k, tile) in tiles.iter().enumerate() {
+                imageops::replace(&mut sheet, tile, ((k % 6) * 486) as i64, ((k / 6) * 306) as i64);
+            }
+            sheet.save(out.join(format!("{label}-{mode}-strip.png"))).expect("strip");
         }
-        println!("{label} glide: largest change between neighbouring frames {most}, mean {mean:.3}");
-        let mut sheet = RgbImage::from_pixel(480 * 6 + 5 * 6, 300 * 2 + 6, Rgb([0, 0, 0]));
-        for (k, tile) in tiles.iter().enumerate() {
-            imageops::replace(&mut sheet, tile, ((k % 6) * 486) as i64, ((k / 6) * 306) as i64);
-        }
-        sheet.save(out.join(format!("{label}-strip.png"))).expect("strip");
     }
 }
