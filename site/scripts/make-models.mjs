@@ -67,13 +67,22 @@ const models = [
       'stationery_supplies_eraser',
     ],
   },
-  { id: 'alarm_clock_01', resolution: '1k', file: 'clock.glb', textures: small, merge: true },
+  { id: 'alarm_clock_01', resolution: '1k', file: 'clock.glb', textures: small },
   { id: 'cassette_player', resolution: '1k', file: 'cassette.glb', textures: small, merge: true },
   { id: 'potted_plant_04', resolution: '1k', file: 'plant.glb', textures: small, merge: true },
   { id: 'vintage_stapler', resolution: '1k', file: 'stapler.glb', textures: small, merge: true },
   { id: 'round_spectacles', resolution: '1k', file: 'glasses.glb', textures: small, merge: true },
   { id: 'digital_wrist_watch', resolution: '1k', file: 'watch.glb', textures: small, merge: true },
   { id: 'gamepad', resolution: '1k', file: 'gamepad.glb', textures: small, merge: true },
+  {
+    id: 'Television_01',
+    resolution: '1k',
+    file: 'console.glb',
+    textures: { color: 1024, normal: 512, arm: 512 },
+    glass: { material: 'television_01_screen', uv: [0.04, 0.338, 0.712, 0.962], facing: 0.7 },
+    paint: [[0.494, 0.526, 0.733, 0.838, 0.51, 0.722]],
+  },
+  { id: 'tea_set_01', resolution: '1k', file: 'cup.glb', textures: small, keep: ['tea_set_01_cup_small_01'] },
 ];
 
 const environment = { id: 'studio_small_08', resolution: '1k', file: 'studio.hdr', width: 256 };
@@ -102,12 +111,30 @@ async function listing(id) {
   return response.json();
 }
 
+async function paintOver(path, rects) {
+  const image = sharp(await readFile(path));
+  const { width, height } = await image.metadata();
+  const layers = [];
+  for (const [u0, u1, v0, v1, su, sv] of rects) {
+    const sample = await sharp(await readFile(path)).extract({ left: Math.round(su * width), top: Math.round(sv * height), width: 4, height: 4 }).resize(1, 1).raw().toBuffer();
+    const w = Math.round((u1 - u0) * width);
+    const h = Math.round((v1 - v0) * height);
+    layers.push({ input: { create: { width: w, height: h, channels: 3, background: { r: sample[0], g: sample[1], b: sample[2] } } }, left: Math.round(u0 * width), top: Math.round(v0 * height) });
+  }
+  await writeFile(path, await image.composite(layers).jpeg({ quality: 95 }).toBuffer());
+}
+
 async function fetchModel(model) {
   const entry = (await listing(model.id)).gltf[model.resolution].gltf;
   const folder = joinPath(cache, model.id, model.resolution);
   const main = joinPath(folder, entry.url.split('/').pop());
   await download(entry.url, main);
-  for (const [relative, file] of Object.entries(entry.include)) await download(file.url, joinPath(folder, relative));
+  for (const [relative, file] of Object.entries(entry.include)) {
+    const path = joinPath(folder, relative);
+    const fresh = !(await exists(path));
+    await download(file.url, path);
+    if (fresh && model.paint && /diff/.test(relative)) await paintOver(path, model.paint);
+  }
   return main;
 }
 
