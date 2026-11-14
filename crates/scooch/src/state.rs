@@ -36,6 +36,16 @@ pub struct State {
     pub stuck: Vec<PathBuf>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub scales: BTreeMap<String, f32>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub starts: BTreeMap<String, Start>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Start {
+    pub ready: u32,
+    pub shown: u32,
+    pub at: u64,
 }
 
 pub fn fresh_options() -> Options {
@@ -73,7 +83,7 @@ impl Tally {
 
 impl Default for State {
     fn default() -> Self {
-        Self { version: VERSION, on: false, options: Options::default(), glide: true, screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new(), scales: BTreeMap::new() }
+        Self { version: VERSION, on: false, options: Options::default(), glide: true, screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new(), scales: BTreeMap::new(), starts: BTreeMap::new() }
     }
 }
 

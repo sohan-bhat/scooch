@@ -174,6 +174,10 @@ impl Helper {
         Ok(helper)
     }
 
+    pub fn arrived(&self) -> Option<Instant> {
+        self.arrived
+    }
+
     pub fn since_launch(&self) -> Option<Duration> {
         self.arrived.map(|arrived| arrived.saturating_duration_since(self.launched))
     }
