@@ -510,8 +510,12 @@ impl Daemon {
             let holding = {
                 let mut sessions = sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 if idle && !sessions.is_empty() {
+                    let held: usize = sessions.values().map(|(_, session)| session.bytes()).sum();
                     sessions.clear();
                     relieve();
+                    if trace() {
+                        eprintln!("{} sessions let go of {} MB after {} s at rest", stamp(), held >> 20, REST.as_secs());
+                    }
                 }
                 !sessions.is_empty()
             };
@@ -683,7 +687,7 @@ impl Daemon {
         self.tidy_tables(state);
     }
 
-    fn screen(&self, state: &mut State, screen: &Screen, snapshot: &Snapshot, options: &Options, known: Option<&[String]>, glider: (Option<&mut Glider>, Option<&'static str>)) -> Result<Outcome> {
+    fn screen(&self, state: &mut State, screen: &Screen, snapshot: &Snapshot, options: &Options, known: Option<&[String]>, (mut glider, blocked): (Option<&mut Glider>, Option<&'static str>)) -> Result<Outcome> {
         let current = self.desktop.wallpaper(screen)?;
         let ours = current.as_deref().is_some_and(|path| self.store.owns(path));
         let usable = current.clone().filter(|path| path.is_file());
@@ -729,6 +733,9 @@ impl Daemon {
         let fingerprint = scene::fingerprint(&entry.source, &scene, options);
         let showing = current.as_deref().is_some_and(|path| same(path, entry.shown()));
         if entry.fingerprint.as_deref() == Some(fingerprint.as_str()) && entry.shown().is_file() {
+            if let Some(glider) = glider.as_deref_mut() {
+                glider.close_early_for(&screen.id);
+            }
             if showing || settling {
                 return Ok(Outcome::Unchanged);
             }
@@ -736,7 +743,7 @@ impl Daemon {
             self.show(screen, &shown)?;
             return Ok(Outcome::Reapplied);
         }
-        let outcome = self.place(entry, screen, &scene, options, (current.as_deref().filter(|_| !settling), current.as_deref()), glider)?;
+        let outcome = self.place(entry, screen, &scene, options, (current.as_deref().filter(|_| !settling), current.as_deref()), (glider, blocked))?;
         if outcome != Outcome::Interrupted {
             entry.fingerprint = Some(fingerprint);
             entry.chosen = false;
@@ -766,6 +773,9 @@ impl Daemon {
         let output = entry.output.clone().filter(|path| path.is_file());
         let showing_output = matches!((current, &output), (Some(current), Some(output)) if same(current, output));
         if scene::is_identity(&placement) && !pads {
+            if let Some(glider) = glider.as_deref_mut() {
+                glider.close_early_for(&screen.id);
+            }
             drop(analysis);
             drop(image);
             let copied = showing_output && !entry.painted && entry.placement.as_ref().is_some_and(scene::is_identity);
@@ -782,6 +792,9 @@ impl Daemon {
             return Ok(Outcome::Plain);
         }
         if options.pads <= 0.0 && !wanted && !entry.painted && showing_output && entry.placement.as_ref() == Some(&placement) {
+            if let Some(glider) = glider.as_deref_mut() {
+                glider.close_early_for(&screen.id);
+            }
             return Ok(Outcome::Kept);
         }
         let painted = wanted && scooch_core::scenery_active(&analysis, &placement, scene, options);
@@ -830,8 +843,11 @@ impl Daemon {
             picture
         };
         let undo = |glider: Option<&mut Glider>, flight: Option<u32>, tables: &Option<PathBuf>| {
-            if let (Some(glider), Some(id)) = (glider, flight) {
-                glider.abort(id);
+            if let Some(glider) = glider {
+                if let Some(id) = flight {
+                    glider.abort(id);
+                }
+                glider.close_early_for(&screen.id);
             }
             if let Some(tables) = tables {
                 let _ = std::fs::remove_file(tables);
@@ -854,6 +870,9 @@ impl Daemon {
                 entry.placement = Some(placement);
                 return Ok(Outcome::Kept);
             }
+        }
+        if let (Some(glider), None) = (glider.as_deref_mut(), flight) {
+            glider.close_early_for(&screen.id);
         }
         let was = std::mem::replace(&mut entry.painted, painted);
         let published = self.publish(entry, screen, current, seen, format.extension(), |path| write_atomic(path, &bytes));
@@ -2710,6 +2729,76 @@ pub mod tests {
         let started = Instant::now();
         signal.first();
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    fn two_screen_rig(name: &str) -> (Daemon, Arc<Fake>, Arc<Mutex<crate::glide::tests::Script>>) {
+        let (mut daemon, fake, _) = rig(name, vec![screen("left", 0.0, 2.0), screen("right", 160.0, 2.0)]);
+        *fake.live.lock().unwrap() = true;
+        let spawner = crate::glide::tests::FakeSpawner::new(fake.events.clone());
+        let script = spawner.script.clone();
+        daemon.glider = Arc::new(Mutex::new(Glider::new(Box::new(spawner))));
+        (daemon, fake, script)
+    }
+
+    fn right(rect: Rect) -> Rect {
+        Rect { x: rect.x + 160.0, ..rect }
+    }
+
+    #[test]
+    fn a_fault_on_one_screen_holds_the_layers_already_over_a_new_wallpaper() {
+        let (daemon, fake, script) = two_screen_rig("glide-fault-hold");
+        fake.place(vec![subject(), right(subject())]);
+        daemon.tick();
+        fake.events.lock().unwrap().clear();
+        script.lock().unwrap().refuse_after = Some(2);
+        fake.place(vec![moved_subject(), right(moved_subject())]);
+        let report = daemon.tick();
+        assert_eq!(report.outcomes.iter().map(|(_, outcome)| *outcome).collect::<Vec<_>>(), vec![Outcome::Rendered, Outcome::Rendered]);
+        let stamped = fake.events.lock().unwrap().clone();
+        let names: Vec<&str> = stamped.iter().map(|(event, _)| event.as_str()).collect();
+        let when = |name: &str| stamped.iter().find(|(event, _)| event.starts_with(name)).map(|(_, at)| *at).unwrap_or_else(|| panic!("no {name} in {names:?}"));
+        let first_set = stamped.iter().find(|(event, _)| event.starts_with("set ")).map(|(_, at)| *at).unwrap();
+        assert!(names.iter().position(|event| event.starts_with("refused 2")) < names.iter().position(|event| *event == "close 1"), "{names:?}");
+        assert!(when("close 1") >= first_set + fake.hold(), "{names:?}");
+        let second_set = stamped.iter().filter(|(event, _)| event.starts_with("set ")).nth(1).map(|(_, at)| *at).unwrap();
+        assert!(when("close 2") <= second_set, "{names:?}");
+        assert!(!daemon.glider.lock().unwrap().running(), "{names:?}");
+    }
+
+    #[test]
+    fn an_early_layer_closes_before_its_screen_takes_the_plain_path() {
+        let (daemon, fake, _, _) = glide_rig("glide-early-plain", true);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        fake.place(vec![moved_subject()]);
+        daemon.tick();
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![corner()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
+        let events = events(&fake);
+        let open = at(&events, "open");
+        let close = events.iter().position(|event| *event == events[open].replacen("open", "close", 1).split(' ').take(2).collect::<Vec<_>>().join(" ")).unwrap_or_else(|| panic!("{events:?}"));
+        let set = events.iter().position(|event| event.starts_with("set ")).unwrap_or_else(|| panic!("{events:?}"));
+        assert!(open < close && close < set && !events.iter().any(|event| event.starts_with("glide ")), "{events:?}");
+    }
+
+    #[test]
+    fn a_screen_too_large_for_the_gpu_is_skipped_until_it_changes() {
+        let (daemon, fake, script, spawned) = glide_rig("glide-huge", true);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        script.lock().unwrap().too_large = true;
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert!(daemon.glider.lock().unwrap().running());
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![Rect { x: 40.0, ..moved_subject() }]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let events = events(&fake);
+        assert!(!events.iter().any(|event| event.starts_with("open") || event.starts_with("huge")), "{events:?}");
+        assert_eq!(*spawned.lock().unwrap(), 1);
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert_eq!(said.iter().filter(|line| line.contains("larger than the GPU can draw")).count(), 1, "{said:?}");
     }
 
     #[test]
