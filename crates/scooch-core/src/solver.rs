@@ -26,6 +26,9 @@ const KEEP_FLOOR: f64 = 0.02;
 const KEEP_SHARE: f64 = 0.10;
 const EPS: f64 = 1e-9;
 const TIE: f64 = 1e-12;
+const HOME_KEEP: f64 = 0.90;
+const HOME_NEAR: f64 = 0.02;
+const HOME_BORDER: f64 = 0.1;
 const COVER_CELL: f32 = 1.0 / 3.0;
 const NEAR_PANS: usize = 3;
 const NEAR_SHARE: f64 = 0.8;
@@ -108,16 +111,16 @@ struct Frame {
 }
 
 impl Frame {
-    fn off(&self) -> f64 {
-        let part = |start: f64, span: f64| {
+    fn off(&self, center: [f64; 2]) -> f64 {
+        let part = |start: f64, span: f64, middle: f64| {
             let slack = 1.0 - span;
             if slack > 1e-9 {
-                ((start + span / 2.0 - 0.5) / (slack / 2.0)).clamp(-1.0, 1.0)
+                ((start + span / 2.0 - middle) / (slack / 2.0)).clamp(-1.0, 1.0)
             } else {
                 0.0
             }
         };
-        part(self.x0, self.cw).powi(2) + part(self.y0, self.ch).powi(2)
+        part(self.x0, self.cw, center[0]).powi(2) + part(self.y0, self.ch, center[1]).powi(2)
     }
 
     fn of(placement: &Placement) -> Option<Self> {
@@ -126,8 +129,8 @@ impl Frame {
         ok.then_some(Self { z: placement.zoom as f64, x0, y0, cw, ch, mirrored: placement.mirrored })
     }
 
-    fn settled(&self) -> f64 {
-        ZOOMED * (self.z - 1.0).max(0.0) + OFF_CENTER * self.off() + if self.mirrored { MIRRORED } else { 0.0 }
+    fn settled(&self, center: [f64; 2]) -> f64 {
+        ZOOMED * (self.z - 1.0).max(0.0) + OFF_CENTER * self.off(center) + if self.mirrored { MIRRORED } else { 0.0 }
     }
 }
 
@@ -145,6 +148,8 @@ struct Field {
     screen_aspect: f64,
     flat: bool,
     middle: Frame,
+    home: Frame,
+    center: [f64; 2],
     kept: f64,
     edge: f64,
     exempt: [bool; 4],
@@ -181,14 +186,69 @@ impl Field {
             screen_aspect,
             flat: analysis.flat,
             middle,
+            home: middle,
+            center: [0.5, 0.5],
             kept: 0.0,
             edge: 0.0,
             exempt: [true; 4],
         };
-        field.kept = field.crop_sum(&middle);
-        field.exempt = field.sides(&middle);
-        field.edge = field.border(&middle);
+        if let Some(home) = field.rest_frame() {
+            field.center = [home.x0 + home.cw / 2.0, home.y0 + home.ch / 2.0];
+            field.home = home;
+        }
+        let home = field.home;
+        field.kept = field.crop_sum(&home);
+        field.exempt = field.sides(&home);
+        field.edge = field.border(&home);
         Some(field)
+    }
+
+    fn rest_frame(&self) -> Option<Frame> {
+        let middle = self.middle;
+        let total = self.total_s;
+        if self.flat || total <= EPS {
+            return None;
+        }
+        let along_x = middle.cw < 1.0 - 1e-9;
+        let slack = if along_x { 1.0 - middle.cw } else { 1.0 - middle.ch };
+        if slack <= 1e-9 {
+            return None;
+        }
+        let grid: Vec<Frame> = pans(slack).into_iter().map(|p| if along_x { Frame { x0: p, ..middle } } else { Frame { y0: p, ..middle } }).collect();
+        let kept: Vec<f64> = grid.iter().map(|f| self.crop_sum(f)).collect();
+        let reach = kept.iter().copied().fold(0.0f64, f64::max);
+        let centroid = self.centroid(along_x);
+        let start = |f: &Frame| if along_x { f.x0 + f.cw / 2.0 } else { f.y0 + f.ch / 2.0 };
+        let best = (0..grid.len())
+            .filter(|i| kept[*i] >= reach - HOME_NEAR * total)
+            .min_by(|a, b| {
+                let (fa, fb) = (start(&grid[*a]), start(&grid[*b]));
+                (fa - centroid).abs().total_cmp(&(fb - centroid).abs()).then((fa - 0.5).abs().total_cmp(&(fb - 0.5).abs())).then(a.cmp(b))
+            })
+            .map(|i| grid[i])?;
+        let crossed = (self.border(&middle) - self.border(&best)) / self.size;
+        let leave = self.crop_sum(&middle) < HOME_KEEP * reach || crossed > HOME_BORDER;
+        (leave && best != middle).then_some(best)
+    }
+
+    fn centroid(&self, along_x: bool) -> f64 {
+        let solid = self.saliency.iter().any(|s| *s >= SOLID);
+        let (mut sum, mut weight) = (0.0f64, 0.0f64);
+        for (i, s) in self.saliency.iter().enumerate() {
+            let w = if solid { if *s >= SOLID { *s as f64 } else { 0.0 } } else { *s as f64 };
+            let at = if along_x { ((i % self.columns) as f64 + 0.5) / self.gw } else { ((i / self.columns) as f64 + 0.5) / self.gh };
+            sum += w * at;
+            weight += w;
+        }
+        if weight > 0.0 { sum / weight } else { 0.5 }
+    }
+
+    fn rest(&self, (sw, sh): (u32, u32), scene: &Scene) -> Placement {
+        if self.home == self.middle {
+            table::fill(sw, sh, scene.width, scene.height)
+        } else {
+            assemble(&self.home, None, None)
+        }
     }
 
     fn crop_sum(&self, frame: &Frame) -> f64 {
@@ -196,7 +256,7 @@ impl Field {
     }
 
     fn crop_loss(&self, frame: &Frame) -> f64 {
-        let middle = &self.middle;
+        let middle = &self.home;
         let (x0, x1) = (frame.x0.max(middle.x0), (frame.x0 + frame.cw).min(middle.x0 + middle.cw));
         let (y0, y1) = (frame.y0.max(middle.y0), (frame.y0 + frame.ch).min(middle.y0 + middle.ch));
         let shared = if x1 > x0 && y1 > y0 { self.sb.sum(x0 * self.gw, y0 * self.gh, x1 * self.gw, y1 * self.gh)[0] } else { 0.0 };
@@ -237,7 +297,7 @@ impl Field {
     }
 
     fn frame_cost(&self, frame: &Frame, hid: f64, busy: f64) -> f64 {
-        let mut cost = BUSY * busy + frame.settled();
+        let mut cost = BUSY * busy + frame.settled(self.center);
         if !self.flat {
             let total = self.total_s.max(EPS);
             cost += HIDDEN * hid / total + CROPPED * self.crop_loss(frame) / total + BORDER * self.cut(frame);
@@ -351,7 +411,7 @@ fn zoom_levels(settings: &Settings) -> usize {
 }
 
 fn stage_one(field: &Field, boxes: &Boxes, settings: &Settings) -> Option<Vec<Frame>> {
-    let middle = field.middle;
+    let middle = field.home;
     let (hid_c, busy_c) = under_icons(field, boxes, &AxisMap::x(&middle, None), &AxisMap::y(&middle, None));
     if hid_c <= 0.0 && busy_c <= 0.0 {
         return None;
@@ -410,7 +470,7 @@ fn stage_one(field: &Field, boxes: &Boxes, settings: &Settings) -> Option<Vec<Fr
                         area += (xb.at - xa.at).max(0.0) * (yb.at - ya.at).max(0.0);
                     }
                     let busy = if area > 0.0 { busy / area } else { 0.0 };
-                    Some(Candidate { zi, xi, yi, frame, off: frame.off(), cost: field.frame_cost(&frame, hid, busy) })
+                    Some(Candidate { zi, xi, yi, frame, off: frame.off(field.center), cost: field.frame_cost(&frame, hid, busy) })
                 })
                 .collect()
         })
@@ -709,10 +769,18 @@ fn source_size(analysis: &Analysis) -> (u32, u32) {
     }
 }
 
+pub fn home(analysis: &Analysis, scene: &Scene) -> Placement {
+    let (sw, sh) = source_size(analysis);
+    match Field::new(analysis, scene) {
+        Some(field) => field.rest((sw, sh), scene),
+        None => table::fill(sw, sh, scene.width, scene.height),
+    }
+}
+
 pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Option<&Placement>) -> Placement {
     let (sw, sh) = source_size(analysis);
-    let fallback = table::fill(sw, sh, scene.width, scene.height);
-    let Some(field) = Field::new(analysis, scene) else { return fallback };
+    let Some(field) = Field::new(analysis, scene) else { return table::fill(sw, sh, scene.width, scene.height) };
+    let fallback = field.rest((sw, sh), scene);
     let bare = footprints(scene);
     if bare.is_empty() {
         return fallback;
