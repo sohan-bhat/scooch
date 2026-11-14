@@ -2647,14 +2647,16 @@ mod probe {
         }
         let ran = p.scooch(&["glide"], LIMIT);
         p.line(format!("- scooch glide said {:?}", ran.text()));
-        let back = position(p, name).unwrap_or(aside);
-        let (off, off_log) = wallpaper_after(p, &screen, |_| drag(back, subject));
+        let back = position(p, name).unwrap_or(subject);
+        let away = if (back.0 - subject.0).abs() < 5.0 { aside } else { subject };
+        let (off, off_log) = wallpaper_after(p, &screen, |_| drag(back, away));
         p.line(format!("- glide off, the same drag back: new wallpaper after {off:?} ms, log {off_log:?}"));
         let ran = p.scooch(&["glide"], LIMIT);
         p.line(format!("- scooch glide said {:?}", ran.text()));
         let wrote = set_motion(p, true);
         let back = position(p, name).unwrap_or(subject);
-        let (time, log) = wallpaper_after(p, &screen, |_| drag(back, aside));
+        let away = if (back.0 - subject.0).abs() < 5.0 { aside } else { subject };
+        let (time, log) = wallpaper_after(p, &screen, |_| drag(back, away));
         let glided = log.iter().any(|line| line.contains(" glide open"));
         let read = log.iter().any(|line| line.contains("glide skipped, reduce motion"));
         p.line(format!("- reduce motion on {wrote}, drag: new wallpaper after {time:?} ms, glided {glided}, the daemon logged reduce motion {read}, log {log:?}"));
@@ -2678,10 +2680,13 @@ mod probe {
         window.close();
         drop(window);
         spin(0.4);
-        let tick = |log: &[String]| log.iter().find_map(|line| line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<u64>().ok()));
+        let rendered = |log: &[String]| log.iter().find(|line| line.contains(" tick ") && line.contains("Rendered")).cloned();
+        let tick = |log: &[String]| rendered(log).and_then(|line| line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<u64>().ok()));
+        let laps = |log: &[String], names: &[&str]| rendered(log).map(|line| line.split(", ").filter_map(|part| part.rsplit_once(' ')).filter(|(name, _)| names.iter().any(|wanted| name.ends_with(wanted))).filter_map(|(_, ms)| ms.parse::<u64>().ok()).sum::<u64>());
         let hidden = covered_log.iter().any(|line| line.contains("glide skipped, hidden") || line.contains("glide skipped, helper budget"));
-        p.line(format!("- a move while a window covers the whole desktop: new wallpaper after {covered:?} ms, the daemon answered hidden {hidden}, tick {:?} ms against {:?} ms with glide off, log {covered_log:?}", tick(&covered_log), tick(&off_log)));
-        if covered.is_none() || !hidden || tick(&covered_log).zip(tick(&off_log)).is_some_and(|(with, without)| with > without + 400 + 300) {
+        let delay = laps(&covered_log, &["early", "tables", "open"]);
+        p.line(format!("- a move while a window covers the whole desktop: new wallpaper after {covered:?} ms, the daemon answered hidden {hidden}, time the glide added to the tick {delay:?} ms, tick {:?} ms against {:?} ms for the glide off move, log {covered_log:?}", tick(&covered_log), tick(&off_log)));
+        if covered.is_none() || !hidden || delay.is_none_or(|delay| delay > 400) {
             p.fail("a covered desktop delayed the plain swap");
         }
         std::thread::sleep(Duration::from_millis(1500));
