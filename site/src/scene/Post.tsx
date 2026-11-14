@@ -38,15 +38,14 @@ function Effects({ full }: { full: boolean }) {
   const dof = useCallback((effect: DepthOfFieldEffect | null) => quality.attachDof(effect), []);
   const ao = useCallback((pass: Toggle | null) => {
     if (pass) patchTargets(pass);
-    if (pass) pass.enabled = quality.ao;
   }, []);
   const noise = useCallback((effect: NoiseEffect | null) => {
     if (effect) effect.blendMode.opacity.value = quality.grainOpacity();
   }, []);
   return (
     <>
-      {full && <N8AO ref={ao} halfRes quality="performance" aoRadius={0.18} distanceFalloff={0.5} intensity={1.4} />}
-      {full && <DepthOfField ref={dof} focusDistance={1} focusRange={0.2} bokehScale={0} resolutionScale={0.5} />}
+      {full && quality.ao && <N8AO ref={ao} halfRes quality="performance" aoRadius={0.18} distanceFalloff={0.5} intensity={1.4} />}
+      {full && quality.dof && <DepthOfField ref={dof} focusDistance={1} focusRange={0.2} bokehScale={0} resolutionScale={0.5} />}
       <Bloom mipmapBlur levels={full ? 5 : 4} luminanceThreshold={1.3} luminanceSmoothing={0.35} intensity={0.6} radius={0.7} />
       <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
       <SMAA />
@@ -57,6 +56,17 @@ function Effects({ full }: { full: boolean }) {
 }
 
 const motion = { until: 0, was: false };
+const captured = new WeakSet<CopyPass>();
+
+function capture(pass: CopyPass) {
+  if (captured.has(pass)) return;
+  captured.add(pass);
+  const render = pass.render.bind(pass);
+  pass.render = (renderer, inputBuffer, outputBuffer, delta, stencil) => {
+    if (inputBuffer) quality.lastFast = inputBuffer.texture;
+    render(renderer, inputBuffer, outputBuffer, delta, stencil);
+  };
+}
 
 export function Post({ phone }: { phone: boolean }) {
   const gl = useThree((state) => state.gl);
@@ -91,11 +101,6 @@ export function Post({ phone }: { phone: boolean }) {
   }, []);
 
   useEffect(() => {
-    const render = copy.render.bind(copy);
-    copy.render = (renderer, inputBuffer, outputBuffer, delta, stencil) => {
-      if (inputBuffer) quality.lastFast = inputBuffer.texture;
-      render(renderer, inputBuffer, outputBuffer, delta, stencil);
-    };
     return () => {
       copy.dispose();
       overlay.dispose();
@@ -131,6 +136,8 @@ export function Post({ phone }: { phone: boolean }) {
       fastRender.current = render;
       value.render = (delta?: number) => {
         if (quality.chain !== 'fast') return;
+        const last = value.passes[value.passes.length - 1];
+        if (last instanceof CopyPass) capture(last);
         render(delta);
       };
       value.setSize = () => {
@@ -161,9 +168,10 @@ export function Post({ phone }: { phone: boolean }) {
       await precompile(gl, scene, camera, quality.fastComposer);
       await quiet();
       if (stopped || !fastRender.current) return;
-      copy.renderToScreen = false;
+      const last = quality.fastComposer.passes[quality.fastComposer.passes.length - 1];
+      if (last) last.renderToScreen = false;
       fastRender.current(0);
-      copy.renderToScreen = true;
+      if (last) last.renderToScreen = true;
       quality.fastReady = true;
     };
     timer = window.setTimeout(() => void warm(), 0);
@@ -171,7 +179,7 @@ export function Post({ phone }: { phone: boolean }) {
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [fast, gl, scene, camera, copy]);
+  }, [fast, gl, scene, camera]);
 
   useFrame((_, delta) => {
     const now = performance.now();
@@ -197,7 +205,7 @@ export function Post({ phone }: { phone: boolean }) {
       {fast ? (
         <EffectComposer ref={fastComposer} multisampling={0} frameBufferType={HalfFloatType}>
           <Effects full={full} />
-          <primitive object={copy} />
+          {full && quality.ao ? null : <primitive object={copy} />}
         </EffectComposer>
       ) : null}
     </>
