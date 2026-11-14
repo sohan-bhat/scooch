@@ -65,8 +65,7 @@ impl Platform for Host {
     }
 
     fn decode(path: &Path) -> Result<RgbImage> {
-        let ours = path.parent().is_some_and(|folder| folder.ends_with("out"));
-        objc2::rc::autoreleasepool(|_| if ours { picture::decode_exact(path) } else { picture::decode(path) })
+        objc2::rc::autoreleasepool(|_| picture::decode(path))
     }
 
     fn frame<T>(work: impl FnOnce() -> T) -> T {

@@ -96,7 +96,6 @@ extern "C" {
     pub fn CGImageSourceCreateWithURL(url: Ref, options: Ref) -> Ref;
     pub fn CGImageSourceCopyPropertiesAtIndex(source: Ref, index: usize, options: Ref) -> Ref;
     pub fn CGImageSourceCreateThumbnailAtIndex(source: Ref, index: usize, options: Ref) -> Ref;
-    pub fn CGImageSourceCreateImageAtIndex(source: Ref, index: usize, options: Ref) -> Ref;
     pub fn CGImageSourceGetCount(source: Ref) -> usize;
     pub fn CGImageSourceGetType(source: Ref) -> Ref;
 }
