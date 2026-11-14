@@ -855,7 +855,7 @@ impl Daemon {
         };
         drop(decoded);
         drop(analysis);
-        let bytes = match encode(&picture, format, self.desktop.profile().as_deref()) {
+        let bytes = match encode(&picture, format, self.desktop.profile().as_deref(), self.desktop.live()) {
             Ok(bytes) => bytes,
             Err(error) => {
                 undo(glider.as_deref_mut(), flight, &tables);
@@ -1072,20 +1072,20 @@ fn flip_check(analysis: &Analysis, scene: &Scene, options: &Options, placement: 
     flip_helps(hidden, scooch_core::hidden_share(analysis, scene, &flipped))
 }
 
-pub fn encode(picture: &RgbImage, format: Format, profile: Option<&[u8]>) -> Result<Vec<u8>> {
+pub fn encode(picture: &RgbImage, format: Format, profile: Option<&[u8]>, full_color: bool) -> Result<Vec<u8>> {
     Ok(match format {
-        Format::Jpeg => jpeg(picture, profile)?,
+        Format::Jpeg => jpeg(picture, profile, full_color)?,
         Format::Png => scooch_core::encode_png(picture)?,
     })
 }
 
-fn jpeg(picture: &RgbImage, profile: Option<&[u8]>) -> Result<Vec<u8>> {
+fn jpeg(picture: &RgbImage, profile: Option<&[u8]>, full_color: bool) -> Result<Vec<u8>> {
     let (Ok(width), Ok(height)) = (u16::try_from(picture.width()), u16::try_from(picture.height())) else {
         return Ok(scooch_core::encode_jpeg(picture, QUALITY)?);
     };
     let mut out = Vec::with_capacity(picture.as_raw().len() / 6);
     let mut encoder = jpeg_encoder::Encoder::new(&mut out, QUALITY);
-    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+    encoder.set_sampling_factor(if full_color { jpeg_encoder::SamplingFactor::F_1_1 } else { jpeg_encoder::SamplingFactor::F_2_2 });
     if let Some(profile) = profile {
         encoder.add_icc_profile(profile)?;
     }
@@ -1850,12 +1850,24 @@ pub mod tests {
         assert!(!adoptable(&entry, &picture, false));
     }
 
+    fn luma_sampling(bytes: &[u8]) -> Option<u8> {
+        let start = bytes.windows(2).position(|pair| pair == [0xFF, 0xC0])?;
+        bytes.get(start + 11).copied()
+    }
+
+    #[test]
+    fn stills_that_may_glide_keep_full_color_detail() {
+        let picture = scene::sample(64, 40);
+        assert_eq!(luma_sampling(&encode(&picture, Format::Jpeg, None, false).unwrap()), Some(0x22));
+        assert_eq!(luma_sampling(&encode(&picture, Format::Jpeg, None, true).unwrap()), Some(0x11));
+    }
+
     #[test]
     fn jpeg_output_decodes_to_the_same_size_and_close_colors() {
         let picture = scene::sample(301, 157);
-        let bytes = encode(&picture, Format::Jpeg, None).unwrap();
+        let bytes = encode(&picture, Format::Jpeg, None, false).unwrap();
         assert!(!bytes.windows(12).any(|window| window == b"ICC_PROFILE\0"));
-        let marked = encode(&picture, Format::Jpeg, Some(&[7u8; 300])).unwrap();
+        let marked = encode(&picture, Format::Jpeg, Some(&[7u8; 300]), false).unwrap();
         assert!(marked.windows(12).any(|window| window == b"ICC_PROFILE\0"));
         let folder = scratch("jpeg");
         std::fs::write(folder.join("a.jpg"), &bytes).unwrap();
@@ -2641,7 +2653,8 @@ pub mod tests {
     }
 
     fn today(name: &str) -> Vec<u8> {
-        let (daemon, fake, _, _) = glide_rig(name, false);
+        let (daemon, fake, _, _) = glide_rig(name, true);
+        *fake.reduce.lock().unwrap() = true;
         assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
         std::fs::read(fake.showing("main")).unwrap()
     }
@@ -2799,6 +2812,39 @@ pub mod tests {
         assert_eq!(*spawned.lock().unwrap(), 1);
         let said = daemon.glider.lock().unwrap().said.clone();
         assert_eq!(said.iter().filter(|line| line.contains("larger than the GPU can draw")).count(), 1, "{said:?}");
+    }
+
+    #[test]
+    fn a_still_saved_with_less_color_detail_swaps_plainly() {
+        let (daemon, fake, _, _) = glide_rig("glide-old-still", true);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let still = fake.shown.lock().unwrap().get("main").cloned().unwrap();
+        assert!(crate::glide::exact(&still));
+        std::fs::write(&still, encode(&scene::sample(64, 40), Format::Jpeg, None, false).unwrap()).unwrap();
+        assert!(!crate::glide::exact(&still));
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let seen = events(&fake);
+        assert!(seen.iter().any(|event| event.starts_with("set ")) && !seen.iter().any(|event| event.starts_with("open") || event.starts_with("glide ")), "{seen:?}");
+        let now = fake.shown.lock().unwrap().get("main").cloned().unwrap();
+        assert!(crate::glide::exact(&now));
+        fake.place(vec![Rect { x: 40.0, ..moved_subject() }]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert!(events(&fake).iter().any(|event| event.starts_with("glide ")), "{:?}", events(&fake));
+    }
+
+    #[test]
+    fn a_png_or_unreadable_still_counts_as_exact() {
+        let folder = crate::state::scratch("exact-still");
+        let png = folder.join("still.png");
+        std::fs::write(&png, encode(&scene::sample(16, 16), Format::Png, None, false).unwrap()).unwrap();
+        assert!(crate::glide::exact(&png));
+        assert!(crate::glide::exact(&folder.join("missing.jpg")));
+        let full = folder.join("full.jpg");
+        std::fs::write(&full, encode(&scene::sample(16, 16), Format::Jpeg, Some(&[7u8; 300]), true).unwrap()).unwrap();
+        assert!(crate::glide::exact(&full));
     }
 
     #[test]

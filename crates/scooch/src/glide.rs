@@ -236,6 +236,42 @@ pub fn skipped(reason: &str, detail: &str) {
     }
 }
 
+pub fn exact(still: &Path) -> bool {
+    use std::io::Read;
+    let mut head = Vec::new();
+    if std::fs::File::open(still).and_then(|file| file.take(1 << 16).read_to_end(&mut head)).is_err() {
+        return true;
+    }
+    sampling(&head).is_none_or(|factors| factors.iter().all(|factor| *factor == factors[0]))
+}
+
+fn sampling(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.get(..2) != Some(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut at = 2;
+    while at + 4 <= bytes.len() {
+        if bytes[at] != 0xFF {
+            return None;
+        }
+        let marker = bytes[at + 1];
+        if marker == 0xFF {
+            at += 1;
+            continue;
+        }
+        if (0xD0..=0xD9).contains(&marker) || marker == 0x01 {
+            at += 2;
+            continue;
+        }
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            let count = usize::from(*bytes.get(at + 9)?);
+            return (0..count).map(|index| bytes.get(at + 11 + index * 3).copied()).collect();
+        }
+        at += 2 + usize::from(u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]));
+    }
+    None
+}
+
 fn reason_of(error: &anyhow::Error) -> &'static str {
     let text = format!("{error:#}");
     if text.contains("software renderer") {
@@ -391,7 +427,7 @@ impl Glider {
     }
 
     pub fn open_early(&mut self, screen: &Screen, picture: &Path, size: [u32; 2], still: &Path) {
-        if !self.usable() || self.doomed || self.too_large(&screen.id, size) || self.early.iter().any(|early| early.screen == screen.id) {
+        if !self.usable() || self.doomed || self.too_large(&screen.id, size) || self.early.iter().any(|early| early.screen == screen.id) || !exact(still) {
             return;
         }
         let id = self.fresh_id();
@@ -435,6 +471,11 @@ impl Glider {
         if self.too_large(&plan.screen.id, plan.size) || self.doomed {
             self.close_early_for(&plan.screen.id);
             skipped(if self.doomed { "helper failed" } else { "too large" }, "");
+            return None;
+        }
+        if !exact(plan.still) {
+            self.close_early_for(&plan.screen.id);
+            skipped("old still", "the picture on screen was saved with less color detail than the layer shows, so this move swaps it plainly");
             return None;
         }
         let started = Instant::now();
