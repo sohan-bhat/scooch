@@ -21,8 +21,8 @@ struct Held {
     scene: Scene,
     parts: Parts,
     bundle: Arc<Bundle>,
-    still: Arc<RgbImage>,
-    picture: RgbImage,
+    still: Option<Arc<RgbImage>>,
+    picture: Option<RgbImage>,
     redraw: Option<Vec<bool>>,
     shrunk: bool,
 }
@@ -111,30 +111,42 @@ impl Session {
     }
 
     pub fn bytes(&self) -> usize {
-        self.held.as_ref().map_or(0, |h| h.parts.bytes() + h.bundle.canvas.len() + h.bundle.table_bytes() + h.still.as_raw().len() + h.picture.as_raw().len())
+        self.held.as_ref().map_or(0, |h| h.parts.bytes() + h.bundle.canvas.len() + h.bundle.table_bytes() + h.still.as_ref().map_or(0, |s| s.as_raw().len()) + h.picture.as_ref().map_or(0, |p| p.as_raw().len()))
     }
 
     pub fn still(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Bundle, RgbImage) {
-        let Some(held) = self.advance(image, analysis, placement, scene, options) else { return render::still(image, analysis, placement, scene, options) };
+        let Some(held) = self.advance(image, analysis, placement, scene, options, true) else { return render::still(image, analysis, placement, scene, options) };
         let mut bundle = (*held.bundle).clone();
         if !held.shrunk && bundle.canvas.is_empty() {
             bundle.canvas = image.as_raw().clone();
         }
-        (bundle, (*held.still).clone())
+        let still = held.still.as_deref().cloned().unwrap_or_default();
+        (bundle, still)
     }
 
     pub fn still_shared(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Arc<Bundle>, Arc<RgbImage>) {
-        let Some(held) = self.advance(image, analysis, placement, scene, options) else {
+        let Some(held) = self.advance(image, analysis, placement, scene, options, true) else {
             let (bundle, still) = render::still(image, analysis, placement, scene, options);
             return (Arc::new(bundle), Arc::new(still));
         };
         if !held.shrunk && held.bundle.canvas.is_empty() {
             Arc::make_mut(&mut held.bundle).canvas = image.as_raw().clone();
         }
-        (Arc::clone(&held.bundle), Arc::clone(&held.still))
+        let still = held.still.clone().unwrap_or_default();
+        (Arc::clone(&held.bundle), still)
     }
 
-    fn advance(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> Option<&mut Held> {
+    pub fn tables_shared(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> Arc<Bundle> {
+        let Some(held) = self.advance(image, analysis, placement, scene, options, false) else {
+            return Arc::new(crate::bundle(image, analysis, placement, scene, options));
+        };
+        if !held.shrunk && held.bundle.canvas.is_empty() {
+            Arc::make_mut(&mut held.bundle).canvas = image.as_raw().clone();
+        }
+        Arc::clone(&held.bundle)
+    }
+
+    fn advance(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options, draw: bool) -> Option<&mut Held> {
         let (sw, sh) = image.dimensions();
         if sw == 0 || sh == 0 || scene.width == 0 || scene.height == 0 {
             self.held = None;
@@ -152,6 +164,12 @@ impl Session {
             }
             _ => build(image, analysis, placement, scene, options, key, None),
         };
+        let mut held = held;
+        if !draw {
+            held.still = None;
+        } else if held.still.is_none() {
+            paint_still(&mut held, image, analysis, scene, options);
+        }
         self.held = Some(held);
         self.held.as_mut()
     }
@@ -179,19 +197,32 @@ fn build(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &S
     };
     let mut parts = bundle::parts(image.dimensions(), canvas, analysis, placement, scene, options, &materials);
     let mut out = parts.tables(&materials);
-    let on = scenery::active(scene, options);
-    let picture = if on { parts.framed.picture() } else { render::plain(image, &parts.framed.placement, scene.width, scene.height) };
     let canvas = std::mem::replace(&mut parts.framed.canvas, RgbImage::new(0, 0)).into_raw();
     out.canvas = if shrunk { canvas } else { Vec::new() };
     parts.settle();
-    let still = if on {
-        let (mut shown, layer) = bundle::finish(&out, &out, 0.0, picture.clone(), None);
+    Held { image: image_key, source: image.dimensions(), analysis: analysis_key, placement: placement.clone(), options: *options, scene: scene.clone(), parts, bundle: Arc::new(out), still: None, picture: None, redraw: None, shrunk }
+}
+
+fn paint_still(h: &mut Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, options: &Options) {
+    let framed = &h.parts.framed;
+    let picture = h.picture.take().unwrap_or_else(|| {
+        if scenery::active(scene, options) {
+            let canvas: &[u8] = if h.shrunk { &h.bundle.canvas } else { image.as_raw() };
+            render::picture((canvas, h.bundle.canvas_width, h.bundle.canvas_height), (&framed.xmap, &framed.ymap), framed.ratio, (scene.width, scene.height))
+        } else {
+            render::plain(image, &framed.placement, scene.width, scene.height)
+        }
+    });
+    let still = if scenery::active(scene, options) {
+        let (mut shown, layer) = bundle::finish(&h.bundle, &h.bundle, 0.0, picture.clone(), None);
         paint::composite(&mut shown, &layer);
         shown
     } else {
-        render::finish_plain(picture.clone(), analysis, &parts.framed.placement, scene, options)
+        render::finish_plain(picture.clone(), analysis, &framed.placement, scene, options)
     };
-    Held { image: image_key, source: image.dimensions(), analysis: analysis_key, placement: placement.clone(), options: *options, scene: scene.clone(), parts, bundle: Arc::new(out), still: Arc::new(still), picture, redraw: None, shrunk }
+    h.picture = Some(picture);
+    h.still = Some(Arc::new(still));
+    h.redraw = None;
 }
 
 fn shift(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key: (u64, u64)) -> Held {
@@ -210,7 +241,7 @@ fn shift(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key:
         if pad != h.bundle.pad {
             Arc::make_mut(&mut h.bundle).pad = pad;
         }
-        h.still = Arc::new(render::finish_plain(h.picture.clone(), analysis, &h.parts.framed.placement, scene, &options));
+        h.still = None;
         h.scene = scene.clone();
         h.redraw = None;
         return h;
@@ -301,6 +332,11 @@ fn lean(h: &mut Held, analysis: &Analysis, scene: &Scene, moved: &[[f64; 4]]) ->
     let mut around: Vec<Area> = halves.iter().map(|a| area::grow(*a, margin, w, hh)).collect();
     around.extend(boxes.iter().map(|a| area::grow(*a, 3, w, hh)));
     let around = area::merge(around);
+    let Some(picture) = h.picture.as_ref().filter(|_| h.still.is_some()) else {
+        h.still = None;
+        h.redraw = None;
+        return true;
+    };
     if around.is_empty() {
         h.redraw = Some(redraw);
         return true;
@@ -308,7 +344,7 @@ fn lean(h: &mut Held, analysis: &Analysis, scene: &Scene, moved: &[[f64; 4]]) ->
     let width = scene.width as usize;
     let scope = Scope::new(redraw, &around, w, hh);
     let mut work = RgbImage::new(scene.width, scene.height);
-    let from = h.picture.as_raw();
+    let from = picture.as_raw();
     work.par_chunks_mut(width * 3).enumerate().for_each(|(y, line)| {
         for (x0, x1) in Scope::ranges(&scope.need, w, y, width) {
             line[x0 * 3..x1 * 3].copy_from_slice(&from[(y * width + x0) * 3..(y * width + x1) * 3]);
@@ -316,7 +352,8 @@ fn lean(h: &mut Held, analysis: &Analysis, scene: &Scene, moved: &[[f64; 4]]) ->
     });
     let (shown, layer) = bundle::finish(&h.bundle, &h.bundle, 0.0, work, Some(&scope));
     let (shown, layer) = (shown.as_raw(), layer.as_raw());
-    let still: &mut RgbImage = Arc::make_mut(&mut h.still);
+    let Some(still) = h.still.as_mut() else { return true };
+    let still: &mut RgbImage = Arc::make_mut(still);
     let still: &mut [u8] = still;
     still.par_chunks_mut(width * 3).enumerate().for_each(|(y, line)| {
         for (x0, x1) in Scope::ranges(&scope.redraw, w, y, width) {
