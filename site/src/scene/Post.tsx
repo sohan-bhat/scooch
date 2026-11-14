@@ -2,7 +2,7 @@ import { Bloom, DepthOfField, EffectComposer, N8AO, Noise, SMAA, ToneMapping, Vi
 import { useFrame, useThree } from '@react-three/fiber';
 import { BlendFunction, CopyPass, ToneMappingMode } from 'postprocessing';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { HalfFloatType, NormalBlending, Vector2, type Texture, type WebGLRenderTarget } from 'three';
+import { ConstantAlphaFactor, CustomBlending, HalfFloatType, OneMinusConstantAlphaFactor, Vector2, type Texture, type WebGLRenderTarget } from 'three';
 import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect } from 'postprocessing';
 import { quiet } from '@/lib/idle';
 import { runtime } from '@/story/state';
@@ -70,7 +70,9 @@ export function Post({ phone }: { phone: boolean }) {
     const pass = new CopyPass();
     pass.renderToScreen = true;
     pass.fullscreenMaterial.transparent = true;
-    pass.fullscreenMaterial.blending = NormalBlending;
+    pass.fullscreenMaterial.blending = CustomBlending;
+    pass.fullscreenMaterial.blendSrc = ConstantAlphaFactor;
+    pass.fullscreenMaterial.blendDst = OneMinusConstantAlphaFactor;
     pass.fullscreenMaterial.depthTest = false;
     pass.fullscreenMaterial.depthWrite = false;
     return pass;
@@ -111,7 +113,7 @@ export function Post({ phone }: { phone: boolean }) {
         const t = (performance.now() - quality.blendAt) / BLEND;
         const last = quality.lastFast;
         if (t >= 1 || !last) return;
-        overlay.fullscreenMaterial.opacity = 1 - t;
+        overlay.fullscreenMaterial.blendAlpha = 1 - t;
         const clear = gl.autoClear;
         gl.autoClear = false;
         overlay.render(gl, { texture: last } as WebGLRenderTarget, null as never);
