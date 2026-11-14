@@ -73,6 +73,10 @@ impl Platform for Host {
         std::thread::sleep(layer::period(layer::main_display()).unwrap_or(PERIOD) * COMPOSITIONS);
     }
 
+    fn prepare(&mut self) {
+        NSApplication::sharedApplication(self.marker).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    }
+
     fn decode(path: &Path) -> Result<RgbImage> {
         objc2::rc::autoreleasepool(|_| picture::decode(path))
     }
@@ -86,6 +90,5 @@ pub fn serve() -> ExitCode {
     let Some(marker) = MainThreadMarker::new() else {
         return helper::refuse("the helper has to run on the main thread");
     };
-    NSApplication::sharedApplication(marker).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     helper::serve(Host { marker })
 }
