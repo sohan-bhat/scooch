@@ -72,7 +72,6 @@ const models = [
   { id: 'potted_plant_04', resolution: '1k', file: 'plant.glb', textures: small, merge: true },
   { id: 'vintage_stapler', resolution: '1k', file: 'stapler.glb', textures: small, merge: true },
   { id: 'round_spectacles', resolution: '1k', file: 'glasses.glb', textures: small, merge: true },
-  { id: 'digital_wrist_watch', resolution: '1k', file: 'watch.glb', textures: small, merge: true },
   { id: 'gamepad', resolution: '1k', file: 'gamepad.glb', textures: small, merge: true },
   {
     id: 'Television_01',

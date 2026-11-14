@@ -34,7 +34,6 @@ export const placements: Placement[] = [
   { model: 'cassette', x: -0.86, z: -0.08, rotation: 0.55, phone: false },
   { model: 'stapler', x: -0.56, z: 0.22, rotation: 0.62, phone: false },
   { model: 'glasses', x: 0.02, z: 0.3, rotation: 2.7, phone: false },
-  { model: 'watch', x: -0.33, z: 0.38, rotation: 1.15, phone: false },
   { model: 'gamepad', x: 0.92, z: 0.1, rotation: -0.7, phone: false },
   { model: 'console', x: 1.42, z: 0.32, rotation: -0.62, floor: true },
 ];
