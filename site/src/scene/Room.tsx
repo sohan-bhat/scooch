@@ -57,7 +57,7 @@ void main() {
   float cone = 1.0 - smoothstep(0.34, 0.5, length(window - 0.5));
   float slats = texture2D(uBlinds, window + uDrift).r;
   vec4 caption = texture2D(uCaption, window);
-  slats = mix(slats, (1.0 - caption.r) * 3.2, caption.g * uCaptionLevel);
+  slats = mix(slats, (1.0 - caption.r) * 4.6, caption.g * uCaptionLevel);
   color += uBlindsColor * uColor * plaster * slats * cone * front * uBlindsLevel * 3.2;
   gl_FragColor = vec4(color * uFade, 1.0);
   #include <fog_fragment>

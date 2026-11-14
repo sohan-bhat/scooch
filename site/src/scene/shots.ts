@@ -24,7 +24,7 @@ export const keys: Record<Layout, Key[]> = {
     { frame: 'world', position: [0.36, 1.68, 1.62], target: [0.42, 1.1, 0.32], fov: 38, shiftX: 0, shiftY: 0 },
     { frame: 'world', position: [0.58, 1.5, 1.4], target: [0.5, 1.12, 0.3], fov: 44, shiftX: 0, shiftY: 0 },
     { frame: 'space', position: [-0.06, -1.2, 1.14], target: [0.05, 0.02, 0.0], fov: 34, shiftX: 0.36, shiftY: 0.02 },
-    { frame: 'world', position: [0.05, 1.5, 2.8], target: [0.0, 1.25, -0.3], fov: 42, shiftX: 0, shiftY: 0 },
+    { frame: 'world', position: [-0.1, 1.5, 2.55], target: [-0.1, 1.3, -0.4], fov: 38, shiftX: 0, shiftY: 0 },
     { frame: 'world', position: [0.22, 1.16, 0.62], target: [0.0, 0.96, -0.12], fov: 34, shiftX: 0, shiftY: 0 },
     { frame: 'world', position: [0.92, 0.62, 1.55], target: [1.34, 0.28, 0.32], fov: 38, shiftX: 0, shiftY: 0 },
     { frame: 'world', position: [-1.02, 0.86, 0.3], target: [-0.82, 0.83, -0.08], fov: 30, shiftX: 0, shiftY: 0 },
