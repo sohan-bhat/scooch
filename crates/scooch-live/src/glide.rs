@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 const FRAME: &str = include_str!("../../scooch-core/shaders/frame.wgsl");
 const STILL: &str = include_str!("still.wgsl");
 const SCALE: &str = include_str!("scale.wgsl");
+const MIP: &str = include_str!("mip.wgsl");
+const CANVAS: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 pub const SCALES: [f32; 4] = [1.0, 0.75, 0.6, 0.5];
 const BUDGET: f64 = 0.6;
 const ROOM: f64 = 0.4;
@@ -23,6 +25,8 @@ pub(crate) struct Pipes {
     still: wgpu::RenderPipeline,
     scale_layout: wgpu::BindGroupLayout,
     scale: wgpu::RenderPipeline,
+    mip_layout: wgpu::BindGroupLayout,
+    mip: wgpu::RenderPipeline,
 }
 
 pub(crate) struct Small {
@@ -46,6 +50,10 @@ fn blended() -> wgpu::BlendState {
 }
 
 fn pipeline(device: &wgpu::Device, label: &str, source: &str, vertex: &str, fragment: &str, layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
+    pipeline_to(device, (label, source, vertex, fragment), layout, wgpu::ColorTargetState { format: OUTPUT, blend: Some(blended()), write_mask: wgpu::ColorWrites::ALL })
+}
+
+fn pipeline_to(device: &wgpu::Device, (label, source, vertex, fragment): (&str, &str, &str, &str), layout: &wgpu::BindGroupLayout, target: wgpu::ColorTargetState) -> wgpu::RenderPipeline {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(source.into()) });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: &[Some(layout)], immediate_size: 0 });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -59,7 +67,7 @@ fn pipeline(device: &wgpu::Device, label: &str, source: &str, vertex: &str, frag
             module: &module,
             entry_point: Some(fragment),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[Some(wgpu::ColorTargetState { format: OUTPUT, blend: Some(blended()), write_mask: wgpu::ColorWrites::ALL })],
+            targets: &[Some(target)],
         }),
         multiview_mask: None,
         cache: None,
@@ -116,10 +124,12 @@ pub(crate) fn pipes(device: &wgpu::Device) -> Result<Pipes, String> {
         ],
     });
     let scale = pipeline(device, "scale", SCALE, "cover", "draw", &scale_layout);
+    let mip_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("mip"), entries: &[texture_entry(0, false, flat)] });
+    let mip = pipeline_to(device, ("mip", MIP, "cover", "draw"), &mip_layout, wgpu::ColorTargetState { format: CANVAS, blend: None, write_mask: wgpu::ColorWrites::ALL });
     if let Some(error) = pollster::block_on(scope.pop()) {
         return Err(format!("the frame shaders do not build {error}"));
     }
-    Ok(Pipes { sampler, frame_layout, frame, still_layout, still, scale_layout, scale })
+    Ok(Pipes { sampler, frame_layout, frame, still_layout, still, scale_layout, scale, mip_layout, mip })
 }
 
 #[derive(Clone)]
@@ -342,8 +352,33 @@ fn smaller(level: &[u8], width: u32, height: u32, decode: &[f32; 256]) -> (Vec<u
     (out, w, h)
 }
 
-fn rgba(rgb: &[u8]) -> Vec<u8> {
-    rgb.as_chunks::<3>().0.iter().flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255]).collect()
+pub fn rgba(rgb: &[u8]) -> Vec<u8> {
+    let count = rgb.len() / 3;
+    let mut out = vec![255u8; count * 4];
+    let (groups, _) = rgb.as_chunks::<12>();
+    let (targets, _) = out.as_chunks_mut::<16>();
+    for (target, p) in targets.iter_mut().zip(groups) {
+        *target = [p[0], p[1], p[2], 255, p[3], p[4], p[5], 255, p[6], p[7], p[8], 255, p[9], p[10], p[11], 255];
+    }
+    let done = groups.len() * 4;
+    for index in done..count {
+        out[index * 4..index * 4 + 3].copy_from_slice(&rgb[index * 3..index * 3 + 3]);
+    }
+    out
+}
+
+pub fn levels(canvas: &Canvas) -> Vec<Vec<u8>> {
+    let (width, height) = (canvas.width.max(1), canvas.height.max(1));
+    let count = 32 - width.max(height).leading_zeros();
+    let decode = linear_table();
+    let mut out = vec![rgba(&canvas.pixels)];
+    let (mut w, mut h) = (width, height);
+    while (out.len() as u32) < count {
+        let (next, nw, nh) = smaller(out.last().map_or(&[][..], Vec::as_slice), w, h, &decode);
+        out.push(next);
+        (w, h) = (nw, nh);
+    }
+    out
 }
 
 impl Gpu {
@@ -402,20 +437,53 @@ impl Gpu {
 
     pub fn try_picture(&self, canvas: &Canvas) -> Result<Picture, String> {
         self.healthy()?;
+        let pipes = self.pipes()?;
         let (width, height) = (canvas.width.max(1), canvas.height.max(1));
         self.fits(width, height)?;
         let levels = 32 - width.max(height).leading_zeros();
-        let texture = self.texture("canvas", (width, height, 1), wgpu::TextureFormat::Rgba8UnormSrgb, levels);
-        let decode = linear_table();
-        let mut level = rgba(&canvas.pixels);
-        let (mut w, mut h) = (width, height);
-        for index in 0..levels {
-            self.write(&texture, index, (w, h, 1), 4, &level);
-            if index + 1 < levels {
-                (level, w, h) = smaller(&level, w, h, &decode);
-            }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("canvas"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CANVAS,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        self.write(&texture, 0, (width, height, 1), 4, &rgba(&canvas.pixels));
+        let level = |index: u32| texture.create_view(&wgpu::TextureViewDescriptor { base_mip_level: index, mip_level_count: Some(1), dimension: Some(wgpu::TextureViewDimension::D2), ..Default::default() });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("mips") });
+        for index in 1..levels {
+            let (source, target) = (level(index - 1), level(index));
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("mip"), layout: &pipes.mip_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&source) }] });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("mip"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &target, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipes.mip);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
         }
+        self.submit(encoder, None);
         Ok(Picture { view: Self::view(&texture, wgpu::TextureViewDimension::D2), width, height, levels })
+    }
+
+    pub fn try_picture_levels(&self, width: u32, height: u32, levels: &[Vec<u8>]) -> Result<Picture, String> {
+        self.healthy()?;
+        self.fits(width.max(1), height.max(1))?;
+        let count = levels.len().max(1) as u32;
+        let texture = self.texture("canvas", (width.max(1), height.max(1), 1), CANVAS, count);
+        let (mut w, mut h) = (width.max(1), height.max(1));
+        for (index, level) in levels.iter().enumerate() {
+            self.write(&texture, index as u32, (w, h, 1), 4, level);
+            (w, h) = ((w / 2).max(1), (h / 2).max(1));
+        }
+        Ok(Picture { view: Self::view(&texture, wgpu::TextureViewDimension::D2), width: width.max(1), height: height.max(1), levels: count })
     }
 
     pub fn still(&self, image: &RgbImage) -> Result<Still, String> {
