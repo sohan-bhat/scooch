@@ -198,7 +198,7 @@ fn kernel(sigma: f32) -> Vec<f32> {
     let mut weights: Vec<f32> = (0..=2 * radius)
         .map(|i| {
             let d = i as f32 - radius as f32;
-            (-d * d / (2.0 * sigma * sigma)).exp()
+            crate::math::exp(-d * d / (2.0 * sigma * sigma))
         })
         .collect();
     let sum: f32 = weights.iter().sum();

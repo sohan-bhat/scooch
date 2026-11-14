@@ -1,4 +1,4 @@
-use super::{line, Reply, VERSION};
+use super::{line, Command, Reply, VERSION};
 use std::io::Write;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -9,17 +9,22 @@ pub const LAYER_IDLE: Duration = Duration::from_secs(5);
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
-type Out = Arc<Mutex<std::io::Stdout>>;
+type Out = Arc<Mutex<Box<dyn Write + Send>>>;
 
 fn say(out: &Out, reply: &Reply) {
+    let text = line(reply).unwrap_or_else(|error| line(&Reply::Failed { id: None, why: format!("an answer could not be written {error:#}") }).unwrap_or_default());
     if let Ok(mut out) = out.lock() {
-        let _ = out.write_all(line(reply).as_bytes());
+        let _ = out.write_all(text.as_bytes());
         let _ = out.flush();
     }
 }
 
+pub fn read(text: &str) -> Result<Command, Reply> {
+    serde_json::from_str::<Command>(text).map_err(|error| Reply::Failed { id: None, why: format!("unreadable command {error}") })
+}
+
 pub fn refuse(why: &str) -> ExitCode {
-    let out: Out = Arc::new(Mutex::new(std::io::stdout()));
+    let out: Out = Arc::new(Mutex::new(Box::new(std::io::stdout())));
     say(&out, &Reply::Hello { version: VERSION, pid: std::process::id() });
     say(&out, &Reply::Failed { id: None, why: why.to_string() });
     ExitCode::from(1)
@@ -39,13 +44,13 @@ pub use running::{serve, Platform};
 
 #[cfg(any(windows, target_os = "macos"))]
 mod running {
-    use super::{say, Out, Waker, IDLE_EXIT, LAYER_IDLE};
-    use crate::live::{Command, Hints, Reply, VERSION};
+    use super::{read, say, Out, Waker, IDLE_EXIT, LAYER_IDLE};
+    use crate::live::{warm_failed, Command, Hints, Reply, VERSION};
     use crate::platform::Screen;
     use anyhow::Result;
     use scooch_core::{Bundle, Canvas, RgbImage};
     use scooch_live::{Glide, Gpu, Look, Picture, Still, Target};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
     use std::io::BufRead;
     use std::path::{Path, PathBuf};
     use std::process::ExitCode;
@@ -96,14 +101,24 @@ mod running {
 
     unsafe impl Send for Surface {}
 
+    const KEPT: usize = 4;
+
     #[derive(Clone)]
     struct Loaded {
         canvas: Arc<Canvas>,
         picture: Picture,
     }
 
+    type Key = (PathBuf, [u32; 2]);
+
+    struct Want {
+        key: Option<Key>,
+        waiters: Vec<Option<u32>>,
+        composition: bool,
+    }
+
     enum Job {
-        Glide { a: PathBuf, b: PathBuf, ms: u32, loaded: Option<Loaded>, asked: Instant, scale: f32 },
+        Glide { a: PathBuf, b: PathBuf, ms: u32, loaded: Vec<Loaded>, asked: Instant, scale: f32 },
         Settle { still: PathBuf, ms: u32 },
         Stop,
     }
@@ -111,7 +126,7 @@ mod running {
     enum Event {
         Command(Command),
         HangUp,
-        Warmed { gpu: Option<Result<Gpu, String>>, composition: bool, loaded: Option<Result<Loaded, String>>, timed: Option<Duration>, ms: u64 },
+        Warmed { gpu: Option<Result<Gpu, String>>, loaded: Option<Result<Loaded, String>>, timed: Option<Duration>, ms: u64 },
         Presented { id: u32, result: Result<(), String> },
         Glided { id: u32, frames: u32, slow: u32, first: u64, scale: f32, timed: Option<Duration> },
         Settled { id: u32 },
@@ -146,10 +161,10 @@ mod running {
         pinned: Option<f32>,
         timed: Option<Duration>,
         gpu: Option<(Gpu, bool)>,
-        loaded: Option<Loaded>,
+        pictures: Vec<(Key, Loaded)>,
         uploads: u32,
-        warming: bool,
-        waiting: usize,
+        running: Option<Want>,
+        queue: VecDeque<Want>,
         pending: Vec<Pending>,
         layers: BTreeMap<u32, Live<P::Layer>>,
         last: Instant,
@@ -205,9 +220,20 @@ mod running {
         period: Duration,
     }
 
-    fn load_tables(path: &Path, canvas: &Canvas) -> Result<Bundle, String> {
-        let bytes = std::fs::read(path).map_err(|error| format!("could not read {} {error}", path.display()))?;
-        Bundle::tables_from_bytes(&bytes, canvas.clone()).map_err(|error| format!("{} {error}", path.display()))
+    fn load_pair(a: &Path, b: &Path, pictures: &[Loaded]) -> Result<(Bundle, Bundle, Loaded), String> {
+        let read = |path: &Path| std::fs::read(path).map_err(|error| format!("could not read {} {error}", path.display()));
+        let (first, second) = (read(a)?, read(b)?);
+        let mut last = "glide needs a warm with a picture first".to_string();
+        for loaded in pictures {
+            match Bundle::tables_from_bytes(&first, (*loaded.canvas).clone()) {
+                Ok(one) => {
+                    let two = Bundle::tables_from_bytes(&second, (*loaded.canvas).clone()).map_err(|error| format!("{} {error}", b.display()))?;
+                    return Ok((one, two, loaded.clone()));
+                }
+                Err(error) => last = format!("{} {error}", a.display()),
+            }
+        }
+        Err(last)
     }
 
     fn render<P: Platform>(start: Start, jobs: Receiver<Job>, events: Sender<Event>, waker: Waker) {
@@ -252,8 +278,7 @@ mod running {
                 Some(Job::Stop) => stop = true,
                 Some(Job::Glide { a, b, ms, loaded, asked, scale }) => {
                     screen.scale = scale;
-                    let built = loaded.ok_or_else(|| "glide needs a warm with a picture first".to_string()).and_then(|loaded| {
-                        let (a, b) = (load_tables(&a, &loaded.canvas)?, load_tables(&b, &loaded.canvas)?);
+                    let built = load_pair(&a, &b, &loaded).and_then(|(a, b, loaded)| {
                         let compatible = scooch_core::compatible(&a, &b);
                         gpu.glide(&loaded.picture, &a, &b).map(|glide| (glide, compatible))
                     });
@@ -393,14 +418,32 @@ mod running {
             self.tell(Reply::Failed { id, why: why.into() });
         }
 
-        fn warm(&mut self, hints: Hints, picture: Option<PathBuf>, size: Option<[u32; 2]>, answer: bool) {
+        fn ready(&self, warm_id: Option<u32>, ms: u64) {
+            let adapter = self.gpu.as_ref().map(|(gpu, _)| gpu.name.clone()).unwrap_or_default();
+            let kind = self.gpu.as_ref().map_or("", |(gpu, _)| gpu.kind).to_string();
+            self.tell(Reply::Ready { adapter, ms, uploads: self.uploads, kind, warm_id });
+        }
+
+        fn has(&self, key: &Option<Key>) -> bool {
+            self.gpu.is_some() && key.as_ref().is_none_or(|key| self.pictures.iter().any(|(kept, _)| kept == key))
+        }
+
+        fn warm(&mut self, hints: Hints, picture: Option<PathBuf>, size: Option<[u32; 2]>, warm_id: Option<u32>, answer: bool) {
             let composition = match self.platform.composition(&hints) {
                 Ok(composition) => composition,
                 Err(error) => {
-                    self.fail(None, format!("{error:#}"));
+                    if answer {
+                        self.fail(None, warm_failed(warm_id, &format!("{error:#}")));
+                    }
                     return;
                 }
             };
+            if self.gpu.as_ref().is_some_and(|(_, made)| *made != composition) {
+                if answer {
+                    self.fail(None, warm_failed(warm_id, "this helper keeps one way to present for its whole life"));
+                }
+                return;
+            }
             let was = self.pinned;
             self.pinned = hints.scale.map(|scale| scale.clamp(0.25, 1.0));
             match (self.pinned, was) {
@@ -409,44 +452,48 @@ mod running {
                 (None, None) => {}
             }
             self.hints = hints;
-            if self.gpu.as_ref().is_some_and(|(_, made)| *made != composition) {
-                if !self.layers.is_empty() {
-                    self.fail(None, "the presentation cannot change while a layer is open");
-                    return;
-                }
-                self.gpu = None;
-                self.loaded = None;
-            }
-            let device = self.gpu.as_ref().filter(|(_, made)| *made == composition).map(|(gpu, _)| gpu.clone());
-            if device.is_some() && picture.is_none() {
-                if answer {
-                    let adapter = device.map(|gpu| gpu.name).unwrap_or_default();
-                    let kind = self.gpu.as_ref().map_or("", |(gpu, _)| gpu.kind).to_string();
-                    self.tell(Reply::Ready { adapter, ms: 0, uploads: self.uploads, kind });
+            let key = picture.map(|path| (path, size.unwrap_or([0, 0])));
+            let waiters = if answer { vec![warm_id] } else { Vec::new() };
+            if self.has(&key) {
+                for waiter in waiters {
+                    self.ready(waiter, 0);
                 }
                 return;
             }
-            if answer {
-                self.waiting += 1;
-            }
-            if self.warming && picture.is_none() {
+            if let Some(running) = self.running.as_mut().filter(|running| running.composition == composition && (running.key == key || key.is_none())) {
+                running.waiters.extend(waiters);
                 return;
             }
-            self.warming = true;
+            if let Some(queued) = self.queue.iter_mut().find(|queued| queued.composition == composition && queued.key == key) {
+                queued.waiters.extend(waiters);
+                return;
+            }
+            let want = Want { key, waiters, composition };
+            if self.running.is_none() {
+                self.start(want);
+            } else {
+                self.queue.push_back(want);
+            }
+        }
+
+        fn start(&mut self, want: Want) {
             let (events, waker) = (self.events.clone(), self.waker.clone());
             let pinned = self.pinned.is_some();
+            let device = self.gpu.as_ref().map(|(gpu, _)| gpu.clone());
+            let (key, composition) = (want.key.clone(), want.composition);
             let spawned = std::thread::Builder::new().name("scooch-live-warm".into()).spawn(move || {
                 let started = Instant::now();
                 let made = device.is_none().then(|| Gpu::new(composition));
                 let usable = device.clone().or_else(|| made.clone().and_then(Result::ok));
                 let mut timed = None;
-                let loaded = picture.map(|path| {
+                let loaded = key.map(|(path, [width, height])| {
                     let gpu = usable.ok_or_else(|| "no device".to_string())?;
                     gpu.ready()?;
                     let image = P::decode(&path).map_err(|error| format!("{error:#}"))?;
-                    let [width, height] = size.unwrap_or([image.width(), image.height()]);
+                    let (width, height) = if width == 0 || height == 0 { (image.width(), image.height()) } else { (width, height) };
+                    gpu.fits(width.max(1), height.max(1))?;
                     let canvas = scooch_core::canvas(&image, width.max(1), height.max(1));
-                    let picture = gpu.picture(&canvas);
+                    let picture = gpu.try_picture(&canvas)?;
                     if !pinned {
                         let heavy = scooch_live::heavy(width.max(1), height.max(1), &picture);
                         if let Ok(glide) = gpu.glide(&picture, &heavy, &heavy) {
@@ -457,12 +504,16 @@ mod running {
                     }
                     Ok(Loaded { canvas: Arc::new(canvas), picture })
                 });
-                let _ = events.send(Event::Warmed { gpu: made, composition, loaded, timed, ms: started.elapsed().as_millis() as u64 });
+                let _ = events.send(Event::Warmed { gpu: made, loaded, timed, ms: started.elapsed().as_millis() as u64 });
                 waker();
             });
-            if spawned.is_err() {
-                self.warming = false;
-                self.fail(None, "could not start the thread that makes the device");
+            match spawned {
+                Ok(_) => self.running = Some(want),
+                Err(error) => {
+                    for waiter in want.waiters {
+                        self.fail(None, warm_failed(waiter, &format!("could not start the thread that makes the device {error}")));
+                    }
+                }
             }
         }
 
@@ -472,14 +523,13 @@ mod running {
                 self.fail(Some(id), format!("layer {id} is already open"));
                 return;
             }
-            let wanted = self.platform.composition(&self.hints).unwrap_or(false);
             let gpu = match &self.gpu {
-                Some((gpu, made)) if *made == wanted => gpu.clone(),
-                _ => {
+                Some((gpu, _)) => gpu.clone(),
+                None => {
                     self.pending.push(pending);
-                    if !self.warming {
+                    if self.running.is_none() {
                         let hints = self.hints.clone();
-                        self.warm(hints, None, None, false);
+                        self.warm(hints, None, None, None, false);
                     }
                     return;
                 }
@@ -549,10 +599,11 @@ mod running {
                     self.leaving = true;
                 }
                 Command::Hello { .. } => {}
-                Command::Warm { hints, picture, size } => self.warm(hints, picture, size, true),
+                Command::Warm { hints, picture, size, warm_id } => self.warm(hints, picture, size, warm_id, true),
                 Command::Open { id, screen, rect, scale, still } => self.open(Pending { id, screen: Screen { id: screen, frame: rect, scale }, still, asked: Instant::now() }),
                 Command::Glide { id, a, b, ms } => {
-                    let job = Job::Glide { a, b, ms, loaded: self.loaded.clone(), asked: Instant::now(), scale: self.scale };
+                    let loaded = self.pictures.iter().rev().map(|(_, loaded)| loaded.clone()).collect();
+                    let job = Job::Glide { a, b, ms, loaded, asked: Instant::now(), scale: self.scale };
                     self.send_job(id, job, Duration::from_millis(u64::from(ms.min(LONGEST))));
                 }
                 Command::Settle { id, still, ms } => {
@@ -564,44 +615,35 @@ mod running {
             }
         }
 
-        fn warmed(&mut self, gpu: Option<Result<Gpu, String>>, composition: bool, loaded: Option<Result<Loaded, String>>, timed: Option<Duration>, ms: u64) {
-            self.warming = false;
+        fn warmed(&mut self, gpu: Option<Result<Gpu, String>>, loaded: Option<Result<Loaded, String>>, timed: Option<Duration>, ms: u64) {
+            let want = self.running.take();
             if let (Some(timed), None) = (timed, self.pinned) {
                 self.timed = Some(timed);
                 self.scale = scooch_live::choose(timed, self.platform.refresh());
             }
             let mut problem = None;
             match gpu {
-                Some(Ok(gpu)) => {
-                    self.gpu = Some((gpu, composition));
-                    self.loaded = None;
-                }
+                Some(Ok(gpu)) if self.gpu.is_none() => self.gpu = Some((gpu, want.as_ref().is_some_and(|want| want.composition))),
+                Some(Ok(_)) => {}
                 Some(Err(why)) => problem = Some(format!("no device {why}")),
                 None => {}
             }
-            match loaded {
-                Some(Ok(loaded)) => {
-                    self.loaded = Some(loaded);
+            match (loaded, want.as_ref().and_then(|want| want.key.clone())) {
+                (Some(Ok(loaded)), Some(key)) => {
+                    self.pictures.retain(|(kept, _)| *kept != key);
+                    self.pictures.push((key, loaded));
+                    if self.pictures.len() > KEPT {
+                        self.pictures.remove(0);
+                    }
                     self.uploads += 1;
                 }
-                Some(Err(why)) => problem = Some(format!("the picture could not be loaded {why}")),
-                None => {}
+                (Some(Err(why)), _) => problem = Some(format!("the picture could not be loaded {why}")),
+                _ => {}
             }
-            let wanted = self.platform.composition(&self.hints).unwrap_or(composition);
-            if problem.is_none() && self.gpu.as_ref().is_some_and(|(_, made)| *made != wanted) {
-                let hints = self.hints.clone();
-                self.warm(hints, None, None, false);
-                return;
-            }
-            if self.waiting > 0 {
-                self.waiting = 0;
+            for waiter in want.map(|want| want.waiters).unwrap_or_default() {
                 match &problem {
-                    Some(why) => self.fail(None, why.clone()),
-                    None => {
-                        let adapter = self.gpu.as_ref().map(|(gpu, _)| gpu.name.clone()).unwrap_or_default();
-                        let kind = self.gpu.as_ref().map_or("", |(gpu, _)| gpu.kind).to_string();
-                        self.tell(Reply::Ready { adapter, ms, uploads: self.uploads, kind });
-                    }
+                    Some(why) => self.fail(None, warm_failed(waiter, why)),
+                    None => self.ready(waiter, ms),
                 }
             }
             for pending in std::mem::take(&mut self.pending) {
@@ -611,13 +653,29 @@ mod running {
                     self.fail(Some(pending.id), problem.clone().unwrap_or_else(|| "no device".into()));
                 }
             }
+            while let Some(next) = self.queue.pop_front() {
+                if self.gpu.as_ref().is_some_and(|(_, made)| *made != next.composition) {
+                    for waiter in next.waiters {
+                        self.fail(None, warm_failed(waiter, "this helper keeps one way to present for its whole life"));
+                    }
+                    continue;
+                }
+                if self.has(&next.key) {
+                    for waiter in next.waiters {
+                        self.ready(waiter, 0);
+                    }
+                    continue;
+                }
+                self.start(next);
+                break;
+            }
         }
 
         fn event(&mut self, event: Event) {
             match event {
                 Event::Command(command) => self.command(command),
                 Event::HangUp => self.leaving = true,
-                Event::Warmed { gpu, composition, loaded, timed, ms } => self.warmed(gpu, composition, loaded, timed, ms),
+                Event::Warmed { gpu, loaded, timed, ms } => self.warmed(gpu, loaded, timed, ms),
                 Event::Presented { id, result } => {
                     let Some(live) = self.layers.get(&id) else { return };
                     if live.closing.is_some() {
@@ -698,7 +756,7 @@ mod running {
     }
 
     pub fn serve<P: Platform>(platform: P) -> ExitCode {
-        let out: Out = Arc::new(Mutex::new(std::io::stdout()));
+        let out: Out = Arc::new(Mutex::new(Box::new(std::io::stdout())));
         say(&out, &Reply::Hello { version: VERSION, pid: std::process::id() });
         let (events, inbox) = mpsc::channel();
         let waker = platform.waker();
@@ -707,16 +765,13 @@ mod running {
         let started = std::thread::Builder::new().name("scooch-live-protocol".into()).spawn(move || {
             for text in std::io::stdin().lock().lines() {
                 let Ok(text) = text else { break };
-                if text.trim().is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<Command>(&text) {
+                match read(&text) {
                     Ok(command) => {
                         if reader.send(Event::Command(command)).is_err() {
                             return;
                         }
                     }
-                    Err(error) => say(&reply, &Reply::Failed { id: None, why: format!("unreadable command {error}") }),
+                    Err(answer) => say(&reply, &answer),
                 }
                 wake();
             }
@@ -727,7 +782,7 @@ mod running {
             say(&out, &Reply::Failed { id: None, why: "could not start the protocol thread".into() });
             return ExitCode::from(1);
         }
-        let mut helper = Helper { platform, out, events, waker, hints: Hints::default(), scale: 1.0, pinned: None, timed: None, gpu: None, loaded: None, uploads: 0, warming: false, waiting: 0, pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+        let mut helper = Helper { platform, out, events, waker, hints: Hints::default(), scale: 1.0, pinned: None, timed: None, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
         loop {
             helper.platform.wait(TICK);
             while let Ok(event) = inbox.try_recv() {
@@ -743,7 +798,206 @@ mod running {
 
     #[cfg(test)]
     mod tests {
-        use super::ease;
+        use super::*;
+        use crate::live::line;
+        use scooch_core::Rect;
+        use std::io::Write;
+
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl Captured {
+            fn replies(&self) -> Vec<Reply> {
+                let bytes = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+                String::from_utf8_lossy(&bytes).lines().filter_map(|text| serde_json::from_str(text).ok()).collect()
+            }
+        }
+
+        struct Fake;
+
+        #[cfg(target_os = "macos")]
+        struct Drawn {
+            metal: objc2::rc::Retained<objc2_quartz_core::CAMetalLayer>,
+            size: (u32, u32),
+        }
+
+        #[cfg(windows)]
+        struct Drawn {
+            window: isize,
+            size: (u32, u32),
+        }
+
+        #[cfg(windows)]
+        fn window(width: u32, height: u32) -> Result<isize> {
+            use windows::core::{w, PCWSTR};
+            use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+            use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+            use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DefWindowProcW, RegisterClassExW, WINDOW_EX_STYLE, WNDCLASSEXW, WS_POPUP};
+            unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+                unsafe { DefWindowProcW(window, message, wparam, lparam) }
+            }
+            let instance = unsafe { GetModuleHandleW(PCWSTR::null()) }?;
+            let class = WNDCLASSEXW { cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32, lpfnWndProc: Some(procedure), hInstance: instance.into(), lpszClassName: w!("ScoochFakeLayer"), ..Default::default() };
+            unsafe { RegisterClassExW(&class) };
+            let made = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("ScoochFakeLayer"), w!("fake"), WS_POPUP, 0, 0, width as i32, height as i32, None, None, Some(instance.into()), None) }?;
+            Ok(made.0 as isize)
+        }
+
+        impl Platform for Fake {
+            type Layer = Drawn;
+
+            fn composition(&self, _hints: &Hints) -> Result<bool> {
+                Ok(false)
+            }
+
+            fn open(&mut self, screen: &Screen, _hints: &Hints) -> Result<Drawn> {
+                let size = (screen.frame.w as u32, screen.frame.h as u32);
+                #[cfg(target_os = "macos")]
+                return Ok(Drawn { metal: objc2_quartz_core::CAMetalLayer::new(), size });
+                #[cfg(windows)]
+                return Ok(Drawn { window: window(size.0, size.1)?, size });
+            }
+
+            fn target(&self, layer: &Drawn) -> Target {
+                #[cfg(target_os = "macos")]
+                return Target::Layer(objc2::rc::Retained::as_ptr(&layer.metal) as *mut std::ffi::c_void);
+                #[cfg(windows)]
+                return Target::Window { window: layer.window, instance: 0, composition: false };
+            }
+
+            fn pixels(&self, layer: &Drawn) -> (u32, u32) {
+                layer.size
+            }
+
+            fn show(&mut self, _layer: &Drawn) -> Result<()> {
+                Ok(())
+            }
+
+            #[cfg(windows)]
+            fn close(&mut self, layer: Drawn) {
+                let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(windows::Win32::Foundation::HWND(layer.window as *mut std::ffi::c_void)) };
+            }
+
+            #[cfg(target_os = "macos")]
+            fn close(&mut self, layer: Drawn) {
+                drop(layer.metal);
+            }
+
+            fn wait(&mut self, timeout: Duration) {
+                std::thread::sleep(timeout.min(Duration::from_millis(5)));
+            }
+
+            fn waker(&self) -> Waker {
+                Arc::new(|| {})
+            }
+
+            fn decode(path: &Path) -> Result<RgbImage> {
+                Ok(scooch_core::open(path)?)
+            }
+        }
+
+        struct Made {
+            picture: PathBuf,
+            size: [u32; 2],
+            still: PathBuf,
+            tables: (PathBuf, PathBuf),
+        }
+
+        fn made(folder: &Path, name: &str, image: &RgbImage, size: [u32; 2]) -> Made {
+            let picture = folder.join(format!("{name}.png"));
+            std::fs::write(&picture, scooch_core::encode_png(image).unwrap()).unwrap();
+            let image = scooch_core::open(&picture).unwrap();
+            let analysis = scooch_core::analyze(&image);
+            let options = scooch_core::Options::default();
+            let icon = Rect { x: 4.0, y: 4.0, w: size[0] as f32 / 6.0, h: size[1] as f32 / 5.0 };
+            let first = scooch_core::Scene { width: size[0], height: size[1], icons: vec![icon] };
+            let second = scooch_core::Scene { width: size[0], height: size[1], icons: vec![Rect { x: size[0] as f32 * 0.5, y: size[1] as f32 * 0.4, ..icon }] };
+            let a = scooch_core::solve(&analysis, &first, &options, None);
+            let b = scooch_core::solve(&analysis, &second, &options, Some(&a));
+            let still = folder.join(format!("{name}-still.png"));
+            std::fs::write(&still, scooch_core::encode_png(&scooch_core::render_with(&image, &analysis, &a, &first, &options)).unwrap()).unwrap();
+            let (one, two) = (folder.join(format!("{name}-a.tables")), folder.join(format!("{name}-b.tables")));
+            std::fs::write(&one, scooch_core::bundle(&image, &analysis, &a, &first, &options).tables_to_bytes()).unwrap();
+            std::fs::write(&two, scooch_core::bundle(&image, &analysis, &b, &second, &options).tables_to_bytes()).unwrap();
+            Made { picture, size, still, tables: (one, two) }
+        }
+
+        fn pump(helper: &mut Helper<Fake>, inbox: &Receiver<Event>, out: &Captured, done: impl Fn(&[Reply]) -> bool) -> Vec<Reply> {
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(90) {
+                while let Ok(event) = inbox.try_recv() {
+                    helper.event(event);
+                }
+                let replies = out.replies();
+                if done(&replies) || replies.iter().any(|reply| matches!(reply, Reply::Failed { .. })) {
+                    return replies;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            out.replies()
+        }
+
+        #[test]
+        fn two_screens_of_different_sizes_warm_and_glide_on_one_device() {
+            let folder = std::env::temp_dir().join(format!("scooch-helper-{}", std::process::id()));
+            std::fs::create_dir_all(&folder).unwrap();
+            let paint = |width: u32, height: u32, step: u32| RgbImage::from_raw(width, height, (0..height).flat_map(|y| (0..width).flat_map(move |x| [((x * step + y) % 256) as u8, ((y * 2) % 256) as u8, ((x + y * step) % 256) as u8])).collect()).unwrap();
+            let (one, two) = (paint(320, 200, 3), paint(240, 240, 5));
+            let (first, second) = (made(&folder, "one", &one, [160, 100]), made(&folder, "two", &two, [120, 96]));
+            let (events, inbox) = mpsc::channel();
+            let out = Captured::default();
+            let mut helper = Helper { platform: Fake, out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let before = scooch_live::devices_made();
+            let screen = |made: &Made| (format!("screen-{}", made.size[0]), Rect { x: 0.0, y: 0.0, w: made.size[0] as f32, h: made.size[1] as f32 });
+            for (index, made) in [&first, &second].into_iter().enumerate() {
+                let id = index as u32 + 1;
+                let (name, rect) = screen(made);
+                helper.event(Event::Command(Command::Warm { hints: Hints { present: None, scale: Some(1.0) }, picture: Some(made.picture.clone()), size: Some(made.size), warm_id: Some(id) }));
+                helper.event(Event::Command(Command::Open { id, screen: name, rect, scale: 1.0, still: Some(made.still.clone()) }));
+            }
+            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().filter(|reply| matches!(reply, Reply::Shown { .. } | Reply::Ready { .. })).count() >= 4);
+            if replies.iter().any(|reply| matches!(reply, Reply::Failed { why, .. } if why.contains("no device"))) {
+                assert!(std::env::var_os("SCOOCH_NEED_ADAPTER").is_none(), "no adapter, and this runner must have one");
+                println!("skipped: no adapter");
+                return;
+            }
+            let readies: Vec<Option<u32>> = replies.iter().filter_map(|reply| match reply {
+                Reply::Ready { warm_id, .. } => Some(*warm_id),
+                _ => None,
+            }).collect();
+            assert_eq!(readies, vec![Some(1), Some(2)], "{replies:?}");
+            for (index, made) in [&first, &second].into_iter().enumerate() {
+                helper.event(Event::Command(Command::Glide { id: index as u32 + 1, a: made.tables.0.clone(), b: made.tables.1.clone(), ms: 120 }));
+            }
+            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().filter(|reply| matches!(reply, Reply::Glided { .. })).count() >= 2);
+            assert!(!replies.iter().any(|reply| matches!(reply, Reply::Failed { .. })), "{replies:?}");
+            for id in [1, 2] {
+                helper.event(Event::Command(Command::Close { id }));
+            }
+            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().filter(|reply| matches!(reply, Reply::Closed { .. })).count() >= 2);
+            assert_eq!(replies.iter().filter(|reply| matches!(reply, Reply::Closed { .. })).count(), 2, "{replies:?}");
+            assert_eq!(scooch_live::devices_made() - before, 1, "the helper made more than one device");
+            assert_eq!(helper.pictures.len(), 2);
+            let _ = std::fs::remove_dir_all(&folder);
+        }
+
+        #[test]
+        fn a_line_that_cannot_be_read_is_answered() {
+            assert!(matches!(read(""), Err(Reply::Failed { id: None, .. })));
+            assert!(matches!(read("{\"kind\":\"warm\""), Err(Reply::Failed { id: None, .. })));
+            assert!(matches!(read(line(&Command::Quit).unwrap().trim()), Ok(Command::Quit)));
+        }
 
         #[test]
         fn the_ease_starts_and_ends_at_rest() {

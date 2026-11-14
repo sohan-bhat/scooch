@@ -26,7 +26,7 @@ pub struct Hints {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Command {
     Hello { version: u32 },
-    Warm { #[serde(default)] hints: Hints, #[serde(default)] picture: Option<PathBuf>, #[serde(default)] size: Option<[u32; 2]> },
+    Warm { #[serde(default)] hints: Hints, #[serde(default)] picture: Option<PathBuf>, #[serde(default)] size: Option<[u32; 2]>, #[serde(default, skip_serializing_if = "Option::is_none")] warm_id: Option<u32> },
     Open { id: u32, screen: String, rect: Rect, #[serde(default = "one")] scale: f32, #[serde(default)] still: Option<PathBuf> },
     Glide { id: u32, a: PathBuf, b: PathBuf, ms: u32 },
     Settle { id: u32, still: PathBuf, #[serde(default)] ms: Option<u32> },
@@ -42,7 +42,7 @@ fn one() -> f32 {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Reply {
     Hello { version: u32, pid: u32 },
-    Ready { adapter: String, ms: u64, #[serde(default)] uploads: u32, #[serde(default, rename = "device")] kind: String },
+    Ready { adapter: String, ms: u64, #[serde(default)] uploads: u32, #[serde(default, rename = "device")] kind: String, #[serde(default, skip_serializing_if = "Option::is_none")] warm_id: Option<u32> },
     Shown { id: u32, ms: u64 },
     Glided { id: u32, frames: u32, slow_frames: u32, first_frame_ms: u64, #[serde(default)] uploads: u32, #[serde(default = "one")] scale: f32 },
     Settled { id: u32 },
@@ -56,6 +56,7 @@ pub struct Ready {
     pub ms: u64,
     pub uploads: u32,
     pub kind: String,
+    pub warm_id: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,8 +68,15 @@ pub struct Glided {
     pub scale: f32,
 }
 
-pub fn line<T: Serialize>(message: &T) -> String {
-    serde_json::to_string(message).unwrap_or_default() + "\n"
+pub fn line<T: Serialize>(message: &T) -> Result<String> {
+    Ok(serde_json::to_string(message).context("a message to the helper could not be written as JSON")? + "\n")
+}
+
+pub fn warm_failed(warm_id: Option<u32>, why: &str) -> String {
+    match warm_id {
+        Some(warm_id) => format!("warm {warm_id}: {why}"),
+        None => why.to_string(),
+    }
 }
 
 pub struct Helper {
@@ -78,6 +86,7 @@ pub struct Helper {
     #[cfg(windows)]
     guard: Option<job::Guard>,
     pub pid: u32,
+    warms: u32,
 }
 
 impl Helper {
@@ -112,6 +121,7 @@ impl Helper {
             #[cfg(windows)]
             guard,
             pid,
+            warms: 0,
         };
         helper.send(&Command::Hello { version: VERSION })?;
         helper.expect(timeout, |reply| match reply {
@@ -124,8 +134,9 @@ impl Helper {
     }
 
     pub fn send(&mut self, command: &Command) -> Result<()> {
+        let text = line(command)?;
         let input = self.input.as_mut().context("the pipe to the helper is closed")?;
-        input.write_all(line(command).as_bytes())?;
+        input.write_all(text.as_bytes())?;
         input.flush()?;
         Ok(())
     }
@@ -156,12 +167,25 @@ impl Helper {
         }
     }
 
-    pub fn warm(&mut self, hints: Hints, picture: Option<&Path>, size: Option<[u32; 2]>, timeout: Duration) -> Result<Ready> {
-        self.send(&Command::Warm { hints, picture: picture.map(Path::to_path_buf), size })?;
+    pub fn ask_warm(&mut self, hints: Hints, picture: Option<&Path>, size: Option<[u32; 2]>) -> Result<u32> {
+        self.warms = self.warms.wrapping_add(1).max(1);
+        let warm_id = self.warms;
+        self.send(&Command::Warm { hints, picture: picture.map(Path::to_path_buf), size, warm_id: Some(warm_id) })?;
+        Ok(warm_id)
+    }
+
+    pub fn ready_for(&mut self, warm_id: u32, timeout: Duration) -> Result<Ready> {
+        let mine = format!("warm {warm_id}: ");
         self.expect(timeout, |reply| match reply {
-            Reply::Ready { adapter, ms, uploads, kind } => Some(Ok(Ready { adapter: adapter.clone(), ms: *ms, uploads: *uploads, kind: kind.clone() })),
-            other => Self::failure(other, None).map(Err),
+            Reply::Ready { adapter, ms, uploads, kind, warm_id: Some(answered) } if *answered == warm_id => Some(Ok(Ready { adapter: adapter.clone(), ms: *ms, uploads: *uploads, kind: kind.clone(), warm_id: Some(warm_id) })),
+            Reply::Failed { id: None, why } if why.starts_with(&mine) || !why.starts_with("warm ") => Some(Err(anyhow!("{why}"))),
+            _ => None,
         })
+    }
+
+    pub fn warm(&mut self, hints: Hints, picture: Option<&Path>, size: Option<[u32; 2]>, timeout: Duration) -> Result<Ready> {
+        let warm_id = self.ask_warm(hints, picture, size)?;
+        self.ready_for(warm_id, timeout)
     }
 
     pub fn ask_open(&mut self, id: u32, screen: &Screen, still: &Path) -> Result<()> {
@@ -285,7 +309,7 @@ mod tests {
     fn commands_and_replies_read_back_the_same() {
         let commands = [
             Command::Hello { version: VERSION },
-            Command::Warm { hints: Hints { present: Some("bare".into()), scale: Some(0.5) }, picture: Some(PathBuf::from("p.jpg")), size: Some([1024, 768]) },
+            Command::Warm { hints: Hints { present: Some("bare".into()), scale: Some(0.5) }, picture: Some(PathBuf::from("p.jpg")), size: Some([1024, 768]), warm_id: Some(4) },
             Command::Open { id: 3, screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5, still: Some(PathBuf::from("a.png")) },
             Command::Glide { id: 3, a: PathBuf::from("a.tables"), b: PathBuf::from("b.tables"), ms: 450 },
             Command::Settle { id: 3, still: PathBuf::from("b.png"), ms: None },
@@ -293,11 +317,11 @@ mod tests {
             Command::Quit,
         ];
         for command in commands {
-            assert_eq!(serde_json::from_str::<Command>(line(&command).trim()).unwrap(), command);
+            assert_eq!(serde_json::from_str::<Command>(line(&command).unwrap().trim()).unwrap(), command);
         }
         let replies = [
             Reply::Hello { version: VERSION, pid: 9 },
-            Reply::Ready { adapter: "gpu".into(), ms: 12, uploads: 1, kind: "integrated".into() },
+            Reply::Ready { adapter: "gpu".into(), ms: 12, uploads: 1, kind: "integrated".into(), warm_id: Some(4) },
             Reply::Shown { id: 3, ms: 40 },
             Reply::Glided { id: 3, frames: 24, slow_frames: 1, first_frame_ms: 30, uploads: 1, scale: 0.75 },
             Reply::Settled { id: 3 },
@@ -305,14 +329,40 @@ mod tests {
             Reply::Failed { id: None, why: "no".into() },
         ];
         for reply in replies {
-            assert_eq!(serde_json::from_str::<Reply>(line(&reply).trim()).unwrap(), reply);
+            assert_eq!(serde_json::from_str::<Reply>(line(&reply).unwrap().trim()).unwrap(), reply);
         }
     }
 
     #[test]
     fn the_ready_answer_names_the_adapter_kind_as_device() {
-        let text = line(&Reply::Ready { adapter: "warp".into(), ms: 1, uploads: 0, kind: "cpu".into() });
+        let text = line(&Reply::Ready { adapter: "warp".into(), ms: 1, uploads: 0, kind: "cpu".into(), warm_id: Some(7) }).unwrap();
         assert!(text.contains(r#""kind":"ready""#) && text.contains(r#""device":"cpu""#), "{text}");
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_json_is_an_error_at_once() {
+        #[cfg(unix)]
+        let bad: PathBuf = {
+            use std::os::unix::ffi::OsStrExt;
+            PathBuf::from(std::ffi::OsStr::from_bytes(b"still-\xff.png"))
+        };
+        #[cfg(windows)]
+        let bad: PathBuf = {
+            use std::os::windows::ffi::OsStringExt;
+            PathBuf::from(std::ffi::OsString::from_wide(&[0x73, 0xD800, 0x2E, 0x70]))
+        };
+        let command = Command::Settle { id: 1, still: bad, ms: None };
+        assert!(line(&command).is_err());
+        assert!(line(&Command::Quit).is_ok_and(|text| text.ends_with('\n')));
+    }
+
+    #[test]
+    fn the_ready_answer_carries_the_warm_it_answers() {
+        let text = line(&Reply::Ready { adapter: "gpu".into(), ms: 1, uploads: 1, kind: "integrated".into(), warm_id: Some(9) }).unwrap();
+        assert!(text.contains(r#""warm_id":9"#), "{text}");
+        let warm = line(&Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: Some(3) }).unwrap();
+        assert!(warm.contains(r#""warm_id":3"#), "{warm}");
+        assert_eq!(warm_failed(Some(3), "no device"), "warm 3: no device");
     }
 
     #[test]
@@ -320,7 +370,7 @@ mod tests {
         let read: Command = serde_json::from_str(r#"{"kind":"open","id":1,"screen":"s","rect":{"x":0,"y":0,"w":10,"h":10}}"#).unwrap();
         assert_eq!(read, Command::Open { id: 1, screen: "s".into(), rect: Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 }, scale: 1.0, still: None });
         let warm: Command = serde_json::from_str(r#"{"kind":"warm"}"#).unwrap();
-        assert_eq!(warm, Command::Warm { hints: Hints::default(), picture: None, size: None });
+        assert_eq!(warm, Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: None });
         let settle: Command = serde_json::from_str(r#"{"kind":"settle","id":2,"still":"b.png"}"#).unwrap();
         assert_eq!(settle, Command::Settle { id: 2, still: PathBuf::from("b.png"), ms: None });
     }

@@ -1,5 +1,6 @@
 use crate::bundle::{Bundle, Constants, RAMP};
 use crate::paint::LAYERS;
+use crate::{Analysis, Rect};
 
 const MAGIC: [u8; 4] = *b"SCBT";
 const VERSION: u32 = 1;
@@ -180,6 +181,53 @@ impl Bundle {
     }
 }
 
+const ANALYSIS_MAGIC: [u8; 4] = *b"SCAN";
+const ANALYSIS_VERSION: u32 = 1;
+
+impl Analysis {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity((self.saliency.len() + self.busy.len() + self.palette.len() * 4 + 16) * 4 + 16);
+        out.extend_from_slice(&ANALYSIS_MAGIC);
+        let words = [ANALYSIS_VERSION, self.width, self.height, self.source_width, self.source_height, self.flat as u32, self.saliency.len() as u32, self.busy.len() as u32, self.palette.len() as u32];
+        words.iter().for_each(|w| out.extend_from_slice(&w.to_le_bytes()));
+        let s = self.subject;
+        [s.x, s.y, s.w, s.h].iter().chain(&self.saliency).chain(&self.busy).chain(self.palette.iter().flatten()).for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+        let sum = fingerprint(0, 0, &out);
+        out.extend_from_slice(&sum.to_le_bytes());
+        out
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Analysis, TablesError> {
+        let body = bytes.len().checked_sub(8).ok_or(TablesError::Short)?;
+        if bytes.len() < 4 || bytes[..4] != ANALYSIS_MAGIC {
+            return Err(TablesError::Magic);
+        }
+        let mut stored = [0u8; 8];
+        stored.copy_from_slice(&bytes[body..]);
+        if fingerprint(0, 0, &bytes[..body]) != u64::from_le_bytes(stored) {
+            return Err(TablesError::Checksum);
+        }
+        let mut reader = Reader { bytes: &bytes[..body], at: 4 };
+        if reader.u32()? != ANALYSIS_VERSION {
+            return Err(TablesError::Version);
+        }
+        let [width, height, source_width, source_height, flat, saliency, busy, palette] = std::array::from_fn(|_| reader.u32().unwrap_or(u32::MAX));
+        if [width, height, source_width, source_height, flat, saliency, busy, palette].contains(&u32::MAX) {
+            return Err(TablesError::Short);
+        }
+        let need = (4 + saliency as u128 + busy as u128 + palette as u128 * 4) * 4;
+        if (reader.bytes.len() - reader.at) as u128 != need || flat > 1 {
+            return Err(TablesError::Shape);
+        }
+        let mut floats = |n: u32| (0..n).map(|_| reader.f32()).collect::<Result<Vec<f32>, _>>();
+        let subject = floats(4)?;
+        let saliency = floats(saliency)?;
+        let busy = floats(busy)?;
+        let palette = floats(palette * 4)?.as_chunks::<4>().0.to_vec();
+        Ok(Analysis { width, height, saliency, busy, subject: Rect { x: subject[0], y: subject[1], w: subject[2], h: subject[3] }, flat: flat == 1, source_width, source_height, palette })
+    }
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
@@ -220,6 +268,31 @@ mod tests {
         }
         assert_eq!(from_half_bits(half_bits(0.25)), 0.25);
         assert_eq!(half_bits(1e9), 0x7bff);
+    }
+
+    #[test]
+    fn an_analysis_survives_its_bytes() {
+        let found = Analysis {
+            width: 3,
+            height: 2,
+            saliency: vec![0.1, 0.2, f32::NAN, 0.4, -0.0, 1.0],
+            busy: vec![0.5; 6],
+            subject: Rect { x: 0.25, y: 0.5, w: 0.125, h: 0.75 },
+            flat: true,
+            source_width: 1200,
+            source_height: 800,
+            palette: vec![[0.5, 0.01, -0.02, 0.4], [0.7, 0.0, 0.03, 0.6]],
+        };
+        let bytes = found.to_bytes();
+        let back = Analysis::from_bytes(&bytes).expect("bytes");
+        assert_eq!(back.to_bytes(), bytes);
+        assert_eq!((back.width, back.height, back.flat, back.source_width, back.palette.len()), (3, 2, true, 1200, 2));
+        for cut in [0, 7, 12, bytes.len() - 1] {
+            assert!(Analysis::from_bytes(&bytes[..cut]).is_err());
+        }
+        let mut broken = bytes.clone();
+        broken[40] ^= 1;
+        assert_eq!(Analysis::from_bytes(&broken).err(), Some(TablesError::Checksum));
     }
 
     #[test]

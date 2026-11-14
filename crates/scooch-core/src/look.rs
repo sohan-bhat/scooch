@@ -75,7 +75,7 @@ pub fn active(found: &Analysis, placement: &Placement, scene: &Scene, options: &
 fn skyish(lab: [f32; 3]) -> bool {
     let [l, a, b] = lab;
     let chroma = (a * a + b * b).sqrt();
-    let hue = b.atan2(a).to_degrees().rem_euclid(360.0);
+    let hue = crate::math::atan2(b, a).to_degrees().rem_euclid(360.0);
     (chroma >= SKY_CHROMA && hue >= SKY_HUE.0 && hue <= SKY_HUE.1) || (chroma < WHITE_CHROMA && l > WHITE_LIGHT)
 }
 

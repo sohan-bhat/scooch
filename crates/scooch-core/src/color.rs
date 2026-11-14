@@ -9,7 +9,7 @@ pub fn decode_table() -> &'static [f32; 256] {
         let mut table = [0.0f32; 256];
         for (i, value) in table.iter_mut().enumerate() {
             let c = i as f64 / 255.0;
-            *value = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) } as f32;
+            *value = if c <= 0.04045 { c / 12.92 } else { crate::math::pow((c + 0.055) / 1.055, 2.4) } as f32;
         }
         table
     })
@@ -21,7 +21,7 @@ pub fn encode_table() -> &'static [u8; ENCODE_SIZE] {
         let mut table = [0u8; ENCODE_SIZE];
         for (i, value) in table.iter_mut().enumerate() {
             let v = i as f64 / (ENCODE_SIZE - 1) as f64;
-            let c = if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+            let c = if v <= 0.0031308 { v * 12.92 } else { 1.055 * crate::math::pow(v, 1.0 / 2.4) - 0.055 };
             *value = (c * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
         }
         table

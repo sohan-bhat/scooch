@@ -117,7 +117,14 @@ fn walk(seed: u64, steps: usize, photo: usize, layout: &str, scenery: Scenery, (
         let what = if n == 0 { "first" } else { step(&mut dice, &mut walk) };
         let photo = &photos()[walk.photo];
         let (want_bundle, want_still) = scooch_core::still(&photo.image, &photo.analysis, &walk.placement, &walk.scene, &walk.options);
-        if dice.next() < 0.5 {
+        let mode = dice.next();
+        if mode < 0.3 {
+            let bundle = session.tables_shared(&photo.image, &photo.analysis, &walk.placement, &walk.scene, &walk.options);
+            assert!(*bundle == want_bundle, "seed {seed} step {n} {what}: tables differ");
+            if let Some((bundle, still, was_bundle, was_still)) = &kept {
+                assert!(**bundle == *was_bundle && still.as_raw() == was_still.as_raw(), "seed {seed} step {n} {what}: a held result changed");
+            }
+        } else if mode < 0.65 {
             let (bundle, still) = session.still_shared(&photo.image, &photo.analysis, &walk.placement, &walk.scene, &walk.options);
             assert!(still.as_raw() == want_still.as_raw(), "seed {seed} step {n} {what}: shared image differs");
             assert!(*bundle == want_bundle, "seed {seed} step {n} {what}: shared bundle differs");

@@ -379,8 +379,28 @@ impl Gpu {
         self.pipes().map(|_| ())
     }
 
+    pub fn largest(&self) -> u32 {
+        self.device.limits().max_texture_dimension_2d
+    }
+
+    pub fn fits(&self, width: u32, height: u32) -> Result<(), String> {
+        let most = self.largest();
+        if width > most || height > most {
+            return Err(format!("the screen is too large for this GPU, {width}x{height} against {most}"));
+        }
+        Ok(())
+    }
+
     pub fn picture(&self, canvas: &Canvas) -> Picture {
+        self.try_picture(canvas).unwrap_or_else(|_| {
+            let texture = self.texture("canvas", (1, 1, 1), wgpu::TextureFormat::Rgba8UnormSrgb, 1);
+            Picture { view: Self::view(&texture, wgpu::TextureViewDimension::D2), width: 0, height: 0, levels: 1 }
+        })
+    }
+
+    pub fn try_picture(&self, canvas: &Canvas) -> Result<Picture, String> {
         let (width, height) = (canvas.width.max(1), canvas.height.max(1));
+        self.fits(width, height)?;
         let levels = 32 - width.max(height).leading_zeros();
         let texture = self.texture("canvas", (width, height, 1), wgpu::TextureFormat::Rgba8UnormSrgb, levels);
         let decode = linear_table();
@@ -392,12 +412,13 @@ impl Gpu {
                 (level, w, h) = smaller(&level, w, h, &decode);
             }
         }
-        Picture { view: Self::view(&texture, wgpu::TextureViewDimension::D2), width, height, levels }
+        Ok(Picture { view: Self::view(&texture, wgpu::TextureViewDimension::D2), width, height, levels })
     }
 
     pub fn still(&self, image: &RgbImage) -> Result<Still, String> {
         let pipes = self.pipes()?;
         let (width, height) = (image.width().max(1), image.height().max(1));
+        self.fits(width, height)?;
         let texture = self.texture("still", (width, height, 1), wgpu::TextureFormat::Rgba8UnormSrgb, 1);
         self.write(&texture, 0, (width, height, 1), 4, &rgba(image.as_raw()));
         let view = Self::view(&texture, wgpu::TextureViewDimension::D2);
@@ -503,6 +524,7 @@ impl Gpu {
         if a.width != b.width || a.height != b.height {
             return Err("the two tables are for screens of different sizes".into());
         }
+        self.fits(a.width.max(a.height), 2)?;
         let (first, second) = (self.tables(a), self.tables(b));
         let shapes = (Shape::of(a), Shape::of(b));
         let size = (shapes.0.width, shapes.0.height);
@@ -676,6 +698,7 @@ impl Gpu {
     }
 
     pub fn time_at(&self, width: u32, height: u32, layers: &[(Look, f32)], scale: f32) -> Result<Duration, String> {
+        self.fits(width, height)?;
         let target = self.target(width, height);
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|error| format!("the device did not go idle {error}"))?;
@@ -691,6 +714,7 @@ impl Gpu {
     }
 
     pub fn snapshot_at(&self, width: u32, height: u32, layers: &[(Look, f32)], scale: f32) -> Result<RgbImage, String> {
+        self.fits(width, height)?;
         let target = self.target(width, height);
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.encode(&view, (width, height), layers, scale)?;
@@ -728,6 +752,7 @@ impl Gpu {
 
     pub fn screen(&self, target: Target, width: u32, height: u32) -> Result<Screen, String> {
         self.pipes()?;
+        self.fits(width, height)?;
         let surface = unsafe { self.instance.create_surface_unsafe(surface_target(&target)?) }.map_err(|error| format!("create surface {error}"))?;
         if !self.adapter.is_surface_supported(&surface) {
             return Err(format!("{} cannot present to this surface", self.name));

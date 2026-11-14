@@ -199,10 +199,6 @@ impl Framed {
     pub fn empty(&self) -> bool {
         self.width == 0 || self.height == 0 || self.canvas_width == 0 || self.canvas_height == 0
     }
-
-    pub fn picture(&self) -> RgbImage {
-        render::picture((self.canvas.as_raw(), self.canvas.width(), self.canvas.height()), (&self.xmap, &self.ymap), self.ratio, (self.width, self.height))
-    }
 }
 
 pub fn framed((sw, sh): (u32, u32), canvas: RgbImage, placement: &Placement, width: u32, height: u32) -> Framed {
@@ -826,7 +822,7 @@ pub fn finish(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opti
                 }
             }
             let mean = sum / count.max(1.0);
-            [mean, 1.0 / (3.0 * mean.cbrt().powi(2)).max(c.grain_floor)]
+            [mean, 1.0 / (3.0 * crate::math::cbrt(mean).powi(2)).max(c.grain_floor)]
         })
         .collect();
     let means: Vec<f32> = block.iter().map(|b| b[0]).collect();

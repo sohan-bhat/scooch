@@ -34,6 +34,7 @@ mod blur;
 mod bundle;
 mod color;
 mod look;
+mod math;
 mod pack;
 mod pads;
 mod paint;
@@ -47,7 +48,7 @@ mod table;
 mod warp;
 
 pub use bundle::{Bundle, Constants, RAMP};
-pub use pack::{Canvas, TablesError};
+pub use pack::{half_bits, Canvas, TablesError};
 pub use session::Session;
 pub use image::{GrayImage, RgbImage, RgbaImage};
 pub use paint::Materials;
@@ -144,7 +145,13 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
 
 /// A quick placement near the previous one, only for while an icon is held. It searches nearby pans only and can hide more of the subject than `solve`, so the caller follows it with a full `solve` when the icon is dropped.
 pub fn solve_near(analysis: &Analysis, scene: &Scene, options: &Options, previous: &Placement, budget: std::time::Duration) -> Placement {
-    solver::solve_near(analysis, scene, options, previous, budget)
+    let started = std::time::Instant::now();
+    solver::solve_near(analysis, scene, options, previous, budget, &|| started.elapsed())
+}
+
+/// `solve_near` with the caller's clock, for targets without `std::time::Instant`. `elapsed` returns the time since the call began.
+pub fn solve_near_timed(analysis: &Analysis, scene: &Scene, options: &Options, previous: &Placement, budget: std::time::Duration, elapsed: &dyn Fn() -> std::time::Duration) -> Placement {
+    solver::solve_near(analysis, scene, options, previous, budget, elapsed)
 }
 
 pub fn render(image: &RgbImage, placement: &Placement, scene: &Scene, options: &Options) -> RgbImage {
@@ -233,6 +240,7 @@ pub fn busy_image(analysis: &Analysis) -> GrayImage {
     analysis::gray(analysis.width, analysis.height, &analysis.busy)
 }
 
+#[cfg(feature = "codecs")]
 pub fn open(path: &std::path::Path) -> image::ImageResult<RgbImage> {
     use image::ImageDecoder;
     let mut decoder = image::ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
@@ -242,12 +250,14 @@ pub fn open(path: &std::path::Path) -> image::ImageResult<RgbImage> {
     Ok(picture.to_rgb8())
 }
 
+#[cfg(feature = "codecs")]
 pub fn encode_jpeg(image: &RgbImage, quality: u8) -> image::ImageResult<Vec<u8>> {
     let mut out = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality).encode_image(image)?;
     Ok(out)
 }
 
+#[cfg(feature = "codecs")]
 pub fn encode_png(image: &RgbImage) -> image::ImageResult<Vec<u8>> {
     use image::codecs::png::{CompressionType, FilterType, PngEncoder};
     use image::ImageEncoder;

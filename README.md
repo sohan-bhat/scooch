@@ -67,3 +67,5 @@ cargo install --path crates/scooch
 To remove it, run `scooch off` and delete the program.
 
 MIT license. Test photos and their sources are in [assets/photos/SOURCES.md](assets/photos/SOURCES.md).
+
+Built by [Sohan Bhat](https://sohanbhat.me/).

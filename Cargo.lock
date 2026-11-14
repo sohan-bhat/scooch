@@ -1640,6 +1640,7 @@ name = "scooch-core"
 version = "0.1.1"
 dependencies = [
  "image",
+ "libm",
  "naga",
  "rayon",
  "serde",
@@ -1654,6 +1655,16 @@ dependencies = [
  "raw-window-handle",
  "scooch-core",
  "wgpu",
+]
+
+[[package]]
+name = "scooch-web"
+version = "0.1.1"
+dependencies = [
+ "image",
+ "js-sys",
+ "scooch-core",
+ "wasm-bindgen",
 ]
 
 [[package]]

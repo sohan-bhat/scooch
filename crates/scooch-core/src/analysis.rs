@@ -262,7 +262,7 @@ fn saliency(lab: &[Vec<f32>; 3], contrast: &[f32], width: usize, height: usize) 
     let scaled: Vec<f32> = smooth.iter().map(|v| (v / top).clamp(0.0, 1.0)).collect();
     let floor = quantile(&scaled, 0.5).max(CALM_LEVEL / top);
     let span = (1.0 - floor).max(1e-3);
-    scaled.iter().map(|v| ((v - floor).max(0.0) / span).powf(SALIENCY_POWER)).collect()
+    scaled.iter().map(|v| crate::math::powf((v - floor).max(0.0) / span, SALIENCY_POWER)).collect()
 }
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {

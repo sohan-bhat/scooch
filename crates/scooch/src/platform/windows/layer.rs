@@ -207,19 +207,49 @@ fn seen(progman: HWND) -> Option<Layout> {
     Some(Layout::InWorkerW { progman: progman.0 as isize, icons: host.0 as isize, wallpaper: wallpaper.0 as isize })
 }
 
+static ASKED: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
+
+fn pump_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < limit {
+        if done() {
+            return true;
+        }
+        let left = LOOK_AGAIN.min(limit.saturating_sub(started.elapsed()));
+        unsafe { MsgWaitForMultipleObjects(None, false, left.as_millis().min(u128::from(u32::MAX)) as u32, QS_ALLINPUT) };
+        let mut message = MSG::default();
+        while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+            let _ = unsafe { TranslateMessage(&message) };
+            unsafe { DispatchMessageW(&message) };
+        }
+    }
+    done()
+}
+
 fn spawn(progman: HWND, wparam: usize, lparam: isize, notes: &mut Vec<String>) -> Option<Layout> {
+    let mut explorer = 0u32;
+    unsafe { GetWindowThreadProcessId(progman, Some(&mut explorer)) };
+    {
+        let mut asked = ASKED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *asked == Some(explorer) {
+            notes.push(format!("0x052C was sent to Explorer {explorer} before and grew no wallpaper WorkerW, so it is not sent again"));
+            return None;
+        }
+        *asked = Some(explorer);
+    }
     let mut result = 0usize;
     let sent = unsafe { SendMessageTimeoutW(progman, SPAWN_MESSAGE, WPARAM(wparam), LPARAM(lparam), SMTO_NORMAL, 1000, Some(&mut result)) };
     let started = Instant::now();
-    while started.elapsed() < LOOK_FOR {
-        if let Some(found) = seen(progman) {
-            notes.push(format!("sent 0x052C with {wparam:#x} and {lparam:#x}, returned {} with result {result}, a wallpaper WorkerW appeared after {} ms", sent.0, started.elapsed().as_millis()));
-            return Some(found);
-        }
-        std::thread::sleep(LOOK_AGAIN);
+    if pump_until(LOOK_FOR, || seen(progman).is_some()) {
+        notes.push(format!("sent 0x052C with {wparam:#x} and {lparam:#x}, returned {} with result {result}, a wallpaper WorkerW appeared after {} ms", sent.0, started.elapsed().as_millis()));
+        return seen(progman);
     }
     notes.push(format!("sent 0x052C with {wparam:#x} and {lparam:#x}, returned {} with result {result}, no wallpaper WorkerW within two seconds", sent.0));
     None
+}
+
+pub fn asked_explorer() -> Option<u32> {
+    *ASKED.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub fn layout() -> Result<(Layout, Vec<String>)> {
