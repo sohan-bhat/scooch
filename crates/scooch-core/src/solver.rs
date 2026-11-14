@@ -29,6 +29,8 @@ const TIE: f64 = 1e-12;
 const HOME_KEEP: f64 = 0.90;
 const HOME_NEAR: f64 = 0.02;
 const HOME_BORDER: f64 = 0.15;
+const HOME_WHOLE: f64 = 0.95;
+const HOME_RESCUE: f64 = 0.20;
 const COVER_CELL: f32 = 1.0 / 3.0;
 const NEAR_PANS: usize = 3;
 const NEAR_SHARE: f64 = 0.8;
@@ -227,8 +229,24 @@ impl Field {
             })
             .map(|i| grid[i])?;
         let crossed = (self.border(&middle) - self.border(&best)) / self.size;
-        let leave = self.crop_sum(&middle) < HOME_KEEP * reach || crossed > HOME_BORDER;
+        let (now, then) = (self.whole(&middle), self.whole(&best));
+        let leave = (self.crop_sum(&middle) < HOME_KEEP * reach || crossed > HOME_BORDER) && (then >= HOME_WHOLE || then - now >= HOME_RESCUE);
         (leave && best != middle).then_some(best)
+    }
+
+    fn whole(&self, frame: &Frame) -> f64 {
+        let (x0, x1, y0, y1) = (frame.x0 * self.gw, (frame.x0 + frame.cw) * self.gw, frame.y0 * self.gh, (frame.y0 + frame.ch) * self.gh);
+        let (mut inside, mut total) = (0.0f64, 0.0f64);
+        for (i, s) in self.saliency.iter().enumerate() {
+            if *s < SOLID {
+                continue;
+            }
+            let (cx, cy) = ((i % self.columns) as f64, (i / self.columns) as f64);
+            let along = ((cx + 1.0).min(x1) - cx.max(x0)).max(0.0) * ((cy + 1.0).min(y1) - cy.max(y0)).max(0.0);
+            inside += *s as f64 * along;
+            total += *s as f64;
+        }
+        if total > 0.0 { inside / total } else { 1.0 }
     }
 
     fn centroid(&self, along_x: bool) -> f64 {
