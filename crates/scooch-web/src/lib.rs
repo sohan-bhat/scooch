@@ -41,6 +41,11 @@
 //! `paintWidth`, `paintHeight` and `mapWidth`, which is `max(width, height)`. `canvasFits` is true when
 //! the canvas is the picture the page passed to `create`, so the page's canvas texture still matches.
 //! `mirrored` tells whether the placement is mirrored.
+//!
+//! The WebAssembly build turns on scooch-core's `portable` feature, so exp, ln, pow, cbrt and atan2
+//! come from the `libm` crate instead of the system's math library. Its tables are byte equal to a
+//! native build with the same feature, and every call repeats to the bit, but they may differ from a
+//! desktop build's tables and stills in the last bit.
 
 use scooch_core::{Analysis, Bundle, Options, Placement, Rect, RgbImage, Scene, Scenery, Session};
 use std::sync::Arc;
