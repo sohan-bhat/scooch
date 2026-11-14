@@ -187,11 +187,15 @@ fn unwatch(state: &Arc<AtomicUsize>) {
     let _ = WATCHED.try_with(|watched| watched.borrow_mut().retain(|(_, other)| !Arc::ptr_eq(other, state)));
 }
 
-fn watch(window: &NSWindow, metal: &CAMetalLayer) -> Arc<AtomicUsize> {
-    let state = Arc::new(AtomicUsize::new(window.occlusionState().0));
-    let watcher = Watch::new(state.clone());
+fn attach(metal: &CAMetalLayer, state: Arc<AtomicUsize>) {
+    let watcher = Watch::new(state);
     unsafe { objc_setAssociatedObject(metal as *const CAMetalLayer as *mut AnyObject, &WATCH_KEY as *const u8 as *const c_void, Retained::as_ptr(&watcher) as *mut AnyObject, RETAIN_NONATOMIC) };
     metal.setDelegate(Some(ProtocolObject::from_ref(&*watcher)));
+}
+
+fn watch(window: &NSWindow, metal: &CAMetalLayer) -> Arc<AtomicUsize> {
+    let state = Arc::new(AtomicUsize::new(window.occlusionState().0));
+    attach(metal, state.clone());
     WATCHED.with(|watched| watched.borrow_mut().push((Weak::new(window), state.clone())));
     state
 }
@@ -328,6 +332,15 @@ impl Layer {
 
     pub fn close(self) {
         drop(self);
+    }
+
+    pub fn abandon(self) {
+        unwatch(&self.seen);
+        objc2::rc::autoreleasepool(|_| {
+            self.window.orderOut(None);
+            CATransaction::flush();
+        });
+        std::mem::forget(self);
     }
 
     pub fn commit(&self) {
@@ -561,10 +574,7 @@ mod tests {
     fn a_render_thread_reads_visibility_from_the_layer_and_never_from_appkit() {
         let metal = CAMetalLayer::new();
         let state = Arc::new(AtomicUsize::new(NSWindowOcclusionState::Visible.0));
-        let watcher = Watch::new(state.clone());
-        unsafe { objc_setAssociatedObject(Retained::as_ptr(&metal) as *mut AnyObject, &WATCH_KEY as *const u8 as *const c_void, Retained::as_ptr(&watcher) as *mut AnyObject, RETAIN_NONATOMIC) };
-        metal.setDelegate(Some(ProtocolObject::from_ref(&*watcher)));
-        drop(watcher);
+        attach(&metal, state.clone());
         let address = Retained::as_ptr(&metal) as usize;
         let asked = std::thread::spawn(move || {
             let metal = unsafe { &*(address as *const CAMetalLayer) };
@@ -577,6 +587,34 @@ mod tests {
             (first, second)
         });
         assert_eq!(asked.join().unwrap(), (NSWindowOcclusionState::Visible.0, 0));
+        drop(metal);
+    }
+
+    #[test]
+    fn a_render_thread_held_past_an_abandon_wakes_to_a_hidden_layer() {
+        let metal = CAMetalLayer::new();
+        let state = Arc::new(AtomicUsize::new(NSWindowOcclusionState::Visible.0));
+        attach(&metal, state.clone());
+        let address = Retained::as_ptr(&metal) as usize;
+        let (go, held) = std::sync::mpsc::channel::<()>();
+        let woke = std::thread::spawn(move || {
+            let metal = unsafe { &*(address as *const CAMetalLayer) };
+            let read = || -> usize {
+                let delegate = metal.delegate().expect("the layer lost its watcher");
+                let window: Option<Retained<NSObject>> = unsafe { msg_send![&*delegate, window] };
+                unsafe { msg_send![&*window.expect("the watcher gave no window"), occlusionState] }
+            };
+            let before = read();
+            let _ = held.recv();
+            (before, read())
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        unwatch(&state);
+        refresh();
+        go.send(()).unwrap();
+        let (before, after) = woke.join().unwrap();
+        assert!(before & NSWindowOcclusionState::Visible.0 != 0);
+        assert_eq!(after & NSWindowOcclusionState::Visible.0, 0);
         drop(metal);
     }
 }

@@ -1652,6 +1652,49 @@ mod probe {
         Ok(())
     }
 
+    fn abandoned(p: &mut Probe, marker: MainThreadMarker, screen: &Screen) -> Result<()> {
+        let gpu = match &p.gpu {
+            Some(gpu) => gpu.clone(),
+            None => Gpu::new(false).map_err(anyhow::Error::msg)?,
+        };
+        let pattern = |layer: &layer::Layer| Pattern { width: layer.pixels.0, height: layer.pixels.1, rgba: GRAY.iter().copied().chain([255]).cycle().take(layer.pixels.0 as usize * layer.pixels.1 as usize * 4).collect() };
+        let layer = layer::open(marker, screen)?;
+        let number = layer.number();
+        let mut renderer = Renderer::on(&gpu, Target::Layer(layer.surface()), &pattern(&layer)).map_err(anyhow::Error::msg)?;
+        layer.commit();
+        layer.reveal();
+        layer::present(|| renderer.frame(Some(0.3))).map_err(anyhow::Error::msg)?;
+        let (go, held) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let _ = held.recv();
+            let woke = layer::present(|| renderer.frame(Some(0.6)));
+            drop(renderer);
+            woke
+        });
+        layer.abandon();
+        layer::spin(0.3);
+        let on_screen = ours().iter().any(|window| window.number == number && window.on_screen);
+        let _ = go.send(());
+        let woke = worker.join().map_err(|_| anyhow::anyhow!("the held render thread panicked"))?;
+        layer::spin(0.1);
+        let next = layer::open(marker, screen).and_then(|next| {
+            let mut renderer = Renderer::on(&gpu, Target::Layer(next.surface()), &pattern(&next)).map_err(anyhow::Error::msg)?;
+            next.commit();
+            next.reveal();
+            let drawn = layer::present(|| renderer.frame(Some(0.5))).map_err(anyhow::Error::msg);
+            drop(renderer);
+            drop(next);
+            drawn
+        });
+        layer::spin(0.2);
+        let left = ours().iter().filter(|window| window.on_screen).count();
+        p.line(format!("- a layer abandoned while its render thread was held: its window on screen {on_screen}, the thread's frame after waking {woke:?}, a fresh layer after it opened and drew {:?}, windows of ours on screen after {left}", next.as_ref().map(|_| ()).map_err(|error| format!("{error:#}"))));
+        if on_screen || !woke.as_ref().is_err_and(|why| why.contains("occluded")) || next.is_err() || left > 0 {
+            p.fail("an abandoned layer stayed on screen, drew after its thread woke, or kept the next layer from opening");
+        }
+        Ok(())
+    }
+
     fn live(p: &mut Probe) -> Result<()> {
         let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
         accessory(marker);
@@ -1785,6 +1828,9 @@ mod probe {
         cycles(p, marker, &screen, false)?;
         if let Err(error) = helpers(p) {
             p.fail(format!("the helper process could not be measured {error:#}"));
+        }
+        if let Err(error) = abandoned(p, marker, &screen) {
+            p.fail(format!("the abandoned layer check could not run {error:#}"));
         }
         let _ = field_color;
         if let Some(recorded) = recorded.filter(|path| path.is_file()) {

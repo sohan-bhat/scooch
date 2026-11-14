@@ -56,6 +56,10 @@ impl Platform for Host {
         layer.close();
     }
 
+    fn abandon(&mut self, layer: layer::Layer) {
+        layer.abandon();
+    }
+
     fn wait(&mut self, timeout: Duration) {
         layer::wait(timeout);
     }
