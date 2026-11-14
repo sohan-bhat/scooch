@@ -2568,6 +2568,7 @@ mod probe {
 
     #[derive(Default)]
     struct Cold {
+        tick: Option<String>,
         set: Option<u128>,
         glided: bool,
         skip: Option<String>,
@@ -2598,6 +2599,11 @@ mod probe {
         let gliding = at("shown and gliding");
         let first = log.iter().find_map(|line| line.split("first frame ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()));
         Cold {
+            tick: log.iter().find(|line| line.contains(" tick ") && line.contains("Rendered")).map(|line| {
+                let took = line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()).unwrap_or(0.0);
+                let began = stamp_of(line).map(|ended| ((ended - took / 1000.0 - dropped) * 1000.0).round());
+                format!("began {began:?} ms after the drop, took {took} ms, {}", line.split(")] ").nth(1).unwrap_or_default().chars().take(150).collect::<String>())
+            }),
             set,
             glided: gliding.is_some(),
             skip: log.iter().find_map(|line| line.split("glide skipped, ").nth(1).map(|rest| rest.split(',').next().unwrap_or(rest).to_string())),
@@ -2621,7 +2627,7 @@ mod probe {
             let cold = cold_drag(p, screen, name, places);
             last = Instant::now();
             p.line(format!(
-                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, launch to ready {:?} ms, open to shown {:?} ms, drop to first frame {:?} ms, drop to set {:?} ms, canvas from {:?}",
+                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, launch to ready {:?} ms, open to shown {:?} ms, drop to first frame {:?} ms, drop to set {:?} ms, canvas from {:?}, tick laps {:?}",
                 index + 1,
                 cold.glided,
                 cold.skip,
@@ -2629,7 +2635,8 @@ mod probe {
                 cold.shown,
                 cold.first,
                 cold.set,
-                cold.from
+                cold.from,
+                cold.tick
             ));
             seen.push(cold);
         }
@@ -2778,7 +2785,7 @@ mod probe {
             p.line(format!("- setup move {step} of {name} to {:.0},{:.0}, new wallpaper {setup:?} ms after the Apple Event returned, daemon log {log:?}", target.0, target.1));
             setup_log = log;
         }
-        let tables = setup_log.iter().any(|line| line.contains(" tick ") && line.contains("Rendered") && line.contains("tables "));
+        let tables = setup_log.iter().any(|line| line.contains(" tick ") && line.contains("Rendered") && (line.contains("tables ") || line.contains("later ")));
         p.line(format!("- the last setup move rendered and wrote tables {tables}"));
         if !tables {
             p.fail("the setup moves wrote no tables, so the timed drag could not glide");
@@ -3041,26 +3048,30 @@ mod probe {
             let device = ms(clock);
             let [found, opened, shaders] = gpu.made.map(|part| part.as_secs_f64() * 1000.0);
             let clock = Instant::now();
-            let canvas = scooch::live::canvas::read(&canvas_file)?;
+            let cached = scooch::live::canvas::read(&canvas_file)?;
             let read = ms(clock);
+            let clock = Instant::now();
+            let canvas = cached.canvas()?;
+            let check = ms(clock);
             let clock = Instant::now();
             let expanded = scooch_live::rgba(&canvas.pixels);
             let expand = ms(clock);
             drop(expanded);
             let clock = Instant::now();
-            let uploaded = gpu.try_picture(&canvas).map_err(anyhow::Error::msg)?;
+            let mipped = gpu.try_picture(&canvas).map_err(anyhow::Error::msg)?;
             let upload = ms(clock);
             gpu.idle(limit).map_err(anyhow::Error::msg)?;
             let upload_done = ms(clock);
+            drop(mipped);
             let clock = Instant::now();
             let levels = scooch_live::levels(&canvas);
             let levels_cpu = ms(clock);
+            drop(levels);
             let clock = Instant::now();
-            let stored = gpu.try_picture_levels(canvas.width, canvas.height, &levels).map_err(anyhow::Error::msg)?;
+            let uploaded = gpu.try_picture_levels(cached.width, cached.height, &cached.levels()).map_err(anyhow::Error::msg)?;
             let stored_upload = ms(clock);
             gpu.idle(limit).map_err(anyhow::Error::msg)?;
             let stored_done = ms(clock);
-            drop(stored);
             let clock = Instant::now();
             let image = objc2::rc::autoreleasepool(|_| picture::decode(&picture_file))?;
             let decode = ms(clock);
@@ -3073,7 +3084,7 @@ mod probe {
             let look = [(Layered::Glide(&glide, 0.5), 1.0)];
             let _ = gpu.time(COLD[0], COLD[1], &look);
             let _ = gpu.time(COLD[0], COLD[1], &look);
-            Ok(vec![device, read, upload, upload_done, levels_cpu, stored_upload, stored_done, decode, made, ms(clock), found, opened, shaders, expand])
+            Ok(vec![device, read, upload, upload_done, levels_cpu, stored_upload, stored_done, decode, made, ms(clock), found, opened, shaders, expand, check])
         })();
         match result {
             Ok(split) => {
@@ -3101,7 +3112,7 @@ mod probe {
             let canvas = scooch_core::canvas(&image, COLD[0], COLD[1]);
             let canvas_file = out.join("balloon.canvas");
             let print = scooch::live::canvas::fingerprint(canvas.width, canvas.height, &canvas.pixels);
-            fs::write(&canvas_file, [scooch::live::canvas::encode(canvas.width, canvas.height, &[], print), canvas.pixels.clone()].concat())?;
+            scooch::live::canvas::write(&canvas_file, canvas.width, canvas.height, &scooch_live::levels(&canvas), print)?;
             let size = fs::metadata(&canvas_file).map(|meta| meta.len()).unwrap_or(0);
             let (mut totals, mut hellos, mut warms, mut gone) = (Vec::new(), Vec::new(), Vec::new(), 0);
             let (mut adapter, mut from, mut scale) = (String::new(), String::new(), None);
@@ -3128,9 +3139,9 @@ mod probe {
             lines.push(format!("- helper launched cold ten times, each warmed from a {}x{} canvas file of {size} bytes and ended, adapter {adapter}, canvas from {from}, first scale {scale:?}", canvas.width, canvas.height));
             lines.push(format!("  - launch to ready {}", stats(&totals)));
             lines.push(format!("  - process start, launch to hello {}", stats(&hellos)));
-            lines.push(format!("  - warm inside the helper, device with shaders, canvas read and upload {}", stats(&warms)));
+            lines.push(format!("  - warm inside the helper, device with shaders, canvas read, check and upload of the stored mips {}", stats(&warms)));
             lines.push(format!("  - helpers gone after their run {gone} of 10"));
-            let mut parts: [Vec<f64>; 14] = Default::default();
+            let mut parts: [Vec<f64>; 15] = Default::default();
             let mut failed = Vec::new();
             for _ in 0..10 {
                 let ran = Command::new(&me).arg("cold-split").arg(&file).arg(&canvas_file).stderr(Stdio::null()).output()?;
@@ -3146,12 +3157,12 @@ mod probe {
             }
             let names = [
                 "device with shader compile",
-                "canvas file read with its fingerprint",
-                "upload with mips made on the GPU, CPU side",
-                "upload with mips made on the GPU, until the GPU is idle",
-                "mips made on the CPU, as a stored file would hold them",
-                "upload of stored mips, CPU side",
-                "upload of stored mips, until the GPU is idle",
+                "canvas file read, every level",
+                "upload with mips made on the GPU instead, CPU side",
+                "upload with mips made on the GPU instead, until the GPU is idle",
+                "mips made on the CPU, as the daemon does once per canvas",
+                "upload of the stored mips, CPU side",
+                "upload of the stored mips, until the GPU is idle",
                 "the old path, source picture decode",
                 "the old path, canvas resample",
                 "two timing frames, now after ready",
@@ -3159,6 +3170,7 @@ mod probe {
                 "of the device, opening it",
                 "of the device, compiling the shaders",
                 "of the upload, three channels to four on the CPU",
+                "the canvas for the tables taken from the file and checked against its fingerprint, beside the upload",
             ];
             lines.push(format!("- the warm steps in ten fresh processes, failed {failed:?}"));
             for (name, values) in names.iter().zip(&parts) {
