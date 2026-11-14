@@ -425,6 +425,20 @@ impl Daemon {
         moved
     }
 
+    pub fn wake_early(&self) -> bool {
+        let state = parse(self.store.read().as_deref());
+        if !state.on || state.restoring || !state.screens.values().any(|entry| entry.output.is_some()) || self.glide_block(&state).is_some() {
+            return false;
+        }
+        let mut glider = self.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let launched = glider.wake();
+        drop(glider);
+        if launched {
+            self.reap_later();
+        }
+        launched
+    }
+
     fn glide_block(&self, state: &State) -> Option<&'static str> {
         if !self.desktop.live() {
             Some("not live")
@@ -548,29 +562,40 @@ impl Daemon {
             let blocked = self.glide_block(&state);
             let mut gliding = blocked.is_none().then(|| glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
             if let Some(glider) = gliding.as_deref_mut() {
-                glider.know(&state.scales);
+                glider.know(&state.scales, &state.starts);
             }
             let snapshot = self.desktop.snapshot();
             lap("snapshot", &mut clock);
+            let mut moved = false;
             if let Ok(snapshot) = &snapshot {
                 let print = icon_print(snapshot);
                 *self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(print);
                 if trace() {
                     eprintln!("{} snapshot icons {print:016x}", stamp());
                 }
-                *self.moved.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = self.moved_screens(snapshot);
+                let screens = self.moved_screens(snapshot);
+                moved = !screens.is_empty();
+                *self.moved.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = screens;
+            }
+            match gliding.as_deref_mut() {
+                Some(glider) => glider.after_snapshot(moved),
+                None => glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).after_snapshot(moved),
             }
             match snapshot {
                 Ok(snapshot) => self.pass(&mut state, &snapshot, &mut report, (gliding.as_deref_mut(), blocked)),
                 Err(error) => report.problem = Some(error.to_string()),
             }
-            if let Some(glider) = gliding.as_deref_mut() {
-                glider.close_early();
-                for (key, scale) in glider.learned() {
+            {
+                let mut held = gliding.take().unwrap_or_else(|| glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+                held.close_early();
+                held.retire_unused();
+                for (key, scale) in held.learned() {
                     state.scales.insert(key, scale);
                 }
+                for (adapter, start) in held.learned_starts() {
+                    state.starts.insert(adapter, start);
+                }
             }
-            drop(gliding);
             self.reap_later();
         }
         state.problem = report.problem.clone();
@@ -1039,6 +1064,14 @@ pub fn unplaced(state: &State, id: &str) -> bool {
 pub fn merge(mine: &State, before: &State, fresh: &State) -> State {
     let mut merged = fresh.clone();
     merged.problem = mine.problem.clone();
+    for (key, scale) in &mine.scales {
+        merged.scales.insert(key.clone(), *scale);
+    }
+    for (adapter, start) in &mine.starts {
+        if merged.starts.get(adapter).is_none_or(|theirs| theirs.at <= start.at) {
+            merged.starts.insert(adapter.clone(), start.clone());
+        }
+    }
     if fresh.tally == before.tally {
         merged.tally = mine.tally;
     }
@@ -1296,6 +1329,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
         loop {
             worker.first();
             let busy = daemon.desktop.busy();
+            daemon.wake_early();
             if daemon.quick_look() {
                 worker.take();
             } else {
@@ -2670,7 +2704,7 @@ pub mod tests {
 
     fn inside_budget(waits: &[(&'static str, Duration)]) -> bool {
         let shared: Vec<Duration> = waits.iter().filter(|(what, _)| *what != "spawn").map(|(_, wait)| *wait).collect();
-        waits.iter().all(|(_, wait)| *wait <= crate::glide::GRACE) && shared.windows(2).all(|pair| pair[1] <= pair[0])
+        waits.iter().all(|(_, wait)| *wait <= crate::glide::PATIENCE) && shared.windows(2).all(|pair| pair[1] <= pair[0])
     }
 
     fn held(script: &Mutex<crate::glide::tests::Script>) -> Arc<std::sync::atomic::AtomicBool> {
@@ -2770,6 +2804,63 @@ pub mod tests {
         assert!(took < off + Duration::from_secs(5), "the tick took {took:?} against {off:?} with the glide off");
         let said = daemon.glider.lock().unwrap().said.clone();
         assert!(said.iter().any(|line| line.contains("skipped, helper cold")), "{said:?}");
+    }
+
+    #[test]
+    fn an_early_launch_at_a_bare_wake_is_quit_and_kept_in_bounds() {
+        let (daemon, fake, _, spawned) = glide_rig("glide-early-bare", true);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        daemon.glider.lock().unwrap().reset_for_test();
+        fake.events.lock().unwrap().clear();
+        let before = *spawned.lock().unwrap();
+        assert!(daemon.wake_early());
+        assert!(!daemon.wake_early());
+        assert_eq!(*spawned.lock().unwrap(), before + 1);
+        daemon.tick();
+        assert!(!daemon.glider.lock().unwrap().running());
+        let seen = events(&fake);
+        assert!(seen.iter().any(|event| event == "device") && seen.iter().any(|event| event == "quit"), "{seen:?}");
+        assert!(!seen.iter().any(|event| event.starts_with("warm") || event.starts_with("open")), "{seen:?}");
+        assert!(!daemon.wake_early(), "a second early launch inside ten seconds");
+        daemon.glider.lock().unwrap().forget_early_for_test();
+        assert!(daemon.wake_early());
+        daemon.tick();
+        daemon.glider.lock().unwrap().forget_early_for_test();
+        assert!(!daemon.wake_early(), "an early launch after two bare wakes in a row");
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        daemon.glider.lock().unwrap().reset_for_test();
+        daemon.glider.lock().unwrap().forget_early_for_test();
+        assert!(daemon.wake_early(), "a real move lets the next wake launch early again");
+    }
+
+    #[test]
+    fn a_helper_on_track_is_waited_for_and_one_that_will_miss_is_not() {
+        for (name, ready, glides) in [("glide-on-track", 120u32, true), ("glide-will-miss", 2000, false)] {
+            let ((daemon, fake, script, _), waits) = glide_rig_waits(name, true);
+            fake.place(vec![subject()]);
+            daemon.tick();
+            let mut state = daemon.store.load();
+            state.starts.insert("Fake GPU".into(), crate::state::Start { ready, shown: 5, at: 1 });
+            daemon.store.save(&state).unwrap();
+            script.lock().unwrap().ready_after = Duration::from_millis(ready.into());
+            daemon.glider.lock().unwrap().reset_for_test();
+            fake.events.lock().unwrap().clear();
+            waits.lock().unwrap().clear();
+            fake.place(vec![moved_subject()]);
+            assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+            let seen = events(&fake);
+            let said = daemon.glider.lock().unwrap().said.clone();
+            assert_eq!(seen.iter().any(|event| event.starts_with("glide ")), glides, "{seen:?} {said:?}");
+            let waited: Vec<Duration> = waits.lock().unwrap().iter().filter(|(what, _)| *what == "ready").map(|(_, wait)| *wait).collect();
+            if glides {
+                assert!(!waited.is_empty() && waited.iter().all(|wait| *wait <= crate::glide::PATIENCE), "{waited:?}");
+            } else {
+                assert!(waited.is_empty(), "{waited:?}");
+                assert!(said.iter().any(|line| line.contains("would be shown")), "{said:?}");
+            }
+        }
     }
 
     #[test]
