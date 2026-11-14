@@ -22,7 +22,6 @@ import {
   UnsignedByteType,
   Vector2,
   Vector3,
-  type WebGLRenderer,
   WebGLRenderTarget,
 } from 'three';
 import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
@@ -126,7 +125,6 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const screens = useScreens(manifest);
   const blinds = useMemo(() => blindsTexture(), []);
   const writing = useRef<((amount: number) => void) | null>(null);
-  const writable = useRef<((gl: WebGLRenderer) => Promise<void>) | null>(null);
   const aimed = useRef(0);
   const blindsMatrix = useMemo(() => projector(), []);
   const [lively, setLively] = useState(false);
@@ -389,19 +387,6 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     floor.uniforms.uBlindsMatrix.value.copy(blindsMatrix);
     wall.uniforms.uCaption.value = placeholder;
     screens.crt.uniforms.uOsd.value = placeholder;
-    const tv = built.television;
-    const sticky = stickyNote({
-      center: tv.center,
-      normal: new Vector3(0, 0, 1).applyQuaternion(tv.quaternion),
-      up: new Vector3(0, 1, 0).applyQuaternion(tv.quaternion),
-      right: new Vector3(1, 0, 0).applyQuaternion(tv.quaternion),
-      width: tv.screen.width,
-      height: tv.screen.height,
-    });
-    writing.current = sticky.write;
-    writable.current = sticky.ready;
-    const note = sticky.note;
-    scene.add(note);
     gl.shadowMap.autoUpdate = false;
     gl.shadowMap.needsUpdate = true;
     screens.crt.uniforms.uLamp.value.copy(bulbWorld);
@@ -435,13 +420,14 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     return () => {
       cancelled = true;
       cancelAnimationFrame(handle);
-      scene.remove(note);
     };
   }, [built, scene, camera, targets, gl, screens, blinds, blindsMatrix, wall, floor, onReady, placeholder]);
 
   useEffect(() => {
+    if (!built) return;
     let stopped = false;
     let timer = 0;
+    let note: Mesh | null = null;
     const paint = async () => {
       if (stopped) return;
       if (!runtime.shown && runtime.still < 0) {
@@ -461,16 +447,39 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       await quiet();
       gl.initTexture(caption.texture);
       wall.uniforms.uCaption.value = caption.texture;
-      await writable.current?.(gl);
+      const tv = built.television;
+      const sticky = stickyNote({
+        center: tv.center,
+        normal: new Vector3(0, 0, 1).applyQuaternion(tv.quaternion),
+        up: new Vector3(0, 1, 0).applyQuaternion(tv.quaternion),
+        right: new Vector3(1, 0, 0).applyQuaternion(tv.quaternion),
+        width: tv.screen.width,
+        height: tv.screen.height,
+      });
+      await sticky.ready(gl);
       if (stopped) return;
+      await quiet();
+      const target = new WebGLRenderTarget(1, 1, { type: HalfFloatType });
+      const previous = gl.getRenderTarget();
+      gl.setRenderTarget(target);
+      const pending = gl.compileAsync(sticky.note, camera, scene);
+      gl.setRenderTarget(previous);
+      await pending.catch(() => undefined);
+      target.dispose();
+      if (stopped) return;
+      note = sticky.note;
+      scene.add(note);
+      writing.current = sticky.write;
       runtime.painted = true;
     };
     timer = window.setTimeout(() => void paint(), 0);
     return () => {
       stopped = true;
       window.clearTimeout(timer);
+      if (note) scene.remove(note);
+      writing.current = null;
     };
-  }, [gl, screens, wall, blindsMatrix]);
+  }, [built, gl, camera, scene, screens, wall, blindsMatrix]);
 
   const shadowFrames = useRef(0);
   const shadowProps = useRef(false);
