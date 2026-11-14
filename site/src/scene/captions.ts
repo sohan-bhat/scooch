@@ -1,6 +1,7 @@
 import { quiet } from '@/lib/idle';
-import { CanvasTexture, LinearFilter, LinearMipmapLinearFilter, NearestFilter, NoColorSpace, SRGBColorSpace, Vector4, type Matrix4 } from 'three';
+import { CanvasTexture, DataTexture, LinearFilter, LinearMipmapLinearFilter, NearestFilter, NoColorSpace, RGBAFormat, SRGBColorSpace, UnsignedByteType, Vector4, type Matrix4, type WebGLRenderer } from 'three';
 import content from '@/content.json';
+import { stripUpload } from './upload';
 
 export const FONT = {
   display: '"Anybody Variable", "Arial Black", sans-serif',
@@ -221,11 +222,8 @@ export function wallTexture(projector: Matrix4) {
   text.width = width;
   text.height = height;
   const draw = text.getContext('2d', { willReadFrequently: true });
-  const out = document.createElement('canvas');
-  out.width = across;
-  out.height = down;
-  const target = out.getContext('2d');
-  const texture = new CanvasTexture(out);
+  const pixels = new Uint8Array(across * down * 4);
+  const texture = new DataTexture(pixels, across, down, RGBAFormat, UnsignedByteType);
   texture.colorSpace = NoColorSpace;
   texture.flipY = false;
   texture.magFilter = LinearFilter;
@@ -235,8 +233,8 @@ export function wallTexture(projector: Matrix4) {
   const inverse = projector.clone().invert();
   const near = new Vector4();
   const far = new Vector4();
-  const paint = async () => {
-    if (!draw || !target) return;
+  const paint = async (gl: WebGLRenderer, wait: () => Promise<void> = quiet) => {
+    if (!draw) return false;
     draw.fillStyle = '#000';
     draw.fillRect(0, 0, width, height);
     const font = Math.round(height * 0.36);
@@ -245,9 +243,14 @@ export function wallTexture(projector: Matrix4) {
     draw.textBaseline = 'middle';
     draw.fillStyle = '#fff';
     draw.fillText(caption('shapes'), width / 2, height * 0.54, width * 0.92);
-    await quiet();
-    const letters = draw.getImageData(0, 0, width, height).data;
-    const image = target.createImageData(across, down);
+    const letters = new Uint8ClampedArray(width * height * 4);
+    const band = Math.max(16, Math.floor((1 << 19) / (width * 4)));
+    for (let y = 0; y < height; y += band) {
+      await wait();
+      letters.set(draw.getImageData(0, y, width, Math.min(band, height - y)).data, y * width * 4);
+    }
+    text.width = 1;
+    text.height = 1;
     const sample = (tx: number, ty: number) => {
       const x = Math.min(Math.max(tx * width - 0.5, 0), width - 1.001);
       const y = Math.min(Math.max(ty * height - 0.5, 0), height - 1.001);
@@ -264,7 +267,7 @@ export function wallTexture(projector: Matrix4) {
     let until = 0;
     for (let v = 0; v < down; v++) {
       if (performance.now() > until) {
-        await quiet();
+        await wait();
         until = performance.now() + 4;
       }
       for (let u = 0; u < across; u++) {
@@ -288,14 +291,12 @@ export function wallTexture(projector: Matrix4) {
           if (edge > 0) letter += sample(tx, ty);
         }
         const at = (v * across + u) * 4;
-        image.data[at] = Math.round(letter / 4);
-        image.data[at + 1] = Math.round((region / 4) * 255);
-        image.data[at + 3] = 255;
+        pixels[at] = Math.round(letter / 4);
+        pixels[at + 1] = Math.round((region / 4) * 255);
+        pixels[at + 3] = 255;
       }
     }
-    await quiet();
-    target.putImageData(image, 0, 0);
-    texture.needsUpdate = true;
+    return stripUpload(gl, texture, { data: pixels, width: across, height: down }, wait);
   };
   return { texture, paint, box };
 }
