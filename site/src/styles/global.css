@@ -209,7 +209,7 @@ html.hero-shot .stage-scrim {
   width: auto;
   height: min(100cqh, 100cqw / 1.6);
   aspect-ratio: 3456 / 1350;
-  left: calc((100cqw - min(100cqh, 100cqw / 1.6) * 2.56) * 0.71);
+  left: calc((100cqw - min(100cqh, 100cqw / 1.6) * 2.56) * 0.74);
   top: calc((100cqh - min(100cqh, 100cqw / 1.6)) * 0.5);
 }
 
@@ -310,7 +310,7 @@ html.loading {
   width: auto;
   height: min(100cqh, 100cqw / 1.6);
   aspect-ratio: 3456 / 1350;
-  left: calc((100cqw - min(100cqh, 100cqw / 1.6) * 2.56) * 0.71);
+  left: calc((100cqw - min(100cqh, 100cqw / 1.6) * 2.56) * 0.74);
   top: calc((100cqh - min(100cqh, 100cqw / 1.6)) * 0.5);
 }
 
