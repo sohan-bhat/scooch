@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/scooch-core", "crates/scooch-live", "crates/scooch"]
+members = ["crates/scooch-core", "crates/scooch-live", "crates/scooch", "crates/scooch-web"]
 
 [workspace.package]
 version = "0.1.1"

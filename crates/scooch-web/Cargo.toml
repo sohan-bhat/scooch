@@ -1,0 +1,27 @@
+[package]
+name = "scooch-web"
+description = "The Scooch engine for web pages, built for WebAssembly."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+scooch-core = { path = "../scooch-core", default-features = false }
+wasm-bindgen = "=0.2.130"
+js-sys = "=0.3.107"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+scooch-core = { path = "../scooch-core", default-features = false, features = ["portable"] }
+
+[features]
+portable = ["scooch-core/portable"]
+
+[dev-dependencies]
+scooch-core = { path = "../scooch-core" }
+image = { version = "0.25", default-features = false }
