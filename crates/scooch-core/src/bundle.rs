@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
 pub const RAMP: usize = 512;
-const RAMP_RANGE: (f32, f32) = look::HOLD;
+const RAMP_RANGE: (f32, f32) = (look::FLOOR, look::HOLD.1);
 const CANVAS_MOST: u32 = 8192;
 const EDGE: f32 = 0.75;
 const SHALLOW_POWER: f32 = 2.2;
