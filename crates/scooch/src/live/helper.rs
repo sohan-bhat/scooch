@@ -160,8 +160,9 @@ mod running {
         Command(Command),
         HangUp,
         Warmed { gpu: Option<Result<Gpu, String>>, loaded: Option<Result<Loaded, String>>, from: Option<String>, ms: u64 },
+        Device { gpu: Gpu, composition: bool },
         Timed { timed: Option<Duration> },
-        Presented { id: u32, result: Result<(), String> },
+        Presented { id: u32, result: Result<(), String>, first: u64 },
         Glided { id: u32, frames: u32, slow: u32, first: u64, scale: f32, timed: Option<Duration> },
         Settled { id: u32 },
         Broke { id: u32, why: String },
@@ -171,6 +172,7 @@ mod running {
     struct Live<L> {
         layer: Option<L>,
         jobs: Sender<Job>,
+        window: u64,
         asked: Instant,
         touched: Instant,
         shown: bool,
@@ -184,6 +186,7 @@ mod running {
         still: Option<Decoding>,
         asked: Instant,
         layer: Option<L>,
+        window: u64,
     }
 
     struct Helper<P: Platform> {
@@ -280,6 +283,7 @@ mod running {
             waker();
         };
         let Start { id, gpu, surface, still, size, period } = start;
+        let begun = Instant::now();
         let made = still
             .ok_or_else(|| "open needs the still the system shows now".to_string())
             .and_then(Decoding::finish::<P>)
@@ -288,7 +292,7 @@ mod running {
         let (first, mut screen) = match made {
             Ok(made) => made,
             Err(why) => {
-                tell(Event::Presented { id, result: Err(why) });
+                tell(Event::Presented { id, result: Err(why), first: 0 });
                 tell(Event::Stopped { id });
                 return;
             }
@@ -296,7 +300,7 @@ mod running {
         let mut shown = vec![(Shown::Still(Arc::new(first)), 1.0f32)];
         let result = P::frame(|| screen.show(&looks(&shown)));
         let ok = result.is_ok();
-        tell(Event::Presented { id, result });
+        tell(Event::Presented { id, result, first: begun.elapsed().as_millis() as u64 });
         let slow_after = period.mul_f32(1.5);
         let mut motion: Option<Motion> = None;
         let mut settling: Option<Settling> = None;
@@ -547,6 +551,11 @@ mod running {
                 let started = Instant::now();
                 let reading = key.as_ref().and(cached).map(|path| std::thread::spawn(move || crate::live::canvas::read(&path).map(Arc::new).map_err(|error| format!("{error:#}"))));
                 let made = device.is_none().then(|| Gpu::new(composition));
+                if let Some(Ok(gpu)) = &made {
+                    if events.send(Event::Device { gpu: gpu.clone(), composition }).is_ok() {
+                        waker();
+                    }
+                }
                 let usable = device.clone().or_else(|| made.clone().and_then(Result::ok));
                 let mut from = None;
                 let loaded = key.map(|(path, [width, height])| {
@@ -607,7 +616,16 @@ mod running {
                 self.fail(Some(id), format!("layer {id} is already open"));
                 return;
             }
-            let layer = match pending.layer.take().map(Ok).unwrap_or_else(|| self.platform.open(&pending.screen, &self.hints)) {
+            let opening = Instant::now();
+            let layer = match pending.layer.take() {
+                Some(layer) => Ok(layer),
+                None => {
+                    let opened = self.platform.open(&pending.screen, &self.hints);
+                    pending.window = opening.elapsed().as_millis() as u64;
+                    opened
+                }
+            };
+            let layer = match layer {
                 Ok(layer) => layer,
                 Err(error) => {
                     self.fail(Some(id), format!("{error:#}"));
@@ -636,7 +654,7 @@ mod running {
                 return;
             }
             let now = Instant::now();
-            self.layers.insert(id, Live { layer: Some(layer), jobs, asked: pending.asked, touched: now, shown: false, stopped: false, closing: None });
+            self.layers.insert(id, Live { layer: Some(layer), jobs, window: pending.window, asked: pending.asked, touched: now, shown: false, stopped: false, closing: None });
         }
 
         fn begin_close(&mut self, id: u32, answer: bool) {
@@ -705,7 +723,7 @@ mod running {
                 }
                 Command::Open { id, screen, rect, scale, still } => {
                     let still = still.map(Decoding::start::<P>);
-                    self.open(Pending { id, screen: Screen { id: screen, frame: rect, scale }, still, asked: Instant::now(), layer: None })
+                    self.open(Pending { id, screen: Screen { id: screen, frame: rect, scale }, still, asked: Instant::now(), layer: None, window: 0 })
                 }
                 Command::Glide { id, a, b, ms } => {
                     let loaded = self.pictures.iter().rev().map(|(_, loaded)| loaded.clone()).collect();
@@ -790,6 +808,17 @@ mod running {
                 Event::Command(command) => self.command(command),
                 Event::HangUp => self.leaving = true,
                 Event::Warmed { gpu, loaded, from, ms } => self.warmed(gpu, loaded, from, ms),
+                Event::Device { gpu, composition } => {
+                    if self.gpu.is_none() {
+                        if self.pinned.is_none() && self.timed.is_none() {
+                            self.scale = self.first_scale(&gpu);
+                        }
+                        self.gpu = Some((gpu, composition));
+                        for pending in std::mem::take(&mut self.pending) {
+                            self.open(pending);
+                        }
+                    }
+                }
                 Event::Timed { timed } => {
                     self.timing = false;
                     if let (Some(timed), None, None) = (timed, self.pinned, self.timed) {
@@ -797,11 +826,12 @@ mod running {
                         self.scale = scooch_live::choose(timed, self.platform.refresh());
                     }
                 }
-                Event::Presented { id, result } => {
+                Event::Presented { id, result, first } => {
                     let Some(live) = self.layers.get(&id) else { return };
                     if live.closing.is_some() {
                         return;
                     }
+                    let revealing = Instant::now();
                     let shown = match (result, live.layer.as_ref()) {
                         (Ok(()), Some(layer)) => self.platform.show(layer).map_err(|error| format!("{error:#}")),
                         (Ok(()), None) => Err("the layer window is gone".to_string()),
@@ -813,7 +843,9 @@ mod running {
                                 live.shown = true;
                                 live.touched = Instant::now();
                                 let ms = live.asked.elapsed().as_millis() as u64;
+                                let window = live.window;
                                 self.tell(Reply::Shown { id, ms });
+                                self.tell(Reply::Drawn { id, window, first, reveal: revealing.elapsed().as_millis() as u64 });
                             }
                         }
                         Err(why) => {
@@ -1157,7 +1189,7 @@ mod running {
             let screen = Screen { id: "stuck".into(), frame: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0 };
             let layer = helper.platform.open(&screen, &Hints::default()).unwrap();
             let (jobs, _receiver) = mpsc::channel();
-            helper.layers.insert(1, Live { layer: Some(layer), jobs, asked: Instant::now(), touched: Instant::now(), shown: true, stopped, closing: None });
+            helper.layers.insert(1, Live { layer: Some(layer), jobs, window: 0, asked: Instant::now(), touched: Instant::now(), shown: true, stopped, closing: None });
             helper.begin_close(1, true);
             if let Some(live) = helper.layers.get_mut(&1) {
                 live.closing = Instant::now().checked_sub(STOP_WAIT + Duration::from_millis(50)).map(|since| (since, true));
