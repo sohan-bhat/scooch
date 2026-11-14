@@ -1,5 +1,5 @@
 import type { EffectComposer, Pass } from 'postprocessing';
-import { Box3, Frustum, Matrix4, Texture, Vector2, type Camera, type Object3D, type Texture as TextureType, type WebGLRenderer, type WebGLRenderTarget } from 'three';
+import { Box3, Frustum, Matrix4, Texture, Vector2, Vector3, type Camera, type Object3D, type Texture as TextureType, type WebGLRenderer, type WebGLRenderTarget } from 'three';
 import { quiet } from '@/lib/idle';
 import { changed, runtime } from '@/story/state';
 
@@ -24,6 +24,7 @@ export const still = {
   row: 0,
   ready: false,
   off: false,
+  box: null as { x: number; y: number; w: number; h: number } | null,
 };
 
 const descriptor = Object.getOwnPropertyDescriptor(Texture.prototype, 'needsUpdate');
@@ -110,6 +111,35 @@ export function inView(object: Object3D | undefined, camera: Camera) {
   projection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
   frustum.setFromProjectionMatrix(projection);
   return frustum.intersectsBox(box.setFromObject(object));
+}
+
+const corner = new Vector3();
+const seen = new Vector3();
+
+export function screenBox(object: Object3D | undefined, camera: Camera, width: number, height: number, pad = 24) {
+  if (!object) return null;
+  box.setFromObject(object);
+  if (box.isEmpty()) return null;
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (let i = 0; i < 8; i++) {
+    corner.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
+    seen.copy(corner).applyMatrix4(camera.matrixWorldInverse);
+    if (seen.z > -0.01) return null;
+    corner.project(camera);
+    x0 = Math.min(x0, (corner.x * 0.5 + 0.5) * width);
+    x1 = Math.max(x1, (corner.x * 0.5 + 0.5) * width);
+    y0 = Math.min(y0, (corner.y * 0.5 + 0.5) * height);
+    y1 = Math.max(y1, (corner.y * 0.5 + 0.5) * height);
+  }
+  const x = Math.max(0, Math.floor(x0 - pad));
+  const y = Math.max(0, Math.floor(y0 - pad));
+  const w = Math.min(width, Math.ceil(x1 + pad)) - x;
+  const h = Math.min(height, Math.ceil(y1 + pad)) - y;
+  if (w <= 0 || h <= 0) return null;
+  return { x, y, w, h };
 }
 
 export function freeze(time: number) {

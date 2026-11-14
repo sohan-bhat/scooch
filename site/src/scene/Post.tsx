@@ -7,7 +7,7 @@ import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEff
 import { quiet } from '@/lib/idle';
 import { runtime, story } from '@/story/state';
 import { quality, type Toggle } from './quality';
-import { allocate, freeze, inView, nativeAllowed, nativeOff, still, thaw } from './still';
+import { allocate, freeze, inView, nativeAllowed, nativeOff, screenBox, still, thaw } from './still';
 import { idleBudget } from './budget';
 import { animating, hooks, live, things } from './touch';
 import { precompile } from './warm';
@@ -189,7 +189,8 @@ export function Post({ phone }: { phone: boolean }) {
     let timer = 0;
     const wait = () => {
       if (stopped) return;
-      if (!runtime.painted) {
+      const intro = performance.getEntriesByName('scooch:intro')[0]?.startTime;
+      if (!runtime.painted || intro === undefined || performance.now() - intro < 1000) {
         timer = window.setTimeout(wait, 500);
         return;
       }
@@ -271,6 +272,8 @@ export function Post({ phone }: { phone: boolean }) {
         total.setSize(size.x, size.y);
         await quiet();
         gl.initRenderTarget(total);
+        await quiet();
+        hooks.frame?.prepare(gl);
         if (await allocate(gl, value)) still.ready = true;
       })().catch(() => nativeOff());
     },
@@ -314,7 +317,9 @@ export function Post({ phone }: { phone: boolean }) {
     const target = composer.inputBuffer;
     const rows = Math.ceil(target.height / still.bands);
     const y = still.band * rows;
-    target.scissor.set(0, y, target.width, Math.min(rows, target.height - y));
+    const box = still.box;
+    if (box) target.scissor.set(box.x, box.y, box.w, box.h);
+    else target.scissor.set(0, y, target.width, Math.min(rows, target.height - y));
     target.scissorTest = true;
     const previous = gl.getRenderTarget();
     const clear = gl.autoClear;
@@ -376,6 +381,7 @@ export function Post({ phone }: { phone: boolean }) {
         still.phase = 'live';
         still.showing = false;
         still.full = false;
+        still.box = null;
         quality.hold = false;
         thaw();
         return;
@@ -405,7 +411,7 @@ export function Post({ phone }: { phone: boolean }) {
           still.phase = 'live';
           return;
         }
-        const rows = Math.max(32, Math.ceil((frame.texture.image as { height: number }).height / 8));
+        const rows = Math.max(32, Math.ceil(frame.rows / 8));
         runtime.muted = true;
         const done = frame.renderRows(gl, story.place, still.row, rows);
         runtime.muted = false;
@@ -421,7 +427,7 @@ export function Post({ phone }: { phone: boolean }) {
           return;
         }
         still.band += 1;
-        if (still.band >= still.bands) still.phase = 'post';
+        if (still.box || still.band >= still.bands) still.phase = 'post';
         return;
       }
       if (still.phase === 'post') {
@@ -443,7 +449,13 @@ export function Post({ phone }: { phone: boolean }) {
         accumulate.fullscreenMaterial.blendAlpha = 1 / (still.pass + 1);
         const clear = gl.autoClear;
         gl.autoClear = false;
+        const box = still.box;
+        if (box) {
+          total.scissor.set(box.x, box.y, box.w, box.h);
+          total.scissorTest = true;
+        }
         accumulate.render(gl, { texture: image } as WebGLRenderTarget, null as never);
+        total.scissorTest = false;
         gl.autoClear = clear;
         still.image = total.texture;
         if (still.pass === 0 && !still.tick) {
@@ -471,7 +483,9 @@ export function Post({ phone }: { phone: boolean }) {
         }
         const second = Math.floor(Date.now() / 1000);
         if (second !== still.second && inView(things.clock, camera)) {
+          const target = quality.nativeComposer?.inputBuffer;
           still.second = second;
+          still.box = target ? screenBox(things.clock, camera, target.width, target.height) : null;
           still.band = 0;
           still.pass = 0;
           still.tick = true;
@@ -497,6 +511,7 @@ export function Post({ phone }: { phone: boolean }) {
       }
       still.phase = 'still';
       still.tick = false;
+      still.box = null;
     },
     [gl, overlay, present],
   );
