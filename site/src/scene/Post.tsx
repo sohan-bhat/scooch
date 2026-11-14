@@ -1,19 +1,21 @@
 import { Bloom, DepthOfField, EffectComposer, N8AO, Noise, SMAA, ToneMapping, Vignette } from '@react-three/postprocessing';
 import { useFrame, useThree } from '@react-three/fiber';
 import { BlendFunction, CopyPass, ToneMappingMode } from 'postprocessing';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { ConstantAlphaFactor, CustomBlending, HalfFloatType, OneMinusConstantAlphaFactor, Vector2, type Texture, type WebGLRenderTarget } from 'three';
-import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect } from 'postprocessing';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinusConstantAlphaFactor, Vector2, type Texture, type WebGLRenderTarget } from 'three';
+import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass } from 'postprocessing';
 import { quiet } from '@/lib/idle';
 import { runtime } from '@/story/state';
 import { quality, type Toggle } from './quality';
-import { animating, live } from './touch';
+import { allocate, freeze, inView, nativeAllowed, nativeOff, still, thaw } from './still';
+import { animating, live, things } from './touch';
 import { precompile } from './warm';
 
 type Target = { isWebGLMultipleRenderTargets?: boolean; textures?: Texture[] & { mipmaps?: unknown[] } };
 
 const SHARP_AFTER = 250;
 const BLEND = 150;
+const STILL_AFTER = 400;
 
 function patchTargets(pass: object) {
   const fix = () => {
@@ -68,6 +70,24 @@ function sizeTo(composer: EffectComposerType, width: number, height: number) {
 }
 const captured = new WeakSet<CopyPass>();
 
+function grab(pass: Pass, run: () => void) {
+  let texture: Texture | null = null;
+  const render = pass.render;
+  const toScreen = pass.renderToScreen;
+  pass.renderToScreen = false;
+  pass.render = function grabbed(this: Pass, renderer, inputBuffer, outputBuffer, delta, stencil) {
+    render.call(this, renderer, inputBuffer, outputBuffer, delta, stencil);
+    texture = outputBuffer ? outputBuffer.texture : null;
+  };
+  try {
+    run();
+  } finally {
+    pass.render = render;
+    pass.renderToScreen = toScreen;
+  }
+  return texture as Texture | null;
+}
+
 function capture(pass: CopyPass) {
   if (captured.has(pass)) return;
   captured.add(pass);
@@ -83,6 +103,9 @@ export function Post({ phone }: { phone: boolean }) {
   const scene = useThree((state) => state.scene);
   const camera = useThree((state) => state.camera);
   const fastRender = useRef<((delta?: number) => void) | null>(null);
+  const sharpRender = useRef<((delta?: number) => void) | null>(null);
+  const nativeRender = useRef<((delta?: number) => void) | null>(null);
+  const [native, setNative] = useState(false);
   const full = !phone && quality.tier === 'full';
   const fast = quality.hasFast && runtime.still < 0;
   const copy = useMemo(() => new CopyPass(), []);
@@ -93,6 +116,14 @@ export function Post({ phone }: { phone: boolean }) {
     pass.fullscreenMaterial.blending = CustomBlending;
     pass.fullscreenMaterial.blendSrc = ConstantAlphaFactor;
     pass.fullscreenMaterial.blendDst = OneMinusConstantAlphaFactor;
+    pass.fullscreenMaterial.depthTest = false;
+    pass.fullscreenMaterial.depthWrite = false;
+    return pass;
+  }, []);
+  const present = useMemo(() => {
+    const pass = new CopyPass();
+    pass.renderToScreen = true;
+    pass.fullscreenMaterial.blending = NoBlending;
     pass.fullscreenMaterial.depthTest = false;
     pass.fullscreenMaterial.depthWrite = false;
     return pass;
@@ -114,8 +145,44 @@ export function Post({ phone }: { phone: boolean }) {
     return () => {
       copy.dispose();
       overlay.dispose();
+      present.dispose();
     };
-  }, [copy, overlay]);
+  }, [copy, overlay, present]);
+
+  useEffect(() => {
+    const input = () => {
+      still.inputAt = performance.now();
+    };
+    const events = ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'] as const;
+    for (const name of events) window.addEventListener(name, input, { passive: true });
+    const lost = () => nativeOff();
+    gl.domElement.addEventListener('webglcontextlost', lost);
+    return () => {
+      for (const name of events) window.removeEventListener(name, input);
+      gl.domElement.removeEventListener('webglcontextlost', lost);
+    };
+  }, [gl]);
+
+  useEffect(() => {
+    if (runtime.still >= 0 || quality.liveScale >= 0.999) return;
+    let stopped = false;
+    let timer = 0;
+    const wait = () => {
+      if (stopped) return;
+      if (!runtime.painted) {
+        timer = window.setTimeout(wait, 500);
+        return;
+      }
+      if (!nativeAllowed(gl)) return;
+      still.bands = quality.gpu === 'low' && !quality.phone ? 6 : 3;
+      setNative(true);
+    };
+    timer = window.setTimeout(wait, 500);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [gl]);
 
   const sharpComposer = useCallback(
     (value: EffectComposerType | null) => {
@@ -126,8 +193,9 @@ export function Post({ phone }: { phone: boolean }) {
         sizeTo(value, size.x, size.y);
       };
       const render = value.render.bind(value);
+      sharpRender.current = render;
       value.render = (delta?: number) => {
-        if (quality.chain !== 'sharp') return;
+        if (quality.chain !== 'sharp' || quality.hold) return;
         render(delta);
         const t = (performance.now() - quality.blendAt) / BLEND;
         const last = quality.lastFast;
@@ -157,7 +225,7 @@ export function Post({ phone }: { phone: boolean }) {
         quality.fastReady = true;
       };
       value.render = (delta?: number) => {
-        if (quality.chain !== 'fast') return;
+        if (quality.chain !== 'fast' || quality.hold) return;
         const last = value.passes[value.passes.length - 1];
         if (last instanceof CopyPass) capture(last);
         render(delta);
@@ -168,6 +236,21 @@ export function Post({ phone }: { phone: boolean }) {
       };
     },
     [gl, size],
+  );
+
+  const nativeComposer = useCallback(
+    (value: EffectComposerType | null) => {
+      quality.nativeComposer = value;
+      if (!value) return;
+      nativeRender.current = value.render.bind(value);
+      value.render = () => undefined;
+      void (async () => {
+        await quiet();
+        await precompile(gl, scene, camera, [value]);
+        if (await allocate(gl, value)) still.ready = true;
+      })().catch(() => nativeOff());
+    },
+    [gl, scene, camera],
   );
 
   useEffect(() => {
@@ -199,18 +282,145 @@ export function Post({ phone }: { phone: boolean }) {
     };
   }, [fast, gl, scene, camera]);
 
-  useFrame((_, delta) => {
-    if (quality.liveScale < 0.999) {
+  const introAt = useRef(0);
+
+  const band = useCallback(() => {
+    const composer = quality.nativeComposer;
+    if (!composer) return false;
+    const target = composer.inputBuffer;
+    const rows = Math.ceil(target.height / still.bands);
+    const y = still.band * rows;
+    target.scissor.set(0, y, target.width, Math.min(rows, target.height - y));
+    target.scissorTest = true;
+    const previous = gl.getRenderTarget();
+    const clear = gl.autoClear;
+    gl.setRenderTarget(target);
+    gl.clear();
+    gl.autoClear = false;
+    gl.render(scene, camera);
+    gl.autoClear = clear;
+    gl.setRenderTarget(previous);
+    target.scissorTest = false;
+    return true;
+  }, [gl, scene, camera]);
+
+  const place = useCallback(
+    (full: boolean) => {
+      if (quality.liveScale >= 0.999) return;
       gl.getSize(size);
-      const r = quality.liveScale;
+      const r = full ? 1 : quality.liveScale;
       gl.setViewport(0, size.y * (1 - r), size.x * r, size.y * r);
-      const scale = `scale(${1 / r})`;
-      if (corner.scale !== scale) {
-        corner.scale = scale;
-        gl.domElement.style.transformOrigin = '0 0';
-        gl.domElement.style.transform = scale;
+      const scale = full ? 'none' : `scale(${1 / r})`;
+      if (corner.scale === scale) return;
+      corner.scale = scale;
+      gl.domElement.style.transformOrigin = '0 0';
+      gl.domElement.style.transform = scale;
+    },
+    [gl, size],
+  );
+
+  const settle = useCallback(
+    (now: number, moving: boolean, time: number) => {
+      if (!introAt.current) introAt.current = performance.getEntriesByName('scooch:intro')[0]?.startTime ?? 0;
+      const calm =
+        still.ready &&
+        !still.off &&
+        !moving &&
+        !live.pressing &&
+        !live.tape &&
+        runtime.settled &&
+        runtime.props &&
+        runtime.gallery &&
+        runtime.inside &&
+        !document.hidden &&
+        introAt.current > 0 &&
+        now - introAt.current > 2500 &&
+        quality.chain === 'sharp' &&
+        now - quality.blendAt > BLEND &&
+        now - still.inputAt > STILL_AFTER &&
+        now - runtime.changedAt > STILL_AFTER;
+      if (still.phase !== 'live' && !calm) {
+        still.phase = 'live';
+        still.showing = false;
+        quality.hold = false;
+        thaw();
+        return;
       }
-    }
+      if (still.phase === 'live') {
+        if (!calm) return;
+        freeze(time);
+        still.phase = 'capture';
+        quality.hold = true;
+        return;
+      }
+      if (still.phase === 'capture') {
+        const composer = quality.composer;
+        const render = sharpRender.current;
+        const last = composer?.passes[composer.passes.length - 1];
+        still.live = composer && render && last ? grab(last, () => render(0)) : null;
+        still.band = 0;
+        still.tick = false;
+        still.phase = still.live ? 'bands' : 'live';
+        return;
+      }
+      if (still.phase === 'bands') {
+        if (!band()) {
+          still.phase = 'live';
+          return;
+        }
+        still.band += 1;
+        if (still.band >= still.bands) still.phase = 'post';
+        return;
+      }
+      if (still.phase === 'post') {
+        const composer = quality.nativeComposer;
+        const render = nativeRender.current;
+        if (!composer || !render) {
+          still.phase = 'live';
+          return;
+        }
+        const first = composer.passes[0];
+        first.enabled = false;
+        still.image = grab(composer.passes[composer.passes.length - 1], () => render(0));
+        first.enabled = true;
+        still.phase = still.image ? 'show' : 'live';
+        if (!still.image) still.showing = false;
+        still.shownAt = now;
+        still.second = Math.floor(Date.now() / 1000);
+        return;
+      }
+      if (still.phase === 'still') {
+        const second = Math.floor(Date.now() / 1000);
+        if (second !== still.second && inView(things.clock, camera)) {
+          still.second = second;
+          still.band = 0;
+          still.tick = true;
+          still.phase = 'bands';
+        }
+      }
+    },
+    [band, camera],
+  );
+
+  const show = useCallback(
+    (now: number) => {
+      if (!still.image) return;
+      present.render(gl, { texture: still.image } as WebGLRenderTarget, null as never);
+      const t = still.tick ? 1 : (now - still.shownAt) / BLEND;
+      if (t < 1 && still.live) {
+        overlay.fullscreenMaterial.blendAlpha = 1 - t;
+        const clear = gl.autoClear;
+        gl.autoClear = false;
+        overlay.render(gl, { texture: still.live } as WebGLRenderTarget, null as never);
+        gl.autoClear = clear;
+        return;
+      }
+      still.phase = 'still';
+    },
+    [gl, overlay, present],
+  );
+
+  useFrame((state, delta) => {
     const now = performance.now();
     if (live.pressing || animating(now)) motion.until = Math.max(motion.until, now + SHARP_AFTER);
     const moving = now < motion.until;
@@ -220,10 +430,15 @@ export function Post({ phone }: { phone: boolean }) {
     quality.moving = moving;
     if (before && moving && quality.motionSharp && quality.chain === 'sharp' && now - quality.switchAt > 100 && delta * 1000 > quality.period * 1.5) quality.miss();
     const want = fast && runtime.shown && quality.fastReady && moving && !quality.motionSharp ? 'fast' : 'sharp';
-    if (want === quality.chain) return;
-    if (want === 'sharp') quality.blendAt = now;
-    quality.switchAt = now;
-    quality.chain = want;
+    if (want !== quality.chain) {
+      if (want === 'sharp') quality.blendAt = now;
+      quality.switchAt = now;
+      quality.chain = want;
+    }
+    settle(now, moving, state.clock.elapsedTime - runtime.timeShift);
+    if (still.phase === 'show') still.showing = true;
+    place(still.showing);
+    if (still.phase === 'show') show(now);
   });
 
   return (
@@ -235,6 +450,11 @@ export function Post({ phone }: { phone: boolean }) {
         <EffectComposer ref={fastComposer} multisampling={0} frameBufferType={HalfFloatType} autoClear={false}>
           <Effects full={full} />
           {full && quality.ao ? null : <primitive object={copy} />}
+        </EffectComposer>
+      ) : null}
+      {native ? (
+        <EffectComposer ref={nativeComposer} multisampling={0} frameBufferType={HalfFloatType} autoClear={false}>
+          <Effects full={full} />
         </EffectComposer>
       ) : null}
     </>

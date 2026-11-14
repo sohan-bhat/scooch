@@ -72,8 +72,11 @@ class Quality {
   dofs: DepthOfFieldEffect[] = [];
   composer: EffectComposer | null = null;
   fastComposer: EffectComposer | null = null;
+  nativeComposer: EffectComposer | null = null;
+  hold = false;
 
   tier: Tier = 'full';
+  phone = false;
   gpu: GpuClass = 'high';
   dof = true;
   ao = true;
@@ -96,6 +99,7 @@ class Quality {
   earnFor = EARN;
 
   configure(phone: boolean, deviceDpr: number, gpu: GpuClass) {
+    this.phone = phone;
     this.gpu = phone ? 'low' : gpu;
     this.tier = this.gpu === 'low' ? 'light' : 'full';
     const chosen = phone ? { sharp: 1, dof: false, ao: false, grain: true } : settings[this.gpu];
