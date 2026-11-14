@@ -79,6 +79,9 @@ mod running {
         }
         fn show(&mut self, layer: &Self::Layer) -> Result<()>;
         fn close(&mut self, layer: Self::Layer);
+        fn abandon(&mut self, layer: Self::Layer) {
+            std::mem::forget(layer);
+        }
         fn wait(&mut self, timeout: Duration);
         fn waker(&self) -> Waker;
         fn decode(path: &Path) -> Result<RgbImage>
@@ -573,7 +576,11 @@ mod running {
         fn finish(&mut self, id: u32) {
             let Some(mut live) = self.layers.remove(&id) else { return };
             if let Some(layer) = live.layer.take() {
-                self.platform.close(layer);
+                if live.stopped {
+                    self.platform.close(layer);
+                } else {
+                    self.platform.abandon(layer);
+                }
             }
             if live.closing.is_some_and(|(_, answer)| answer) {
                 self.tell(Reply::Closed { id });
@@ -824,7 +831,11 @@ mod running {
             }
         }
 
-        struct Fake;
+        #[derive(Default)]
+        struct Fake {
+            closed: usize,
+            abandoned: usize,
+        }
 
         #[cfg(target_os = "macos")]
         struct Drawn {
@@ -886,12 +897,22 @@ mod running {
 
             #[cfg(windows)]
             fn close(&mut self, layer: Drawn) {
+                self.closed += 1;
                 let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(windows::Win32::Foundation::HWND(layer.window as *mut std::ffi::c_void)) };
             }
 
             #[cfg(target_os = "macos")]
             fn close(&mut self, layer: Drawn) {
+                self.closed += 1;
                 drop(layer.metal);
+            }
+
+            fn abandon(&mut self, layer: Drawn) {
+                self.abandoned += 1;
+                #[cfg(target_os = "macos")]
+                std::mem::forget(layer.metal);
+                #[cfg(windows)]
+                let _ = layer.window;
             }
 
             fn wait(&mut self, timeout: Duration) {
@@ -957,7 +978,7 @@ mod running {
             let (first, second) = (made(&folder, "one", &one, [160, 100]), made(&folder, "two", &two, [120, 96]));
             let (events, inbox) = mpsc::channel();
             let out = Captured::default();
-            let mut helper = Helper { platform: Fake, out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let mut helper = Helper { platform: Fake::default(), out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
             let before = scooch_live::devices_made();
             let screen = |made: &Made| (format!("screen-{}", made.size[0]), Rect { x: 0.0, y: 0.0, w: made.size[0] as f32, h: made.size[1] as f32 });
             for (index, made) in [&first, &second].into_iter().enumerate() {
@@ -990,6 +1011,32 @@ mod running {
             assert_eq!(scooch_live::devices_made() - before, 1, "the helper made more than one device");
             assert_eq!(helper.pictures.len(), 2);
             let _ = std::fs::remove_dir_all(&folder);
+        }
+
+        fn closed_after_stop(stopped: bool) -> (usize, usize, Vec<Reply>) {
+            let (events, _inbox) = mpsc::channel();
+            let out = Captured::default();
+            let mut helper = Helper { platform: Fake::default(), out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let screen = Screen { id: "stuck".into(), frame: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0 };
+            let layer = helper.platform.open(&screen, &Hints::default()).unwrap();
+            let (jobs, _receiver) = mpsc::channel();
+            helper.layers.insert(1, Live { layer: Some(layer), jobs, asked: Instant::now(), touched: Instant::now(), shown: true, stopped, closing: None });
+            helper.begin_close(1, true);
+            if let Some(live) = helper.layers.get_mut(&1) {
+                live.closing = Instant::now().checked_sub(STOP_WAIT + Duration::from_millis(50)).map(|since| (since, true));
+            }
+            helper.sweep();
+            (helper.platform.closed, helper.platform.abandoned, out.replies())
+        }
+
+        #[test]
+        fn a_stuck_render_thread_leaves_its_layer_abandoned_not_closed() {
+            let (closed, abandoned, replies) = closed_after_stop(false);
+            assert_eq!((closed, abandoned), (0, 1));
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Closed { id: 1 })), "{replies:?}");
+            let (closed, abandoned, replies) = closed_after_stop(true);
+            assert_eq!((closed, abandoned), (1, 0));
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Closed { id: 1 })), "{replies:?}");
         }
 
         #[test]
