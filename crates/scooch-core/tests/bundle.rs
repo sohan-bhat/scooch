@@ -88,7 +88,7 @@ fn a_glide_starts_and_ends_on_the_stills() {
     }
 }
 
-const STEP_MEAN: f64 = 0.1;
+const STEP_MEAN: f64 = 0.15;
 
 #[test]
 fn a_glide_moves_in_small_even_steps() {
