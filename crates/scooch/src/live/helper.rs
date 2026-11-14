@@ -545,34 +545,47 @@ mod running {
             let (key, cached, composition) = (want.key.clone(), want.canvas.clone(), want.composition);
             let spawned = std::thread::Builder::new().name("scooch-live-warm".into()).spawn(move || {
                 let started = Instant::now();
-                let reading = key.as_ref().and(cached).map(|path| std::thread::spawn(move || crate::live::canvas::read(&path).map_err(|error| format!("{error:#}"))));
+                let reading = key.as_ref().and(cached).map(|path| std::thread::spawn(move || crate::live::canvas::read(&path).map(Arc::new).map_err(|error| format!("{error:#}"))));
                 let made = device.is_none().then(|| Gpu::new(composition));
                 let usable = device.clone().or_else(|| made.clone().and_then(Result::ok));
                 let mut from = None;
                 let loaded = key.map(|(path, [width, height])| {
                     let gpu = usable.ok_or_else(|| "no device".to_string())?;
                     gpu.ready()?;
-                    let read = reading.map(|reading| reading.join().unwrap_or_else(|_| Err("the canvas reader stopped".into())));
-                    let canvas = match read {
-                        Some(Ok(canvas)) => {
-                            from = Some("cache".to_string());
-                            canvas
-                        }
-                        other => {
-                            from = Some(match other {
-                                Some(Err(why)) => format!("picture, {why}"),
-                                _ => "picture".to_string(),
-                            });
-                            let image = P::decode(&path).map_err(|error| format!("{error:#}"))?;
-                            let (width, height) = if width == 0 || height == 0 { (image.width(), image.height()) } else { (width, height) };
-                            gpu.fits(width.max(1), height.max(1))?;
-                            scooch_core::canvas(&image, width.max(1), height.max(1))
-                        }
-                    };
                     if width > 0 && height > 0 {
                         gpu.fits(width, height)?;
                     }
-                    let picture = gpu.try_picture(&canvas)?;
+                    let read = reading.map(|reading| reading.join().unwrap_or_else(|_| Err("the canvas reader stopped".into())));
+                    let cached = match read {
+                        Some(Ok(cached)) => {
+                            let checking = {
+                                let cached = cached.clone();
+                                std::thread::spawn(move || cached.canvas().map_err(|error| format!("{error:#}")))
+                            };
+                            let picture = gpu.try_picture_levels(cached.width, cached.height, &cached.levels());
+                            match (checking.join().unwrap_or_else(|_| Err("the canvas check stopped".into())), picture) {
+                                (Ok(canvas), Ok(picture)) => Ok((canvas, picture)),
+                                (Err(why), _) | (_, Err(why)) => Err(why),
+                            }
+                        }
+                        Some(Err(why)) => Err(why),
+                        None => Err(String::new()),
+                    };
+                    let (canvas, picture) = match cached {
+                        Ok(made) => {
+                            from = Some("cache".to_string());
+                            made
+                        }
+                        Err(why) => {
+                            from = Some(if why.is_empty() { "picture".to_string() } else { format!("picture, {why}") });
+                            let image = P::decode(&path).map_err(|error| format!("{error:#}"))?;
+                            let (width, height) = if width == 0 || height == 0 { (image.width(), image.height()) } else { (width, height) };
+                            gpu.fits(width.max(1), height.max(1))?;
+                            let canvas = scooch_core::canvas(&image, width.max(1), height.max(1));
+                            let picture = gpu.try_picture(&canvas)?;
+                            (canvas, picture)
+                        }
+                    };
                     Ok(Loaded { canvas: Arc::new(canvas), picture })
                 });
                 let _ = events.send(Event::Warmed { gpu: made, loaded, from, ms: started.elapsed().as_millis() as u64 });
@@ -1068,7 +1081,8 @@ mod running {
             std::fs::write(&two, scooch_core::bundle(&image, &analysis, &b, &second, &options).tables_to_bytes()).unwrap();
             let canvas = folder.join(format!("{name}.canvas"));
             let print = crate::live::canvas::fingerprint(bundle.canvas_width, bundle.canvas_height, &bundle.canvas);
-            std::fs::write(&canvas, crate::live::canvas::encode(bundle.canvas_width, bundle.canvas_height, &bundle.canvas, print)).unwrap();
+            let pixels = scooch_core::Canvas { width: bundle.canvas_width, height: bundle.canvas_height, pixels: bundle.canvas.clone() };
+            crate::live::canvas::write(&canvas, bundle.canvas_width, bundle.canvas_height, &scooch_live::levels(&pixels), print).unwrap();
             Made { picture, size, still, tables: (one, two), canvas }
         }
 
@@ -1095,8 +1109,7 @@ mod running {
             let (one, two) = (paint(320, 200, 3), paint(240, 240, 5));
             let (first, second) = (made(&folder, "one", &one, [160, 100]), made(&folder, "two", &two, [120, 96]));
             let mut damaged = std::fs::read(&first.canvas).unwrap();
-            let last = damaged.len() - 1;
-            damaged[last] ^= 1;
+            damaged[crate::live::canvas::HEAD] ^= 1;
             std::fs::write(&first.canvas, damaged).unwrap();
             let (events, inbox) = mpsc::channel();
             let out = Captured::default();
