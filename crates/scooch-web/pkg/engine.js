@@ -26,6 +26,8 @@ import init, { Engine as Raw } from './scooch_web.js';
  */
 
 let ready = null;
+/** @type {any} */
+let instance = null;
 
 /**
  * Loads the WebAssembly once. Later calls return the same promise.
@@ -33,7 +35,9 @@ let ready = null;
  * @returns {Promise<void>}
  */
 export function load(wasm = new URL('./scooch_web_bg.wasm', import.meta.url)) {
-  ready ??= init({ module_or_path: wasm }).then(() => undefined);
+  ready ??= init({ module_or_path: wasm }).then((exports) => {
+    instance = exports;
+  });
   return ready;
 }
 
@@ -128,6 +132,14 @@ export class Engine {
     return unpack(this.raw.drag(icons, held, budgetMs));
   }
 
+  /**
+   * Bytes of WebAssembly memory the engine holds in this thread.
+   * @returns {Promise<number>}
+   */
+  async memory() {
+    return instance ? instance.memory.buffer.byteLength : 0;
+  }
+
   /** @returns {Promise<void>} */
   async free() {
     this.raw.free();
@@ -209,6 +221,14 @@ export class Remote {
    */
   drag(icons, held, budgetMs) {
     return this.call('drag', [icons, held, budgetMs]);
+  }
+
+  /**
+   * Bytes of WebAssembly memory the engine holds in its worker.
+   * @returns {Promise<number>}
+   */
+  memory() {
+    return this.call('memory', []);
   }
 
   /** @returns {Promise<void>} */

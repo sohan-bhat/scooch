@@ -32,6 +32,8 @@ async function run(job) {
   } else if (op === 'drop' || op === 'drag') {
     const tables = op === 'drop' ? await engine.drop(args[0]) : await engine.drag(args[0], args[1], args[2]);
     reply(id, tables, transferables(tables));
+  } else if (op === 'memory') {
+    reply(id, await engine.memory());
   } else if (op === 'free') {
     await engine.free();
     engine = null;
