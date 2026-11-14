@@ -7,7 +7,7 @@ import { DESK_TOP } from './layout';
 import { ask, begin, end } from './drag';
 import { warm } from './engine';
 import { CHANNELS, hooks, live, liveId, obstacles, release, rimOf, things } from './touch';
-import { hush } from './sound';
+import { hush, prepare } from './sound';
 import { bounds } from './bounds';
 
 const DESK = { left: -0.98, right: 0.98, back: -0.36, front: 0.42 };
@@ -344,6 +344,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
     if (runtime.painted && now - scan.at > 1000) {
       scan.at = now;
       for (const root of Object.values(things)) if (root) bounds(root);
+      prepare();
     }
     const quiet = now - live.lastScroll > QUIET;
     if (live.quiet && !quiet) {

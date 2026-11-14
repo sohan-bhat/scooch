@@ -1,4 +1,5 @@
 import { asset } from '@/lib/base';
+import { quiet } from '@/lib/idle';
 import { onSound, sound } from '@/lib/sound';
 import { live } from './touch';
 
@@ -16,8 +17,13 @@ const files: Record<string, string> = {
 
 const SHOTS = ['switch', 'knob', 'tack', 'bell', 'pour'];
 const LOOP = 8.42;
+const LATE = 150;
+const RATE = 48000;
+const touch = typeof window !== 'undefined' && window.matchMedia('(hover: none) and (pointer: coarse)').matches;
 let context: AudioContext | null = null;
+let resuming: Promise<void> | null = null;
 let settable: boolean | null = null;
+let prepared = false;
 const buffers = new Map<string, Promise<AudioBuffer | null>>();
 const elements = new Map<string, HTMLAudioElement>();
 let loop: Voice | null = null;
@@ -27,11 +33,13 @@ onSound((on) => {
   if (!on) hush();
   else {
     warm();
+    prepare();
     if (live.tape && context) play('cassette');
   }
 });
 
-function volumeWorks() {
+function useElements() {
+  if (touch) return false;
   if (settable === null) {
     const probe = new Audio();
     probe.volume = 0.5;
@@ -51,7 +59,7 @@ function element(name: string) {
 }
 
 function warm() {
-  if (!sound.on || !volumeWorks() || elements.size) return;
+  if (!sound.on || !useElements() || elements.size) return;
   for (const name of SHOTS) element(name);
   const primer = element('switch');
   primer.muted = true;
@@ -67,13 +75,7 @@ function warm() {
   );
 }
 
-function audio() {
-  context ??= new AudioContext();
-  if (context.state === 'suspended') void context.resume();
-  return context;
-}
-
-function buffer(name: string, target: AudioContext) {
+function decode(name: string, target: BaseAudioContext) {
   let pending = buffers.get(name);
   if (!pending) {
     pending = fetch(asset(files[name]))
@@ -85,16 +87,40 @@ function buffer(name: string, target: AudioContext) {
   return pending;
 }
 
-function lead(data: AudioBuffer) {
-  const samples = data.getChannelData(0);
-  for (let i = 0; i < samples.length; i++) if (Math.abs(samples[i]) > 0.004) return i / data.sampleRate;
-  return 0;
+export function prepare() {
+  if (!touch || prepared || !sound.on || typeof OfflineAudioContext === 'undefined') return;
+  prepared = true;
+  const offline = new OfflineAudioContext(1, 1, RATE);
+  void (async () => {
+    for (const name of SHOTS) {
+      await quiet();
+      await decode(name, offline);
+    }
+  })();
+}
+
+function audio() {
+  if (!context) {
+    context = new AudioContext();
+    resuming = null;
+  }
+  if (context.state === 'suspended') resuming ??= context.resume().finally(() => (resuming = null));
+  return context;
+}
+
+function wait(ms: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, Math.max(0, ms)));
 }
 
 async function start(name: string, { gain = 0.6, rate = 1, repeat = false }: Options = {}): Promise<Voice | null> {
+  const asked = performance.now();
   const target = audio();
-  const data = await buffer(name, target);
+  const data = await decode(name, target);
   if (!data || !sound.on) return null;
+  if (!repeat) {
+    if (target.state !== 'running' && resuming) await Promise.race([resuming, wait(LATE - (performance.now() - asked))]);
+    if (target.state !== 'running' || performance.now() - asked > LATE) return null;
+  }
   const source = target.createBufferSource();
   const level = target.createGain();
   level.gain.value = gain;
@@ -111,18 +137,40 @@ async function start(name: string, { gain = 0.6, rate = 1, repeat = false }: Opt
   return source;
 }
 
+function lead(data: AudioBuffer) {
+  const samples = data.getChannelData(0);
+  for (let i = 0; i < samples.length; i++) if (Math.abs(samples[i]) > 0.004) return i / data.sampleRate;
+  return 0;
+}
+
 function shot(name: string, { gain = 0.6, rate = 1 }: Options = {}): Promise<Voice | null> {
-  if (!volumeWorks()) return start(name, { gain, rate });
+  if (!useElements()) return start(name, { gain, rate });
   const base = element(name);
   const voice = base.paused ? base : (base.cloneNode() as HTMLAudioElement);
+  let late = false;
+  const timer = window.setTimeout(() => {
+    late = true;
+    voice.muted = true;
+  }, LATE);
+  voice.muted = false;
   voice.volume = gain;
   voice.preservesPitch = false;
   (voice as HTMLAudioElement & { webkitPreservesPitch?: boolean }).webkitPreservesPitch = false;
   voice.playbackRate = rate;
   voice.currentTime = 0;
   return voice.play().then(
-    () => ({ stop: () => voice.pause() }),
-    () => null,
+    () => {
+      window.clearTimeout(timer);
+      if (!late) return { stop: () => voice.pause() };
+      voice.pause();
+      voice.muted = false;
+      return null;
+    },
+    () => {
+      window.clearTimeout(timer);
+      voice.muted = false;
+      return null;
+    },
   );
 }
 
