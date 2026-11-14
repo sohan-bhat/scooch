@@ -168,7 +168,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const targets = useMemo(() => ({ lamp: new Object3D(), street: new Object3D(), laptop: new Object3D(), television: new Object3D() }), []);
   const bulbs = useRef<MeshStandardMaterial[]>([]);
   const scratch = useMemo(
-    () => ({ color: new Color(), white: new Color(1, 1, 1), focus: new Vector3(), lampColor: new Color('#ffb46b'), street: tokenColor('rim'), window: new Color(), stripe: new Color(), buffer: new Vector2(), right: new Vector3(), up: new Vector3(), corner: new Vector3() }),
+    () => ({ color: new Color(), white: new Color(1, 1, 1), focus: new Vector3(), lampColor: new Color('#ffb46b'), street: tokenColor('rim'), window: new Color(), stripe: new Color(), buffer: new Vector2(), part: new Vector2(), right: new Vector3(), up: new Vector3(), corner: new Vector3() }),
     [],
   );
   const room = useMemo(() => tokenColor('room'), []);
@@ -603,12 +603,15 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     wall.uniforms.uDrift.value.set(story.drift * 0.018, -story.drift * 0.028);
     floor.uniforms.uDrift.value.copy(wall.uniforms.uDrift.value);
     crt.uTime.value = time;
+    const frameSize = screens.main.texture.image as { width: number; height: number };
     const part = inside?.group.visible ? undefined : heldPart();
     const holding = hooks.drawHeld(gl, Math.min(delta, 0.05), part);
-    if (!holding) screens.main.render(gl, story.place);
-    const frameSize = screens.main.texture.image as { width: number; height: number };
-    const sx = holding && part ? part.width / frameSize.width : 1;
-    const sy = holding && part ? part.height / frameSize.height : 1;
+    const moving = quality.chain === 'fast' && quality.fastScale < 1 ? scratch.part.set(Math.max(1, Math.round(frameSize.width * quality.fastScale)), Math.max(1, Math.round(frameSize.height * quality.fastScale))) : null;
+    const movingPart = moving ? { width: moving.x, height: moving.y } : undefined;
+    if (!holding) screens.main.render(gl, story.place, movingPart);
+    const shownPart = holding ? part : movingPart;
+    const sx = shownPart ? shownPart.width / frameSize.width : 1;
+    const sy = shownPart ? shownPart.height / frameSize.height : 1;
     crt.uFrameScale.value.set(crt.uFrame.value === screens.main.texture ? sx : 1, crt.uFrame.value === screens.main.texture ? sy : 1);
     if (inside) inside.uniforms.uFrameScale.value.set(inside.uniforms.uFrame.value === screens.main.texture ? sx : 1, inside.uniforms.uFrame.value === screens.main.texture ? sy : 1);
     for (const frame of Object.values(gallery.current)) frame.render(gl, 0);

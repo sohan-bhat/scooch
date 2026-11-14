@@ -325,22 +325,31 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       gl.setRenderTarget(previous);
       return pending;
     },
-    render(gl: WebGLRenderer, place: number) {
+    render(gl: WebGLRenderer, place: number, part?: { width: number; height: number }) {
       if (custom) {
         custom = false;
         for (const key of keys) (uniforms[key] as { value: unknown }).value = defaults[key];
       }
       const { from, to, s } = select(place);
-      const key = `${from}:${to}:${s.toFixed(4)}:${scenery.states.length}`;
+      const key = `${from}:${to}:${s.toFixed(4)}:${scenery.states.length}:${part ? `${part.width}x${part.height}` : 'full'}`;
       if (key === last) return false;
       last = key;
       bind('a', scenery.states[from]);
       bind('b', scenery.states[to]);
       uniforms.s.value = s;
+      const full = uniforms.view.value;
+      if (part) {
+        target.viewport.set(0, 0, part.width, part.height);
+        uniforms.view.value = [part.width, part.height];
+      }
       const previous = gl.getRenderTarget();
       gl.setRenderTarget(target);
       gl.render(scene, camera);
       gl.setRenderTarget(previous);
+      if (part) {
+        target.viewport.set(0, 0, target.width, target.height);
+        uniforms.view.value = full;
+      }
       return true;
     },
     async renderIdle(gl: WebGLRenderer, place: number, pixels = 120000) {
