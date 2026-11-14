@@ -219,16 +219,5 @@ export function introduce(refs: Refs, still: number) {
       },
     });
   };
-  if (!load?.full) {
-    fade();
-    return;
-  }
-  let started = false;
-  const go = () => {
-    if (started) return;
-    started = true;
-    fade();
-  };
-  void load.full.then(go);
-  window.setTimeout(go, 1500);
+  fade();
 }
