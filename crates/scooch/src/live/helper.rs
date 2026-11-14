@@ -798,7 +798,206 @@ mod running {
 
     #[cfg(test)]
     mod tests {
-        use super::ease;
+        use super::*;
+        use crate::live::line;
+        use scooch_core::Rect;
+        use std::io::Write;
+
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl Captured {
+            fn replies(&self) -> Vec<Reply> {
+                let bytes = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+                String::from_utf8_lossy(&bytes).lines().filter_map(|text| serde_json::from_str(text).ok()).collect()
+            }
+        }
+
+        struct Fake;
+
+        #[cfg(target_os = "macos")]
+        struct Drawn {
+            metal: objc2::rc::Retained<objc2_quartz_core::CAMetalLayer>,
+            size: (u32, u32),
+        }
+
+        #[cfg(windows)]
+        struct Drawn {
+            window: isize,
+            size: (u32, u32),
+        }
+
+        #[cfg(windows)]
+        fn window(width: u32, height: u32) -> Result<isize> {
+            use windows::core::{w, PCWSTR};
+            use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+            use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+            use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DefWindowProcW, RegisterClassExW, WINDOW_EX_STYLE, WNDCLASSEXW, WS_POPUP};
+            unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+                unsafe { DefWindowProcW(window, message, wparam, lparam) }
+            }
+            let instance = unsafe { GetModuleHandleW(PCWSTR::null()) }?;
+            let class = WNDCLASSEXW { cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32, lpfnWndProc: Some(procedure), hInstance: instance.into(), lpszClassName: w!("ScoochFakeLayer"), ..Default::default() };
+            unsafe { RegisterClassExW(&class) };
+            let made = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("ScoochFakeLayer"), w!("fake"), WS_POPUP, 0, 0, width as i32, height as i32, None, None, Some(instance.into()), None) }?;
+            Ok(made.0 as isize)
+        }
+
+        impl Platform for Fake {
+            type Layer = Drawn;
+
+            fn composition(&self, _hints: &Hints) -> Result<bool> {
+                Ok(false)
+            }
+
+            fn open(&mut self, screen: &Screen, _hints: &Hints) -> Result<Drawn> {
+                let size = (screen.frame.w as u32, screen.frame.h as u32);
+                #[cfg(target_os = "macos")]
+                return Ok(Drawn { metal: objc2_quartz_core::CAMetalLayer::new(), size });
+                #[cfg(windows)]
+                return Ok(Drawn { window: window(size.0, size.1)?, size });
+            }
+
+            fn target(&self, layer: &Drawn) -> Target {
+                #[cfg(target_os = "macos")]
+                return Target::Layer(objc2::rc::Retained::as_ptr(&layer.metal) as *mut std::ffi::c_void);
+                #[cfg(windows)]
+                return Target::Window { window: layer.window, instance: 0, composition: false };
+            }
+
+            fn pixels(&self, layer: &Drawn) -> (u32, u32) {
+                layer.size
+            }
+
+            fn show(&mut self, _layer: &Drawn) -> Result<()> {
+                Ok(())
+            }
+
+            #[cfg(windows)]
+            fn close(&mut self, layer: Drawn) {
+                let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(windows::Win32::Foundation::HWND(layer.window as *mut std::ffi::c_void)) };
+            }
+
+            #[cfg(target_os = "macos")]
+            fn close(&mut self, layer: Drawn) {
+                drop(layer.metal);
+            }
+
+            fn wait(&mut self, timeout: Duration) {
+                std::thread::sleep(timeout.min(Duration::from_millis(5)));
+            }
+
+            fn waker(&self) -> Waker {
+                Arc::new(|| {})
+            }
+
+            fn decode(path: &Path) -> Result<RgbImage> {
+                Ok(scooch_core::open(path)?)
+            }
+        }
+
+        struct Made {
+            picture: PathBuf,
+            size: [u32; 2],
+            still: PathBuf,
+            tables: (PathBuf, PathBuf),
+        }
+
+        fn made(folder: &Path, name: &str, image: &RgbImage, size: [u32; 2]) -> Made {
+            let picture = folder.join(format!("{name}.png"));
+            std::fs::write(&picture, scooch_core::encode_png(image).unwrap()).unwrap();
+            let image = scooch_core::open(&picture).unwrap();
+            let analysis = scooch_core::analyze(&image);
+            let options = scooch_core::Options::default();
+            let icon = Rect { x: 4.0, y: 4.0, w: size[0] as f32 / 6.0, h: size[1] as f32 / 5.0 };
+            let first = scooch_core::Scene { width: size[0], height: size[1], icons: vec![icon] };
+            let second = scooch_core::Scene { width: size[0], height: size[1], icons: vec![Rect { x: size[0] as f32 * 0.5, y: size[1] as f32 * 0.4, ..icon }] };
+            let a = scooch_core::solve(&analysis, &first, &options, None);
+            let b = scooch_core::solve(&analysis, &second, &options, Some(&a));
+            let still = folder.join(format!("{name}-still.png"));
+            std::fs::write(&still, scooch_core::encode_png(&scooch_core::render_with(&image, &analysis, &a, &first, &options)).unwrap()).unwrap();
+            let (one, two) = (folder.join(format!("{name}-a.tables")), folder.join(format!("{name}-b.tables")));
+            std::fs::write(&one, scooch_core::bundle(&image, &analysis, &a, &first, &options).tables_to_bytes()).unwrap();
+            std::fs::write(&two, scooch_core::bundle(&image, &analysis, &b, &second, &options).tables_to_bytes()).unwrap();
+            Made { picture, size, still, tables: (one, two) }
+        }
+
+        fn pump(helper: &mut Helper<Fake>, inbox: &Receiver<Event>, out: &Captured, done: impl Fn(&[Reply]) -> bool) -> Vec<Reply> {
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(90) {
+                while let Ok(event) = inbox.try_recv() {
+                    helper.event(event);
+                }
+                let replies = out.replies();
+                if done(&replies) || replies.iter().any(|reply| matches!(reply, Reply::Failed { .. })) {
+                    return replies;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            out.replies()
+        }
+
+        #[test]
+        fn two_screens_of_different_sizes_warm_and_glide_on_one_device() {
+            let folder = std::env::temp_dir().join(format!("scooch-helper-{}", std::process::id()));
+            std::fs::create_dir_all(&folder).unwrap();
+            let paint = |width: u32, height: u32, step: u32| RgbImage::from_raw(width, height, (0..height).flat_map(|y| (0..width).flat_map(move |x| [((x * step + y) % 256) as u8, ((y * 2) % 256) as u8, ((x + y * step) % 256) as u8])).collect()).unwrap();
+            let (one, two) = (paint(320, 200, 3), paint(240, 240, 5));
+            let (first, second) = (made(&folder, "one", &one, [160, 100]), made(&folder, "two", &two, [120, 96]));
+            let (events, inbox) = mpsc::channel();
+            let out = Captured::default();
+            let mut helper = Helper { platform: Fake, out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let before = scooch_live::devices_made();
+            let screen = |made: &Made| (format!("screen-{}", made.size[0]), Rect { x: 0.0, y: 0.0, w: made.size[0] as f32, h: made.size[1] as f32 });
+            for (index, made) in [&first, &second].into_iter().enumerate() {
+                let id = index as u32 + 1;
+                let (name, rect) = screen(made);
+                helper.event(Event::Command(Command::Warm { hints: Hints { present: None, scale: Some(1.0) }, picture: Some(made.picture.clone()), size: Some(made.size), warm_id: Some(id) }));
+                helper.event(Event::Command(Command::Open { id, screen: name, rect, scale: 1.0, still: Some(made.still.clone()) }));
+            }
+            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().filter(|reply| matches!(reply, Reply::Shown { .. } | Reply::Ready { .. })).count() >= 4);
+            if replies.iter().any(|reply| matches!(reply, Reply::Failed { why, .. } if why.contains("no device"))) {
+                assert!(std::env::var_os("SCOOCH_NEED_ADAPTER").is_none(), "no adapter, and this runner must have one");
+                println!("skipped: no adapter");
+                return;
+            }
+            let readies: Vec<Option<u32>> = replies.iter().filter_map(|reply| match reply {
+                Reply::Ready { warm_id, .. } => Some(*warm_id),
+                _ => None,
+            }).collect();
+            assert_eq!(readies, vec![Some(1), Some(2)], "{replies:?}");
+            for (index, made) in [&first, &second].into_iter().enumerate() {
+                helper.event(Event::Command(Command::Glide { id: index as u32 + 1, a: made.tables.0.clone(), b: made.tables.1.clone(), ms: 120 }));
+            }
+            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().filter(|reply| matches!(reply, Reply::Glided { .. })).count() >= 2);
+            assert!(!replies.iter().any(|reply| matches!(reply, Reply::Failed { .. })), "{replies:?}");
+            for id in [1, 2] {
+                helper.event(Event::Command(Command::Close { id }));
+            }
+            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().filter(|reply| matches!(reply, Reply::Closed { .. })).count() >= 2);
+            assert_eq!(replies.iter().filter(|reply| matches!(reply, Reply::Closed { .. })).count(), 2, "{replies:?}");
+            assert_eq!(scooch_live::devices_made() - before, 1, "the helper made more than one device");
+            assert_eq!(helper.pictures.len(), 2);
+            let _ = std::fs::remove_dir_all(&folder);
+        }
+
+        #[test]
+        fn a_line_that_cannot_be_read_is_answered() {
+            assert!(matches!(read(""), Err(Reply::Failed { id: None, .. })));
+            assert!(matches!(read("{\"kind\":\"warm\""), Err(Reply::Failed { id: None, .. })));
+            assert!(matches!(read(line(&Command::Quit).unwrap().trim()), Ok(Command::Quit)));
+        }
 
         #[test]
         fn the_ease_starts_and_ends_at_rest() {
