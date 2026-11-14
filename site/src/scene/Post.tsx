@@ -2,7 +2,7 @@ import { Bloom, DepthOfField, EffectComposer, N8AO, Noise, SMAA, ToneMapping, Vi
 import { useFrame, useThree } from '@react-three/fiber';
 import { BlendFunction, CopyPass, ToneMappingMode } from 'postprocessing';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinusConstantAlphaFactor, Vector2, WebGLRenderTarget, type Texture } from 'three';
+import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinusConstantAlphaFactor, SRGBColorSpace, Vector2, WebGLRenderTarget, type Texture } from 'three';
 import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass } from 'postprocessing';
 import { quiet } from '@/lib/idle';
 import { runtime } from '@/story/state';
@@ -134,7 +134,7 @@ export function Post({ phone }: { phone: boolean }) {
     pass.fullscreenMaterial.depthWrite = false;
     return pass;
   }, []);
-  const total = useMemo(() => new WebGLRenderTarget(1, 1, { depthBuffer: false }), []);
+  const total = useMemo(() => new WebGLRenderTarget(1, 1, { depthBuffer: false, colorSpace: SRGBColorSpace }), []);
   const accumulate = useMemo(() => {
     const pass = new CopyPass(total, false);
     pass.fullscreenMaterial.transparent = true;
