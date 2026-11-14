@@ -444,6 +444,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     crt.uOsdLevel.value = story.osd;
     writing.current?.(story.written);
     wall.uniforms.uCaptionLevel.value = story.wall;
+    wall.uniforms.uDrift.value.set(story.drift * 0.018, -story.drift * 0.028);
+    floor.uniforms.uDrift.value.copy(wall.uniforms.uDrift.value);
     crt.uTime.value = time;
     screens.main.render(gl, story.place);
     for (const frame of Object.values(gallery.current)) frame.render(gl, 0);

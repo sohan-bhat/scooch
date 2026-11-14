@@ -1,4 +1,4 @@
-import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Vector3, type Texture } from 'three';
+import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Quaternion, Vector3, type Texture } from 'three';
 import { dialPainter, fontsReady, paintedTexture, stickyPainter, typedPainter } from './captions';
 
 function decal(map: Texture, width: number, height: number, options: { emissive?: boolean; opaque?: boolean } = {}) {
@@ -58,17 +58,44 @@ export function labelProps(group: Object3D) {
   }
 
   const clock = group.getObjectByName('clock_whole');
+  let glow: MeshStandardMaterial | null = null;
+  const hands: { node: Object3D; rest: Quaternion; angle: number; turn: (date: Date) => number }[] = [];
   if (clock) {
     const box = top(clock);
     const size = box.getSize(new Vector3());
     const mesh = decal(dial.texture, size.x * 0.62, size.x * 0.62, { emissive: true });
     mesh.position.set(0, size.y * 0.48, box.max.z + 0.0015);
     clock.add(mesh);
+    glow = mesh.material as MeshStandardMaterial;
+    const turns: Record<string, (date: Date) => number> = {
+      houd_hand: (date) => ((date.getHours() % 12) + date.getMinutes() / 60) / 12,
+      minute_hand: (date) => (date.getMinutes() + date.getSeconds() / 60) / 60,
+      second_hand: (date) => (date.getSeconds() + date.getMilliseconds() / 1000) / 60,
+    };
+    for (const [name, turn] of Object.entries(turns)) {
+      const node = clock.getObjectByName(name);
+      const mesh = node?.children.find((child) => (child as Mesh).isMesh) as Mesh | undefined;
+      const target = (node as Mesh)?.isMesh ? (node as Mesh) : mesh;
+      if (!node || !target) continue;
+      target.geometry.computeBoundingBox();
+      const center = target.geometry.boundingBox!.getCenter(new Vector3());
+      if (target !== node) center.applyMatrix4(target.matrix);
+      center.applyQuaternion(node.quaternion);
+      hands.push({ node, rest: node.quaternion.clone(), angle: Math.atan2(center.x, center.y), turn });
+    }
   }
+  const spin = new Quaternion();
+  const axis = new Vector3(0, 0, 1);
 
   return {
-    update(amount: number) {
+    update(amount: number, dark: number) {
       typed.draw(Math.round(amount * 64) / 64);
+      if (glow) glow.emissiveIntensity = 0.25 + 2.4 * dark;
+      const now = new Date();
+      for (const hand of hands) {
+        spin.setFromAxisAngle(axis, -(hand.turn(now) * Math.PI * 2 - hand.angle));
+        hand.node.quaternion.multiplyQuaternions(spin, hand.rest);
+      }
     },
   };
 }

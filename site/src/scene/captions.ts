@@ -140,7 +140,7 @@ export const dialPainter: Painter = (context, width, height) => {
   context.textAlign = 'center';
   context.fillStyle = '#cfeec4';
   const lines = wrap(context, text, width * 0.62);
-  lines.forEach((line, index) => context.fillText(line, width / 2, height * 0.66 + (index - (lines.length - 1) / 2) * size * 1.3));
+  lines.forEach((line, index) => context.fillText(line, width / 2, height * 0.8 + (index - (lines.length - 1) / 2) * size * 1.3));
 };
 
 export const WALL = { left: -1.42, right: -0.16, bottom: 1.3, top: 1.62, z: -0.975 };

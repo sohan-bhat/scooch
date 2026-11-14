@@ -217,7 +217,7 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
     });
     if (holder && screen) onConsole({ mesh: screen, frame: holder });
   }, [group, onConsole]);
-  useFrame(() => labels.update(story.typed));
+  useFrame(() => labels.update(story.typed, 1 - Math.min(story.lamp / 0.8, 1)));
 
   useLayoutEffect(() => {
     for (const child of group.children) child.visible = !phone || child.userData.phone;
