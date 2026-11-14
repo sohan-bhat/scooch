@@ -48,8 +48,9 @@ export const runtime = {
   timeShift: 0,
   changedAt: 0,
   settled: true,
+  muted: false,
 };
 
 export function changed() {
-  runtime.changedAt = performance.now();
+  if (!runtime.muted) runtime.changedAt = performance.now();
 }

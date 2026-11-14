@@ -32,6 +32,7 @@ import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
+import { still as native } from './still';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
 import { Tumbler } from './Tumbler';
@@ -237,6 +238,28 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   );
   const pads = useMemo(() => (built ? { laptop: built.laptop, console: consoleGlass } : null), [built, consoleGlass]);
   const gallery = useRef<Record<string, Frame>>({});
+
+  useEffect(() => {
+    let stopped = false;
+    let timer = 0;
+    const sharpen = async () => {
+      if (stopped) return;
+      if (!(runtime.painted && runtime.gallery && native.ready)) {
+        timer = window.setTimeout(() => void sharpen(), 1000);
+        return;
+      }
+      for (const frame of [screens.main, ...Object.values(gallery.current)]) {
+        await quiet();
+        if (stopped || native.off) return;
+        await frame.sharpen(gl).catch(() => false);
+      }
+    };
+    timer = window.setTimeout(() => void sharpen(), 1000);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [gl, screens]);
 
   useEffect(() => {
     const restored = () => {
@@ -621,9 +644,14 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const frameSize = screens.main.texture.image as { width: number; height: number };
     const part = inside?.group.visible ? undefined : heldPart();
     const holding = hooks.drawHeld(gl, Math.min(delta, 0.05), part);
-    const moving = quality.chain === 'fast' && quality.fastScale < 1 ? scratch.part.set(Math.max(1, Math.round(frameSize.width * quality.fastScale)), Math.max(1, Math.round(frameSize.height * quality.fastScale))) : null;
+    const share = native.phase !== 'live' ? 1 : quality.frameLive * (quality.chain === 'fast' ? quality.fastScale : 1);
+    const moving = share < 0.999 ? scratch.part.set(Math.max(1, Math.round(frameSize.width * share)), Math.max(1, Math.round(frameSize.height * share))) : null;
     const movingPart = moving ? { width: moving.x, height: moving.y } : undefined;
-    if (!holding) screens.main.render(gl, story.place, movingPart);
+    if (!holding) {
+      runtime.muted = native.phase !== 'live';
+      screens.main.render(gl, story.place, movingPart);
+      runtime.muted = false;
+    }
     const shownPart = holding ? part : movingPart;
     const sx = shownPart ? shownPart.width / frameSize.width : 1;
     const sy = shownPart ? shownPart.height / frameSize.height : 1;

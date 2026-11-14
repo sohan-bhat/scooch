@@ -84,6 +84,7 @@ class Quality {
   sharpDpr = 1;
   nativeDpr = 1;
   liveScale = 1;
+  frameLive = 1;
   fastScale = 1;
   chain: Chain = 'sharp';
   switchAt = -1e9;

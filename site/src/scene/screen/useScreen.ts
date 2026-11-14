@@ -48,8 +48,12 @@ export function useScreens(manifest: DemoManifest) {
 
   return useMemo(() => {
     const buffer = quality.liveSize(gl, new Vector2());
+    const native = gl.getDrawingBufferSize(new Vector2());
     const { width, height } = main.info;
-    const scale = Math.min(1, Math.max(buffer.x, buffer.y) / Math.max(width, height));
+    const longest = Math.max(width, height);
+    const live = Math.min(1, Math.max(buffer.x, buffer.y) / longest);
+    const scale = quality.liveScale < 0.999 ? Math.max(live, Math.min(2, Math.max(native.x, native.y) / longest)) : live;
+    quality.frameLive = live / scale;
     const mainFrame = createFrame(main, { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) });
     const crt = createCrtMaterial();
     crt.uniforms.uFrame.value = mainFrame.texture;
