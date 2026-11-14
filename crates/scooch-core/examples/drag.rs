@@ -73,23 +73,30 @@ fn main() {
         let (mut last_still, mut last_layer) = ((*first_still).clone(), first_layers.scenery);
         let cell = 110.0;
         let mut worst = (0u8, 0u8, 0.0f32, 0.0f64, 0u8);
+        let mut shifted = 0;
         let mut tiles = Vec::new();
         let start = scene.icons[held];
         for step in 1..=STEPS {
             let before = scene.icons[held];
             scene.icons[held].x += dx;
             scene.icons[held].y += dy;
-            placement = scooch_core::solve_near(&analysis, &scene, &options, &placement, Duration::from_millis(8));
+            let next = scooch_core::solve_near(&analysis, &scene, &options, &placement, Duration::from_millis(8));
+            let moved = next != placement;
+            placement = next;
             let (bundle, still) = session.still_shared(&image, &analysis, &placement, &scene, &options);
             let layers = scooch_core::frame_layers(&bundle, &bundle, 0.0);
             let (alpha, color, farthest, share) = layer_gap(&last_layer, &layers.scenery, (&before, &scene.icons[held]), cell);
             let (most, _) = gap(&last_still, &still);
-            println!("{label} step {step:2}: scenery alpha {alpha:3} color {color:3} farthest {farthest:.2} cells, changed {share:.2}% | picture largest {most}");
-            worst = (worst.0.max(alpha), worst.1.max(color), worst.2.max(farthest), worst.3.max(share), worst.4.max(most));
+            println!("{label} step {step:2}: scenery alpha {alpha:3} color {color:3} farthest {farthest:.2} cells, changed {share:.2}% | picture largest {most}{}", if moved { " | the wallpaper moved" } else { "" });
+            if moved {
+                shifted += 1;
+            } else {
+                worst = (worst.0.max(alpha), worst.1.max(color), worst.2.max(farthest), worst.3.max(share), worst.4.max(most));
+            }
             last_still = (*still).clone();
             last_layer = layers.scenery;
         }
-        println!("{label} walk worst: scenery alpha {} color {} farthest {:.2} cells changed {:.2}% picture largest {}", worst.0, worst.1, worst.2, worst.3, worst.4);
+        println!("{label} walk worst over the {} steps that kept the wallpaper still: scenery alpha {} color {} farthest {:.2} cells changed {:.2}% picture largest {}", STEPS - shifted, worst.0, worst.1, worst.2, worst.3, worst.4);
         let end = scene.icons[held];
         let (last_bundle, _) = session.still_shared(&image, &analysis, &placement, &scene, &options);
         let mut previous: Option<RgbImage> = None;
