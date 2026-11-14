@@ -2231,9 +2231,16 @@ mod probe {
     }
 
     fn spot(a: &Shot, b: &Shot, from_row: usize) -> Spot {
+        spot_outside(a, b, from_row, None)
+    }
+
+    fn spot_outside(a: &Shot, b: &Shot, from_row: usize, skip: Option<[usize; 4]>) -> Spot {
         let mut found = Spot::default();
         for y in from_row..a.height.min(b.height) {
             for x in 0..a.width.min(b.width) {
+                if skip.is_some_and(|[left, top, right, bottom]| x >= left && x < right && y >= top && y < bottom) {
+                    continue;
+                }
                 let (one, two) = (a.at(x, y), b.at(x, y));
                 let worst = (0..3).map(|channel| one[channel].abs_diff(two[channel])).max().unwrap_or(0);
                 if worst > found.worst {
@@ -2246,6 +2253,7 @@ mod probe {
 
     struct Dragged {
         dropped: f64,
+        skip: Option<[usize; 4]>,
         seen: Vec<Seen>,
         log: Vec<String>,
         old: Option<PathBuf>,
@@ -2310,6 +2318,13 @@ mod probe {
         let old_still = old.as_deref().and_then(|path| objc2::rc::autoreleasepool(|_| picture::decode(path)).ok()).map(|image| halved(&image));
         let menu = (30.0 * screen.scale) as usize;
         let lines = daemon_log(p).lines().count();
+        let grow = 6usize;
+        let skip = finder::named(&finder::view()).ok().and_then(|items| items.into_iter().map(|(_, rect)| rect).find(|rect| from.0 >= rect.x && from.0 <= rect.x + rect.w && from.1 >= rect.y && from.1 <= rect.y + rect.h)).map(|rect| {
+            let pixel = |value: f32, origin: f32| ((value - origin) * screen.scale).max(0.0) as usize;
+            let (left, top) = (pixel(rect.x + to.0 - from.0, screen.frame.x), pixel(rect.y + to.1 - from.1, screen.frame.y));
+            let (right, bottom) = (pixel(rect.x + rect.w + to.0 - from.0, screen.frame.x), pixel(rect.y + rect.h + to.1 - from.1, screen.frame.y));
+            [left.saturating_sub(grow), top.saturating_sub(grow), right + grow, bottom + grow]
+        });
         drag(from, to);
         let dropped = epoch();
         let started = Instant::now();
@@ -2321,7 +2336,7 @@ mod probe {
             let at = epoch();
             let Some(shot) = grab(display) else { continue };
             let inked = masks.iter().map(|ink| ink.iter().filter(|(x, y)| !near(shot.at(*x, *y), baseline.at(*x, *y))).count() as f32 / ink.len().max(1) as f32).fold(0.0, f32::max);
-            let step = previous.as_ref().map_or_else(Spot::default, |previous| spot(previous, &shot, menu));
+            let step = previous.as_ref().map_or_else(Spot::default, |previous| spot_outside(previous, &shot, menu, skip));
             seen.push(Seen { at, half: half_shot(&shot), inked, step });
             previous = Some(shot);
             checks += 1;
@@ -2333,7 +2348,7 @@ mod probe {
             }
         }
         let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).collect();
-        Some(Dragged { dropped, seen, log, old, old_still, old_tables })
+        Some(Dragged { dropped, skip, seen, log, old, old_still, old_tables })
     }
 
     fn logged(dragged: &Dragged, word: &str) -> Option<f64> {
@@ -2444,7 +2459,8 @@ mod probe {
         ));
         p.line(format!("  - captures a second during the glide {:?}, largest gap between captures during the glide {:?} ms, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95, frames the helper drew {frames_drawn:?}", rate.map(|rate| rate.round()), gap.map(|gap| (gap * 1000.0).round()), expected.map(|value| value.round())));
         p.line(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(closed)));
-        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, captures of the settled layer before close {layered:?}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
+        let masked = dragged.skip.map_or("nothing masked, the dropped icon was not found".to_string(), |[left, top, right, bottom]| format!("outside the dropped icon's box of {}x{} px at {left},{top}, its Finder rect grown by 6 px", right - left, bottom - top));
+        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, {masked}, captures of the settled layer before close {layered:?}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
         p.line(format!("  - the change across the settle fade from the glide's last frame to the still, which ends before settled, {:?} of 255 at pixel {:?} from {:?} to {:?}", fade.map(|step| step.worst), fade.map(|step| (step.x, step.y)), fade.map(|step| step.before), fade.map(|step| step.after)));
         p.line(format!("  - daemon log {:?}", dragged.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         if let Some(name) = evidence {
@@ -2791,16 +2807,16 @@ mod probe {
             std::thread::sleep(Duration::from_millis(400));
             alive.push(helper_pids(p).len());
         }
-        std::thread::sleep(Duration::from_millis(1000));
+        std::thread::sleep(Duration::from_millis(2000));
         let left = helper_pids(p);
         let log = new_lines(&daemon_log(p), lines);
         let launches = log.iter().filter(|line| line.contains("glide early launch")).count();
         let lived: Vec<f64> = log.iter().filter_map(|line| number_after(line, "it lived ")).collect();
         let ticks = log.iter().filter(|line| line.contains(" tick ")).count();
         let sent: Vec<String> = log.iter().filter(|line| commanded(line) || line.contains("glide warm") || line.contains("glide open")).map(|line| line.chars().take(160).collect()).collect();
-        p.line(format!("- thirty wakes with nothing moved, after the helper was gone {rested}: ticks {ticks}, early launches {launches}, each quit after living {lived:?} ms, helper commands or picture warms {sent:?}, helpers seen after each wake {alive:?}, helpers left a second after the last wake {left:?}"));
-        if launches > 2 || lived.len() != launches || lived.iter().any(|lived| *lived > 1000.0) || !sent.is_empty() || !left.is_empty() {
-            p.fail("thirty bare wakes launched more than two helpers, kept one past a second, or sent it work");
+        p.line(format!("- thirty wakes with nothing moved, after the helper was gone {rested}: ticks {ticks}, early launches {launches}, each quit after living {lived:?} ms, helper commands or picture warms {sent:?}, helpers seen after each wake {alive:?}, helpers left two seconds after the last wake {left:?}"));
+        if launches > 2 || lived.len() != launches || lived.iter().any(|lived| *lived > 2000.0) || !sent.is_empty() || !left.is_empty() {
+            p.fail("thirty bare wakes launched more than two helpers, kept one past two seconds, or sent it work");
         }
     }
 

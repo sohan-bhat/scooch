@@ -3471,6 +3471,12 @@ mod probe {
         sent: bool,
     }
 
+    fn decisions(p: &mut Probe, watched: &Watched) {
+        for line in watched.log.iter().filter(|line| line.contains("glide decision at the set")) {
+            p.line(format!("  - {line}"));
+        }
+    }
+
     fn watch_change(log: &Path, screen: &Screen, act: impl FnOnce() -> bool, capture_screen: bool) -> Watched {
         let desktop = platform::current().ok();
         let area = screen_rect(screen);
@@ -3828,6 +3834,7 @@ mod probe {
             let from = icon_spot(name, folder);
             let watched = watch_change(&log, &screen, || drag_icon(name, folder, target), false);
             p.line(format!("- setup drag {step} from {from:?} to {},{} after a quiet log {calm}, icon now at {:?}: new wallpaper {}, log {:?}", target.x, target.y, icon_spot(name, folder), watched.new != watched.old, watched.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
+            decisions(p, &watched);
             setup = Some(watched);
         }
         let setup = setup.context("no setup drag")?;
@@ -3847,6 +3854,7 @@ mod probe {
         let warmed = log_lines(&log).iter().any(|line| line.contains(" glide ready"));
         let watched = watch_change(&log, &screen, || drag_icon(name, folder, centre), true);
         p.line(format!("- the timed drag from {from:?} to {},{}, icon now at {:?}", centre.x, centre.y, icon_spot(name, folder)));
+        decisions(p, &watched);
         let given = Judged { source: &source, old_tables: old_tables.as_deref(), before: &before, still_icons: &still_icons, warmed };
         let good = judge_daemon_glide(p, &watched, &screen, &given, "glide on, a real drag onto the subject", Some("daemon-glide-strip"));
         pump(Duration::from_millis(1000));
@@ -3951,6 +3959,7 @@ mod probe {
             glided_again = again.log.iter().any(|line| line.contains(" glide settled"));
             let reasons: Vec<String> = again.log.iter().filter(|line| line.contains("glide skipped")).map(|line| line.chars().take(200).collect()).collect();
             p.line(format!("- drag {tries} after the kill glides {glided_again}, skip reasons {reasons:?}, log {:?}", again.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
+            decisions(p, &again);
             if glided_again {
                 break;
             }
@@ -3980,6 +3989,21 @@ mod probe {
         if !still.is_empty() {
             p.failed.push("a helper was still running 35 s after the last drag".into());
         }
+        let before_bare = log_lines(&log).len();
+        for _ in 0..30 {
+            let _ = scooch::poke::send(daemon);
+            pump(Duration::from_millis(400));
+        }
+        pump(Duration::from_millis(2000));
+        let bare: Vec<String> = log_lines(&log).into_iter().skip(before_bare).collect();
+        let launches = bare.iter().filter(|line| line.contains("glide early launch")).count();
+        let lived: Vec<f64> = bare.iter().filter_map(|line| line.split("it lived ").nth(1).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse().ok())).collect();
+        let sent: Vec<String> = bare.iter().filter(|line| commanded(line)).map(|line| line.chars().take(160).collect()).collect();
+        let left = helper_children(daemon);
+        p.line(format!("- thirty wakes with nothing moved after the helper was gone: early launches {launches}, each quit after living {lived:?} ms, helper commands or picture warms {sent:?}, helper processes two seconds after the last wake {left:?}"));
+        if launches > 2 || lived.len() != launches || lived.iter().any(|lived| *lived > 2000.0) || !sent.is_empty() || !left.is_empty() {
+            p.failed.push("thirty bare wakes launched more than two helpers, kept one past two seconds, or sent it work".into());
+        }
         let (cpu_before, quiet_from) = (cpu(&child), epoch());
         pump(Duration::from_secs(60));
         let (cpu_after, quiet_to) = (cpu(&child), epoch());
@@ -3996,7 +4020,7 @@ mod probe {
         let stamp = |word: &str| rested.log.iter().find(|line| line.contains(word)).and_then(|line| stamp_of(line));
         let rest_glided = rested.log.iter().any(|line| line.contains(" glide settled"));
         let rest_skips: Vec<String> = rested.log.iter().filter(|line| line.contains("glide skipped")).map(|line| line.chars().take(200).collect()).collect();
-        let cold = stamp(" glide helper started").zip(stamp(" glide ready")).map(|(started, ready)| ((ready - started) * 1000.0).round());
+        let cold = stamp(" glide early launch").or_else(|| stamp(" glide helper launched")).zip(stamp(" glide ready")).map(|(started, ready)| ((ready - started) * 1000.0).round());
         let shown = stamp(" glide open after snapshot").zip(rested.log.iter().find(|line| gliding(line)).and_then(|line| stamp_of(line))).map(|(asked, shown)| ((shown - asked) * 1000.0).round());
         p.line(format!(
             "- the first drag after the helper went away, to {},{} and now at {:?}: glided {rest_glided}, skip reasons {rest_skips:?}, helper start to ready {cold:?} ms, open after the snapshot to shown {shown:?} ms, wallpaper set {:?} ms after the drop, log {:?}",
@@ -4006,6 +4030,7 @@ mod probe {
             stamp(" set ").map(|set| ((set - rested.dropped) * 1000.0).round()),
             rested.log.iter().filter(|line| line.contains(" glide ") || line.contains(" set ")).map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()
         ));
+        decisions(p, &rested);
         let stopped = stop_glide_daemon(&mut child);
         p.line(format!("- daemon stopped {stopped:?}"));
         pump(Duration::from_millis(800));
