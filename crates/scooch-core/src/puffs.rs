@@ -149,7 +149,7 @@ impl Shape<'_> {
                 let r = CORE * cell * sky;
                 let clear = f.subject(x, y) - CLEAR * cell;
                 let r = if r > 0.0 { (r * smoothstep(ROOM.0, ROOM.1, clear / r)).min(clear.max(0.0)) } else { 0.0 };
-                air.push([x, y, r]);
+                air.push([x, y, r * smoothstep(FADE.0 * cell, FADE.1 * cell, r)]);
             }
             if water * (1.0 - fit) > 0.0 {
                 bare.push((*icon, water * (1.0 - fit)));
