@@ -3,7 +3,7 @@ use crate::paint::LAYERS;
 use crate::{Analysis, Rect};
 
 const MAGIC: [u8; 4] = *b"SCBT";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const GRID: u32 = 4;
 const PAINT: u32 = 16;
 
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn tables_from_version_one_are_refused() {
+    fn tables_from_older_versions_are_refused() {
         let canvas = Canvas { width: 2, height: 2, pixels: vec![9; 12] };
         let constants = Constants { unit: 10.0, ramp_low: -0.6, ramp_high: 1.15, reach: 1.12, shadow: [0.0; 2], rim: [0.0; 2], belly: [0.0; 2], grain: 0.1, grain_scale: 1.0, grain_floor: 0.0, core_lift: 0.17, core_drop: 0.05, volume_lit: 0.9, volume_dark: 0.9 };
         let bundle = Bundle {
@@ -320,12 +320,15 @@ mod tests {
             constants,
         };
         let bytes = bundle.tables_to_bytes();
+        assert_eq!(&bytes[..8], b"SCBT\x03\x00\x00\x00");
         assert_eq!(Bundle::tables_from_bytes(&bytes, canvas.clone()), Ok(bundle));
-        let mut old = bytes[..bytes.len() - 8].to_vec();
-        old[4..8].copy_from_slice(&1u32.to_le_bytes());
-        let sum = fingerprint(0, 0, &old);
-        old.extend_from_slice(&sum.to_le_bytes());
-        assert_eq!(Bundle::tables_from_bytes(&old, canvas), Err(TablesError::Version));
+        for version in [1u32, 2] {
+            let mut old = bytes[..bytes.len() - 8].to_vec();
+            old[4..8].copy_from_slice(&version.to_le_bytes());
+            let sum = fingerprint(0, 0, &old);
+            old.extend_from_slice(&sum.to_le_bytes());
+            assert_eq!(Bundle::tables_from_bytes(&old, canvas.clone()), Err(TablesError::Version), "version {version}");
+        }
     }
 
     #[test]
