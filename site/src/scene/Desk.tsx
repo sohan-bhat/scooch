@@ -3,11 +3,14 @@ import { useFrame, useThree } from '@react-three/fiber';
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { Box3, Group, HalfFloatType, Mesh, MeshStandardMaterial, Object3D, Vector3, WebGLRenderTarget, type Texture, type WebGLRenderer } from 'three';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { asset } from '@/lib/base';
 import { runtime, story } from '@/story/state';
 import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
+import { still as native } from './still';
+import { advance, budget, calm, level, prefetch, upgrades } from './budget';
 import { labelProps } from './labels';
 import { makeLive, obstacles, rimmed } from './touch';
 import { quiet } from '@/lib/idle';
@@ -32,6 +35,9 @@ const hero = query.has('hero');
 const lite = !still;
 const urls = lite ? pick(heroes, 'models/lite') : full;
 const extraUrls = pick(extras, 'models');
+const sharpExtras = ['clock', 'cassette', 'plant', 'stapler', 'glasses', 'gamepad'] as const;
+const sharpUrls = Object.values(pick(sharpExtras, 'models/sharp'));
+const heroUrls = heroes.map((name) => full[name]);
 
 const support = gpuClass();
 const ktx2 = new KTX2Loader().setTranscoderPath(asset('basis/'));
@@ -42,8 +48,11 @@ ktx2.detectSupport({
   },
 } as never);
 
-function extend(loader: { setKTX2Loader: (value: never) => unknown }) {
+MeshoptDecoder.useWorkers(2);
+
+function extend(loader: { setKTX2Loader: (value: never) => unknown; setMeshoptDecoder: (value: never) => unknown }) {
   loader.setKTX2Loader(ktx2 as never);
+  loader.setMeshoptDecoder(MeshoptDecoder as never);
 }
 
 for (const name of heroes) useGLTF.preload(urls[name], false, true, extend as never);
@@ -80,7 +89,7 @@ async function swapTextures(gl: WebGLRenderer, scene: Object3D, source: Object3D
   for (const [, , texture] of swaps) {
     if (uploaded.has(texture)) continue;
     uploaded.add(texture);
-    await quiet();
+    await calm();
     if (cancelled()) return false;
     gl.initTexture(texture);
   }
@@ -94,10 +103,10 @@ async function swapTextures(gl: WebGLRenderer, scene: Object3D, source: Object3D
   return true;
 }
 
-function Sharpen({ name, onDone }: { name: Hero; onDone: () => void }) {
+function Sharpen({ url, onDone }: { url: string; onDone: () => void }) {
   const gl = useThree((state) => state.gl);
   const scene = useThree((state) => state.scene);
-  const gltf = useGLTF(full[name], false, true, extend);
+  const gltf = useGLTF(url, false, true, extend);
   useEffect(() => {
     let stopped = false;
     void swapTextures(gl, scene, gltf.scene, () => stopped).then((done) => {
@@ -120,23 +129,26 @@ function whenReady(start: () => void, test: () => boolean) {
   return () => window.clearTimeout(timer);
 }
 
-function Sharpener() {
+function Sharpener({ list, when, done }: { list: string[]; when: () => boolean; done: () => void }) {
   const [index, setIndex] = useState(-1);
-  const next = useCallback(() => setIndex((value) => value + 1), []);
+  const next = useCallback(() => void calm().then(() => setIndex((value) => value + 1)), []);
+  useEffect(() => whenReady(() => void calm().then(() => setIndex(0)), when), [when]);
   useEffect(() => {
-    if (!lite) return;
-    return whenReady(
-      () => setIndex(0),
-      () => runtime.props && quality.tier === 'full' && layoutFor(window.innerWidth, window.innerHeight) !== 'phone',
-    );
-  }, []);
-  if (index < 0 || index >= heroes.length) return null;
+    if (index >= list.length) done();
+  }, [index, list, done]);
+  if (index < 0 || index >= list.length) return null;
   return (
     <Suspense fallback={null}>
-      <Sharpen key={heroes[index]} name={heroes[index]} onDone={next} />
+      <Sharpen key={list[index]} url={list[index]} onDone={next} />
     </Suspense>
   );
 }
+
+const desktop = () => layoutFor(window.innerWidth, window.innerHeight) !== 'phone';
+const heroesWhen = () => lite && runtime.props && (quality.tier === 'full' || native.ready) && desktop() && level() === 'all';
+const extrasWhen = () => runtime.painted && native.ready && desktop() && level() === 'all' && budget.stage >= 2;
+const heroesDone = () => advance(1);
+const extrasDone = () => advance(3);
 
 function prepare(root: Object3D) {
   root.traverse((child) => {
@@ -241,6 +253,7 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
   useEffect(() => {
     let stopped = false;
     group.visible = false;
+    const sharpLabels = (wait: () => Promise<void>) => labels.sharpen(gl, wait);
     const target = new WebGLRenderTarget(1, 1, { type: HalfFloatType });
     const compileEach = async () => {
       const waits: Promise<unknown>[] = [];
@@ -282,12 +295,14 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
           warmDraw(gl, scene, camera, holder);
         }
         if (stopped) return;
+        upgrades.add(sharpLabels);
         group.visible = true;
         runtime.props = true;
         onExtras();
       });
     return () => {
       stopped = true;
+      upgrades.delete(sharpLabels);
     };
   }, [group, gl, scene, camera, onExtras, labels]);
 
@@ -324,6 +339,17 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
   const laptop = useGLTF(urls.laptop, false, true, extend);
   const lamp = useGLTF(urls.lamp, false, true, extend);
   const television = useGLTF(urls.television, false, true, extend);
+
+  useEffect(
+    () =>
+      whenReady(
+        () => {
+          if (desktop() && level() === 'all') prefetch([...(lite ? heroUrls : []), ...sharpUrls]);
+        },
+        () => runtime.shown,
+      ),
+    [],
+  );
 
   useMemo(() => {
     for (const model of [desk, laptop, lamp, television]) prepare(model.scene);
@@ -382,7 +408,8 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
         <primitive object={television.scene} />
       </primitive>
       {hero ? null : <LateExtras phone={phone} onExtras={onExtras} onConsole={onConsole} />}
-      <Sharpener />
+      <Sharpener list={heroUrls} when={heroesWhen} done={heroesDone} />
+      <Sharpener list={sharpUrls} when={extrasWhen} done={extrasDone} />
     </group>
   );
 }

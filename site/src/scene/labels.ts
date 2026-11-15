@@ -1,5 +1,8 @@
-import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Quaternion, Vector3, type Texture, type WebGLRenderer } from 'three';
+import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Vector3, type Texture, type WebGLRenderer } from 'three';
 import { quiet } from '@/lib/idle';
+import { changed, runtime, wallClock } from '@/story/state';
+import { clockHands, type Turn } from './clock';
+import { stripUpload } from './upload';
 import { windowLit } from './window';
 import { canvasTexture, dialPainter, fontsReady, paintedTexture, sticky as stickyText, typed as typedText, type Reveal } from './captions';
 
@@ -29,8 +32,8 @@ function revealDecal(painters: Reveal, width: number, height: number, size: numb
     hidden.context.fillStyle = '#fff';
     hidden.context.fillRect(0, 0, 1, 1);
   }
-  const full = canvasTexture(size[0], size[1], true);
-  const order = canvasTexture(size[0], size[1], true, false);
+  let full = canvasTexture(size[0], size[1], true);
+  let order = canvasTexture(size[0], size[1], true, false);
   const uniforms = { uReveal: { value: -1 }, uBlank: { value: blank.texture }, uOrder: { value: hidden.texture } };
   const mesh = decal(blank.texture, width, height, options);
   const material = mesh.material as MeshStandardMaterial;
@@ -43,25 +46,42 @@ function revealDecal(painters: Reveal, width: number, height: number, size: numb
   };
   material.customProgramCacheKey = () => 'reveal';
   windowLit(material);
-  const ready = async (gl: WebGLRenderer) => {
+  const ready = async (gl: WebGLRenderer, wait: () => Promise<void> = quiet) => {
     await fontsReady();
-    await quiet();
+    await wait();
     if (full.context) painters.full(full.context, size[0], size[1], 1);
-    await quiet();
+    await wait();
     if (order.context) painters.order(order.context, size[0], size[1], 1);
-    await quiet();
+    await wait();
     gl.initTexture(blank.texture);
-    await quiet();
-    gl.initTexture(full.texture);
-    await quiet();
-    gl.initTexture(order.texture);
+    if (!(await stripUpload(gl, full.texture, full.texture.image as HTMLCanvasElement, wait))) return false;
+    if (!(await stripUpload(gl, order.texture, order.texture.image as HTMLCanvasElement, wait))) return false;
     material.map = full.texture;
     uniforms.uOrder.value = order.texture;
+    return true;
+  };
+  const sharpen = async (gl: WebGLRenderer, wide: number[], wait: () => Promise<void>) => {
+    const nextFull = canvasTexture(wide[0], wide[1], true);
+    const nextOrder = canvasTexture(wide[0], wide[1], true, false);
+    await wait();
+    if (nextFull.context) painters.full(nextFull.context, wide[0], wide[1], 1);
+    await wait();
+    if (nextOrder.context) painters.order(nextOrder.context, wide[0], wide[1], 1);
+    if (!(await stripUpload(gl, nextFull.texture, nextFull.texture.image as HTMLCanvasElement, wait))) return false;
+    if (!(await stripUpload(gl, nextOrder.texture, nextOrder.texture.image as HTMLCanvasElement, wait))) return false;
+    const previous = [full.texture, order.texture];
+    full = nextFull;
+    order = nextOrder;
+    material.map = full.texture;
+    uniforms.uOrder.value = order.texture;
+    for (const texture of previous) texture.dispose();
+    changed();
+    return true;
   };
   const reveal = (amount: number) => {
     uniforms.uReveal.value = amount > 0 ? amount : -1;
   };
-  return { mesh, ready, reveal };
+  return { mesh, ready, reveal, sharpen };
 }
 
 export function localBox(holder: Object3D) {
@@ -77,7 +97,8 @@ export function localBox(holder: Object3D) {
 }
 
 export function labelProps(group: Object3D) {
-  const dial = paintedTexture(512, 512, dialPainter, true, false);
+  let dial = paintedTexture(512, 512, dialPainter, true, false);
+  let face: MeshStandardMaterial | null = null;
   let typed: ReturnType<typeof revealDecal> | null = null;
 
   const pad = group.getObjectByName('notepads_office_notepads_yellow_pad');
@@ -94,38 +115,23 @@ export function labelProps(group: Object3D) {
   }
 
   const clock = group.getObjectByName('clock_whole');
-  const hands: { node: Object3D; rest: Quaternion; angle: number; turn: (date: Date) => number }[] = [];
+  let hands: ReturnType<typeof clockHands> | null = null;
   if (clock) {
     const box = localBox(clock);
     const size = box.getSize(new Vector3());
     const mesh = decal(dial.texture, size.x * 0.62, size.x * 0.62);
-    windowLit(mesh.material as MeshStandardMaterial);
+    face = mesh.material as MeshStandardMaterial;
+    windowLit(face);
     mesh.position.set(0, size.y * 0.48, box.max.z + 0.0015);
     clock.add(mesh);
-    const turns: Record<string, (date: Date) => number> = {
-      houd_hand: (date) => ((date.getHours() % 12) + date.getMinutes() / 60) / 12,
+    const turns: Record<string, Turn> = {
+      houd_hand: (date) => ((date.getHours() % 12) + date.getMinutes() / 60 + date.getSeconds() / 3600) / 12,
       minute_hand: (date) => (date.getMinutes() + date.getSeconds() / 60) / 60,
       second_hand: (date) => (date.getSeconds() + date.getMilliseconds() / 1000) / 60,
     };
-    for (const [name, turn] of Object.entries(turns)) {
-      const node = clock.getObjectByName(name);
-      const mesh = node?.children.find((child) => (child as Mesh).isMesh) as Mesh | undefined;
-      const target = (node as Mesh)?.isMesh ? (node as Mesh) : mesh;
-      if (!node || !target) continue;
-      target.geometry.computeBoundingBox();
-      const center = target.geometry.boundingBox!.getCenter(new Vector3());
-      if (target !== node) center.applyMatrix4(target.matrix);
-      center.applyQuaternion(node.quaternion);
-      hands.push({ node, rest: node.quaternion.clone(), angle: Math.atan2(center.x, center.y), turn });
-    }
-    if (hands.length) {
-      clock.updateWorldMatrix(true, true);
-      const pivot = clock.worldToLocal(hands[0].node.getWorldPosition(new Vector3()));
-      mesh.position.set(pivot.x, pivot.y, box.max.z + 0.0015);
-    }
+    hands = clockHands(clock, turns, box.getCenter(new Vector3()));
+    if (hands.dial) mesh.position.set(hands.dial.pivot.x, hands.dial.pivot.y, box.max.z + 0.0015);
   }
-  const spin = new Quaternion();
-  const axis = new Vector3(0, 0, 1);
 
   return {
     async ready(gl: WebGLRenderer) {
@@ -136,13 +142,22 @@ export function labelProps(group: Object3D) {
       gl.initTexture(dial.texture);
       await typed?.ready(gl);
     },
+    async sharpen(gl: WebGLRenderer, wait: () => Promise<void>) {
+      const next = paintedTexture(1536, 1536, dialPainter, true, false);
+      await wait();
+      next.draw(1, true);
+      if (!(await stripUpload(gl, next.texture, next.texture.image as HTMLCanvasElement, wait))) return false;
+      const previous = dial.texture;
+      dial = next;
+      if (face) face.map = next.texture;
+      previous.dispose();
+      changed();
+      return (await typed?.sharpen(gl, [1024, 1360], wait)) ?? true;
+    },
     update(amount: number) {
       typed?.reveal(amount);
-      const now = new Date();
-      for (const hand of hands) {
-        spin.setFromAxisAngle(axis, -(hand.turn(now) * Math.PI * 2 - hand.angle));
-        hand.node.quaternion.multiplyQuaternions(spin, hand.rest);
-      }
+      const at = wallClock();
+      hands?.set(new Date(runtime.frozen === null ? at : Math.floor(at / 1000) * 1000));
     },
   };
 }
@@ -157,7 +172,7 @@ export type Glass = {
 };
 
 export function stickyNote(glass: Glass) {
-  const sticky = revealDecal(stickyText, 0.1, 0.1, [512, 512], { opaque: true });
+  const sticky = revealDecal(stickyText, 0.1, 0.1, [1024, 1024], { opaque: true });
   const note = sticky.mesh;
   note.position
     .copy(glass.center)

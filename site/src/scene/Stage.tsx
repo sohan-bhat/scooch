@@ -95,16 +95,22 @@ export default function Stage({ onReady }: { onReady: () => void }) {
   const shown = useShown();
   const phone = layoutFor(window.innerWidth, window.innerHeight) === 'phone';
   const deviceDpr = window.devicePixelRatio || 1;
-  quality.configure(phone, phone ? Math.min(deviceDpr, 1.5) : deviceDpr, gpuClass().gpu);
-  const dpr = runtime.still >= 0 ? Math.min(deviceDpr, 2) : Math.min(quality.sharpDpr, deviceDpr);
+  quality.configure(phone, deviceDpr, gpuClass().gpu);
+  const [dpr, setDpr] = useState(() => (runtime.still >= 0 ? Math.min(deviceDpr, 2) : quality.canvasDpr));
+  useEffect(() => {
+    quality.onNative = () => setDpr(quality.nativeDpr);
+    return () => {
+      quality.onNative = null;
+    };
+  }, []);
 
   return (
-    <div ref={host} className="absolute inset-0">
+    <div ref={host} className="absolute inset-0 overflow-hidden">
       <Canvas
         shadows="percentage"
         frameloop="never"
         dpr={dpr}
-        gl={{ antialias: false, powerPreference: 'high-performance', stencil: false, alpha: false }}
+        gl={{ antialias: false, powerPreference: 'high-performance', stencil: false, alpha: false, depth: false }}
         camera={{ fov: 30, near: 0.03, far: 9, position: [0, 1.3, 1.6] }}
         onCreated={({ gl }) => {
           gl.debug.checkShaderErrors = import.meta.env.DEV;

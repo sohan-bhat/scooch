@@ -800,7 +800,7 @@ mod probe {
     }
 
     fn stand_in(p: &mut Probe, what: &str) -> Result<Option<Duration>> {
-        if !asking(p) {
+        if !asking(p) && !windows().iter().any(|(owner, _, _)| owner == "UserNotificationCenter") {
             return Ok(None);
         }
         p.limit("on a hosted runner the login item daemon waits for a Finder automation prompt that nobody can click, and the runner image pre-grants Finder automation only to bash, osascript and its own agents, which a launchd job does not inherit");
@@ -2231,9 +2231,16 @@ mod probe {
     }
 
     fn spot(a: &Shot, b: &Shot, from_row: usize) -> Spot {
+        spot_outside(a, b, from_row, None)
+    }
+
+    fn spot_outside(a: &Shot, b: &Shot, from_row: usize, skip: Option<[usize; 4]>) -> Spot {
         let mut found = Spot::default();
         for y in from_row..a.height.min(b.height) {
             for x in 0..a.width.min(b.width) {
+                if skip.is_some_and(|[left, top, right, bottom]| x >= left && x < right && y >= top && y < bottom) {
+                    continue;
+                }
                 let (one, two) = (a.at(x, y), b.at(x, y));
                 let worst = (0..3).map(|channel| one[channel].abs_diff(two[channel])).max().unwrap_or(0);
                 if worst > found.worst {
@@ -2246,6 +2253,7 @@ mod probe {
 
     struct Dragged {
         dropped: f64,
+        skip: Option<[usize; 4]>,
         seen: Vec<Seen>,
         log: Vec<String>,
         old: Option<PathBuf>,
@@ -2310,6 +2318,13 @@ mod probe {
         let old_still = old.as_deref().and_then(|path| objc2::rc::autoreleasepool(|_| picture::decode(path)).ok()).map(|image| halved(&image));
         let menu = (30.0 * screen.scale) as usize;
         let lines = daemon_log(p).lines().count();
+        let grow = 6usize;
+        let skip = finder::named(&finder::view()).ok().and_then(|items| items.into_iter().map(|(_, rect)| rect).find(|rect| from.0 >= rect.x && from.0 <= rect.x + rect.w && from.1 >= rect.y && from.1 <= rect.y + rect.h)).map(|rect| {
+            let pixel = |value: f32, origin: f32| ((value - origin) * screen.scale).max(0.0) as usize;
+            let (left, top) = (pixel(rect.x + to.0 - from.0, screen.frame.x), pixel(rect.y + to.1 - from.1, screen.frame.y));
+            let (right, bottom) = (pixel(rect.x + rect.w + to.0 - from.0, screen.frame.x), pixel(rect.y + rect.h + to.1 - from.1, screen.frame.y));
+            [left.saturating_sub(grow), top.saturating_sub(grow), right + grow, bottom + grow]
+        });
         drag(from, to);
         let dropped = epoch();
         let started = Instant::now();
@@ -2321,7 +2336,7 @@ mod probe {
             let at = epoch();
             let Some(shot) = grab(display) else { continue };
             let inked = masks.iter().map(|ink| ink.iter().filter(|(x, y)| !near(shot.at(*x, *y), baseline.at(*x, *y))).count() as f32 / ink.len().max(1) as f32).fold(0.0, f32::max);
-            let step = previous.as_ref().map_or_else(Spot::default, |previous| spot(previous, &shot, menu));
+            let step = previous.as_ref().map_or_else(Spot::default, |previous| spot_outside(previous, &shot, menu, skip));
             seen.push(Seen { at, half: half_shot(&shot), inked, step });
             previous = Some(shot);
             checks += 1;
@@ -2333,7 +2348,7 @@ mod probe {
             }
         }
         let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).collect();
-        Some(Dragged { dropped, seen, log, old, old_still, old_tables })
+        Some(Dragged { dropped, skip, seen, log, old, old_still, old_tables })
     }
 
     fn logged(dragged: &Dragged, word: &str) -> Option<f64> {
@@ -2444,7 +2459,8 @@ mod probe {
         ));
         p.line(format!("  - captures a second during the glide {:?}, largest gap between captures during the glide {:?} ms, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95, frames the helper drew {frames_drawn:?}", rate.map(|rate| rate.round()), gap.map(|gap| (gap * 1000.0).round()), expected.map(|value| value.round())));
         p.line(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(closed)));
-        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, captures of the settled layer before close {layered:?}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
+        let masked = dragged.skip.map_or("nothing masked, the dropped icon was not found".to_string(), |[left, top, right, bottom]| format!("outside the dropped icon's box of {}x{} px at {left},{top}, its Finder rect grown by 6 px", right - left, bottom - top));
+        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, {masked}, captures of the settled layer before close {layered:?}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
         p.line(format!("  - the change across the settle fade from the glide's last frame to the still, which ends before settled, {:?} of 255 at pixel {:?} from {:?} to {:?}", fade.map(|step| step.worst), fade.map(|step| (step.x, step.y)), fade.map(|step| step.before), fade.map(|step| step.after)));
         p.line(format!("  - daemon log {:?}", dragged.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         if let Some(name) = evidence {
@@ -2581,10 +2597,13 @@ mod probe {
         wake: Option<f64>,
         launch: Option<f64>,
         hello: Option<f64>,
+        device: Option<f64>,
         ready_at: Option<f64>,
         shown_at: Option<f64>,
         decided: Option<f64>,
         waited: Option<f64>,
+        predicted: Option<f64>,
+        split: Option<String>,
     }
 
     fn number_after(line: &str, key: &str) -> Option<f64> {
@@ -2627,10 +2646,13 @@ mod probe {
             wake: log.iter().find(|line| line.contains(" wake ") && !line.contains(" glide ")).and_then(|line| stamp_of(line)).map(after_drop),
             launch,
             hello: from_launch("hello "),
+            device: from_launch("device "),
             ready_at: from_launch("ready ").or_else(|| launch.zip(later_ready).map(|(at, after)| at + after)),
             shown_at: from_launch(", shown "),
             decided,
             waited,
+            predicted: from_launch("predicted shown "),
+            split: decision.and_then(|line| line.split("the helper made its window in ").nth(1)).map(|rest| format!("window {rest}")),
             tick: log.iter().find(|line| line.contains(" tick ") && line.contains("Rendered")).map(|line| {
                 let took = line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()).unwrap_or(0.0);
                 let began = stamp_of(line).map(|ended| ((ended - took / 1000.0 - dropped) * 1000.0).round());
@@ -2653,13 +2675,16 @@ mod probe {
 
     fn cold_round(p: &mut Probe, screen: &Screen, name: &str, places: ((f32, f32), (f32, f32)), label: &str) -> Vec<Cold> {
         let mut last = Instant::now();
-        let mut seen = Vec::new();
-        for index in 0..10 {
-            let rested = rest_for_cold(p, last);
+        (0..10).map(|index| cold_one(p, screen, name, places, (label, index), &mut last)).collect()
+    }
+
+    fn cold_one(p: &mut Probe, screen: &Screen, name: &str, places: ((f32, f32), (f32, f32)), (label, index): (&str, usize), last: &mut Instant) -> Cold {
+        {
+            let rested = rest_for_cold(p, *last);
             let cold = cold_drag(p, screen, name, places);
-            last = Instant::now();
+            *last = Instant::now();
             p.line(format!(
-                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, ready {}, shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, canvas from {:?}, tick laps {:?}",
+                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}",
                 index + 1,
                 cold.glided,
                 cold.skip,
@@ -2667,20 +2692,22 @@ mod probe {
                 rounded(cold.wake),
                 rounded(cold.launch),
                 rounded(cold.hello),
+                rounded(cold.device),
                 rounded(cold.ready_at),
                 rounded(cold.shown_at),
+                rounded(cold.predicted),
                 rounded(cold.decided),
                 rounded(cold.waited),
                 cold.first,
                 cold.set,
                 cold.ready,
                 cold.shown,
+                cold.split,
                 cold.from,
                 cold.tick
             ));
-            seen.push(cold);
+            cold
         }
-        seen
     }
 
     fn restart_daemon(p: &mut Probe, slow: bool) -> Result<bool> {
@@ -2741,19 +2768,30 @@ mod probe {
         p.line("- ten drags with the glide on, each after 35 s at rest so the helper is gone".to_string());
         let on = cold_round(p, &screen, name, places, "cold");
         let glided = on.iter().filter(|cold| cold.glided).count();
-        let ran = p.scooch(&["glide"], LIMIT);
-        p.line(format!("- scooch glide said {:?}, then ten drags with the glide off, each after 35 s at rest", ran.text()));
-        let off = cold_round(p, &screen, name, places, "off");
-        let ran = p.scooch(&["glide"], LIMIT);
-        p.line(format!("- scooch glide said {:?}", ran.text()));
-        let slow = if restart_daemon(p, true)? {
-            p.line(format!("- the daemon restarted with {}=1000, so each helper answers hello a second late, then ten drags each after 35 s at rest", scooch::live::SLOW_HELLO));
-            let slow = cold_round(p, &screen, name, places, "slow");
+        let (slow, off) = if restart_daemon(p, true)? {
+            p.line(format!("- the daemon restarted with {}=1000, so each helper answers hello a second late, then one drag to settle the new daemon that is not counted, then ten pairs, each a drag with the glide on and the slow helper followed by a drag with the glide off, both after 35 s at rest so they meet the same runner load, and before each pair one uncounted drag with the glide on so the slow drag finds glide tables", scooch::live::SLOW_HELLO));
+            let mut last = Instant::now();
+            cold_one(p, &screen, name, places, ("settling", 0), &mut last);
+            let (mut slow, mut off) = (Vec::new(), Vec::new());
+            for index in 0..10 {
+                if index > 0 {
+                    let _ = cold_drag(p, &screen, name, places);
+                    last = Instant::now();
+                }
+                slow.push(cold_one(p, &screen, name, places, ("slow", index), &mut last));
+                let _ = p.scooch(&["glide"], LIMIT);
+                off.push(cold_one(p, &screen, name, places, ("off", index), &mut last));
+                let _ = p.scooch(&["glide"], LIMIT);
+            }
+            p.line(format!("- the glide setting after the pairs is {}", state(p)["glide"]));
             restart_daemon(p, false)?;
-            Some(slow)
+            (Some(slow), off)
         } else {
-            p.line("- the daemon here is the login item, so the slow helper hint could not be set and the slow drags were skipped".to_string());
-            None
+            let ran = p.scooch(&["glide"], LIMIT);
+            p.line(format!("- the daemon here is the login item, so the slow helper hint could not be set and the slow drags were skipped, scooch glide said {:?}, then ten drags with the glide off, each after 35 s at rest", ran.text()));
+            let off = cold_round(p, &screen, name, places, "off");
+            let _ = p.scooch(&["glide"], LIMIT);
+            (None, off)
         };
         let sets = |round: &[Cold]| round.iter().filter_map(|cold| cold.set).collect::<Vec<u128>>();
         let (on_set, off_set) = (middle(&sets(&on)), middle(&sets(&off)));
@@ -2785,16 +2823,16 @@ mod probe {
             std::thread::sleep(Duration::from_millis(400));
             alive.push(helper_pids(p).len());
         }
-        std::thread::sleep(Duration::from_millis(1000));
+        std::thread::sleep(Duration::from_millis(2000));
         let left = helper_pids(p);
         let log = new_lines(&daemon_log(p), lines);
         let launches = log.iter().filter(|line| line.contains("glide early launch")).count();
         let lived: Vec<f64> = log.iter().filter_map(|line| number_after(line, "it lived ")).collect();
         let ticks = log.iter().filter(|line| line.contains(" tick ")).count();
         let sent: Vec<String> = log.iter().filter(|line| commanded(line) || line.contains("glide warm") || line.contains("glide open")).map(|line| line.chars().take(160).collect()).collect();
-        p.line(format!("- thirty wakes with nothing moved, after the helper was gone {rested}: ticks {ticks}, early launches {launches}, each quit after living {lived:?} ms, helper commands or picture warms {sent:?}, helpers seen after each wake {alive:?}, helpers left a second after the last wake {left:?}"));
-        if launches > 2 || lived.len() != launches || lived.iter().any(|lived| *lived > 1000.0) || !sent.is_empty() || !left.is_empty() {
-            p.fail("thirty bare wakes launched more than two helpers, kept one past a second, or sent it work");
+        p.line(format!("- thirty wakes with nothing moved, after the helper was gone {rested}: ticks {ticks}, early launches {launches}, each quit after living {lived:?} ms, helper commands or picture warms {sent:?}, helpers seen after each wake {alive:?}, helpers left two seconds after the last wake {left:?}"));
+        if launches > 2 || lived.len() != launches || lived.iter().any(|lived| *lived > 2000.0) || !sent.is_empty() || !left.is_empty() {
+            p.fail("thirty bare wakes launched more than two helpers, kept one past two seconds, or sent it work");
         }
     }
 

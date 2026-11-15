@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Color, Matrix4, ShaderMaterial, UniformsLib, UniformsUtils, Vector2, type Texture } from 'three';
+import { Color, Matrix4, ShaderMaterial, UniformsLib, UniformsUtils, Vector2, Vector4, type Texture } from 'three';
 import { tokenColor } from '@/lib/tokens';
 
 const vertex = `
@@ -27,6 +27,7 @@ uniform vec3 uBlindsColor;
 uniform float uBlindsLevel;
 uniform float uFade;
 uniform sampler2D uCaption;
+uniform vec4 uCaptionBox;
 uniform float uCaptionLevel;
 uniform vec2 uDrift;
 varying vec3 vWorld;
@@ -56,7 +57,9 @@ void main() {
   float front = step(0.0, projected.w) * step(0.0, window.x) * step(window.x, 1.0) * step(0.0, window.y) * step(window.y, 1.0);
   float cone = 1.0 - smoothstep(0.34, 0.5, length(window - 0.5));
   float slats = texture2D(uBlinds, window + uDrift).r;
-  vec4 caption = texture2D(uCaption, window);
+  vec2 inside = (window - uCaptionBox.xy) / uCaptionBox.zw;
+  float within = step(0.0, inside.x) * step(inside.x, 1.0) * step(0.0, inside.y) * step(inside.y, 1.0);
+  vec4 caption = texture2D(uCaption, clamp(inside, 0.0, 1.0)) * within;
   slats = mix(slats, caption.r * 9.0, caption.g * uCaptionLevel);
   color += uBlindsColor * uColor * plaster * slats * cone * front * uBlindsLevel * 3.2;
   gl_FragColor = vec4(color * uFade, 1.0);
@@ -80,6 +83,7 @@ export function useRoomMaterial(kind: 'wall' | 'floor', center: Vector2, blinds:
         uBlindsLevel: { value: 0 },
         uFade: { value: 1 },
         uCaption: { value: null as Texture | null },
+        uCaptionBox: { value: new Vector4(0, 0, 1, 1) },
         uCaptionLevel: { value: 0 },
         uDrift: { value: new Vector2() },
       },

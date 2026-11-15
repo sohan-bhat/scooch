@@ -32,8 +32,11 @@ import { tokenColor } from '@/lib/tokens';
 import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
+import { still as native } from './still';
+import { advance, budget, calm, finished, level, memory, prefetch, upgrades } from './budget';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
+import { stripUpload } from './upload';
 import { Tumbler } from './Tumbler';
 import { CHANNELS, hooks, live } from './touch';
 import { BULB, DESK_TOP, Desk, LAMP, type Console, type Screens } from './Desk';
@@ -118,7 +121,15 @@ export function Surroundings() {
   useLayoutEffect(() => {
     scene.environmentRotation.set(0, Math.PI * 0.7, 0);
     scene.environmentIntensity = 0.22;
-    return applyEnvironment(gl, scene, texture);
+    let release = applyEnvironment(gl, scene, texture);
+    const restored = () => {
+      release = applyEnvironment(gl, scene, texture);
+    };
+    gl.domElement.addEventListener('webglcontextrestored', restored);
+    return () => {
+      gl.domElement.removeEventListener('webglcontextrestored', restored);
+      release();
+    };
   }, [gl, scene, texture]);
   return null;
 }
@@ -237,6 +248,69 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   );
   const pads = useMemo(() => (built ? { laptop: built.laptop, console: consoleGlass } : null), [built, consoleGlass]);
   const gallery = useRef<Record<string, Frame>>({});
+
+  useEffect(() => {
+    let stopped = false;
+    let timer = 0;
+    const wait = async (test: () => boolean) => {
+      while (!stopped && !test()) await new Promise((resolve) => (timer = window.setTimeout(resolve, 500)));
+    };
+    const sharpen = async () => {
+      const amount = level();
+      await wait(() => runtime.shown);
+      const main = screens.main.sharpUrl();
+      if (amount !== 'none' && main) prefetch([main]);
+      await wait(() => runtime.props && runtime.painted && runtime.gallery);
+      if (amount === 'all') prefetch(Object.values(gallery.current).flatMap((frame) => frame.sharpUrl() ?? []));
+      if (memory() >= 4) {
+        for (const upgrade of upgrades) {
+          await calm();
+          if (stopped) return;
+          await upgrade(calm).catch(() => false);
+        }
+      }
+      if (amount === 'none') {
+        finished();
+        return;
+      }
+      await wait(() => native.ready && (amount === 'main' || budget.stage >= 1));
+      if (stopped || native.off) return;
+      await calm();
+      await screens.main.sharpen(gl, calm).catch(() => false);
+      advance(2);
+      if (amount !== 'all') {
+        finished();
+        return;
+      }
+      await wait(() => budget.stage >= 3);
+      for (const frame of Object.values(gallery.current)) {
+        await calm();
+        if (stopped || native.off) return;
+        await frame.sharpen(gl, calm).catch(() => false);
+      }
+      finished();
+    };
+    timer = window.setTimeout(() => void sharpen(), 0);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [gl, screens]);
+
+  useEffect(() => {
+    const restored = () => {
+      const again = [screens.main, ...Object.values(gallery.current)].filter((frame) => frame.invalidate());
+      gl.shadowMap.needsUpdate = true;
+      void (async () => {
+        for (const frame of again) {
+          await calm();
+          await frame.sharpen(gl, calm).catch(() => false);
+        }
+      })();
+    };
+    gl.domElement.addEventListener('webglcontextrestored', restored);
+    return () => gl.domElement.removeEventListener('webglcontextrestored', restored);
+  }, [gl, screens]);
   useEffect(() => {
     hooks.showing = () => {
       const busy: string[] = [];
@@ -269,7 +343,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       const ready = new Set(screens.main.textures());
       await streamScenery(screens.main.scenery);
       await upload(screens.main.textures().filter((texture) => !ready.has(texture)));
-      const buffer = gl.getDrawingBufferSize(new Vector2());
+      const buffer = quality.liveSize(gl, new Vector2());
       const limit = Math.round(Math.max(buffer.x, buffer.y) * 0.8);
       const order = ['swans', 'wide', 'tall', 'city', 'moon'];
       const rank = (id: string) => (order.includes(id) ? order.indexOf(id) : order.length);
@@ -406,6 +480,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       frames += 1;
       if (frames === 1) {
         performance.mark('scooch:frame');
+        quality.warmFast?.();
         loadStage(0.95);
       }
       if (frames < 2) handle = requestAnimationFrame(wait);
@@ -415,7 +490,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     loadStage(0.15);
     environmentReady(scene)
       .then(() => loadStage(0.35))
-      .then(() => precompile(gl, scene, camera, quality.composer, [screens.main.compile(gl)]))
+      .then(() => precompile(gl, scene, camera, [quality.composer, quality.fastComposer], [screens.main.compile(gl)]))
       .catch(() => undefined)
       .then(() => {
         if (cancelled) return;
@@ -438,7 +513,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     let note: Mesh | null = null;
     const paint = async () => {
       if (stopped) return;
-      if (!runtime.shown && runtime.still < 0) {
+      const shownAt = performance.getEntriesByName('scooch:shown')[0]?.startTime;
+      if (runtime.still < 0 && (shownAt === undefined || performance.now() - shownAt < 1000)) {
         timer = window.setTimeout(() => void paint(), 200);
         return;
       }
@@ -473,15 +549,16 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       writing.current = sticky.write;
       await quiet();
       if (stopped) return;
-      const osd = paintedTexture(1024, 768, osdPainter);
+      const osd = paintedTexture(2048, 1536, osdPainter, false, false);
       await quiet();
-      gl.initTexture(osd.texture);
+      osd.draw(1);
+      await stripUpload(gl, osd.texture, osd.texture.image as HTMLCanvasElement);
+      if (stopped) return;
       screens.crt.uniforms.uOsd.value = osd.texture;
       const caption = wallTexture(blindsMatrix);
-      await caption.paint();
+      await caption.paint(gl);
       if (stopped) return;
-      await quiet();
-      gl.initTexture(caption.texture);
+      wall.uniforms.uCaptionBox.value.copy(caption.box);
       wall.uniforms.uCaption.value = caption.texture;
       runtime.painted = true;
     };
@@ -497,7 +574,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const heldPart = useCallback(() => {
     if (!built) return undefined;
     const tv = built.television;
-    const buffer = gl.getDrawingBufferSize(scratch.buffer);
+    const buffer = quality.liveSize(gl, scratch.buffer);
     scratch.right.set(1, 0, 0).applyQuaternion(tv.quaternion).multiplyScalar(tv.screen.width / 2);
     scratch.up.set(0, 1, 0).applyQuaternion(tv.quaternion).multiplyScalar(tv.screen.height / 2);
     let minX = Infinity;
@@ -511,7 +588,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       minY = Math.min(minY, scratch.corner.y);
       maxY = Math.max(maxY, scratch.corner.y);
     }
-    const size = screens.main.texture.image as { width: number; height: number };
+    const size = screens.main.live.image as { width: number; height: number };
     const fit = Math.min(1, Math.max(((maxX - minX) / 2) * buffer.x / size.width, ((maxY - minY) / 2) * buffer.y / size.height) * 1.25);
     if (fit >= 1) return undefined;
     return { width: Math.max(64, Math.ceil(size.width * fit)), height: Math.max(48, Math.ceil(size.height * fit)) };
@@ -531,10 +608,13 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       gl.shadowMap.needsUpdate = true;
       shadowFrames.current += 1;
     }
-    const time = state.clock.elapsedTime;
+    const time = runtime.frozen ?? state.clock.elapsedTime - runtime.timeShift;
     const idle = runtime.idle;
     const motion = idle ? 1 : 0;
-    rig.apply(camera as PerspectiveCamera, story.camera, time, pointer.x * motion + live.look.x, pointer.y * motion + live.look.y, Math.min(delta, 0.1), size.width, size.height, idle);
+    const lookX = pointer.x * motion + live.look.x;
+    const lookY = pointer.y * motion + live.look.y;
+    rig.apply(camera as PerspectiveCamera, story.camera, time, lookX, lookY, Math.min(delta, 0.1), size.width, size.height, idle, runtime.frozen !== null);
+    runtime.settled = rig.settled(lookX, lookY);
 
     if (runtime.introAt === null && runtime.ready && runtime.still < 0) {
       if (readyAt.current < 0) readyAt.current = time;
@@ -603,13 +683,13 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     wall.uniforms.uDrift.value.set(story.drift * 0.018, -story.drift * 0.028);
     floor.uniforms.uDrift.value.copy(wall.uniforms.uDrift.value);
     crt.uTime.value = time;
-    const frameSize = screens.main.texture.image as { width: number; height: number };
+    const frameSize = screens.main.live.image as { width: number; height: number };
     const part = inside?.group.visible ? undefined : heldPart();
     const holding = hooks.drawHeld(gl, Math.min(delta, 0.05), part);
     const moving = quality.chain === 'fast' && quality.fastScale < 1 ? scratch.part.set(Math.max(1, Math.round(frameSize.width * quality.fastScale)), Math.max(1, Math.round(frameSize.height * quality.fastScale))) : null;
     const movingPart = moving ? { width: moving.x, height: moving.y } : undefined;
-    if (!holding) screens.main.render(gl, story.place, movingPart);
-    const shownPart = holding ? part : movingPart;
+    if (!holding && native.phase === 'live') screens.main.render(gl, story.place, movingPart);
+    const shownPart = native.full ? undefined : holding ? part : movingPart;
     const sx = shownPart ? shownPart.width / frameSize.width : 1;
     const sy = shownPart ? shownPart.height / frameSize.height : 1;
     crt.uFrameScale.value.set(crt.uFrame.value === screens.main.texture ? sx : 1, crt.uFrame.value === screens.main.texture ? sy : 1);
