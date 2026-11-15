@@ -3,7 +3,8 @@ use crate::paint::{self, Materials, LAYERS};
 use crate::shape::{self, smoothstep, Grid};
 use crate::{blur, color, math, scenery, table, Analysis, Options, Placement, Scene, Scenery};
 use rayon::prelude::*;
-use std::collections::VecDeque;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, VecDeque};
 
 pub use crate::surface::{live, relive, Live};
 
@@ -22,6 +23,7 @@ pub(crate) const BELONG_SPREAD: f32 = 0.35;
 pub(crate) const SEAM: (f32, f32) = (0.6, 0.95);
 pub(crate) const SKY_HUE: (f32, f32) = (200.0, 290.0);
 pub(crate) const SKY_SEED: (f32, f32) = (215.0, 0.02);
+pub(crate) const SKY_HORIZON: f32 = 0.08;
 pub(crate) const SKY_CHROMA: f32 = 0.03;
 pub(crate) const WHITE_CHROMA: f32 = 0.04;
 pub(crate) const WHITE_LIGHT: f32 = 0.6;
@@ -262,10 +264,6 @@ fn flood(grid: &Grid, mut origin: Vec<usize>, down: bool, accept: &dyn Fn(usize,
     origin
 }
 
-fn marks(origin: &[usize]) -> Vec<f32> {
-    origin.iter().map(|o| if *o == NONE { 0.0 } else { 1.0 }).collect()
-}
-
 fn grown(seed: &[f32], colour: &[[f32; 3]], grid: &Grid) -> Vec<f32> {
     let open: Vec<bool> = colour
         .iter()
@@ -279,8 +277,49 @@ fn grown(seed: &[f32], colour: &[[f32; 3]], grid: &Grid) -> Vec<f32> {
         let step = if n + grid.w == i { SKY_GROW.2 } else { SKY_SIDE };
         open[n] && apart(colour[n], colour[i]) < step && apart(colour[n], colour[o]) <= SKY_DRIFT
     });
-    let top = (0..origin.len()).map(|i| if i < grid.w && origin[i] != NONE { i } else { NONE }).collect();
-    marks(&flood(grid, top, true, &|_, n, _| origin[n] != NONE))
+    horizon(grid, &origin, colour)
+}
+
+fn horizon(grid: &Grid, reached: &[usize], colour: &[[f32; 3]]) -> Vec<f32> {
+    let mut peak = vec![f32::INFINITY; reached.len()];
+    let mut heap = BinaryHeap::new();
+    for i in (0..grid.w.min(reached.len())).filter(|i| reached[*i] != NONE) {
+        peak[i] = colour[i][0].max(0.0);
+        heap.push(Reverse((peak[i].to_bits(), i)));
+    }
+    while let Some(Reverse((bits, i))) = heap.pop() {
+        let top = f32::from_bits(bits);
+        if top > peak[i] {
+            continue;
+        }
+        let (x, y) = (i % grid.w, i / grid.w);
+        let next = [(x > 0).then(|| i - 1), (x + 1 < grid.w).then(|| i + 1), (y > 0).then(|| i - grid.w), (y + 1 < grid.h).then(|| i + grid.w)];
+        for n in next.into_iter().flatten() {
+            let l = colour[n][0].max(0.0);
+            if reached[n] == NONE || l < top - SKY_HORIZON {
+                continue;
+            }
+            let through = top.max(l);
+            if through < peak[n] {
+                peak[n] = through;
+                heap.push(Reverse((through.to_bits(), n)));
+            }
+        }
+    }
+    peak.iter().map(|p| if p.is_finite() { 1.0 } else { 0.0 }).collect()
+}
+
+fn root(parent: &mut [usize], mut i: usize) -> usize {
+    while parent[i] != i {
+        parent[i] = parent[parent[i]];
+        i = parent[i];
+    }
+    i
+}
+
+fn median(mut values: Vec<f32>) -> f32 {
+    values.sort_by(f32::total_cmp);
+    values.get(values.len() / 2).copied().unwrap_or(0.0)
 }
 
 pub(crate) fn water_colour(c: [f32; 3], sand: f32) -> f32 {
@@ -314,12 +353,38 @@ fn sky_region(lab: &[[f32; 3]], busy: &[f32], grid: &Grid) -> Vec<f32> {
     let open: Vec<bool> = lab.iter().zip(busy).map(|(c, b)| skyish(*c) && *b < SKY_BUSY).collect();
     let calm: Vec<bool> = busy.iter().map(|b| *b < SKY_BUSY).collect();
     let soft: Vec<Vec<f32>> = (0..3).map(|k| blurred(&lab.iter().map(|c| c[k]).collect::<Vec<f32>>(), grid, SKY_SMOOTH.1)).collect();
-    let seeded = |i: usize| {
-        let (l, chroma, hue) = colour_of([soft[0][i], soft[1][i], soft[2][i]]);
-        (chroma < SKY_SEED.1 && l > WHITE_LIGHT) || hue >= SKY_SEED.0
-    };
-    let top = (0..lab.len()).map(|i| if i < grid.w && open[i] && seeded(i) { i } else { NONE }).collect();
-    marks(&flood(grid, top, true, &|i, n, _| (open[n] && apart(lab[n], lab[i]) < SKY_JUMP) || (calm[n] && (0..3).map(|k| (soft[k][n] - soft[k][i]).powi(2)).sum::<f32>().sqrt() < SKY_SMOOTH.0)))
+    let accept = |i: usize, n: usize| (open[n] && apart(lab[n], lab[i]) < SKY_JUMP) || (calm[n] && (0..3).map(|k| (soft[k][n] - soft[k][i]).powi(2)).sum::<f32>().sqrt() < SKY_SMOOTH.0);
+    let top = grid.w.min(lab.len());
+    let mut origin: Vec<usize> = (0..lab.len()).map(|i| if i < top && open[i] { i } else { NONE }).collect();
+    let mut parent: Vec<usize> = (0..top).collect();
+    let mut queue: VecDeque<usize> = (0..top).filter(|i| origin[*i] != NONE).collect();
+    while let Some(i) = queue.pop_front() {
+        let (x, y) = (i % grid.w, i / grid.w);
+        let next = [(x > 0).then(|| i - 1), (x + 1 < grid.w).then(|| i + 1), (y > 0).then(|| i - grid.w), (y + 1 < grid.h).then(|| i + grid.w)];
+        for n in next.into_iter().flatten() {
+            if !accept(i, n) {
+                continue;
+            }
+            if origin[n] == NONE {
+                origin[n] = origin[i];
+                queue.push_back(n);
+            } else {
+                let (a, b) = (root(&mut parent, origin[i]), root(&mut parent, origin[n]));
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    let mut sky = vec![false; top];
+    for (r, slot) in sky.iter_mut().enumerate() {
+        let cells: Vec<usize> = (0..top).filter(|i| origin[*i] != NONE && root(&mut parent, *i) == r).collect();
+        if cells.is_empty() {
+            continue;
+        }
+        let colours: Vec<(f32, f32, f32)> = cells.iter().map(|i| colour_of([soft[0][*i], soft[1][*i], soft[2][*i]])).collect();
+        let (l, chroma, hue) = (median(colours.iter().map(|c| c.0).collect()), median(colours.iter().map(|c| c.1).collect()), median(colours.iter().map(|c| c.2).collect()));
+        *slot = (chroma < SKY_SEED.1 && l > WHITE_LIGHT) || hue >= SKY_SEED.0;
+    }
+    origin.iter().map(|o| if *o != NONE && sky[root(&mut parent, *o)] { 1.0 } else { 0.0 }).collect()
 }
 
 pub(crate) fn byte(v: f32) -> u8 {
