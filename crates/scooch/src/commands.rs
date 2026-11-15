@@ -552,7 +552,7 @@ pub struct Rendered {
 pub fn rendered(source: &RgbImage, scene: &Scene, fill: bool) -> Rendered {
     let options = Options::default();
     let analysis = scooch_core::analyze(source);
-    let options = if crate::state::scenery_on(&options) && !scooch_core::Session::new().belongs(source, &analysis, scene, &options) { Options { scenery: scooch_core::Scenery::Off, ..options } } else { options };
+    let options = scooch_core::Session::new().options(source, &analysis, scene, &options);
     let plain = scooch_core::fill(source.width(), source.height(), scene);
     let (placement, options) = if fill { (plain.clone(), Options { pads: 0.0, ..options }) } else { (scooch_core::solve(&analysis, scene, &options, None), options) };
     let picture = scooch_core::render_with(source, &analysis, &placement, scene, &options);

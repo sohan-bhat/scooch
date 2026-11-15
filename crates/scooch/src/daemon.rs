@@ -513,7 +513,7 @@ impl Daemon {
                 slot.1.forget();
                 slot.0 = key;
             }
-            slot.1.belongs(&decoded, analysis, scene, options)
+            slot.1.options(&decoded, analysis, scene, options).scenery == options.scenery
         };
         *self.used.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
         lap("belongs", clock);
@@ -852,9 +852,11 @@ impl Daemon {
                 }
             }
             entry.painted = false;
+            entry.drawn = None;
             return Ok(Outcome::Plain);
         }
-        if options.pads <= 0.0 && !wanted && !entry.painted && showing_output && entry.placement.as_ref() == Some(&placement) {
+        let drawn = scene::fingerprint(&source, scene, options);
+        if !wanted && !entry.painted && showing_output && entry.placement.as_ref() == Some(&placement) && (options.pads <= 0.0 || entry.drawn.as_deref() == Some(drawn.as_str())) {
             if let Some(glider) = glider.as_deref_mut() {
                 glider.close_early_for(&screen.id);
             }
@@ -903,6 +905,7 @@ impl Daemon {
                     glider.close_early_for(&screen.id);
                 }
                 entry.placement = Some(placement);
+                entry.drawn = Some(drawn);
                 return Ok(Outcome::Kept);
             }
         }
@@ -960,6 +963,7 @@ impl Daemon {
         }
         let set = Instant::now();
         entry.placement = Some(placement);
+        entry.drawn = Some(drawn);
         lap("set", &mut clock);
         if let (Some(bundle), Some(output), Some(tables_key)) = (bundle, entry.output.clone(), tables_key) {
             let wanted = self.store.tables_for(&output, tables_key);

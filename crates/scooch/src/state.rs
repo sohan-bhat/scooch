@@ -126,6 +126,8 @@ pub struct Entry {
     pub absent_ticks: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub belongs: Option<Belongs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawn: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
