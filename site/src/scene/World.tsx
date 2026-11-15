@@ -221,6 +221,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const consoleScreen = useMemo(() => {
     const crt = createCrtMaterial();
     crt.uniforms.uAtlas.value = screens.atlas;
+    crt.uniforms.uShade.value = screens.shade;
     crt.uniforms.uRim.value = tokenColor('rim');
     crt.uniforms.uLamp.value.copy(bulbWorld);
     const moon = manifest.pictures.find((picture) => picture.id === 'moon');
@@ -320,7 +321,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     };
     hooks.current = () => (story.city > 0.5 && gallery.current.city ? 'city' : 'main');
   }, [screens, consoleScreen]);
-  const inside = useInside(manifest, screens.main, screens.saliency, screens.atlas, stage, gallery, pads);
+  const inside = useInside(manifest, screens.main, screens.saliency, screens.atlas, screens.shade, stage, gallery, pads);
   const [insideIn, setInsideIn] = useState(runtime.still >= 0);
   const second = useRef<Frame | null>(null);
 

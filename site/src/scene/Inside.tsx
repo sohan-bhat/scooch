@@ -153,6 +153,7 @@ void main() {
 const tileFragment = `
 precision highp float;
 uniform sampler2D uAtlas;
+uniform sampler2D uShade;
 uniform float uOutline;
 uniform float uFade;
 varying vec2 vUv;
@@ -165,8 +166,13 @@ vec4 cell(float index, float row) {
 }
 void main() {
   vec4 icon = mix(cell(vCell, 0.0), cell(vCell, 2.0), uOutline);
-  if (icon.a < 0.35) discard;
-  gl_FragColor = vec4(icon.rgb * uFade * (1.0 - vGhost * 0.25), 1.0);
+  vec2 at = (vec2(mod(vCell, GRID), floor(vCell / GRID)) + clamp(vUv, 0.002, 0.998)) / GRID;
+  float footprint = max(length(dFdx(vUv)), length(dFdy(vUv))) * float(textureSize(uShade, 0).x) / GRID;
+  float lod = clamp(log2(max(footprint, 1e-4)), 0.0, 10.0);
+  float dark = min(textureLod(uShade, at, lod).r * clamp(0.6 + (footprint - 1.8) * 0.75, 0.5, 2.2), 0.92) * (1.0 - uOutline);
+  float alpha = icon.a + dark * (1.0 - icon.a);
+  if (alpha < 0.004) discard;
+  gl_FragColor = vec4(icon.rgb * icon.a * uFade * (1.0 - vGhost * 0.25), alpha);
 }
 `;
 
@@ -179,7 +185,7 @@ export type Stage = {
   height: number;
 };
 
-export function createInside(frame: Frame, saliency: Texture, atlas: Texture, stage: Stage) {
+export function createInside(frame: Frame, saliency: Texture, atlas: Texture, shade: Texture, stage: Stage) {
   const geometry = new PlaneGeometry(stage.width, stage.height, 192, 144);
   const uniforms = {
     ...pictureUniforms(),
@@ -209,7 +215,7 @@ export function createInside(frame: Frame, saliency: Texture, atlas: Texture, st
   );
   plane.frustumCulled = false;
 
-  const tileUniforms = { uAtlas: { value: atlas }, uOutline: { value: 0 }, uFade: { value: 1 } };
+  const tileUniforms = { uAtlas: { value: atlas }, uShade: { value: shade }, uOutline: { value: 0 }, uFade: { value: 1 } };
   const tiles = new InstancedMesh(
     new PlaneGeometry(1, 1),
     new ShaderMaterial({
@@ -221,6 +227,8 @@ export function createInside(frame: Frame, saliency: Texture, atlas: Texture, st
       polygonOffset: true,
       polygonOffsetFactor: -2,
       polygonOffsetUnits: -2,
+      transparent: true,
+      premultipliedAlpha: true,
     }),
     ICON_SLOTS,
   );
@@ -272,11 +280,12 @@ export function useInside(
   frame: Frame,
   saliency: Texture,
   atlas: Texture,
+  shade: Texture,
   stage: Stage | null,
   gallery: { current: Record<string, Frame> },
   pads: Pads,
 ) {
-  const inside = useMemo(() => (stage ? createInside(frame, saliency, atlas, stage) : null), [frame, saliency, atlas, stage]);
+  const inside = useMemo(() => (stage ? createInside(frame, saliency, atlas, shade, stage) : null), [frame, saliency, atlas, shade, stage]);
   const places = useMemo(
     () => ({
       space: { position: new Vector3(), quaternion: new Quaternion(), width: 0, height: 0 } as Place,
