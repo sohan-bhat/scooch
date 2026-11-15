@@ -1173,10 +1173,10 @@ mod probe {
         if matched.is_none_or(|share| share < 0.9) {
             p.fail("the scenery off capture does not match the scenery off render");
         }
-        navy_check(p, &screen, display, (from, to))
+        navy_check(p, &screen, display, (to, subject))
     }
 
-    fn navy_check(p: &mut Probe, screen: &Screen, display: u32, (from, to): ((f32, f32), (f32, f32))) -> Result<()> {
+    fn navy_check(p: &mut Probe, screen: &Screen, display: u32, (calm, onto): ((f32, f32), (f32, f32))) -> Result<()> {
         let desktop = platform::current()?;
         let name = PROBES[0].0;
         let (width, height) = pixels(screen);
@@ -1184,18 +1184,19 @@ mod probe {
         let ran = p.scooch(&["use", &navy.to_string_lossy()], Duration::from_secs(60));
         let switched = wait_render(p, Duration::from_secs(45), Some(&navy), false);
         p.line(format!("- scooch use on a navy picture with scenery `{}` exit {:?}, rendered after {:?} ms", state(p)["options"]["scenery"].as_str().unwrap_or("missing"), ran.code, switched.map(|time| time.as_millis())));
-        away(p, name, from);
-        let start = position(p, name).unwrap_or(from);
+        away(p, name, calm);
+        quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
+        let start = position(p, name).unwrap_or(calm);
         let shown = || desktop.wallpaper(screen).ok().flatten();
         let before = shown();
         let seen = daemon_log(p).lines().count();
-        drag(start, to);
+        drag(start, onto);
         let dropped = Instant::now();
         let swapped = wait_until(Duration::from_secs(12), || shown() != before).map(|_| dropped.elapsed().as_millis());
         std::thread::sleep(Duration::from_millis(1200));
         let icon = icon_rect(name);
         let on_shot = grab(display).context("the screen could not be captured on the navy picture")?;
-        p.line(format!("- navy picture, scenery on, drag to calm ground: new wallpaper after {swapped:?} ms, daemon ticks {:?}", tick_lines(p, seen)));
+        p.line(format!("- navy picture, scenery on, drag from calm ground onto the subject at {:.0},{:.0}: new wallpaper after {swapped:?} ms, daemon ticks {:?}", onto.0, onto.1, tick_lines(p, seen)));
         let _ = p.scooch(&["scenery"], LIMIT);
         std::thread::sleep(Duration::from_millis(1500));
         let off_shot = grab(display).context("the screen could not be captured on the navy picture with scenery off")?;
