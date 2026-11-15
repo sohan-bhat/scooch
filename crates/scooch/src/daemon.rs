@@ -489,6 +489,39 @@ impl Daemon {
         made
     }
 
+    fn bare(&self, entry: &mut Entry, screen: &str, (source, key): (&Path, u64), (image, analysis, scene, options): (&mut Option<RgbImage>, &Analysis, &Scene, &Options), clock: &mut Instant) -> Result<bool> {
+        if !crate::state::scenery_on(options) || scene.icons.is_empty() {
+            entry.belongs = None;
+            return Ok(false);
+        }
+        let stamp = scooch_core::belonging_stamp(analysis, scene, options);
+        if let Some(known) = entry.belongs.filter(|known| known.key == key && known.stamp == stamp) {
+            return Ok(!known.answer);
+        }
+        let decoded = match image.take() {
+            Some(decoded) => decoded,
+            None => {
+                let decoded = self.pixels(source, key)?;
+                lap("decode", clock);
+                decoded
+            }
+        };
+        let answer = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let slot = sessions.entry(screen.to_string()).or_insert_with(|| (key, scooch_core::Session::new()));
+            if slot.0 != key {
+                slot.1.forget();
+                slot.0 = key;
+            }
+            slot.1.belongs(&decoded, analysis, scene, options)
+        };
+        *self.used.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+        lap("belongs", clock);
+        *image = Some(decoded);
+        entry.belongs = Some(crate::state::Belongs { key, stamp, answer });
+        Ok(!answer)
+    }
+
     fn forget_session(&self, screen: &str) {
         if let Some((_, mut session)) = self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(screen) {
             session.forget();
@@ -787,6 +820,13 @@ impl Daemon {
             Ok(made)
         })?;
         lap("analysis", &mut clock);
+        let bare_off;
+        let options = if self.bare(entry, &screen.id, (&source, key), (&mut image, &analysis, scene, options), &mut clock)? {
+            bare_off = Options { scenery: scooch_core::Scenery::Off, ..*options };
+            &bare_off
+        } else {
+            options
+        };
         let wanted = crate::state::scenery_on(options) && !scene.icons.is_empty();
         let previous = entry.placement.as_ref().filter(|_| wanted || !entry.painted);
         let placement = scooch_core::solve(&analysis, scene, options, previous);
