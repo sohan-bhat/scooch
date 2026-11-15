@@ -17,7 +17,7 @@ const CANVAS_MOST: u32 = 8192;
 const EDGE: f32 = 0.75;
 const SHALLOW_POWER: f32 = 2.2;
 const FOAM_LINE: (f32, f32) = (0.05, 0.01);
-const WET_BAND: (f32, f32) = (0.35, 1.5);
+const BEACH: (f32, f32) = (0.12, 0.25);
 const BAND: f32 = 0.3;
 const UNDER: f32 = 0.15;
 const BROAD_MIX: f32 = 0.9;
@@ -26,7 +26,7 @@ const GRAIN_DOUBLE: f32 = 0.6;
 const GRAIN_MIX: [u32; 3] = [0x8da6_b343, 0xd816_3841, 0x5bd1_e995];
 const GRAIN_SHIFT: [u32; 3] = [13, 15, 8];
 const GLIDE_REACH: f32 = 1.8;
-const LABEL_DEEPEN: f32 = 0.2;
+const LABEL_DEEPEN: f32 = 0.0;
 const LABEL_CAP: f32 = 0.373;
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 const GLIDE_BLEND: f32 = 0.1;
@@ -126,7 +126,7 @@ fn ramps(u: f32) -> Vec<u8> {
         let depth = (-d).max(0.0);
         let shallow = if d <= 0.0 { 1.0 } else { math::powf((1.0 - d / cell).max(0.0), SHALLOW_POWER) };
         let foam = if d <= 0.0 { 1.0 } else { smoothstep(FOAM_LINE.0 * cell, FOAM_LINE.1 * cell, d) };
-        let first = [shallow, foam, smoothstep(EDGE, -EDGE, d), math::powf(smoothstep(WET_BAND.0 * cell, 0.0, depth), WET_BAND.1)];
+        let first = [shallow, foam, smoothstep(EDGE, -EDGE, d), smoothstep(BEACH.0 * u, (BEACH.0 + BEACH.1) * u, depth)];
         let second = [(0.5 - d).clamp(0.0, 1.0), smoothstep(BAND * cell, 0.0, depth), smoothstep(UNDER * cell, 0.0, depth), 0.0];
         for c in 0..4 {
             out[k * 4 + c] = byte(first[c]);
@@ -1108,7 +1108,8 @@ mod tests {
         let c = constants(&paint::from_palette(&[]), 100.0);
         let rows: Vec<[f32; 8]> = (0..RAMP).map(|k| std::array::from_fn(|c| table[((c / 4) * RAMP + k) * 4 + c % 4] as f32 / 255.0)).collect();
         let inside = ramp(&rows, -0.5, &c);
-        assert!(inside.at(0) > 0.99 && inside.at(2) > 0.99 && inside.at(4) > 0.99 && inside.at(3) < 0.01);
+        assert!(inside.at(0) > 0.99 && inside.at(2) > 0.99 && inside.at(4) > 0.99 && inside.at(3) > 0.99);
+        assert!(ramp(&rows, -BEACH.0, &c).at(3) < 0.01 && ramp(&rows, -BEACH.0 - BEACH.1, &c).at(3) > 0.99);
         let shore = ramp(&rows, 0.011, &c);
         assert!(shore.at(0) > 0.9 && shore.at(1) > 0.9 && shore.at(2) < 0.01 && shore.at(4) < 0.01);
         let outside = ramp(&rows, look::REACH, &c);
