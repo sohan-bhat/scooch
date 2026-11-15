@@ -96,12 +96,14 @@ With scenery on, the still can also carry clouds or sand islands that gather aro
 |---|---|---|
 | field | 4 pixels | Distance to the scenery edge in u, negative inside, held between minus 1.7 and 1.15 |
 | look | 4 pixels | Kind, cloud or land. The pile mark on cloud, a lit arc inside each front puff and a tucked shade outside it, both fading to nothing over 1.5 cells at the puff's edge so the 4 pixel grid never shows as steps, or foam on land. Broad light on cloud or the label hold on land. Facing |
-| paints | 16 pixels, 8 layers | Shallows gain, foam, sand, wet sand, cloud, lit cloud, deep cloud, and the subject guard in alpha |
-| ramps | 2 rows of 512 | Shallows, foam line, sand cover, wet band, cloud cover, lit band and under shade, over the field from minus 0.6 to 1.15 |
+| paints | 16 pixels, 8 layers | Shallows gain, foam, beach sand, inside sand, cloud, lit cloud, deep cloud, and the subject guard in alpha |
+| ramps | 2 rows of 512 | Shallows, foam line, sand cover, beach to inside, cloud cover, lit band and under shade, over the field from minus 0.6 to 1.15 |
 
 Once a release has shipped tables, any change in what a table holds must raise the version.
 
-**Label hold.** Under the bottom third of each icon, fading out over 0.7 cell, cloud drops its broad light, lit arcs and lit rim, and sand is drawn at least 20% darker and dark enough that its luminance stays at or under 0.373, a lightness of 0.72.
+**Island tones.** An island has what a cloud has, a pale rim and a calmer inside. The beach along the coast is the sand tone. From 0.12 u to 0.37 u inside the coast it fades to the inside tone, the sand tone less 0.12 and at most a lightness of 0.70, a little warmer, which is already the ground a label needs. An island too small for an inside, one icon on its own puff, is a beach ring with the inside tone only in its middle. Shallows move the water's own colour halfway toward the sand at the coast and fade out with the shallows. They are never more than 0.12 lighter than the water beside them and never more colourful.
+
+**Label hold.** Under the bottom third of each icon, fading out over 0.7 cell, cloud drops its broad light, lit arcs and lit rim, and sand is drawn dark enough that its luminance stays at or under 0.373, a lightness of 0.72. Inside an island that changes nothing, so only a label on the beach is held.
 
 **Grain.** Sand grain comes from one integer hash written in Rust, WGSL and GLSL. A test reads both shader files and checks their numbers against the Rust constants, together with the glide numbers below.
 
@@ -114,7 +116,7 @@ A subject that touches the screen edge under the icons cannot slide clear on a s
 ### What scenery cannot do
 
 - Clouds need a sky blue region that reaches the top of the picture and is darker than the cloud. Overcast, pale, foggy, night and sunset skies get none, and so does sky blue that sits lower in the frame.
-- Islands need teal or blue water at least 0.1 darker than the sand. Green water, ocean blue past hue 245, a lake paler than that and a dark lake get none, and so does water under a smooth haze that joins a sky. A cyan sky that fills the top of the frame would read as water.
+- Islands need teal or blue water at least 0.1 darker than the sand. Green water, ocean blue past hue 245, a lake paler than that and a dark lake get none, and so does water under a smooth haze that joins a sky. A cyan sky that fills the top of the frame below hue 215 reads as water and gets islands. The scenery setting can force clouds there.
 - White label text reaches about 1.8 to 1 contrast on cloud and 2.2 to 1 on sand at worst.
 - Icons smaller than 16 pixels get scenery sized for 16 pixel icons.
 - Past 250,000 sites the puffs spread apart, which starts near a 7680 by 4320 screen with 16 pixel icons.
