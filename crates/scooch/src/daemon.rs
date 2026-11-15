@@ -2803,6 +2803,7 @@ pub mod tests {
         let (a, b) = (on.store.load().screens["main"].clone(), off.store.load().screens["main"].clone());
         assert_eq!(a.source, navy);
         assert_eq!(a.placement, b.placement);
+        assert_eq!(a.flip_helps, b.flip_helps);
         assert_eq!(std::fs::read(on_fake.showing("main")).unwrap(), std::fs::read(off_fake.showing("main")).unwrap());
         assert!(!a.painted);
         assert_eq!(a.belongs.map(|known| known.answer), Some(false));
@@ -2842,6 +2843,47 @@ pub mod tests {
         assert_eq!((after.placement, after.output), (before.placement, before.output));
         assert_eq!(fake.showing("main"), shown);
         assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
+    }
+
+    #[test]
+    fn switching_scenery_off_on_a_bare_picture_right_after_a_set_keeps_the_file() {
+        let (mut daemon, fake, _) = navy_rig("bare-settling", true);
+        daemon.grace = Duration::from_secs(30);
+        let mut state = daemon.store.load();
+        state.options.pads = 0.7;
+        daemon.store.save(&state).unwrap();
+        fake.place(bare_layout());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let before = daemon.store.load().screens["main"].clone();
+        let (shown, sets) = (fake.showing("main"), fake.sets.load(Ordering::SeqCst));
+        set_scenery(&daemon, false);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
+        let after = daemon.store.load().screens["main"].clone();
+        assert_eq!((after.placement, after.output), (before.placement, before.output));
+        assert_eq!(fake.showing("main"), shown);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
+    }
+
+    #[test]
+    fn a_foreign_wallpaper_inside_the_settle_window_is_taken_once_the_window_ends() {
+        let (mut daemon, fake, navy) = navy_rig("bare-foreign", true);
+        daemon.grace = Duration::from_millis(400);
+        fake.place(bare_layout());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let ours = daemon.store.load().screens["main"].output.clone();
+        let sets = fake.sets.load(Ordering::SeqCst);
+        let foreign = picture(navy.parent().unwrap(), "foreign.png");
+        fake.show("main", &foreign);
+        set_scenery(&daemon, false);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
+        assert_eq!(fake.showing("main"), foreign);
+        assert_eq!(daemon.store.load().screens["main"].output, ours);
+        std::thread::sleep(Duration::from_millis(500));
+        let after = outcome(&daemon.tick());
+        assert!(matches!(after, Outcome::Rendered | Outcome::Plain), "{after:?}");
+        let entry = daemon.store.load().screens["main"].clone();
+        assert_eq!((entry.source, entry.original), (foreign.clone(), foreign));
     }
 
     #[test]
