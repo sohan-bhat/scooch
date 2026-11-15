@@ -24,7 +24,8 @@ export function Tiering() {
   const [measuring, setMeasuring] = useState(false);
   useFrame(() => {
     const now = performance.now();
-    const live = runtime.shown && still.phase === 'live' && !document.hidden && quality.changes < MAX_CHANGES && plan.next === null;
+    const loaded = runtime.props && runtime.gallery && runtime.painted && runtime.inside;
+    const live = runtime.shown && loaded && still.phase === 'live' && !document.hidden && quality.changes < MAX_CHANGES && plan.next === null;
     if (live !== measuring) setMeasuring(live);
     if (plan.next && resting() && now - plan.lastAt > GAP) {
       quality.setLevel(plan.next);
