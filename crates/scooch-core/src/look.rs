@@ -109,6 +109,7 @@ pub(crate) const PILE_CELL: f32 = 1.1;
 pub(crate) const PILE_SKIP: f32 = 0.25;
 pub(crate) const ARC: (f32, f32) = (-0.3, -0.03);
 pub(crate) const ARC_POWER: f32 = 1.5;
+pub(crate) const RIM: f32 = 1.5;
 pub(crate) const TUCK: f32 = 0.25;
 pub(crate) const AWAY: (f32, f32) = (0.6, 0.95);
 pub(crate) const CALM: f32 = 0.85;
