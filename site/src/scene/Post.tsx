@@ -125,6 +125,16 @@ function grab(pass: Pass, run: () => void) {
   return texture as Texture | null;
 }
 
+function kept(pass: Pass, run: () => void) {
+  const render = pass.render;
+  pass.render = () => undefined;
+  try {
+    run();
+  } finally {
+    pass.render = render;
+  }
+}
+
 function capture(pass: CopyPass) {
   if (captured.has(pass)) return;
   captured.add(pass);
@@ -458,10 +468,7 @@ export function Post({ phone }: { phone: boolean }) {
       return;
     }
     if (step === 2) {
-      const first = composer.passes[0];
-      first.enabled = false;
-      grab(composer.passes[composer.passes.length - 1], () => render(0));
-      first.enabled = true;
+      grab(composer.passes[composer.passes.length - 1], () => kept(composer.passes[0], () => render(0)));
       return;
     }
     runtime.muted = true;
@@ -578,10 +585,7 @@ export function Post({ phone }: { phone: boolean }) {
           still.phase = 'live';
           return;
         }
-        const first = composer.passes[0];
-        first.enabled = false;
-        const image = grab(composer.passes[composer.passes.length - 1], () => render(0));
-        first.enabled = true;
+        const image = grab(composer.passes[composer.passes.length - 1], () => kept(composer.passes[0], () => render(0)));
         if (!image) {
           still.phase = 'live';
           still.showing = false;
