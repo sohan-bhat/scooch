@@ -259,37 +259,20 @@ fn shift(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key:
 fn lean(h: &mut Held, analysis: &Analysis, scene: &Scene, moved: &[[f64; 4]]) -> bool {
     let Some(g) = shape::ground(scene) else { return false };
     let parts = &mut h.parts;
-    let (Some(base), Some(fixed), Some(live), Some(grounded)) = (parts.base.as_mut(), parts.fixed.as_ref(), parts.live.as_mut(), parts.grounded.as_ref()) else { return false };
-    if g.u.to_bits() != base.u.to_bits() || parts.pads.as_ref().is_some_and(|p| p.feather().to_bits() != pads::feather(scene).to_bits()) {
+    let (Some(fixed), Some(live), Some(grounded)) = (parts.fixed.as_ref(), parts.live.as_mut(), parts.grounded.as_ref()) else { return false };
+    if g.u.to_bits() != fixed.u().to_bits() || parts.pads.as_ref().is_some_and(|p| p.feather().to_bits() != pads::feather(scene).to_bits()) {
         return false;
     }
     let _ = analysis;
-    let grid = base.grid;
-    let (w, hh, u) = (grid.w, grid.h, base.u);
+    let grid = parts.framed.grid;
+    let (w, hh) = (grid.w, grid.h);
     let icons: Vec<[f32; 4]> = moved.iter().map(|r| r.map(|v| v as f32)).collect();
-    let near = area::merge(icons.iter().map(|r| shape::cells_near(&grid, &shape::anchor(r, u, scene), shape::field_reach(u))).collect());
-    base.icons = g.icons.clone();
-    let mut changed: Vec<Area> = Vec::new();
-    for a in &near {
-        let (d, m) = (area::take(&base.d, w, *a), area::take(&base.meanders, w, *a));
-        shape::field_into(&g, &grid, *a, &mut base.d, &mut base.meanders);
-        changed.extend(area::moved(&d, &base.d, w, *a, area::bits));
-        changed.extend(area::moved(&m, &base.meanders, w, *a, area::bits));
-    }
-    let changed = area::merge(changed);
-    let reach = shape::margin(u) + 1;
-    let mut flipped = Vec::new();
-    for a in area::merge(changed.iter().map(|a| area::grow(*a, reach, w, hh)).collect()) {
-        let before = area::take(&base.owned, w, a);
-        shape::reached_into(&base.d, &grid, shape::margin(u), a, &mut base.owned);
-        flipped.extend(area::moved(&before, &base.owned, w, a, area::equal));
-    }
-    let (field, look) = look::relive(base, fixed, live, &changed, &area::merge(flipped), &icons);
+    let Some((field, look)) = look::relive(fixed, live, &g, &icons) else { return false };
     let cells = w * hh;
     let (mut far, mut halves) = (vec![false; cells], Vec::new());
     for a in area::merge(field) {
         let before = area::take(&h.bundle.field, w, a);
-        let fresh: Vec<f32> = area::take(&live.field, w, a).into_iter().map(bundle::half).collect();
+        let fresh: Vec<f32> = live.field_in(w, a).into_iter().map(bundle::half).collect();
         if before.iter().zip(&fresh).all(|(p, q)| area::bits(p, q)) {
             continue;
         }

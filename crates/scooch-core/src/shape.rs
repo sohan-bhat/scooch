@@ -17,21 +17,8 @@ const MEANDER: (f32, f32, u32) = (1.4, 3.2, 73);
 const MEANDER_RISE: f32 = 0.6;
 const ANCHOR: f32 = 1.0;
 const BEYOND: f32 = 2.0;
-const PUFFS: [(f32, f32, u32); 2] = [(0.55, 1.2, 53), (0.30, 0.55, 59)];
-const PUFF_LOW: f32 = 0.25;
-const PUFF_FACE: (f32, f32) = (-0.4, 0.5);
-const PUFF_JITTER: f32 = 0.35;
-const PUFF_INSET: f32 = 0.10;
-const PUFF_JOIN: f32 = 0.03;
-const PUFF_REACH: f32 = 1.1;
-const PUFF_SPAN: (f32, f32) = (0.8, 1.2);
-const OPEN: f32 = 1.0;
-const GAPS: f32 = 0.25;
-const FOLDS: (f32, f32, u32) = (0.12, 0.6, 61);
-const BILLOWS: (f32, f32, u32) = (0.75, 1.25, 67);
-const MARGIN: f32 = 2.6;
+const PUFF_SIZE: f32 = 0.55;
 const PAINT_REACH: f32 = 0.45;
-const CLOUD_MEANDER: f32 = 0.6;
 
 pub struct Ground {
     pub rects: Vec<[f32; 4]>,
@@ -70,7 +57,7 @@ pub fn ground(scene: &Scene) -> Option<Ground> {
     Some(Ground { rects, icons, anchored, u })
 }
 
-fn hash(x: i32, y: i32, seed: u32) -> f32 {
+pub(crate) fn hash(x: i32, y: i32, seed: u32) -> f32 {
     let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841) ^ seed.wrapping_mul(0xcb1a_b31f);
     h ^= h >> 13;
     h = h.wrapping_mul(0x5bd1_e995);
@@ -106,15 +93,6 @@ fn rounded_box(px: f32, py: f32, r: &[f32; 4], grow: f32) -> f32 {
 pub fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-fn smooth_min(a: f32, b: f32, k: f32) -> f32 {
-    -smooth_max(-a, -b, k)
-}
-
-fn smooth_max(a: f32, b: f32, k: f32) -> f32 {
-    let h = (0.5 + 0.5 * (a - b) / k).clamp(0.0, 1.0);
-    b + (a - b) * h + k * h * (1.0 - h)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -153,10 +131,6 @@ pub fn whole(grid: &Grid) -> Area {
     [0, 0, grid.w, grid.h]
 }
 
-pub fn field_reach(u: f32) -> f32 {
-    (GROW + CUT) * u
-}
-
 pub fn cells_near(grid: &Grid, r: &[f32; 4], reach: f32) -> Area {
     let c = grid.cell as f32;
     let span = |lo: f32, hi: f32, n: usize| ((((lo - reach) / c).floor() - 1.0).clamp(0.0, n as f32) as usize, (((hi + reach) / c).ceil() + 1.0).clamp(0.0, n as f32) as usize);
@@ -172,7 +146,7 @@ fn field(g: &Ground, grid: &Grid) -> (Vec<f32>, Vec<f32>) {
     (d, meanders)
 }
 
-pub fn field_into(g: &Ground, grid: &Grid, [x0, y0, x1, y1]: Area, d: &mut [f32], meanders: &mut [f32]) {
+fn field_into(g: &Ground, grid: &Grid, [x0, y0, x1, y1]: Area, d: &mut [f32], meanders: &mut [f32]) {
     let k = SMOOTH * g.u;
     let cut = CUT * g.u;
     let grow = GROW * g.u;
@@ -246,267 +220,25 @@ fn label(d: &[f32], grid: &Grid) -> (Vec<i32>, Vec<Vec<usize>>) {
     (labels, groups)
 }
 
-pub fn reached(d: &[f32], grid: &Grid, reach: usize) -> Vec<bool> {
-    let cap = reach as u32 + 1;
-    let mut across = vec![cap; d.len()];
-    across.par_chunks_mut(grid.w).zip(d.par_chunks(grid.w)).for_each(|(out, row)| {
-        let mut last = cap;
-        for (o, v) in out.iter_mut().zip(row) {
-            last = if *v < 0.0 { 0 } else { (last + 1).min(cap) };
-            *o = last;
-        }
-        for i in (0..grid.w.saturating_sub(1)).rev() {
-            out[i] = out[i].min(out[i + 1] + 1);
-        }
-    });
-    let mut down = vec![cap; d.len()];
-    down.par_chunks_mut(grid.h).enumerate().for_each(|(x, column)| {
-        let mut last = cap;
-        for (y, o) in column.iter_mut().enumerate() {
-            last = across[y * grid.w + x].min(last + 1);
-            *o = last;
-        }
-        for y in (0..grid.h.saturating_sub(1)).rev() {
-            column[y] = column[y].min(column[y + 1] + 1);
-        }
-    });
-    (0..d.len()).into_par_iter().map(|i| down[(i % grid.w) * grid.h + i / grid.w] as usize <= reach).collect()
-}
-
-pub fn reached_into(d: &[f32], grid: &Grid, reach: usize, a: Area, owned: &mut [bool]) {
-    let crop = [a[0].saturating_sub(reach + 1), a[1].saturating_sub(reach + 1), (a[2] + reach + 1).min(grid.w), (a[3] + reach + 1).min(grid.h)];
-    let small = Grid { w: crop[2] - crop[0], h: crop[3] - crop[1], cell: grid.cell };
-    if small.w == 0 || small.h == 0 {
-        return;
-    }
-    let mut part = Vec::with_capacity(small.w * small.h);
-    for y in crop[1]..crop[3] {
-        part.extend_from_slice(&d[y * grid.w + crop[0]..y * grid.w + crop[2]]);
-    }
-    let near = reached(&part, &small, reach);
-    for y in a[1]..a[3] {
-        for x in a[0]..a[2] {
-            owned[y * grid.w + x] = near[(y - crop[1]) * small.w + x - crop[0]];
-        }
-    }
-}
-
-pub struct Base {
-    pub grid: Grid,
-    pub u: f32,
-    pub d: Vec<f32>,
-    pub owned: Vec<bool>,
-    pub icons: Vec<[f32; 4]>,
-    pub meanders: Vec<f32>,
-}
-
-pub fn margin(u: f32) -> usize {
-    (MARGIN * u / Q as f32).ceil() as usize
-}
-
-pub fn base(scene: &Scene, width: usize, height: usize) -> Option<Base> {
-    let g = ground(scene)?;
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let grid = Grid::of(width, height, Q);
-    let (d, meanders) = field(&g, &grid);
-    let owned = reached(&d, &grid, margin(g.u));
-    Some(Base { grid, u: g.u, d, owned, icons: g.icons, meanders })
-}
-
-#[derive(PartialEq)]
-struct Lattice {
-    spacing: f32,
-    cols: i32,
-    rows: i32,
-    points: Vec<[f32; 4]>,
-}
-
-impl Lattice {
-    fn new(d: Option<&[f32]>, grid: &Grid, u: f32, (size, spacing, seed): (f32, f32, u32)) -> Self {
-        let spacing = spacing * u;
-        let cols = ((grid.w * grid.cell) as f32 / spacing).ceil() as i32 + 3;
-        let rows = ((grid.h * grid.cell) as f32 / spacing).ceil() as i32 + 3;
-        let points = (0..rows * cols)
-            .map(|k| {
-                let (cx, cy) = (k % cols - 1, k / cols - 1);
-                let x = (cx as f32 + 0.5 + PUFF_JITTER * hash(cx, cy, seed)) * spacing;
-                let y = (cy as f32 + 0.5 + PUFF_JITTER * hash(cx, cy, seed + 1)) * spacing;
-                let (inside, upper) = d.map_or((-1.0, 1.0), |d| {
-                    let at = |x: f32, y: f32| grid.linear(d, grid.at(x), grid.at(y));
-                    let step = grid.cell as f32;
-                    let (dx, dy) = (at(x + step, y) - at(x - step, y), at(x, y + step) - at(x, y - step));
-                    let rise = -dy / (dx * dx + dy * dy).sqrt().max(1e-6);
-                    (at(x, y), PUFF_LOW + (1.0 - PUFF_LOW) * smoothstep(PUFF_FACE.0, PUFF_FACE.1, rise))
-                });
-                [x, y, size * u * (0.6 + 0.4 * hash(cx, cy, seed + 2)) * upper, inside]
-            })
-            .collect();
-        Self { spacing, cols, rows, points }
-    }
-
-    fn near(&self, px: f32, py: f32) -> impl Iterator<Item = &[f32; 4]> {
-        let (ix, iy) = ((px / self.spacing).floor() as i32, (py / self.spacing).floor() as i32);
-        (iy - 1..=iy + 1)
-            .flat_map(move |cy| (ix - 1..=ix + 1).map(move |cx| (cx, cy)))
-            .filter(|&(cx, cy)| cx >= -1 && cy >= -1 && cx + 1 < self.cols && cy + 1 < self.rows)
-            .map(|(cx, cy)| &self.points[((cy + 1) * self.cols + cx + 1) as usize])
-    }
-}
-
-#[derive(PartialEq)]
-pub struct Puffs(Vec<Lattice>);
-
-pub fn calmer(d: f32, meander: f32) -> f32 {
-    d + meander * CLOUD_MEANDER
-}
-
-pub fn puffs(base: &Base, calmer: &[f32]) -> Puffs {
-    Puffs(PUFFS.iter().map(|p| Lattice::new(Some(calmer), &base.grid, base.u, *p)).collect())
-}
-
-impl Lattice {
-    fn bytes(&self) -> usize {
-        self.points.len() * 16
-    }
-}
-
-impl Billows {
-    pub fn bytes(&self) -> usize {
-        self.0.bytes()
-    }
-}
-
-impl Base {
-    pub fn bytes(&self) -> usize {
-        (self.d.len() + self.meanders.len()) * 4 + self.owned.len() + self.icons.len() * 16
-    }
-}
-
-impl Puffs {
-    pub fn bytes(&self) -> usize {
-        self.0.iter().map(|l| l.bytes()).sum()
-    }
-
-    pub fn moved(&self, other: &Puffs, grid: &Grid) -> Vec<Area> {
-        let mut out = Vec::new();
-        for (a, b) in self.0.iter().zip(&other.0) {
-            if a.points.len() != b.points.len() {
-                return vec![whole(grid)];
-            }
-            for (k, (p, q)) in a.points.iter().zip(&b.points).enumerate() {
-                if p.iter().zip(q).any(|(x, y)| x.to_bits() != y.to_bits()) {
-                    let (cx, cy) = ((k as i32 % a.cols - 1) as f32, (k as i32 / a.cols - 1) as f32);
-                    let s = a.spacing;
-                    out.push(cells_near(grid, &[(cx - 1.0) * s, (cy - 1.0) * s, (cx + 2.0) * s, (cy + 2.0) * s], 0.0));
-                }
-            }
-        }
-        out
-    }
-}
-
-pub fn clouds_into(base: &Base, d: &[f32], lattices: &Puffs, wanted: impl Fn(usize) -> bool + Sync, [x0, y0, x1, y1]: Area, out: &mut [f32]) {
-    let (grid, u) = (base.grid, base.u);
-    let (x1, y1) = (x1.min(grid.w), y1.min(grid.h));
-    if x0 >= x1 || y0 >= y1 {
-        return;
-    }
-    out.par_chunks_mut(grid.w).enumerate().skip(y0).take(y1 - y0).for_each(|(j, row)| {
-        for (x, cell) in row.iter_mut().enumerate().take(x1).skip(x0) {
-            let i = j * grid.w + x;
-            if !base.owned[i] || !wanted(i) {
-                *cell = d[i];
-                continue;
-            }
-            let (px, py) = grid.center(i);
-            let mut puffed = d[i] + PUFF_INSET * u;
-            if d[i] > -PUFF_SPAN.0 * u && d[i] < PUFF_SPAN.1 * u {
-                for lattice in &lattices.0 {
-                    for &[x, y, bulge, inside] in lattice.near(px, py) {
-                        if inside < 0.0 {
-                            let radius = (bulge - inside).min(PUFF_REACH * lattice.spacing);
-                            puffed = smooth_min(puffed, ((px - x) * (px - x) + (py - y) * (py - y)).sqrt() - radius, PUFF_JOIN * u);
-                        }
-                    }
-                }
-            }
-            *cell = puffed;
-        }
-    });
-}
-
-pub fn shade_reach(u: f32) -> f32 {
-    OPEN * u
-}
-
-pub fn shade_into(icons: &[[f32; 4]], grid: &Grid, u: f32, [x0, y0, x1, y1]: Area, out: &mut [f32]) {
-    let reach = OPEN * u;
-    let (x1, y1) = (x1.min(grid.w), y1.min(grid.h));
-    if x0 >= x1 || y0 >= y1 {
-        return;
-    }
-    out.par_chunks_mut(grid.w).enumerate().skip(y0).take(y1 - y0).for_each(|(j, row)| {
-        let py = grid.center(j * grid.w).1;
-        row[x0..x1].fill(reach);
-        for r in icons.iter().filter(|r| py >= r[1] - reach && py <= r[3] + reach) {
-            let i0 = (((r[0] - reach) / grid.cell as f32).floor().max(0.0) as usize).min(grid.w).max(x0);
-            let i1 = (((r[2] + reach) / grid.cell as f32).ceil().max(0.0) as usize).min(grid.w).min(x1);
-            for (i, cell) in row.iter_mut().enumerate().take(i1).skip(i0) {
-                *cell = smooth_min(*cell, rounded_box(grid.center(i).0, py, r, 0.0), GAPS * u);
-            }
-        }
-        for (i, cell) in row.iter_mut().enumerate().take(x1).skip(x0) {
-            if *cell < reach {
-                let px = grid.center(i).0;
-                *cell -= FOLDS.0 * u * 0.5 * (1.0 + noise(px / (FOLDS.1 * u), py / (FOLDS.1 * u), FOLDS.2));
-            }
-        }
-    });
-}
-
-pub struct Billows(Lattice);
-
-pub fn billow_lattice(grid: &Grid, u: f32) -> Billows {
-    Billows(Lattice::new(None, grid, u, (BILLOWS.0, BILLOWS.1, BILLOWS.2)))
-}
-
-pub fn billows_into(lattice: &Billows, grid: &Grid, u: f32, wanted: impl Fn(usize) -> bool + Sync, [x0, y0, x1, y1]: Area, out: &mut [f32]) {
-    let (x1, y1) = (x1.min(grid.w), y1.min(grid.h));
-    if x0 >= x1 || y0 >= y1 {
-        return;
-    }
-    out.par_chunks_mut(grid.w).enumerate().skip(y0).take(y1 - y0).for_each(|(j, row)| {
-        for (x, cell) in row.iter_mut().enumerate().take(x1).skip(x0) {
-            let i = j * grid.w + x;
-            *cell = if !wanted(i) {
-                FAR * u
-            } else {
-                let (px, py) = grid.center(i);
-                lattice.0.near(px, py).fold(FAR * u, |acc, &[x, y, r, _]| smooth_min(acc, ((px - x) * (px - x) + (py - y) * (py - y)).sqrt() - r, GAPS * u))
-            };
-        }
-    });
-}
-
 pub fn coverage(scene: &Scene, cell: usize) -> Option<(Grid, Vec<bool>)> {
     let g = ground(scene)?;
     let grid = Grid::of(scene.width as usize, scene.height as usize, cell);
     let (d, _) = field(&g, &grid);
-    let reach = (PUFFS[0].0 + PAINT_REACH) * g.u + cell as f32 * 0.75;
+    let reach = (PUFF_SIZE + PAINT_REACH) * g.u + cell as f32 * 0.75;
     Some((grid, d.iter().map(|v| *v < reach).collect()))
 }
 
 pub fn field_image(scene: &Scene, width: u32, height: u32) -> GrayImage {
     let (w, h) = (width as usize, height as usize);
-    let Some(b) = base(scene, w, h) else { return GrayImage::from_pixel(width, height, image::Luma([0])) };
-    let step = FIELD_STEP * b.u;
+    let Some(g) = ground(scene).filter(|_| w > 0 && h > 0) else { return GrayImage::from_pixel(width, height, image::Luma([0])) };
+    let grid = Grid::of(w, h, Q);
+    let (d, _) = field(&g, &grid);
+    let step = FIELD_STEP * g.u;
     let mut out = vec![0u8; w * h];
     out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        let gy = b.grid.at(y as f32 + 0.5);
+        let gy = grid.at(y as f32 + 0.5);
         for (x, cell) in row.iter_mut().enumerate() {
-            let d = b.grid.linear(&b.d, b.grid.at(x as f32 + 0.5), gy);
+            let d = grid.linear(&d, grid.at(x as f32 + 0.5), gy);
             *cell = (128.0 - d / step).round().clamp(0.0, 255.0) as u8;
         }
     });
@@ -527,27 +259,6 @@ mod tests {
 
     fn icon(x: f32, y: f32) -> Rect {
         Rect { x, y, w: 76.0, h: 94.0 }
-    }
-
-    #[test]
-    fn reach_matches_a_breadth_first_walk() {
-        let grid = Grid::of(160, 120, 4);
-        let d: Vec<f32> = (0..grid.w * grid.h).map(|i| if [37usize, 520, 999, 1100].contains(&i) { -1.0 } else { 1.0 }).collect();
-        let near = reached(&d, &grid, 6);
-        let mut distance = vec![usize::MAX; d.len()];
-        let mut queue: VecDeque<usize> = (0..d.len()).filter(|i| d[*i] < 0.0).collect();
-        queue.iter().for_each(|i| distance[*i] = 0);
-        while let Some(i) = queue.pop_front() {
-            for n in neighbours(i, &grid).into_iter().flatten() {
-                if distance[n] == usize::MAX {
-                    distance[n] = distance[i] + 1;
-                    queue.push_back(n);
-                }
-            }
-        }
-        for i in 0..d.len() {
-            assert_eq!(near[i], distance[i] <= 6, "{i}");
-        }
     }
 
     #[test]

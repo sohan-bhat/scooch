@@ -79,6 +79,7 @@ fn main() {
         "height": a.height,
         "canvas": { "file": "canvas.jpg", "width": a.canvas_width, "height": a.canvas_height },
         "analysis": { "file": "analysis.bin", "format": "scooch analysis v1" },
+        "tables": "scooch tables v2",
         "grid_cell": 4,
         "paint_cell": 16,
         "states": states,
