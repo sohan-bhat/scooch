@@ -109,15 +109,25 @@ impl Session {
         !empty
     }
 
-    /// Places the picture like `scooch_core::solve`, except that where nothing belongs anywhere on the picture it solves with scenery off, since no scenery will be drawn there and the placement must match the one scenery off gives.
+    /// The options to use for every later call on this picture and scene: every solve, `solve`, `solve_near` and `solve_near_timed`, and every draw. They are the given options, with the scenery setting off where nothing belongs anywhere on the picture, so a bare picture is placed and drawn exactly as with scenery off. It asks `belongs`, so the map is worked out once.
+    pub fn options(&mut self, image: &RgbImage, analysis: &Analysis, scene: &Scene, options: &Options) -> Options {
+        if options.scenery == crate::Scenery::Off || self.belongs(image, analysis, scene, options) {
+            *options
+        } else {
+            Options { scenery: crate::Scenery::Off, ..*options }
+        }
+    }
+
+    /// `scooch_core::solve` with the options `options` gives for this picture and scene.
     pub fn solve(&mut self, image: &RgbImage, analysis: &Analysis, scene: &Scene, options: &Options, previous: Option<&Placement>) -> Placement {
-        let options = if self.belongs(image, analysis, scene, options) { *options } else { Options { scenery: crate::Scenery::Off, ..*options } };
+        let options = self.options(image, analysis, scene, options);
         crate::solve(analysis, scene, &options, previous)
     }
 
     #[doc(hidden)]
-    pub fn map_id(&self) -> Option<usize> {
-        self.held.as_ref().and_then(|h| h.parts.belonging.as_ref()).or(self.kept.as_ref().map(|k| &k.2)).map(|b| Arc::as_ptr(b) as usize)
+    pub fn map_ids(&self) -> (Option<usize>, Option<usize>) {
+        let id = |b: &Arc<look::Belonging>| Arc::as_ptr(b) as usize;
+        (self.kept.as_ref().map(|k| id(&k.2)), self.held.as_ref().and_then(|h| h.parts.belonging.as_ref()).map(id))
     }
 
     pub fn redrawn(&self, x: u32, y: u32) -> bool {
@@ -136,7 +146,9 @@ impl Session {
     }
 
     pub fn bytes(&self) -> usize {
-        self.held.as_ref().map_or(0, |h| h.parts.bytes() + h.bundle.canvas.len() + h.bundle.table_bytes() + h.still.as_ref().map_or(0, |s| s.as_raw().len()) + h.picture.as_ref().map_or(0, |p| p.as_raw().len()))
+        let held = self.held.as_ref().map_or(0, |h| h.parts.bytes() + h.bundle.canvas.len() + h.bundle.table_bytes() + h.still.as_ref().map_or(0, |s| s.as_raw().len()) + h.picture.as_ref().map_or(0, |p| p.as_raw().len()));
+        let shared = |k: &Arc<look::Belonging>| self.held.as_ref().and_then(|h| h.parts.belonging.as_ref()).is_some_and(|b| Arc::ptr_eq(b, k));
+        held + self.kept.as_ref().filter(|k| !shared(&k.2)).map_or(0, |k| k.2.bytes())
     }
 
     pub fn still(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Bundle, RgbImage) {
@@ -179,16 +191,17 @@ impl Session {
         }
         let key = (glance(sw, sh, image.as_raw()), look::print(analysis));
         let spare = self.kept.as_ref().filter(|k| k.0 == key.0 && k.1 == (sw, sh)).map(|k| Arc::clone(&k.2));
+        let stamp = look::stamp(analysis, scene, options);
         let held = match self.held.take() {
             Some(mut h) if h.image == key.0 && h.source == (sw, sh) && h.scene.width == scene.width && h.scene.height == scene.height => {
                 if h.analysis == key.1 && h.placement == *placement && h.options == *options {
-                    shift::<DRAW>(h, image, analysis, scene, key)
+                    shift::<DRAW>(h, image, analysis, scene, key, spare)
                 } else {
-                    let kept = (reuse(&mut h), h.parts.belonging.take().filter(|_| h.analysis == key.1).or(spare));
+                    let kept = (reuse(&mut h), fitting(h.parts.belonging.take().filter(|_| h.analysis == key.1), spare, (sw, sh), stamp));
                     build(image, analysis, placement, scene, options, key, kept)
                 }
             }
-            _ => build(image, analysis, placement, scene, options, key, (None, spare)),
+            _ => build(image, analysis, placement, scene, options, key, (None, fitting(None, spare, (sw, sh), stamp))),
         };
         let mut held = held;
         if !DRAW {
@@ -251,7 +264,11 @@ fn paint_still(h: &mut Held, image: &RgbImage, analysis: &Analysis, scene: &Scen
     h.redraw = None;
 }
 
-fn shift<const DRAW: bool>(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key: (u64, u64)) -> Held {
+fn fitting(held: Option<Arc<look::Belonging>>, spare: Option<Arc<look::Belonging>>, source: (u32, u32), stamp: u64) -> Option<Arc<look::Belonging>> {
+    held.into_iter().chain(spare).find(|b| b.fits(source, stamp))
+}
+
+fn shift<const DRAW: bool>(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key: (u64, u64), spare: Option<Arc<look::Belonging>>) -> Held {
     let (old, new) = (solver::screen_rects(&h.scene), solver::screen_rects(scene));
     if old == new {
         h.scene = scene.clone();
@@ -267,6 +284,13 @@ fn shift<const DRAW: bool>(mut h: Held, image: &RgbImage, analysis: &Analysis, s
         if pad != h.bundle.pad {
             Arc::make_mut(&mut h.bundle).pad = pad;
         }
+        let unit = shape::ground(scene).map_or(1.0, |g| g.u);
+        if unit.to_bits() != h.bundle.constants.unit.to_bits() {
+            h.parts.unit = unit;
+            let out = Arc::make_mut(&mut h.bundle);
+            out.constants.unit = unit;
+            out.ramps = bundle::ramps(unit);
+        }
         h.still = None;
         h.scene = scene.clone();
         h.redraw = None;
@@ -276,7 +300,8 @@ fn shift<const DRAW: bool>(mut h: Held, image: &RgbImage, analysis: &Analysis, s
         Some(moved) if lean::<DRAW>(&mut h, analysis, scene, &moved) => h,
         _ => {
             let placement = h.placement.clone();
-            let kept = (reuse(&mut h), h.parts.belonging.take());
+            let stamp = look::stamp(analysis, scene, &options);
+            let kept = (reuse(&mut h), fitting(h.parts.belonging.take(), spare, h.source, stamp));
             build(image, analysis, &placement, scene, &options, key, kept)
         }
     }

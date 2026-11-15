@@ -303,6 +303,26 @@ fn picture(name: &str) -> RgbImage {
 }
 
 #[test]
+fn one_session_works_each_map_out_once() {
+    let (w, h) = (960u32, 600u32);
+    let image = made("flat-water");
+    let analysis = scooch_core::analyze(&image);
+    let icons = |size: f32| (0..12).map(|k| Rect { x: 60.0 + 70.0 * k as f32, y: 80.0 + 30.0 * (k % 3) as f32, w: size, h: size }).collect::<Vec<Rect>>();
+    let auto = Options { scenery: Scenery::Auto, ..Options::default() };
+    let clouds = Options { scenery: Scenery::Clouds, ..Options::default() };
+    let mut session = Session::new();
+    for (size, options) in [(64.0, auto), (80.0, auto), (80.0, clouds)] {
+        let scene = Scene { width: w, height: h, icons: icons(size) };
+        assert!(session.belongs(&image, &analysis, &scene, &options));
+        assert!(session.bytes() > 0, "the kept map is not counted");
+        let kept = session.map_ids().0;
+        let placement = scooch_core::solve(&analysis, &scene, &options, None);
+        session.still(&image, &analysis, &placement, &scene, &options);
+        assert!(kept.is_some() && session.map_ids() == (kept, kept), "icons of {size} with {:?}: the map was worked out again", options.scenery);
+    }
+}
+
+#[test]
 fn a_bare_picture_is_placed_as_with_scenery_off() {
     let (w, h) = (1024u32, 768u32);
     let (auto, off) = (Options { scenery: Scenery::Auto, ..Options::default() }, Options { scenery: Scenery::Off, ..Options::default() });
@@ -339,7 +359,7 @@ fn belongs_says_what_the_bundle_carries() {
                 let mut session = Session::new();
                 let belongs = session.belongs(&image, &analysis, &scene, &options);
                 assert_eq!(belongs, want, "{name} {layout}");
-                let map = session.map_id();
+                let kept = session.map_ids().0;
                 let placement = session.solve(&image, &analysis, &scene, &options, None);
                 let bundle = match call {
                     "still" => session.still(&image, &analysis, &placement, &scene, &options).0,
@@ -347,7 +367,7 @@ fn belongs_says_what_the_bundle_carries() {
                     _ => (*session.tables_shared(&image, &analysis, &placement, &scene, &options)).clone(),
                 };
                 assert_eq!(bundle.bare(), !belongs, "{name} {layout} {call}");
-                assert_eq!(session.map_id(), map, "{name} {layout} {call}: the map was worked out again");
+                assert!(kept.is_some() && session.map_ids() == (kept, kept), "{name} {layout} {call}: the map was worked out again");
                 let canvas = scooch_core::canvas(&image, w, h);
                 let plain = scooch_core::bundle(&image, &analysis, &placement, &scene, &options);
                 let back = scooch_core::Bundle::tables_from_bytes(&plain.tables_to_bytes(), canvas).expect("tables");

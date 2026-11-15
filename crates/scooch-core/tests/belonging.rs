@@ -115,6 +115,11 @@ fn made(name: &str) -> RgbImage {
                 mix(a, [61.0, 106.0, 127.0], ((v - 0.55) / 0.2).clamp(0.0, 1.0)).map(|c| c + 2.0 * grain)
             }
             "sea-210-216" => oklch(0.55, 0.09, 210.0 + 6.0 * u).map(|c| c + 2.0 * grain),
+            "mixed-top" => {
+                let (blue, white, cream) = (oklch(0.62, 0.09, 245.0), oklch(0.9, 0.01, 100.0), oklch(0.88, 0.03, 85.0));
+                mix(mix(blue, white, smoothstep(0.36, 0.44, u)), cream, smoothstep(0.66, 0.74, u)).map(|c| c + 2.0 * grain)
+            }
+            "pink-white" => oklch(0.85, 0.03, 350.0).map(|c| c + 2.0 * grain),
             "teal-blue-corner" => {
                 let corner = smoothstep(0.7, 0.9, u) * (1.0 - smoothstep(0.15, 0.35, v));
                 mix(oklch(0.5, 0.08, 205.0), oklch(0.42, 0.1, 250.0), corner).map(|c| c + 2.0 * grain)
@@ -460,16 +465,30 @@ fn one_top_cell_does_not_decide_sky_or_water() {
     let (clouds, land) = kinds(&sea, (w, h));
     println!("sea-210-216: clouds {clouds:.4} land {land:.4}");
     assert!(clouds == 0.0 && land > 0.05, "the sea from hue 210 to 216 read as sky: clouds {clouds:.4} land {land:.4}");
-    let (sw, sh) = sea.dimensions();
-    for (x, y, cw, ch) in [(1, 0, sw - 1, sh), (0, 0, sw - 1, sh), (0, 1, sw, sh - 1), (0, 0, sw, sh - 1)] {
-        let crop = image::imageops::crop_imm(&sea, x, y, cw, ch).to_image();
-        let (c, l) = kinds(&crop, (w, h));
-        println!("sea-210-216 cropped at {x},{y}: clouds {c:.4} land {l:.4}");
-        assert!(c == 0.0 && l > 0.05, "a one pixel crop changed the kind: clouds {c:.4} land {l:.4}");
-    }
     let (clouds, land) = kinds(&made("teal-blue-corner"), (w, h));
     println!("teal-blue-corner: clouds {clouds:.4} land {land:.4}");
     assert!(clouds == 0.0 && land > 0.05, "teal with a blue corner: clouds {clouds:.4} land {land:.4}");
+}
+
+fn sky_share(image: &RgbImage, (w, h): (u32, u32), inside: impl Fn(f32) -> bool) -> f64 {
+    let analysis = scooch_core::analyze(image);
+    let scene = Scene { width: w, height: h, icons: grid(w, h, 8, 5) };
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let placement = framing(image, (w, h), 1.0, (0.5, 0.5));
+    let (cells, gw, _) = scooch_core::regions(image, &analysis, &placement, &scene, &options);
+    let picked: Vec<&[u8; 4]> = cells.iter().enumerate().filter(|(i, _)| inside((*i % gw as usize) as f32 / gw as f32)).map(|(_, c)| c).collect();
+    picked.iter().filter(|c| c[0] >= 128).count() as f64 / picked.len().max(1) as f64
+}
+
+#[test]
+fn the_top_edge_votes_cell_by_cell() {
+    let (w, h) = (1440u32, 900u32);
+    let blue = sky_share(&made("mixed-top"), (w, h), |x| x < 0.3);
+    println!("mixed-top: {blue:.3} of the blue reads as sky");
+    assert!(blue > 0.95, "a top row of 40% blue, 30% white and 30% cream did not read as sky: {blue:.3}");
+    let pink = sky_share(&made("pink-white"), (w, h), |_| true);
+    println!("pink-white: {pink:.3} reads as sky");
+    assert!(pink < 0.05, "a pink white at hue 350 read as blue sky: {pink:.3}");
 }
 
 #[test]

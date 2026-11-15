@@ -101,7 +101,8 @@ fn main() {
         let analysis = scooch_core::analyze(&image);
         let mut scene = Scene { width: w, height: h, icons: icons.clone() };
         let mut session = Session::new();
-        let mut placement = session.solve(&image, &analysis, &scene, &options, None);
+        let options = session.options(&image, &analysis, &scene, &options);
+        let mut placement = scooch_core::solve(&analysis, &scene, &options, None);
         let still_placement = placement.clone();
         let (first_bundle, first_still) = session.still_shared(&image, &analysis, &placement, &scene, &options);
         let first_layers = scooch_core::frame_layers(&first_bundle, &first_bundle, 0.0);

@@ -272,6 +272,28 @@ fn a_bare_picture_keeps_the_real_unit() {
 }
 
 #[test]
+fn a_glide_takes_its_unit_from_the_state_with_scenery() {
+    let (w, h) = (960, 600);
+    let photo = photos().iter().find(|p| p.name == "lone-canoe").expect("lone-canoe");
+    let scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &photo.analysis, w, h) };
+    let off = Options { scenery: Scenery::Off, ..Options::default() };
+    let placement = scooch_core::solve(&photo.analysis, &scene, &on(), None);
+    let (with, without) = (scooch_core::bundle(&photo.image, &photo.analysis, &placement, &scene, &on()), scooch_core::bundle(&photo.image, &photo.analysis, &placement, &scene, &off));
+    assert!(!with.bare() && without.bare());
+    assert_eq!(without.constants.unit, with.constants.unit, "scenery off carries unit {} beside {}", without.constants.unit, with.constants.unit);
+    let empty = Scene { icons: Vec::new(), ..scene.clone() };
+    let mut none = scooch_core::bundle(&photo.image, &photo.analysis, &placement, &empty, &on());
+    assert!(none.bare());
+    for s in [0.25f32, 0.5, 0.75] {
+        let (there, back) = (scooch_core::frame(&none, &with, s), scooch_core::frame(&with, &none, s));
+        let kept = none.constants.unit;
+        none.constants.unit = with.constants.unit;
+        assert!(scooch_core::frame(&none, &with, s) == there && scooch_core::frame(&with, &none, s) == back, "s {s}: the unit of a state with no icons changed the glide");
+        none.constants.unit = kept;
+    }
+}
+
+#[test]
 fn a_mirrored_pair_glides_as_the_mirror() {
     let (w, h) = (640, 400);
     for name in ["lone-canoe", "balloon-sky"] {
