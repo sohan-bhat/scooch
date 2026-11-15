@@ -214,7 +214,16 @@ export function createInside(frame: Frame, saliency: Texture, atlas: Texture, st
   const tileUniforms = { uAtlas: { value: atlas }, uOutline: { value: 0 }, uFade: { value: 1 } };
   const tiles = new InstancedMesh(
     new PlaneGeometry(1, 1),
-    new ShaderMaterial({ name: 'scooch-tiles', vertexShader: tileVertex, fragmentShader: tileFragment, uniforms: tileUniforms, side: DoubleSide }),
+    new ShaderMaterial({
+      name: 'scooch-tiles',
+      vertexShader: tileVertex,
+      fragmentShader: tileFragment,
+      uniforms: tileUniforms,
+      side: DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    }),
     ICON_SLOTS,
   );
   tiles.geometry.setAttribute('aCell', new InstancedBufferAttribute(Float32Array.from({ length: ICON_SLOTS }, (_, index) => index), 1));
