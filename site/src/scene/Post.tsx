@@ -77,6 +77,12 @@ function Effects({ full }: { full: boolean }) {
   );
 }
 
+function atLiveSize(pass: Pass, composer: EffectComposerType) {
+  const setSize = pass.setSize.bind(pass);
+  pass.setSize = (width: number, height: number) => setSize(Math.max(1, Math.round(width * quality.stillScale)), Math.max(1, Math.round(height * quality.stillScale)));
+  pass.setSize(composer.inputBuffer.width, composer.inputBuffer.height);
+}
+
 const motion = { until: 0, was: false };
 const corner = { scale: '' };
 
@@ -320,6 +326,7 @@ export function Post({ phone }: { phone: boolean }) {
     (value: EffectComposerType | null) => {
       quality.nativeComposer = value;
       if (!value) return;
+      for (const pass of value.passes) if ('configuration' in pass) atLiveSize(pass, value);
       nativeRender.current = value.render.bind(value);
       value.render = () => undefined;
       void (async () => {
