@@ -5,7 +5,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinusConstantAlphaFactor, SRGBColorSpace, Vector2, WebGLRenderTarget, type Texture } from 'three';
 import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass } from 'postprocessing';
 import { quiet } from '@/lib/idle';
+import { release as releaseLoader } from '@/lib/load';
 import { runtime, story, wallClock } from '@/story/state';
+import { beats, TOTAL } from '@/story/timeline';
 import { quality, type Toggle } from './quality';
 import { allocate, freeze, inView, nativeAllowed, nativeOff, screenBox, still, thaw } from './still';
 import { budget, grant, release } from './budget';
@@ -15,6 +17,17 @@ import { precompile } from './warm';
 type Target = { isWebGLMultipleRenderTargets?: boolean; textures?: Texture[] & { mipmaps?: unknown[] } };
 
 const SHARP_AFTER = 250;
+const LOST_FOR = 4000;
+
+function giveUp() {
+  const at = story.progress * TOTAL;
+  const found = beats.findIndex((beat) => at < beat.end);
+  const index = found < 0 ? beats.length - 1 : found;
+  runtime.abandoned = true;
+  document.documentElement.classList.add('stills-mode');
+  releaseLoader(false);
+  requestAnimationFrame(() => document.querySelectorAll('.stills li')[index]?.scrollIntoView({ block: 'start' }));
+}
 const BLEND = 150;
 const STILL_AFTER = 400;
 const JITTER = [
@@ -201,15 +214,24 @@ export function Post({ phone }: { phone: boolean }) {
     };
     const events = ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'] as const;
     for (const name of events) window.addEventListener(name, input, { passive: true });
+    let watchdog = 0;
     const lost = () => {
       nativeOff();
       switchWanted.current = false;
       release();
+      window.clearTimeout(watchdog);
+      watchdog = window.setTimeout(() => {
+        if (gl.getContext().isContextLost()) giveUp();
+      }, LOST_FOR);
     };
+    const restored = () => window.clearTimeout(watchdog);
     gl.domElement.addEventListener('webglcontextlost', lost);
+    gl.domElement.addEventListener('webglcontextrestored', restored);
     return () => {
       for (const name of events) window.removeEventListener(name, input);
       gl.domElement.removeEventListener('webglcontextlost', lost);
+      gl.domElement.removeEventListener('webglcontextrestored', restored);
+      window.clearTimeout(watchdog);
     };
   }, [gl]);
 
