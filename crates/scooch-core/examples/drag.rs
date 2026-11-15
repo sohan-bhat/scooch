@@ -142,7 +142,7 @@ fn main() {
             last_bundle.constants.shadow[1] = gate;
         }
         let middle = Rect { x: (start.x + end.x) / 2.0, y: (start.y + end.y) / 2.0, w: start.w, h: start.h };
-        for (mode, dissolve) in [("morph", false), ("dissolve", true)] {
+        for (mode, dissolve) in [("kind", false), ("dissolve", true)] {
             let mut previous: Option<(RgbImage, Vec<bool>)> = None;
             let (mut most, mut share, mut appeared, mut vanished, mut biggest) = (0u8, 0.0f64, 0usize, 0usize, 0usize);
             let mut tiles = Vec::new();

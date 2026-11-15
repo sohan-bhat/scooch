@@ -620,12 +620,12 @@ fn crossfade(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
 }
 
 pub fn frame(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
-    frame_with(a, b, s, Glide::Morph)
+    frame_with(a, b, s, Glide::ByKind)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Glide {
-    Morph,
+    ByKind,
     Dissolve,
 }
 
@@ -664,7 +664,7 @@ fn dilate(cells: &[bool], grid: &Grid) -> Vec<bool> {
 }
 
 pub fn draw(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8]) -> (RgbImage, RgbaImage) {
-    draw_with(a, b, s, canvas, Glide::Morph)
+    draw_with(a, b, s, canvas, Glide::ByKind)
 }
 
 fn draw_with(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8], glide: Glide) -> (RgbImage, RgbaImage) {
@@ -735,7 +735,7 @@ impl Scope {
 }
 
 pub fn finish(a: &Bundle, b: &Bundle, s: f32, picture: RgbImage, scope: Option<&Scope>) -> (RgbImage, RgbaImage) {
-    finish_with(a, b, s, picture, scope, Glide::Morph)
+    finish_with(a, b, s, picture, scope, Glide::ByKind)
 }
 
 fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Option<&Scope>, glide: Glide) -> (RgbImage, RgbaImage) {
@@ -841,9 +841,7 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
                 let tints = &tint_lines[k];
                 pieces(&shares[k].1.constants, &planes[k].ramps, (d, own), lerp4(&look_lines[k], column), |layer| lerp4(&tints[layer], tint_column), here, grain)
             };
-            let total = if planes.len() == 1 {
-                under(part(0, ds[0], ds[0]))
-            } else if glide == Glide::Dissolve {
+            let faded = || {
                 let mut sum = Paint::default();
                 for (k, (share, _)) in shares.iter().enumerate() {
                     if ds[k] <= c.reach {
@@ -851,17 +849,29 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
                     }
                 }
                 sum
-            } else {
+            };
+            let moved = || {
                 let (da, db) = (ds[0], ds[1]);
                 let (ta, tb) = (da + s * c.grain_scale, db + (1.0 - s) * c.grain_scale);
                 let change = gap(fields[0], fields[1], &grid, (x as f32 + 0.5, y as f32 + 0.5), (da - db).abs(), GLIDE_SPAN * c.unit);
-                let kept = da.max(db) + c.shadow[0] * 4.0 * s * (1.0 - s) * smoothstep(0.0, c.shadow[1], change);
+                let bump = 4.0 * s * (1.0 - s);
+                let kept = da.max(db) + c.shadow[0] * bump * bump * smoothstep(0.0, c.shadow[1], change);
                 let d = kept.min(ta.min(tb));
                 let mut w = smoothstep(-c.grain_floor, c.grain_floor, ta - tb);
                 w *= (GLIDE_EDGE * s).min(1.0);
                 w = 1.0 - (1.0 - w) * (GLIDE_EDGE * (1.0 - s)).min(1.0);
                 let ((sa, ra), (sb, rb)) = (part(0, d, da), part(1, d, db));
                 under((sa.scaled(1.0 - s).plus(sb.scaled(s)), ra.scaled(1.0 - w).plus(rb.scaled(w))))
+            };
+            let tide = if planes.len() == 1 || glide == Glide::Dissolve { 0.0 } else { 1.0 - lerp4(&look_lines[0], column)[0].max(lerp4(&look_lines[1], column)[0]) };
+            let total = if planes.len() == 1 {
+                under(part(0, ds[0], ds[0]))
+            } else if tide <= 0.0 {
+                faded()
+            } else if tide >= 1.0 {
+                moved()
+            } else {
+                faded().scaled(1.0 - tide).plus(moved().scaled(tide))
             };
             if total.a <= 1e-4 {
                 continue;

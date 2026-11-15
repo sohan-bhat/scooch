@@ -171,16 +171,28 @@ void main() {
         Parts b = parts(1, p, d_b, d_b, picture, grain);
         land = mix(under(a.shallow, a.rest), under(b.shallow, b.rest), s);
     } else {
-        float ta = d_a + s * grain_scale;
-        float tb = d_b + (1.0 - s) * grain_scale;
-        float kept = max(d_a, d_b) + shadow_at.x * 4.0 * s * (1.0 - s) * smoothstep(0.0, shadow_at.y, gap(p, abs(d_a - d_b)));
-        float d = min(kept, min(ta, tb));
-        float w = smoothstep(-grain_floor, grain_floor, ta - tb);
-        w = w * min(4.0 * s, 1.0);
-        w = 1.0 - (1.0 - w) * min(4.0 * (1.0 - s), 1.0);
-        Parts a = parts(0, p, d, d_a, picture, grain);
-        Parts b = parts(1, p, d, d_b, picture, grain);
-        land = under(mix(a.shallow, b.shallow, s), mix(a.rest, b.rest, w));
+        float tide = 1.0 - max(textureLod(look_a, quarter(p), 0.0).r, textureLod(look_b, quarter(p), 0.0).r);
+        vec4 faded = vec4(0.0);
+        if (tide < 1.0) {
+            Parts a = parts(0, p, d_a, d_a, picture, grain);
+            Parts b = parts(1, p, d_b, d_b, picture, grain);
+            faded = mix(under(a.shallow, a.rest), under(b.shallow, b.rest), s);
+        }
+        vec4 moved = vec4(0.0);
+        if (tide > 0.0) {
+            float ta = d_a + s * grain_scale;
+            float tb = d_b + (1.0 - s) * grain_scale;
+            float bump = 4.0 * s * (1.0 - s);
+            float kept = max(d_a, d_b) + shadow_at.x * bump * bump * smoothstep(0.0, shadow_at.y, gap(p, abs(d_a - d_b)));
+            float d = min(kept, min(ta, tb));
+            float w = smoothstep(-grain_floor, grain_floor, ta - tb);
+            w = w * min(4.0 * s, 1.0);
+            w = 1.0 - (1.0 - w) * min(4.0 * (1.0 - s), 1.0);
+            Parts a = parts(0, p, d, d_a, picture, grain);
+            Parts b = parts(1, p, d, d_b, picture, grain);
+            moved = under(mix(a.shallow, b.shallow, s), mix(a.rest, b.rest, w));
+        }
+        land = mix(faded, moved, clamp(tide, 0.0, 1.0));
     }
     color = vec4(over_picture(picture, land), 1.0);
 }

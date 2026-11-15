@@ -172,16 +172,28 @@ fn draw(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         let b = parts(look_b, paints_b, ramps_b, p, d_b, d_b, picture, grain);
         land = mix(under(a.shallow, a.rest), under(b.shallow, b.rest), frame.s);
     } else {
-        let ta = d_a + frame.s * frame.grain_scale;
-        let tb = d_b + (1.0 - frame.s) * frame.grain_scale;
-        let kept = max(d_a, d_b) + frame.shadow.x * 4.0 * frame.s * (1.0 - frame.s) * smoothstep(0.0, frame.shadow.y, gap(p, abs(d_a - d_b)));
-        let d = min(kept, min(ta, tb));
-        var w = smoothstep(-frame.grain_floor, frame.grain_floor, ta - tb);
-        w = w * min(4.0 * frame.s, 1.0);
-        w = 1.0 - (1.0 - w) * min(4.0 * (1.0 - frame.s), 1.0);
-        let a = parts(look_a, paints_a, ramps_a, p, d, d_a, picture, grain);
-        let b = parts(look_b, paints_b, ramps_b, p, d, d_b, picture, grain);
-        land = under(mix(a.shallow, b.shallow, frame.s), mix(a.rest, b.rest, w));
+        let tide = 1.0 - max(textureSampleLevel(look_a, smooth_filter, quarter(p), 0.0).r, textureSampleLevel(look_b, smooth_filter, quarter(p), 0.0).r);
+        var faded = vec4<f32>(0.0);
+        if (tide < 1.0) {
+            let a = parts(look_a, paints_a, ramps_a, p, d_a, d_a, picture, grain);
+            let b = parts(look_b, paints_b, ramps_b, p, d_b, d_b, picture, grain);
+            faded = mix(under(a.shallow, a.rest), under(b.shallow, b.rest), frame.s);
+        }
+        var moved = vec4<f32>(0.0);
+        if (tide > 0.0) {
+            let ta = d_a + frame.s * frame.grain_scale;
+            let tb = d_b + (1.0 - frame.s) * frame.grain_scale;
+            let bump = 4.0 * frame.s * (1.0 - frame.s);
+            let kept = max(d_a, d_b) + frame.shadow.x * bump * bump * smoothstep(0.0, frame.shadow.y, gap(p, abs(d_a - d_b)));
+            let d = min(kept, min(ta, tb));
+            var w = smoothstep(-frame.grain_floor, frame.grain_floor, ta - tb);
+            w = w * min(4.0 * frame.s, 1.0);
+            w = 1.0 - (1.0 - w) * min(4.0 * (1.0 - frame.s), 1.0);
+            let a = parts(look_a, paints_a, ramps_a, p, d, d_a, picture, grain);
+            let b = parts(look_b, paints_b, ramps_b, p, d, d_b, picture, grain);
+            moved = under(mix(a.shallow, b.shallow, frame.s), mix(a.rest, b.rest, w));
+        }
+        land = mix(faded, moved, clamp(tide, 0.0, 1.0));
     }
     return vec4<f32>(over_picture(picture, land), 1.0);
 }
