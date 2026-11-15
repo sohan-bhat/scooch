@@ -343,9 +343,8 @@ pub fn shell(framed: &Framed, materials: &Materials) -> Bundle {
     }
 }
 
-pub fn fill(out: &mut Bundle, framed: &Framed, fixed: Option<&look::Fixed>, live: Option<&look::Live>, pad: Option<Vec<u8>>) {
+pub fn fill(out: &mut Bundle, framed: &Framed, fixed: Option<&look::Fixed>, live: Option<&look::Live>, pad: Option<Vec<u8>>, unit: f32) {
     let (grid, width, height) = (framed.grid, framed.width as usize, framed.height as usize);
-    let unit = fixed.map_or(1.0, |f| f.u());
     match (fixed, live) {
         (Some(fixed), Some(live)) => {
             out.field = live.field().into_iter().map(half).collect();
@@ -393,7 +392,8 @@ impl Parts {
     pub fn tables(&self, materials: &Materials) -> Bundle {
         let mut out = shell(&self.framed, materials);
         if !self.framed.empty() {
-            fill(&mut out, &self.framed, self.fixed.as_ref(), self.live.as_ref(), self.pad());
+            let unit = self.fixed.as_ref().map(|f| f.u()).or(self.belonging.as_ref().map(|b| b.unit())).unwrap_or(1.0);
+            fill(&mut out, &self.framed, self.fixed.as_ref(), self.live.as_ref(), self.pad(), unit);
         }
         out
     }
@@ -1089,6 +1089,30 @@ mod tests {
             let high: Vec<usize> = (0..RAMP).filter(|k| at(*k) >= GLIDE_FELT.1 - step).collect();
             assert!(low.iter().all(|k| entry(*k) == entry(0)), "u {u} the ramps still change below {}", GLIDE_FELT.0);
             assert!(high.iter().all(|k| entry(*k) == entry(RAMP - 1)), "u {u} the ramps still change above {}", GLIDE_FELT.1);
+        }
+    }
+
+    #[test]
+    fn the_guard_follows_the_picture_within_a_pixel() {
+        let n = 1200usize;
+        let warp = |x: f64, k: f64, lo: f64, span: f64| lo + span * (x + k * (std::f64::consts::TAU * x).sin() / std::f64::consts::TAU);
+        let own: Vec<f64> = (0..n).map(|i| warp((i as f64 + 0.5) / n as f64, 0.35, 0.1, 0.7)).collect();
+        let other: Vec<f64> = (0..n).map(|i| warp((i as f64 + 0.5) / n as f64, -0.3, 0.18, 0.62)).collect();
+        for s in [0.25f32, 0.5, 0.75] {
+            let probes = followed(&own, &other, s, 1, n);
+            let mut worst = 0.0f64;
+            for i in 0..n {
+                let want = own[i] + (other[i] - own[i]) * s as f64;
+                let k = own.partition_point(|v| *v < want);
+                if k == 0 || k >= n {
+                    continue;
+                }
+                let exact = (k - 1) as f64 + (want - own[k - 1]) / (own[k] - own[k - 1]) + 0.5;
+                let p = &probes[i];
+                let got = p.a as f64 + p.t as f64 + 0.5;
+                worst = worst.max((got - exact).abs());
+            }
+            assert!(worst <= 1.0, "s {s}: the guard follows the picture off by {worst:.2} px");
         }
     }
 

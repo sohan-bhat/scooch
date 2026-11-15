@@ -165,6 +165,10 @@ impl Belonging {
         self.source == source && self.screen == screen && self.u.to_bits() == u.to_bits() && self.scenery == options.scenery
     }
 
+    pub fn unit(&self) -> f32 {
+        self.u
+    }
+
     pub fn at(&self, values: &[f32], fx: f64, fy: f64) -> f32 {
         let cell = self.grid.cell as f64;
         self.grid.linear(values, (fx * self.size[0] / cell - 0.5) as f32, (fy * self.size[1] / cell - 0.5) as f32)

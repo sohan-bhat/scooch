@@ -262,4 +262,6 @@ fn a_picture_that_gets_nothing_builds_no_scenery() {
     let (_, shown) = session.still(&image, &analysis, &placement, &next, &options);
     assert_eq!(session.sites(), 0);
     assert!(shown.as_raw() == scooch_core::still(&image, &analysis, &placement, &next, &options).1.as_raw());
+    let kept = (0..h).step_by(8).flat_map(|y| (0..w).step_by(8).map(move |x| (x, y))).filter(|(x, y)| !session.redrawn(*x, *y)).count();
+    assert!(kept * 2 > ((w / 8) * (h / 8)) as usize, "the move redrew the whole still, so it was rebuilt: {kept} cells kept");
 }
