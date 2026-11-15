@@ -549,6 +549,18 @@ mod probe {
     }
 
     fn subject_picture(width: u32, height: u32, at: (f32, f32)) -> RgbImage {
+        let mut image = filled(width, height, [19, 90, 48]);
+        let (cx, cy) = (at.0 * width as f32, at.1 * height as f32);
+        let radius = height as f32 / 7.0;
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            if ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt() < radius {
+                pixel.0 = [245, 196, 92];
+            }
+        }
+        image
+    }
+
+    fn navy_picture(width: u32, height: u32, at: (f32, f32)) -> RgbImage {
         let mut image = filled(width, height, [24, 34, 58]);
         let (cx, cy) = (at.0 * width as f32, at.1 * height as f32);
         let radius = height as f32 / 7.0;
@@ -854,7 +866,7 @@ mod probe {
         p.line(format!("- {} sits on the subject and the other probe items sit in a calm column", PROBES[0].0));
         std::thread::sleep(Duration::from_millis(1500));
         let kind = format!("{:?}", store::describe(&screen.id));
-        p.line(format!("- wallpaper set to a plain test JPEG with one bright subject in the middle {}, store kind {kind}", subject.display()));
+        p.line(format!("- wallpaper set to a calm water test JPEG with one bright subject in the middle {}, store kind {kind}", subject.display()));
         p.kind_before = Some(kind);
         let started = Instant::now();
         let ran = p.scooch(&[], Duration::from_secs(60));
@@ -1135,6 +1147,46 @@ mod probe {
         }
         if matched.is_none_or(|share| share < 0.9) {
             p.fail("the scenery off capture does not match the scenery off render");
+        }
+        navy_check(p, &screen, display, (from, to))
+    }
+
+    fn navy_check(p: &mut Probe, screen: &Screen, display: u32, (from, to): ((f32, f32), (f32, f32))) -> Result<()> {
+        let desktop = platform::current()?;
+        let name = PROBES[0].0;
+        let (width, height) = pixels(screen);
+        let navy = picture_file(p, "probe-navy.jpg", &navy_picture(width, height, (0.5, 0.5)))?;
+        let ran = p.scooch(&["use", &navy.to_string_lossy()], Duration::from_secs(60));
+        let switched = wait_render(p, Duration::from_secs(45), Some(&navy), false);
+        p.line(format!("- scooch use on a navy picture with scenery `{}` exit {:?}, rendered after {:?} ms", state(p)["options"]["scenery"].as_str().unwrap_or("missing"), ran.code, switched.map(|time| time.as_millis())));
+        away(p, name, from);
+        let start = position(p, name).unwrap_or(from);
+        let shown = || desktop.wallpaper(screen).ok().flatten();
+        let before = shown();
+        let seen = daemon_log(p).lines().count();
+        drag(start, to);
+        let dropped = Instant::now();
+        let swapped = wait_until(Duration::from_secs(12), || shown() != before).map(|_| dropped.elapsed().as_millis());
+        std::thread::sleep(Duration::from_millis(1200));
+        let icon = icon_rect(name);
+        let on_shot = grab(display).context("the screen could not be captured on the navy picture")?;
+        p.line(format!("- navy picture, scenery on, drag to calm ground: new wallpaper after {swapped:?} ms, daemon ticks {:?}", tick_lines(p, seen)));
+        let _ = p.scooch(&["scenery"], LIMIT);
+        std::thread::sleep(Duration::from_millis(1500));
+        let off_shot = grab(display).context("the screen could not be captured on the navy picture with scenery off")?;
+        let _ = p.scooch(&["scenery"], LIMIT);
+        let painted = icon.as_ref().map(|icon| ring(&on_shot, &off_shot, icon, screen));
+        p.line(format!("- pixels within 40 points around the dragged item that differ between scenery on and off on the navy picture {painted:?}"));
+        if let Some(subject) = p.subject.clone() {
+            let ran = p.scooch(&["use", &subject.to_string_lossy()], Duration::from_secs(60));
+            let back = wait_render(p, Duration::from_secs(45), Some(&subject), false);
+            p.line(format!("- back to the water picture exit {:?}, rendered after {:?} ms", ran.code, back.map(|time| time.as_millis())));
+        }
+        if swapped.is_none() {
+            p.fail("a drag on the navy picture with scenery on brought no new wallpaper");
+        }
+        if painted.is_none_or(|count| count >= 200) {
+            p.fail("scenery showed on a navy picture, where it does not belong");
         }
         Ok(())
     }
@@ -2825,7 +2877,8 @@ mod probe {
         let rewritten = file.as_ref().and_then(|file| {
             let mut bytes = fs::read(file).ok()?;
             let body = bytes.len().checked_sub(8).filter(|body| *body > 8)?;
-            bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+            let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+            bytes[4..8].copy_from_slice(&version.checked_sub(1)?.to_le_bytes());
             let sum = scooch::live::canvas::fingerprint(0, 0, &bytes[..body]);
             bytes[body..].copy_from_slice(&sum.to_le_bytes());
             fs::write(file, &bytes).ok()
@@ -2844,7 +2897,7 @@ mod probe {
                 break;
             }
         }
-        p.line(format!("- tables rewritten as version 1 {:?}, then a drag: logged another version {named}, new wallpaper {:?} ms, glided {}, a layer opened {opened}, skip {:?}, the drags after it glided {again:?}", rewritten.is_some(), first.set, first.glided, first.skip));
+        p.line(format!("- tables rewritten one version back {:?}, then a drag: logged another version {named}, new wallpaper {:?} ms, glided {}, a layer opened {opened}, skip {:?}, the drags after it glided {again:?}", rewritten.is_some(), first.set, first.glided, first.skip));
         if rewritten.is_none() || !named || first.set.is_none() || first.glided || opened || !again.contains(&true) {
             p.fail("tables from another version did not give one plain swap at once and then a glide");
         }
