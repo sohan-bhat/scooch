@@ -147,6 +147,7 @@ pub struct Belonging {
     pub size: [f64; 2],
     pub sky: Vec<f32>,
     pub belong: Vec<f32>,
+    pub empty: bool,
     source: (u32, u32),
     screen: (u32, u32),
     u: f32,
@@ -513,7 +514,8 @@ pub fn belonging_map(input: &Sampled, source: (u32, u32), screen: (u32, u32), op
             (sky, belong)
         }
     };
-    Belonging { grid, size, sky, belong, source, screen, u, scenery: options.scenery }
+    let empty = belong.iter().all(|b| *b <= 0.0);
+    Belonging { grid, size, sky, belong, empty, source, screen, u, scenery: options.scenery }
 }
 
 pub fn fixed(input: &Sampled, belonging: &Belonging, materials: &Materials, u: f32, (width, height): (usize, usize)) -> Fixed {

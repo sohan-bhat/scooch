@@ -437,7 +437,7 @@ pub fn parts(source: (u32, u32), (canvas, kept): (RgbImage, Option<Arc<look::Bel
         Some(b) => b,
         None => Arc::new(look::belonging_map(&home(&out.framed.canvas, found, source, (width, height)).sampled(), source, (width, height), options, g.u, paint::sand(materials)[0])),
     });
-    out.fixed = ground.as_ref().zip(out.belonging.as_deref()).map(|(g, b)| look::fixed(&grounded.sampled(&out.framed), b, materials, g.u, (width as usize, height as usize)));
+    out.fixed = ground.as_ref().zip(out.belonging.as_deref().filter(|b| !b.empty)).map(|(g, b)| look::fixed(&grounded.sampled(&out.framed), b, materials, g.u, (width as usize, height as usize)));
     out.live = ground.as_ref().zip(out.fixed.as_ref()).map(|(g, f)| look::live(f, g));
     out.grounded = Some(grounded);
     out.repad(found, scene, options);

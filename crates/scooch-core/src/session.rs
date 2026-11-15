@@ -1,358 +1,265 @@
-use crate::area::{self, Area};
-use crate::bundle::{self, Bundle, Parts, Scope};
-use crate::pack::fingerprint;
-use rayon::prelude::*;
-use std::borrow::Cow;
+#[path = "support/layouts.rs"]
+mod layouts;
+
+use scooch_core::{Analysis, Bundle, Options, Placement, Rect, RgbImage, Scene, Scenery, Session};
 use std::sync::Arc;
-use crate::paint;
-use crate::{look, pads, render, scenery, shape, solver, Analysis, Options, Placement, RgbImage, Scene};
+use std::sync::OnceLock;
 
-#[derive(Default)]
-pub struct Session {
-    held: Option<Held>,
+struct Photo {
+    image: RgbImage,
+    analysis: Analysis,
 }
 
-struct Held {
-    image: u64,
-    source: (u32, u32),
-    analysis: u64,
-    placement: Placement,
-    options: Options,
+fn photos() -> &'static [Photo] {
+    static CELL: OnceLock<Vec<Photo>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        layouts::photos()
+            .into_iter()
+            .step_by(3)
+            .take(5)
+            .map(|path| {
+                let full = scooch_core::open(&path).expect("photo");
+                let scale = 900.0 / full.width().max(full.height()) as f32;
+                let image = image::imageops::resize(&full, (full.width() as f32 * scale) as u32, (full.height() as f32 * scale) as u32, image::imageops::FilterType::Triangle);
+                let analysis = scooch_core::analyze(&image);
+                Photo { image, analysis }
+            })
+            .collect()
+    })
+}
+
+struct Dice(u64);
+
+impl Dice {
+    fn next(&mut self) -> f32 {
+        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 40) as f32 / (1u64 << 24) as f32
+    }
+
+    fn pick(&mut self, n: usize) -> usize {
+        ((self.next() * n as f32) as usize).min(n.saturating_sub(1))
+    }
+}
+
+struct Walk {
+    photo: usize,
     scene: Scene,
-    parts: Parts,
-    bundle: Arc<Bundle>,
-    still: Option<Arc<RgbImage>>,
-    picture: Option<RgbImage>,
-    redraw: Option<Vec<bool>>,
-    shrunk: bool,
+    options: Options,
+    placement: Placement,
 }
 
-fn glance(width: u32, height: u32, bytes: &[u8]) -> u64 {
-    let (words, rest) = bytes.as_chunks::<32>();
-    let mut lanes = [0x9e37_79b9_7f4a_7c15u64 ^ width as u64, 0xc2b2_ae3d_27d4_eb4f ^ height as u64, 0x1656_67b1_9e37_79f9, 0x27d4_eb2f_1656_67c5 ^ bytes.len() as u64];
-    for block in words {
-        for (k, lane) in lanes.iter_mut().enumerate() {
-            let word = u64::from_le_bytes(block[k * 8..k * 8 + 8].try_into().unwrap_or([0; 8]));
-            *lane = (*lane ^ word).wrapping_mul(0x9fb2_1c65_1e98_df25).rotate_left(29);
+fn nudge(dice: &mut Dice, r: &mut Rect, w: u32, h: u32) {
+    let u = r.h;
+    r.x = (r.x + (dice.next() * 2.0 - 1.0) * 3.0 * u).clamp(0.0, w as f32 - r.w);
+    r.y = (r.y + (dice.next() * 2.0 - 1.0) * 3.0 * u).clamp(0.0, h as f32 - r.h);
+}
+
+fn step(dice: &mut Dice, walk: &mut Walk) -> &'static str {
+    let (w, h) = (walk.scene.width, walk.scene.height);
+    let icons = &mut walk.scene.icons;
+    let kind = dice.pick(10);
+    match kind {
+        0..=3 if !icons.is_empty() => {
+            let k = dice.pick(icons.len());
+            nudge(dice, &mut icons[k], w, h);
+            "move"
+        }
+        4 => {
+            let size = icons.first().map_or(Rect { x: 0.0, y: 0.0, w: 40.0, h: 50.0 }, |r| *r);
+            let at = dice.pick(icons.len() + 1);
+            icons.insert(at, Rect { x: dice.next() * (w as f32 - size.w), y: dice.next() * (h as f32 - size.h), ..size });
+            "add"
+        }
+        5 if icons.len() > 1 => {
+            let k = dice.pick(icons.len());
+            icons.remove(k);
+            "remove"
+        }
+        6 if !icons.is_empty() => {
+            for _ in 0..2 + dice.pick(3) {
+                let k = dice.pick(icons.len());
+                nudge(dice, &mut icons[k], w, h);
+            }
+            "several"
+        }
+        7 => {
+            let photo = &photos()[walk.photo];
+            walk.placement = if dice.next() < 0.5 { scooch_core::fill(photo.analysis.source_width, photo.analysis.source_height, &walk.scene) } else { scooch_core::solve(&photo.analysis, &walk.scene, &walk.options, None) };
+            "placement"
+        }
+        8 => {
+            walk.options = match dice.pick(4) {
+                0 => Options { scenery: if walk.options.scenery == Scenery::Off { Scenery::Auto } else { Scenery::Off }, ..walk.options },
+                1 => Options { scenery: Scenery::Islands, ..walk.options },
+                2 => Options { pads: if walk.options.pads > 0.0 { 0.0 } else { 0.7 }, ..walk.options },
+                _ => Options { scenery: Scenery::Clouds, ..walk.options },
+            };
+            "option"
+        }
+        _ => {
+            walk.photo = (walk.photo + 1 + dice.pick(photos().len() - 1)) % photos().len();
+            "picture"
         }
     }
-    fingerprint(width, height, &[lanes.iter().flat_map(|l| l.to_le_bytes()).collect::<Vec<u8>>(), rest.to_vec()].concat())
 }
 
-fn print(found: &Analysis) -> u64 {
-    let mut bytes = Vec::with_capacity((found.saliency.len() + found.busy.len() + found.palette.len() * 4 + 8) * 4);
-    for v in [found.width, found.height, found.source_width, found.source_height, found.flat as u32, found.saliency.len() as u32, found.busy.len() as u32, found.palette.len() as u32] {
-        bytes.extend_from_slice(&v.to_le_bytes());
-    }
-    let s = found.subject;
-    for v in [s.x, s.y, s.w, s.h].iter().chain(&found.saliency).chain(&found.busy).chain(found.palette.iter().flatten()) {
-        bytes.extend_from_slice(&v.to_bits().to_le_bytes());
-    }
-    fingerprint(0, 0, &bytes)
-}
-
-fn changes(old: &[[f64; 4]], new: &[[f64; 4]]) -> Option<Vec<[f64; 4]>> {
-    let mut out = Vec::new();
-    if old.len() == new.len() {
-        for (a, b) in old.iter().zip(new) {
-            if a != b {
-                out.push(*a);
-                out.push(*b);
+fn walk(seed: u64, steps: usize, photo: usize, layout: &str, scenery: Scenery, (w, h): (u32, u32)) {
+    let mut dice = Dice(seed);
+    let first = &photos()[photo];
+    let options = Options { scenery, ..Options::default() };
+    let scene = Scene { width: w, height: h, icons: layouts::layout(layout, &first.analysis, w, h) };
+    let placement = scooch_core::solve(&first.analysis, &scene, &options, None);
+    let mut walk = Walk { photo, scene, options, placement };
+    let mut session = Session::new();
+    let mut most = 0;
+    let mut kept: Option<(Arc<Bundle>, Arc<RgbImage>, Bundle, RgbImage)> = None;
+    for n in 0..=steps {
+        let what = if n == 0 { "first" } else { step(&mut dice, &mut walk) };
+        let photo = &photos()[walk.photo];
+        let (want_bundle, want_still) = scooch_core::still(&photo.image, &photo.analysis, &walk.placement, &walk.scene, &walk.options);
+        let mode = dice.next();
+        if mode < 0.3 {
+            let bundle = session.tables_shared(&photo.image, &photo.analysis, &walk.placement, &walk.scene, &walk.options);
+            assert!(*bundle == want_bundle, "seed {seed} step {n} {what}: tables differ");
+            if let Some((bundle, still, was_bundle, was_still)) = &kept {
+                assert!(**bundle == *was_bundle && still.as_raw() == was_still.as_raw(), "seed {seed} step {n} {what}: a held result changed");
+            }
+        } else if mode < 0.65 {
+            let (bundle, still) = session.still_shared(&photo.image, &photo.analysis, &walk.placement, &walk.scene, &walk.options);
+            assert!(still.as_raw() == want_still.as_raw(), "seed {seed} step {n} {what}: shared image differs");
+            assert!(*bundle == want_bundle, "seed {seed} step {n} {what}: shared bundle differs");
+            if let Some((bundle, still, was_bundle, was_still)) = &kept {
+                assert!(**bundle == *was_bundle && still.as_raw() == was_still.as_raw(), "seed {seed} step {n} {what}: a held result changed");
+            }
+            kept = (dice.next() < 0.7).then_some((bundle, still, want_bundle, want_still));
+        } else {
+            let (bundle, still) = session.still(&photo.image, &photo.analysis, &walk.placement, &walk.scene, &walk.options);
+            assert!(still.as_raw() == want_still.as_raw(), "seed {seed} step {n} {what}: image differs");
+            assert!(bundle == want_bundle, "seed {seed} step {n} {what}: bundle differs");
+            if let Some((bundle, still, was_bundle, was_still)) = &kept {
+                assert!(**bundle == *was_bundle && still.as_raw() == was_still.as_raw(), "seed {seed} step {n} {what}: a held result changed");
             }
         }
-        return Some(out);
+        most = most.max(session.bytes());
     }
-    let (mut i, mut j) = (0, 0);
-    while i < old.len() || j < new.len() {
-        if i < old.len() && j < new.len() && old[i] == new[j] {
-            i += 1;
-            j += 1;
-        } else if j < new.len() && (i >= old.len() || new[j + 1..].first() == old.get(i)) {
-            out.push(new[j]);
-            j += 1;
-        } else if i < old.len() && (j >= new.len() || old[i + 1..].first() == new.get(j)) {
-            out.push(old[i]);
-            i += 1;
-        } else if i < old.len() && j < new.len() {
-            out.push(old[i]);
-            out.push(new[j]);
-            i += 1;
-            j += 1;
-        }
-        if out.len() > 64 {
-            return None;
-        }
-    }
-    Some(out)
+    assert!(most < 24 * (w * h) as usize + 8 * 1024 * 1024, "{most}");
 }
 
-fn field_margin(c: &bundle::Constants) -> usize {
-    let most = [c.shadow, c.rim, c.belly].iter().flatten().fold(0.0f32, |m, v| m.max(v.abs()));
-    (most * c.unit / shape::Q as f32).ceil() as usize + 4
+#[test]
+fn random_walks_match_the_reference_still() {
+    let mut seed = 7;
+    for photo in 0..photos().len() {
+        for layout in ["mac", "scattered", "cluster"] {
+            for scenery in [Scenery::Auto, Scenery::Off] {
+                walk(seed, 40, photo, layout, scenery, (640, 400));
+                seed += 1;
+            }
+        }
+    }
 }
 
-impl Session {
-    pub fn new() -> Session {
-        Session::default()
-    }
+#[test]
+#[ignore]
+fn a_long_walk_matches_the_reference_still() {
+    walk(2027, 2000, 0, "scattered", Scenery::Auto, (1440, 900));
+}
 
-    pub fn forget(&mut self) {
-        self.held = None;
-    }
-
-    pub fn redrawn(&self, x: u32, y: u32) -> bool {
-        match &self.held {
-            Some(h) => h.redraw.as_ref().is_none_or(|cells| {
-                let w = h.parts.framed.grid.w;
-                cells.get((y as usize / shape::Q) * w + x as usize / shape::Q).copied().unwrap_or(false)
-            }),
-            None => true,
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn sites(&self) -> usize {
-        self.held.as_ref().and_then(|h| h.parts.live.as_ref()).map_or(0, |live| live.sites())
-    }
-
-    pub fn bytes(&self) -> usize {
-        self.held.as_ref().map_or(0, |h| h.parts.bytes() + h.bundle.canvas.len() + h.bundle.table_bytes() + h.still.as_ref().map_or(0, |s| s.as_raw().len()) + h.picture.as_ref().map_or(0, |p| p.as_raw().len()))
-    }
-
-    pub fn still(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Bundle, RgbImage) {
-        let Some(held) = self.advance::<true>(image, analysis, placement, scene, options) else { return render::still(image, analysis, placement, scene, options) };
-        let mut bundle = (*held.bundle).clone();
-        if !held.shrunk && bundle.canvas.is_empty() {
-            bundle.canvas = image.as_raw().clone();
-        }
-        let still = held.still.as_deref().cloned().unwrap_or_default();
-        (bundle, still)
-    }
-
-    pub fn still_shared(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Arc<Bundle>, Arc<RgbImage>) {
-        let Some(held) = self.advance::<true>(image, analysis, placement, scene, options) else {
-            let (bundle, still) = render::still(image, analysis, placement, scene, options);
-            return (Arc::new(bundle), Arc::new(still));
-        };
-        if !held.shrunk && held.bundle.canvas.is_empty() {
-            Arc::make_mut(&mut held.bundle).canvas = image.as_raw().clone();
-        }
-        let still = held.still.clone().unwrap_or_default();
-        (Arc::clone(&held.bundle), still)
-    }
-
-    pub fn tables_shared(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> Arc<Bundle> {
-        let Some(held) = self.advance::<false>(image, analysis, placement, scene, options) else {
-            return Arc::new(crate::bundle(image, analysis, placement, scene, options));
-        };
-        if !held.shrunk && held.bundle.canvas.is_empty() {
-            Arc::make_mut(&mut held.bundle).canvas = image.as_raw().clone();
-        }
-        Arc::clone(&held.bundle)
-    }
-
-    fn advance<const DRAW: bool>(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> Option<&mut Held> {
-        let (sw, sh) = image.dimensions();
-        if sw == 0 || sh == 0 || scene.width == 0 || scene.height == 0 {
-            self.held = None;
-            return None;
-        }
-        let key = (glance(sw, sh, image.as_raw()), print(analysis));
-        let held = match self.held.take() {
-            Some(mut h) if h.image == key.0 && h.source == (sw, sh) && h.scene.width == scene.width && h.scene.height == scene.height => {
-                if h.analysis == key.1 && h.placement == *placement && h.options == *options {
-                    shift::<DRAW>(h, image, analysis, scene, key)
-                } else {
-                    let kept = (reuse(&mut h), h.parts.belonging.take().filter(|_| h.analysis == key.1));
-                    build(image, analysis, placement, scene, options, key, kept)
+#[test]
+fn single_moves_change_only_what_the_session_redraws() {
+    let (w, h) = (960, 600);
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    for photo in photos() {
+        for layout in ["mac", "scattered", "cluster"] {
+            let icons = layouts::layout(layout, &photo.analysis, w, h);
+            let scene = Scene { width: w, height: h, icons: icons.clone() };
+            let placement = scooch_core::solve(&photo.analysis, &scene, &options, None);
+            let before = scooch_core::still(&photo.image, &photo.analysis, &placement, &scene, &options).1;
+            for k in [0, icons.len() / 3, 2 * icons.len() / 3] {
+                let mut session = Session::new();
+                session.still(&photo.image, &photo.analysis, &placement, &scene, &options);
+                let mut moved = icons.clone();
+                let r = &mut moved[k];
+                r.x = if r.x + 2.0 * r.w < w as f32 { r.x + r.w } else { r.x - r.w };
+                let next = Scene { icons: moved, ..scene.clone() };
+                let (_, shown) = session.still(&photo.image, &photo.analysis, &placement, &next, &options);
+                let after = scooch_core::still(&photo.image, &photo.analysis, &placement, &next, &options).1;
+                assert!(shown.as_raw() == after.as_raw());
+                for (i, (p, q)) in before.pixels().zip(after.pixels()).enumerate() {
+                    if p != q {
+                        let (x, y) = (i as u32 % w, i as u32 / w);
+                        assert!(session.redrawn(x, y), "{layout} icon {k}: pixel {x},{y} changed outside the redrawn cells");
+                    }
                 }
             }
-            _ => build(image, analysis, placement, scene, options, key, (None, None)),
-        };
-        let mut held = held;
-        if !DRAW {
-            held.still = None;
-        } else if held.still.is_none() {
-            paint_still(&mut held, image, analysis, scene, options);
         }
-        self.held = Some(held);
-        self.held.as_mut()
     }
 }
 
-fn reuse(h: &mut Held) -> Option<RgbImage> {
-    if !h.shrunk {
-        return None;
-    }
-    let raw = match Arc::get_mut(&mut h.bundle) {
-        Some(bundle) => std::mem::take(&mut bundle.canvas),
-        None => h.bundle.canvas.clone(),
-    };
-    RgbImage::from_raw(h.bundle.canvas_width, h.bundle.canvas_height, raw)
-}
-
-fn build(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options, (image_key, analysis_key): (u64, u64), (canvas, kept): (Option<RgbImage>, Option<Arc<look::Belonging>>)) -> Held {
-    let materials = paint::materials(analysis);
-    let (canvas, shrunk) = match canvas {
-        Some(canvas) => (canvas, true),
-        None => match bundle::canvas(image, scene.width, scene.height) {
-            Cow::Owned(canvas) => (canvas, true),
-            Cow::Borrowed(image) => (image.clone(), false),
-        },
-    };
-    let mut parts = bundle::parts(image.dimensions(), (canvas, kept), analysis, placement, scene, options, &materials);
-    let mut out = parts.tables(&materials);
-    let canvas = std::mem::replace(&mut parts.framed.canvas, RgbImage::new(0, 0)).into_raw();
-    out.canvas = if shrunk { canvas } else { Vec::new() };
-    parts.settle();
-    Held { image: image_key, source: image.dimensions(), analysis: analysis_key, placement: placement.clone(), options: *options, scene: scene.clone(), parts, bundle: Arc::new(out), still: None, picture: None, redraw: None, shrunk }
-}
-
-fn paint_still(h: &mut Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, options: &Options) {
-    let framed = &h.parts.framed;
-    let picture = h.picture.take().unwrap_or_else(|| {
-        if scenery::active(scene, options) {
-            let canvas: &[u8] = if h.shrunk { &h.bundle.canvas } else { image.as_raw() };
-            render::picture((canvas, h.bundle.canvas_width, h.bundle.canvas_height), (&framed.xmap, &framed.ymap), framed.ratio, (scene.width, scene.height))
+#[test]
+fn a_session_at_2880_holds_under_eighty_megabytes() {
+    let path = &layouts::photos()[0];
+    let image = scooch_core::open(path).expect("photo");
+    let analysis = scooch_core::analyze(&image);
+    let (w, h) = (2880, 1800);
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let mut scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &analysis, w, h) };
+    let placement = scooch_core::solve(&analysis, &scene, &options, None);
+    let mut session = Session::new();
+    for k in 0..4 {
+        if k % 2 == 0 {
+            session.still(&image, &analysis, &placement, &scene, &options);
         } else {
-            render::plain(image, &framed.placement, scene.width, scene.height)
+            session.still_shared(&image, &analysis, &placement, &scene, &options);
         }
-    });
-    let still = if scenery::active(scene, options) {
-        let (mut shown, layer) = bundle::finish(&h.bundle, &h.bundle, 0.0, picture.clone(), None);
-        paint::composite(&mut shown, &layer);
-        shown
-    } else {
-        render::finish_plain(picture.clone(), analysis, &framed.placement, scene, options)
-    };
-    h.picture = Some(picture);
-    h.still = Some(Arc::new(still));
-    h.redraw = None;
-}
-
-fn shift<const DRAW: bool>(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key: (u64, u64)) -> Held {
-    let (old, new) = (solver::screen_rects(&h.scene), solver::screen_rects(scene));
-    if old == new {
-        h.scene = scene.clone();
-        h.redraw = Some(Vec::new());
-        return h;
-    }
-    let options = h.options;
-    let bare = h.parts.fixed.is_none() && h.parts.belonging.as_ref().is_some_and(|b| b.empty && shape::ground(scene).is_some_and(|g| b.fits(h.source, (scene.width, scene.height), g.u, &options)));
-    let (was, now) = (scenery::active(&h.scene, &options) && !bare, scenery::active(scene, &options) && !bare);
-    if !was && !now {
-        h.parts.repad(analysis, scene, &options);
-        let grid = h.parts.framed.grid;
-        let pad = h.parts.pad().unwrap_or_else(|| vec![0; grid.w * grid.h * 4]);
-        if pad != h.bundle.pad {
-            Arc::make_mut(&mut h.bundle).pad = pad;
-        }
-        h.still = None;
-        h.scene = scene.clone();
-        h.redraw = None;
-        return h;
-    }
-    match (was && now).then(|| changes(&old, &new)).flatten() {
-        Some(moved) if lean::<DRAW>(&mut h, analysis, scene, &moved) => h,
-        _ => {
-            let placement = h.placement.clone();
-            let kept = (reuse(&mut h), h.parts.belonging.take());
-            build(image, analysis, &placement, scene, &options, key, kept)
-        }
+        assert!(session.bytes() < 80 * 1024 * 1024, "{}", session.bytes());
+        scene.icons[k].x += scene.icons[k].w;
     }
 }
 
-fn lean<const DRAW: bool>(h: &mut Held, analysis: &Analysis, scene: &Scene, moved: &[[f64; 4]]) -> bool {
-    let Some(g) = shape::ground(scene) else { return false };
-    let parts = &mut h.parts;
-    let (Some(fixed), Some(live), Some(grounded)) = (parts.fixed.as_ref(), parts.live.as_mut(), parts.grounded.as_ref()) else { return false };
-    if g.u.to_bits() != fixed.u().to_bits() || parts.pads.as_ref().is_some_and(|p| p.feather().to_bits() != pads::feather(scene).to_bits()) {
-        return false;
+#[test]
+fn a_session_after_forget_or_an_empty_call_starts_clean() {
+    let photo = &photos()[1];
+    let (w, h) = (640, 400);
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &photo.analysis, w, h) };
+    let placement = scooch_core::solve(&photo.analysis, &scene, &options, None);
+    let want = scooch_core::still(&photo.image, &photo.analysis, &placement, &scene, &options);
+    let mut session = Session::new();
+    assert_eq!(session.bytes(), 0);
+    let first = session.still(&photo.image, &photo.analysis, &placement, &scene, &options);
+    assert!(session.bytes() > 0);
+    session.forget();
+    assert_eq!(session.bytes(), 0);
+    let again = session.still(&photo.image, &photo.analysis, &placement, &scene, &options);
+    let empty = Scene { width: 0, height: 0, icons: Vec::new() };
+    let nothing = session.still(&photo.image, &photo.analysis, &placement, &empty, &options);
+    assert_eq!((nothing.0.width, nothing.1.width()), (0, 0));
+    let blank = session.still(&RgbImage::new(0, 0), &photo.analysis, &placement, &scene, &options);
+    assert_eq!(blank.1.width(), w);
+    let last = session.still(&photo.image, &photo.analysis, &placement, &scene, &options);
+    for (bundle, still) in [first, again, last] {
+        assert!(bundle == want.0 && still.as_raw() == want.1.as_raw());
     }
-    let _ = analysis;
-    let grid = parts.framed.grid;
-    let (w, hh) = (grid.w, grid.h);
-    let icons: Vec<[f32; 4]> = moved.iter().map(|r| r.map(|v| v as f32)).collect();
-    let Some((field, look)) = look::relive(fixed, live, &g, &icons) else { return false };
-    let cells = w * hh;
-    let (mut far, mut halves) = (vec![false; cells], Vec::new());
-    for a in area::merge(field) {
-        let before = area::take(&h.bundle.field, w, a);
-        let fresh: Vec<f32> = live.field_in(w, a).into_iter().map(bundle::half).collect();
-        if before.iter().zip(&fresh).all(|(p, q)| area::bits(p, q)) {
-            continue;
-        }
-        let out = Arc::make_mut(&mut h.bundle);
-        for y in a[1]..a[3] {
-            out.field[y * w + a[0]..y * w + a[2]].copy_from_slice(&fresh[(y - a[1]) * (a[2] - a[0])..(y - a[1] + 1) * (a[2] - a[0])]);
-        }
-        halves.extend(area::mark(&before, &out.field, w, a, area::bits, &mut far));
-    }
-    let (mut near, mut boxes) = (vec![false; cells], Vec::new());
-    for a in area::merge(look) {
-        let before = area::take(h.bundle.look.as_chunks::<4>().0, w, a);
-        if before == area::take(live.look.as_chunks::<4>().0, w, a) {
-            continue;
-        }
-        let out = Arc::make_mut(&mut h.bundle);
-        for y in a[1]..a[3] {
-            out.look[(y * w + a[0]) * 4..(y * w + a[2]) * 4].copy_from_slice(&live.look[(y * w + a[0]) * 4..(y * w + a[2]) * 4]);
-        }
-        boxes.extend(area::mark(&before, out.look.as_chunks::<4>().0, w, a, area::equal, &mut near));
-    }
-    if let (Some(pads), Some(calm)) = (parts.pads.as_mut(), parts.calm.as_ref()) {
-        let was = pads.any();
-        let touched = area::merge(pads.update(calm, &grid, &grounded.lookup, scene, Some(&fixed.belong), moved));
-        let before: Vec<Vec<[u8; 4]>> = touched.iter().map(|a| area::take(h.bundle.pad.as_chunks::<4>().0, w, *a)).collect();
-        if was != pads.any() {
-            Arc::make_mut(&mut h.bundle).pad = pads.table(calm).unwrap_or_else(|| vec![0; cells * 4]);
-        } else if was && !touched.is_empty() {
-            pads.patch(&mut Arc::make_mut(&mut h.bundle).pad, w, &touched);
-        }
-        for (a, old) in touched.iter().zip(&before) {
-            boxes.extend(area::mark(old, h.bundle.pad.as_chunks::<4>().0, w, *a, |p, q| p[3] == q[3], &mut near));
-        }
-    }
-    h.scene = scene.clone();
-    let margin = field_margin(&h.bundle.constants);
-    let mut redraw = vec![false; cells];
-    area::spread(&far, w, hh, margin, &halves, &mut redraw);
-    area::spread(&near, w, hh, 3, &boxes, &mut redraw);
-    let mut around: Vec<Area> = halves.iter().map(|a| area::grow(*a, margin, w, hh)).collect();
-    around.extend(boxes.iter().map(|a| area::grow(*a, 3, w, hh)));
-    let around = area::merge(around);
-    let Some(picture) = h.picture.as_ref().filter(|_| DRAW && h.still.is_some()) else {
-        h.still = None;
-        h.redraw = None;
-        return true;
-    };
-    if around.is_empty() {
-        h.redraw = Some(redraw);
-        return true;
-    }
-    let width = scene.width as usize;
-    let scope = Scope::new(redraw, &around, w, hh);
-    let mut work = RgbImage::new(scene.width, scene.height);
-    let from = picture.as_raw();
-    work.par_chunks_mut(width * 3).enumerate().for_each(|(y, line)| {
-        for (x0, x1) in Scope::ranges(&scope.need, w, y, width) {
-            line[x0 * 3..x1 * 3].copy_from_slice(&from[(y * width + x0) * 3..(y * width + x1) * 3]);
-        }
-    });
-    let (shown, layer) = bundle::finish(&h.bundle, &h.bundle, 0.0, work, Some(&scope));
-    let (shown, layer) = (shown.as_raw(), layer.as_raw());
-    let Some(still) = h.still.as_mut() else { return true };
-    let still: &mut RgbImage = Arc::make_mut(still);
-    let still: &mut [u8] = still;
-    still.par_chunks_mut(width * 3).enumerate().for_each(|(y, line)| {
-        for (x0, x1) in Scope::ranges(&scope.redraw, w, y, width) {
-            for x in x0..x1 {
-                let (i, p) = (y * width + x, &mut line[x * 3..x * 3 + 3]);
-                p.copy_from_slice(&shown[i * 3..i * 3 + 3]);
-                paint::blend(p, &layer[i * 4..i * 4 + 4]);
-            }
-        }
-    });
-    h.redraw = Some(scope.redraw);
-    true
+}
+
+#[test]
+fn a_picture_that_gets_nothing_builds_no_scenery() {
+    let (w, h) = (960, 600);
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let path = layouts::photos().into_iter().find(|p| p.to_string_lossy().contains("fox")).expect("fox");
+    let image = scooch_core::open(&path).expect("open");
+    let analysis = scooch_core::analyze(&image);
+    let icons = layouts::layout("scattered", &analysis, w, h);
+    let scene = Scene { width: w, height: h, icons: icons.clone() };
+    let placement = scooch_core::solve(&analysis, &scene, &options, None);
+    let mut session = Session::new();
+    let (bundle, _) = session.still(&image, &analysis, &placement, &scene, &options);
+    assert_eq!(session.sites(), 0);
+    assert!(bundle.field.iter().all(|f| *f > bundle.constants.reach), "fox drew scenery");
+    let mut moved = icons;
+    moved[2].x = (moved[2].x + moved[2].w).min(w as f32 - moved[2].w);
+    let next = Scene { icons: moved, ..scene };
+    let (_, shown) = session.still(&image, &analysis, &placement, &next, &options);
+    assert_eq!(session.sites(), 0);
+    assert!(shown.as_raw() == scooch_core::still(&image, &analysis, &placement, &next, &options).1.as_raw());
 }
