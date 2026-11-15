@@ -84,13 +84,13 @@ Measured on a six core laptop from 2018, a 2880 by 1800 render takes about 95 ms
 
 With scenery on, the still can also carry clouds or sand islands that gather around the icons and give their labels a calm ground.
 
-**Where it is drawn.** Clouds go only where the picture is sky blue at mid brightness or above and at least 0.08 darker than the shaded cloud tone, so a cloud always reads lighter than its sky, in a calm region that reaches the top edge. From those places the sky grows through smoothly joined blue down to a lightness of 0.3, so a sky that darkens toward the top keeps its clouds there. Islands go only where the picture is coloured like water, green cyan to cyan at mid lightness, in a calm region. Each colour test runs on the picture blurred by 0.2 icon units, is opened by 1.35 units so strips and small patches drop out, and is blurred by 0.45 units so scenery fades out where belonging ends. Whether a place belongs depends only on the picture and the icon size, so a pan or an icon move never switches it. Everything else gets no scenery, and the pads still work there.
+**Where it is drawn.** Where scenery belongs is worked out once per picture, on the whole picture at the size the home frame shows it, and then carried through the placement like the picture itself. It changes only with the screen size and the icon size, so a pan, a zoom or an icon move never switches it. Clouds go only where the picture is sky blue at mid brightness or above and at least 0.08 darker than the shaded cloud tone, so a cloud always reads lighter than its sky, in a calm region that reaches the top edge of the picture. From those places the sky grows upward and sideways, never down, through smoothly joined blue down to a lightness of 0.3. A step may change the colour by 0.01 upward and 0.003 sideways, and a grown place may sit at most 0.3 from the colour it grew from, so a sky that darkens toward the top keeps its clouds there while a sea under the horizon or a wall beside a window stays bare. The grown sky must reach the top edge of the picture. Islands go only where the picture is coloured like water, green cyan to cyan at mid lightness, in a calm region. Each colour test runs on the picture blurred by 0.2 icon units, is opened by 1.35 units so strips and small patches drop out, and is blurred by 0.45 units so scenery fades out where belonging ends. Everything else gets no scenery, and the pads still work there.
 
-**Subject guard.** Scenery is cleared from every 16 pixel cell that holds solid subject, which is saliency of at least 0.35 in a colour at least 0.1 apart from the blurred backdrop, and from every cell within 24 pixels or 0.2 units of one, whichever is larger. Past that it fades back in over half a unit. The guard travels in the paint table, so the still, the CPU frame and both shaders apply it, and a glide applies the guard of both states.
+**Subject guard.** Scenery is cleared from every 16 pixel cell that holds solid subject, which is saliency of at least 0.35 in a colour at least 0.1 apart from the blurred backdrop, and from every cell within 24 pixels or 0.2 units of one, whichever is larger. Past that it fades back in over half a unit. The guard travels in the paint table, so the still, the CPU frame and both shaders apply it. A glide reads the guard of each state where that state showed the part of the picture now on screen, found by two Newton steps on the warp maps, so the cleared place travels with the subject.
 
 **Unit and lattice.** The unit u is the median height of the icons on the screen, measured before clipping, with a floor of 16 pixels. A median under 0.5 pixels turns scenery off. Clouds and islands grow from jittered sites spaced a third of a cell apart, where a cell is 1.1 u. A screen gets at most 250,000 sites, and the spacing widens when it would need more.
 
-**Tables.** Each still hands its scenery to the frame as tables, version 2.
+**Tables.** Each still hands its scenery to the frame as tables, version 3, which start with the bytes `SCBT` and the version as a 32 bit little endian number. `scooch_core::TABLES_VERSION` holds the version a build writes.
 
 | Table | Grid | Holds |
 |---|---|---|
@@ -101,7 +101,7 @@ With scenery on, the still can also carry clouds or sand islands that gather aro
 
 Once a release has shipped tables, any change in what a table holds must raise the version.
 
-**Label hold.** Under the bottom third of each icon, fading out over 0.7 cell, cloud drops its broad light, lit arcs and lit rim, and sand is drawn 20% darker.
+**Label hold.** Under the bottom third of each icon, fading out over 0.7 cell, cloud drops its broad light, lit arcs and lit rim, and sand is drawn at least 20% darker and dark enough that its luminance stays at or under 0.373, a lightness of 0.72.
 
 **Grain.** Sand grain comes from one integer hash written in Rust, WGSL and GLSL. A test reads both shader files and checks their numbers against the Rust constants, together with the glide numbers below.
 
@@ -115,8 +115,7 @@ A subject that touches the screen edge under the icons cannot slide clear on a s
 
 - Clouds need a sky blue region that reaches the top of the picture and is darker than the cloud. Overcast, pale, foggy, night and sunset skies get none, and so does sky blue that sits lower in the frame.
 - Islands need water from green cyan to cyan at mid lightness. A deep blue sea, a pale lake and a dark lake get none.
-- In a glide that also moves the picture, the guard clears the subject's place in both states, not every place the subject passes between them.
-- White label text reaches about 1.8 to 1 contrast on cloud and 2.3 to 1 on sand at worst.
+- White label text reaches about 1.8 to 1 contrast on cloud and 2.2 to 1 on sand at worst.
 - Icons smaller than 16 pixels get scenery sized for 16 pixel icons.
 - Past 250,000 sites the puffs spread apart, which starts near a 7680 by 4320 screen with 16 pixel icons.
 - Mid glide, land near a change shrinks by up to 0.3 u before it grows back.
@@ -127,13 +126,13 @@ A subject that touches the screen edge under the icons cannot slide clear on a s
 |---|---|---|
 | One land glide frame, four gate reads against none, fastest of 160 frames | 0.12 ms more at s 0.25, 0.49 ms more at s 0.5 | Owner's Mac, Intel UHD Graphics 630, 2880 by 1800, two-swans, 7bc00dc |
 | First still and one move, instructions on one thread, fox at 2880 by 1800 | Mac column 4,677M and 657M, scattered 5,423M and 734M | Owner's Mac, 7bc00dc |
-| 300 icons at 5120 by 2880 | First still 24,973M, move 479M | Owner's Mac, 7bc00dc |
+| 300 icons at 5120 by 2880 on balloon-sky | First still 26,681M, move 630M, a move that zooms the picture 22,469M | Owner's Mac, fb73c4a |
 | A 1 pixel icon at 1920 by 1080, and 120 icons of 16 pixels at 7680 by 4320 | 63,794 sites in 0.45 s, and 233,324 sites in 1.82 s | Owner's Mac, 7bc00dc |
-| Solid subject pixels under scenery, 17 photos on two layouts at 960 by 600 | 0 of 2,775,424 in the stills, and 0 in glide frames at s 0.25, 0.5 and 0.75 | Owner's Mac, 997217e |
-| Label ground lightness under white labels, 17 photos on four layouts at 960 by 600 | Cloud at most 0.812, which is 1.8 to 1, and sand at most 0.745, which is 2.3 to 1 | Owner's Mac, 997217e |
-| Pictures that get scenery, 17 photos and 16 made pictures on two layouts at 2880 by 1800 | balloon-sky, moon-sky, two-swans, a sky blue gradient, a deep to mid blue sky and a flat water colour. Every other picture 0.00% of the screen | Owner's Mac, 12ee42b |
-| Web package | 196,439 bytes gzipped | Owner's Mac, 12ee42b |
-| First still and one move on balloon-sky, instructions on one thread, at 2880 by 1800 | Mac column 5,470M and 657M, scattered 7,581M and 1,104M | Owner's Mac, 12ee42b |
+| Solid subject pixels under scenery, 17 photos on two layouts at 960 by 600, with clouds forced, islands forced and automatic | 0 of 33,582,477 in the stills and in glide frames at s 0.25, 0.5 and 0.75 where the picture puts the subject, with 10,799,764 scenery pixels within 1 u of it | Owner's Mac, fb73c4a |
+| Label ground lightness under white labels, 17 photos on four layouts at 960 by 600, with clouds forced, islands forced and automatic | Cloud at most 0.815, which is 1.8 to 1, and sand at most 0.748, which is 2.2 to 1 | Owner's Mac, fb73c4a |
+| Pictures that get scenery, 17 photos and 21 made pictures on two layouts at 2880 by 1800 | balloon-sky, moon-sky, two-swans, a sky blue gradient, a deep to mid blue sky, a flat water colour, and the sky over a sea, over a lake and in a window. Every other picture 0.00% of the screen | Owner's Mac, fb73c4a |
+| Web package | 199,631 bytes gzipped | Owner's Mac, fb73c4a |
+| First still, one move and a move that zooms the picture by 1.15 on balloon-sky, instructions on one thread, at 2880 by 1800 | Mac column 6,079M, 680M and 4,417M, scattered 8,266M, 1,138M and 6,419M | Owner's Mac, fb73c4a |
 
 ## Desktop adapter
 
@@ -207,7 +206,7 @@ On macOS and Windows a move can slide the picture into its new place. A layer ov
 
 On macOS the layer is a borderless window at the desktop window level, above the wallpaper and below Finder's icons, that takes no mouse input. It opens only when a wallpaper window and Finder's icon window are both on that screen and no window covers the whole desktop. On Windows the layer is a child window of Explorer's desktop below the icon view, under Progman or under the wallpaper WorkerW, depending on how the shell is laid out.
 
-**Tables.** For each output the daemon writes `<output>.<key>.tables` in the cache, where the key is a hash of the picture and the flip setting. Tables of version 2 start with `SCBT` and hold the screen and canvas sizes, the warp maps, the field, look, pad, paint and ramp grids, the canvas fingerprint and a checksum. For a glide the daemon hands the helper the tables of the picture on screen and of the new one.
+**Tables.** For each output the daemon writes `<output>.<key>.tables` in the cache, where the key is a hash of the picture and the flip setting. Tables of version 3 start with `SCBT` and hold the screen and canvas sizes, the warp maps, the field, look, pad, paint and ramp grids, the canvas fingerprint and a checksum. For a glide the daemon hands the helper the tables of the picture on screen and of the new one.
 
 **The canvas file.** One per screen, `<screen>.<key>.canvas` beside the tables. Its 36 byte header is `SCCV`, then version 2, width, height, 4 channels, colour 1 for sRGB and the number of mip levels as 32 bit numbers, then the canvas fingerprint that the tables also hold. Every mip level follows as RGBA. A 2880 by 1800 canvas makes a file of 27,647,488 bytes. The daemon writes the file after a set when none exists for that picture and those options, and deletes the screen's older canvas files. The helper reads it while it makes the device, uploads the stored levels and checks the fingerprint. When the file is missing or does not match, the helper decodes the picture instead.
 
