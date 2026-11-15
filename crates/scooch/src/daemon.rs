@@ -2746,13 +2746,27 @@ pub mod tests {
         assert_eq!(fake.showing("main"), original);
     }
 
-    fn navy_picture(folder: &Path) -> PathBuf {
-        let image = RgbImage::from_fn(480, 100, |x, y| {
-            let (dx, dy) = (x as f32 / 480.0 - 0.5, y as f32 / 100.0 - 0.5);
+    fn navy_image(width: u32, height: u32) -> RgbImage {
+        RgbImage::from_fn(width, height, |x, y| {
+            let (dx, dy) = (x as f32 / width as f32 - 0.5, y as f32 / height as f32 - 0.5);
             if dx * dx * 9.0 + dy * dy < 0.02 { [250, 240, 220].into() } else { [24, 34, 58].into() }
-        });
+        })
+    }
+
+    fn sky_image(width: u32, height: u32) -> RgbImage {
+        let (w, h) = (width as f32, height as f32);
+        RgbImage::from_fn(width, height, |x, y| {
+            let (fx, fy) = (x as f32, y as f32);
+            let sky = [30.0 + 50.0 * fy / h, 60.0 + 70.0 * fy / h, 140.0 - 60.0 * fy / h + 20.0 * fx / w];
+            let glow = (1.0 - ((fx - 0.6 * w).powi(2) + (fy - 0.65 * h).powi(2)).sqrt() / (0.12 * h)).clamp(0.0, 1.0).powf(0.6);
+            let lit = [250.0, 196.0, 110.0];
+            std::array::from_fn::<u8, 3, _>(|i| (sky[i] + (lit[i] - sky[i]) * glow).round().clamp(0.0, 255.0) as u8).into()
+        })
+    }
+
+    fn navy_picture(folder: &Path) -> PathBuf {
         let path = folder.join("navy.png");
-        std::fs::write(&path, scooch_core::encode_png(&image).unwrap()).unwrap();
+        std::fs::write(&path, scooch_core::encode_png(&navy_image(480, 100)).unwrap()).unwrap();
         path
     }
 
@@ -2807,6 +2821,26 @@ pub mod tests {
         assert_eq!(fake.showing("main"), shown);
         assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
         assert_eq!(fake.decodes.load(Ordering::SeqCst), decodes);
+    }
+
+    #[test]
+    fn with_pads_switching_scenery_off_after_a_move_on_a_bare_picture_keeps_the_file() {
+        let (daemon, fake, _) = navy_rig("bare-pads", true);
+        let mut state = daemon.store.load();
+        state.options.pads = 0.7;
+        daemon.store.save(&state).unwrap();
+        fake.place(vec![calm(), calm_moved()]);
+        daemon.tick();
+        fake.place(bare_layout());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let before = daemon.store.load().screens["main"].clone();
+        let (shown, sets) = (fake.showing("main"), fake.sets.load(Ordering::SeqCst));
+        set_scenery(&daemon, false);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
+        let after = daemon.store.load().screens["main"].clone();
+        assert_eq!((after.placement, after.output), (before.placement, before.output));
+        assert_eq!(fake.showing("main"), shown);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
     }
 
     #[test]
@@ -2880,6 +2914,27 @@ pub mod tests {
             let placements: Vec<Option<Placement>> = rigs.iter().map(|(daemon, _)| daemon.store.load().screens["main"].placement.clone()).collect();
             assert!(placements[0].is_some(), "step {step}");
             assert_eq!(placements[0], placements[1], "step {step}");
+        }
+    }
+
+    #[test]
+    fn the_stored_answer_gives_the_options_the_session_gives() {
+        for (name, make) in [("navy", navy_image as fn(u32, u32) -> RgbImage), ("sky", sky_image)] {
+            let (daemon, fake, original) = scenery_rig(&format!("agree-{name}"), true);
+            let path = original.parent().unwrap().join(format!("{name}.png"));
+            std::fs::write(&path, scooch_core::encode_png(&make(480, 100)).unwrap()).unwrap();
+            fake.show("main", &path);
+            fake.place(bare_layout());
+            daemon.tick();
+            let state = daemon.store.load();
+            let entry = state.screens["main"].clone();
+            let image = scooch_core::open(&path).unwrap();
+            let analysis = scooch_core::analyze(&image);
+            let scene = scene::scene(&screen("main", 0.0, 2.0), &bare_layout());
+            let chosen = scooch_core::Session::new().options(&image, &analysis, &scene, &state.options);
+            let stored = if entry.belongs.unwrap().answer { state.options } else { with_scenery(state.options, false) };
+            assert_eq!(stored, chosen, "{name}");
+            assert_eq!(entry.placement, Some(scooch_core::solve(&analysis, &scene, &chosen, None)), "{name}");
         }
     }
 
