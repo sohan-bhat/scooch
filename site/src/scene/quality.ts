@@ -127,10 +127,12 @@ class Quality {
   changes = 0;
   onLevel: ((level: GpuClass) => void) | null = null;
   gpuSamples: number[] = [];
+  gpuRest: number[] = [];
 
-  noteGpu(ms: number) {
-    this.gpuSamples.push(ms);
-    if (this.gpuSamples.length > GPU_SAMPLES) this.gpuSamples.shift();
+  noteGpu(ms: number, moving: boolean) {
+    const list = moving ? this.gpuSamples : this.gpuRest;
+    list.push(ms);
+    if (list.length > GPU_SAMPLES) list.shift();
   }
 
   headroom() {
@@ -186,6 +188,7 @@ class Quality {
     this.fastScale = Math.min(1, (FAST ?? chosen.fast) / this.sharpDpr);
     this.changes += 1;
     this.gpuSamples = [];
+    this.gpuRest = [];
     this.composer?.setSize(0, 0);
     this.fastComposer?.setSize(0, 0);
     this.onLevel?.(level);
