@@ -54,7 +54,6 @@ const HEADROOM = 600;
 const PATIENCE = 4000;
 
 export async function calm() {
-  let restSince = 0;
   for (;;) {
     if (stillsPlanned()) {
       await new Promise<void>((resolve) => waiting.push(resolve));
@@ -64,9 +63,8 @@ export async function calm() {
     await quiet();
     const now = performance.now();
     const resting = !quality.moving && quality.chain === 'sharp';
-    restSince = resting ? restSince || now : 0;
     if (resting && now - quality.slowAt > HEADROOM) return;
-    if (resting && now - restSince > PATIENCE) return;
+    if (resting && now - still.inputAt > PATIENCE) return;
     await new Promise((resolve) => window.setTimeout(resolve, 300));
   }
 }
