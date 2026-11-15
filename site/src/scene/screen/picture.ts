@@ -16,6 +16,7 @@ uniform highp sampler2D uMapB;
 uniform float uMix;
 uniform vec2 uScreen;
 uniform sampler2D uAtlas;
+uniform sampler2D uShade;
 uniform float uTime;
 uniform vec4 uIcons[ICON_SLOTS];
 uniform float uGhost[ICON_SLOTS];
@@ -75,6 +76,19 @@ vec4 atlasCell(float index, float row, vec2 q, vec2 dx, vec2 dy, vec2 scale) {
   return clamp(textureLod(uAtlas, at, lod), 0.0, 1.0);
 }
 
+float glow(float footprint) {
+  return clamp(0.6 + (footprint - 1.8) * 0.75, 0.5, 2.2);
+}
+
+float shadeCell(float index, vec2 q, vec2 dx, vec2 dy, vec2 scale) {
+  vec2 cell = vec2(mod(index, GRID), floor(index / GRID));
+  vec2 at = (cell + clamp(q, 0.002, 0.998)) / GRID;
+  vec2 size = vec2(textureSize(uShade, 0));
+  float footprint = max(length(dx * scale * size), length(dy * scale * size));
+  float lod = clamp(log2(max(footprint, 1e-4)), 0.0, 10.0);
+  return min(textureLod(uShade, at, lod).r * glow(footprint), 0.92);
+}
+
 vec3 icons(vec3 color, vec2 uv, vec2 dx, vec2 dy) {
   for (int i = 0; i < ICON_SLOTS; i++) {
     vec4 rect = uIcons[i];
@@ -86,6 +100,8 @@ vec3 icons(vec3 color, vec2 uv, vec2 dx, vec2 dy) {
       vec4 icon = filled;
       if (uOutline > 0.0) icon = mix(filled, atlasCell(float(i), 2.0, q, dx, dy, scale), uOutline);
       float alpha = icon.a * (1.0 - uGhost[i]);
+      float dark = shadeCell(float(i), q, dx, dy, scale) * (1.0 - uOutline) * (1.0 - uGhost[i]);
+      color *= 1.0 - dark;
       color = color * (1.0 - alpha) + icon.rgb * alpha;
     }
   }
@@ -112,6 +128,7 @@ export type PictureUniforms = {
   uMix: { value: number };
   uScreen: { value: Vector2 };
   uAtlas: { value: Texture | null };
+  uShade: { value: Texture | null };
   uTime: { value: number };
   uIcons: { value: Vector4[] };
   uGhost: { value: number[] };
@@ -129,6 +146,7 @@ export function pictureUniforms(): PictureUniforms {
     uMix: { value: 0 },
     uScreen: { value: new Vector2(1280, 960) },
     uAtlas: { value: null },
+    uShade: { value: null },
     uTime: { value: 0 },
     uIcons: { value: Array.from({ length: ICON_SLOTS }, () => new Vector4(-1, -1, 0.01, 0.01)) },
     uGhost: { value: new Array(ICON_SLOTS).fill(0) },

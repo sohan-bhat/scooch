@@ -11,6 +11,7 @@ import {
   PlaneGeometry,
   Quaternion,
   ShaderMaterial,
+  Vector2,
   Vector3,
   Vector4,
   type Texture,
@@ -79,6 +80,7 @@ uniform vec3 uGlow;
 uniform vec3 uHot;
 uniform vec4 uTiles[${ICON_SLOTS}];
 uniform float uTileHeight[${ICON_SLOTS}];
+uniform vec2 uTileSeen[${ICON_SLOTS}];
 uniform vec2 uShadowDir;
 uniform sampler2D uFrameB;
 uniform float uBlend;
@@ -87,14 +89,6 @@ varying float vHeight;
 varying vec3 vNormal;
 ${pictureBody}
 
-float box(vec2 p, vec4 rect, float blur) {
-  vec2 lo = rect.xy;
-  vec2 hi = rect.xy + rect.zw;
-  vec2 a = smoothstep(lo - blur, lo + blur, p);
-  vec2 b = 1.0 - smoothstep(hi - blur, hi + blur, p);
-  return a.x * a.y * b.x * b.y;
-}
-
 void main() {
   vec2 uv = vUv;
   vec3 photo = mix(picture(uv), texture(uFrameB, vec2(clamp(uv.x, 0.0, 1.0), 1.0 - clamp(uv.y, 0.0, 1.0))).rgb, uBlend);
@@ -102,11 +96,14 @@ void main() {
 
   float shadow = 0.0;
   for (int i = 0; i < ${ICON_SLOTS}; i++) {
-    vec4 rect = uTiles[i];
     float lift = uTileHeight[i];
-    vec4 fallen = vec4(rect.xy + uShadowDir * lift, rect.zw);
-    vec4 core = vec4(fallen.xy + fallen.zw * vec2(0.14, 0.06), fallen.zw * vec2(0.72, 0.7));
-    shadow = max(shadow, box(uv, core, 0.004 + lift * 0.35) * smoothstep(0.0, 0.004, lift));
+    if (lift < 0.0005) continue;
+    vec4 rect = uTiles[i];
+    vec2 q = (uv - uTileSeen[i] - uShadowDir * lift) / rect.zw;
+    if (q.x < -0.1 || q.x > 1.1 || q.y < -0.1 || q.y > 1.1) continue;
+    vec2 cell = vec2(mod(float(i), GRID), floor(float(i) / GRID));
+    float shape = textureLod(uAtlas, (cell + clamp(q, 0.002, 0.998)) / GRID, 2.5 + lift * 20.0).a;
+    shadow = max(shadow, shape * smoothstep(0.0, 0.004, lift));
   }
 
   vec3 n = normalize(vNormal);
@@ -132,7 +129,7 @@ void main() {
     float wobble = (fbm(uv * vec2(6.0, 4.5) + uTime * 0.05) - 0.5) * 0.05;
     color += mix(uHeat, uGlow, 0.7) * exp(-abs(front + wobble) * 70.0) * 0.55;
   }
-  color *= 1.0 - shadow * 0.6;
+  color *= 1.0 - shadow * 0.3;
   vec2 c = uv - 0.5;
   color *= 1.0 - 0.3 * pow(dot(c, c) * 2.2, 1.6);
   gl_FragColor = vec4(color * uFade, 1.0);
@@ -156,6 +153,7 @@ void main() {
 const tileFragment = `
 precision highp float;
 uniform sampler2D uAtlas;
+uniform sampler2D uShade;
 uniform float uOutline;
 uniform float uFade;
 varying vec2 vUv;
@@ -168,8 +166,13 @@ vec4 cell(float index, float row) {
 }
 void main() {
   vec4 icon = mix(cell(vCell, 0.0), cell(vCell, 2.0), uOutline);
-  if (icon.a < 0.35) discard;
-  gl_FragColor = vec4(icon.rgb * uFade * (1.0 - vGhost * 0.25), 1.0);
+  vec2 at = (vec2(mod(vCell, GRID), floor(vCell / GRID)) + clamp(vUv, 0.002, 0.998)) / GRID;
+  float footprint = max(length(dFdx(vUv)), length(dFdy(vUv))) * float(textureSize(uShade, 0).x) / GRID;
+  float lod = clamp(log2(max(footprint, 1e-4)), 0.0, 10.0);
+  float dark = min(textureLod(uShade, at, lod).r * clamp(0.6 + (footprint - 1.8) * 0.75, 0.5, 2.2), 0.92) * (1.0 - uOutline);
+  float alpha = icon.a + dark * (1.0 - icon.a);
+  if (alpha < 0.004) discard;
+  gl_FragColor = vec4(icon.rgb * icon.a * uFade * (1.0 - vGhost * 0.25), alpha);
 }
 `;
 
@@ -182,7 +185,7 @@ export type Stage = {
   height: number;
 };
 
-export function createInside(frame: Frame, saliency: Texture, atlas: Texture, stage: Stage) {
+export function createInside(frame: Frame, saliency: Texture, atlas: Texture, shade: Texture, stage: Stage) {
   const geometry = new PlaneGeometry(stage.width, stage.height, 192, 144);
   const uniforms = {
     ...pictureUniforms(),
@@ -198,6 +201,7 @@ export function createInside(frame: Frame, saliency: Texture, atlas: Texture, st
     uHot: { value: tokenColor('paper') },
     uTiles: { value: Array.from({ length: ICON_SLOTS }, () => new Vector4(-1, -1, 0, 0)) },
     uTileHeight: { value: new Array(ICON_SLOTS).fill(0) },
+    uTileSeen: { value: Array.from({ length: ICON_SLOTS }, () => new Vector2()) },
     uShadowDir: { value: [0.18, 0.26] },
     uFrameB: { value: null as Texture | null },
     uBlend: { value: 0 },
@@ -211,10 +215,21 @@ export function createInside(frame: Frame, saliency: Texture, atlas: Texture, st
   );
   plane.frustumCulled = false;
 
-  const tileUniforms = { uAtlas: { value: atlas }, uOutline: { value: 0 }, uFade: { value: 1 } };
+  const tileUniforms = { uAtlas: { value: atlas }, uShade: { value: shade }, uOutline: { value: 0 }, uFade: { value: 1 } };
   const tiles = new InstancedMesh(
     new PlaneGeometry(1, 1),
-    new ShaderMaterial({ name: 'scooch-tiles', vertexShader: tileVertex, fragmentShader: tileFragment, uniforms: tileUniforms, side: DoubleSide }),
+    new ShaderMaterial({
+      name: 'scooch-tiles',
+      vertexShader: tileVertex,
+      fragmentShader: tileFragment,
+      uniforms: tileUniforms,
+      side: DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+      transparent: true,
+      premultipliedAlpha: true,
+    }),
     ICON_SLOTS,
   );
   tiles.geometry.setAttribute('aCell', new InstancedBufferAttribute(Float32Array.from({ length: ICON_SLOTS }, (_, index) => index), 1));
@@ -230,7 +245,7 @@ export function createInside(frame: Frame, saliency: Texture, atlas: Texture, st
 
 export const INSIDE_LAYER = 1;
 
-const scratch = { matrix: new Matrix4(), position: new Vector3(), quaternion: new Quaternion(), scale: new Vector3(), color: new Color(), normal: new Vector3(), up: new Vector3(0, 1, 0) };
+const scratch = { matrix: new Matrix4(), position: new Vector3(), quaternion: new Quaternion(), scale: new Vector3(), color: new Color(), normal: new Vector3(), up: new Vector3(0, 1, 0), eye: new Vector3() };
 
 export type Pad = { center: Vector3; quaternion: Quaternion; screen: { width: number; height: number } };
 type Pads = { laptop: Pad; console: Pad | null } | null;
@@ -265,11 +280,12 @@ export function useInside(
   frame: Frame,
   saliency: Texture,
   atlas: Texture,
+  shade: Texture,
   stage: Stage | null,
   gallery: { current: Record<string, Frame> },
   pads: Pads,
 ) {
-  const inside = useMemo(() => (stage ? createInside(frame, saliency, atlas, stage) : null), [frame, saliency, atlas, stage]);
+  const inside = useMemo(() => (stage ? createInside(frame, saliency, atlas, shade, stage) : null), [frame, saliency, atlas, shade, stage]);
   const places = useMemo(
     () => ({
       space: { position: new Vector3(), quaternion: new Quaternion(), width: 0, height: 0 } as Place,
@@ -377,6 +393,9 @@ export function useInside(
       return layout?.[index] ?? own(index);
     };
     const tileHeight = Math.min(Math.max((lift - 0.15) / 0.5, 0), 1) * 0.1 * raise;
+    inside.group.updateMatrixWorld();
+    inside.group.worldToLocal(state.camera.getWorldPosition(scratch.eye));
+    const eye = scratch.eye;
     for (let i = 0; i < manifest.icons.length && i < ICON_SLOTS; i++) {
       const a = rects(first, i);
       const b = rects(second, i);
@@ -391,6 +410,10 @@ export function useInside(
       u.uTiles.value[i].set(x, y, w, h);
       u.uTileHeight.value[i] = height;
       scratch.position.set((x + w / 2 - 0.5) * place.width, (0.5 - (y + h / 2)) * place.height, height * place.height);
+      const reach = eye.z > scratch.position.z + 1e-6 ? eye.z / (eye.z - scratch.position.z) : 1;
+      const seenX = eye.x + (scratch.position.x - eye.x) * reach;
+      const seenY = eye.y + (scratch.position.y - eye.y) * reach;
+      u.uTileSeen.value[i].set(seenX / place.width + 0.5 - w / 2, 0.5 - seenY / place.height - h / 2);
       scratch.scale.set(w * place.width, h * place.height, 1);
       scratch.matrix.compose(scratch.position, scratch.quaternion.identity(), scratch.scale);
       inside.tiles.setMatrixAt(i, scratch.matrix);

@@ -651,7 +651,8 @@ impl Daemon {
         }
         let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { return };
         let Ok(key) = tables_key(&entry.source, options) else { return };
-        if !self.store.tables_for(output, key).is_file() || !current.is_some_and(|shown| same(shown, output)) {
+        let tables = self.store.tables_for(output, key);
+        if !tables.is_file() || !current.is_some_and(|shown| same(shown, output)) || stale_tables(&tables).is_some() {
             return;
         }
         let scene = scene::scene(screen, &[]);
@@ -870,7 +871,9 @@ impl Daemon {
         let mut made = None;
         if let (Some(glider), Some(bundle), Some(tables_key)) = (glider.as_deref_mut(), bundle.as_ref(), tables_key) {
             let from = output.as_ref().filter(|_| showing_output).map(|output| self.store.tables_for(output, tables_key)).filter(|from| from.is_file());
+            let stale = from.as_deref().and_then(stale_tables);
             match (from, output.as_deref().filter(|_| showing_output)) {
+                (Some(_), Some(_)) if stale.is_some() => crate::glide::skipped("old tables", stale.as_deref().unwrap_or_default()),
                 (Some(from), Some(still)) => {
                     let canvas = self.store.canvas_for(&screen.id, tables_key);
                     let canvas = canvas.is_file().then_some(canvas);
@@ -1133,6 +1136,15 @@ fn print_of<'a>(icons: impl Iterator<Item = &'a Rect>) -> u64 {
     let mut rects: Vec<[i64; 4]> = icons.map(|icon| [icon.x.round() as i64, icon.y.round() as i64, icon.w.round() as i64, icon.h.round() as i64]).collect();
     rects.sort_unstable();
     cache::digest(&rects.iter().flat_map(|rect| rect.iter().flat_map(|value| value.to_le_bytes())).collect::<Vec<u8>>())
+}
+
+fn stale_tables(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let empty = scooch_core::Canvas { width: 0, height: 0, pixels: Vec::new() };
+    match scooch_core::Bundle::tables_from_bytes(&bytes, empty) {
+        Err(error @ (scooch_core::TablesError::Version | scooch_core::TablesError::Magic | scooch_core::TablesError::Checksum | scooch_core::TablesError::Short)) => Some(format!("{} {error}", path.display())),
+        _ => None,
+    }
 }
 
 pub fn tables_key(source: &Path, options: &Options) -> Result<u64> {
@@ -2896,24 +2908,61 @@ pub mod tests {
         assert!(waits.lock().unwrap().iter().all(|(_, wait)| *wait <= crate::glide::PATIENCE), "{:?}", waits.lock().unwrap());
     }
 
-    #[test]
-    fn an_early_launch_a_second_before_the_move_keeps_the_cold_time() {
-        let (daemon, fake, script, _) = glide_rig("glide-early-cold", true);
+    fn colds_after(name: &str, early: bool, device: Duration) -> Vec<u32> {
+        let (daemon, fake, script, _) = glide_rig(name, true);
         fake.place(vec![subject()]);
         daemon.tick();
         let mut state = daemon.store.load();
-        state.starts.insert("Fake GPU".into(), crate::state::Start { colds: vec![100, 100, 100], at: 1, ..Default::default() });
+        state.starts.insert("Fake GPU".into(), crate::state::Start { colds: vec![120, 120], at: 1, ..Default::default() });
         daemon.store.save(&state).unwrap();
-        script.lock().unwrap().ready_after = Duration::from_millis(1100);
+        {
+            let mut script = script.lock().unwrap();
+            script.device_after = Some(device);
+            script.ready_after = if early { Duration::from_millis(1100) } else { Duration::from_millis(100) };
+        }
         daemon.glider.lock().unwrap().reset_for_test();
-        assert!(daemon.wake_early());
-        std::thread::sleep(Duration::from_millis(1000));
+        if early {
+            assert!(daemon.wake_early());
+            std::thread::sleep(Duration::from_millis(1000));
+        }
         fake.place(vec![moved_subject()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
         let said = daemon.glider.lock().unwrap().said.clone();
-        let start = daemon.store.load().starts.get("Fake GPU").cloned().unwrap_or_default();
-        assert_eq!(start.colds.len(), 3, "{start:?} {said:?}");
-        assert!(start.colds.iter().all(|cold| *cold < 600), "{start:?} {said:?}");
+        assert!(events(&fake).iter().any(|event| event.starts_with("glide ")), "{said:?}");
+        daemon.store.load().starts.get("Fake GPU").cloned().unwrap_or_default().colds
+    }
+
+    #[test]
+    fn only_a_helper_without_its_device_at_the_open_feeds_the_cold_memory() {
+        assert_eq!(colds_after("glide-cold-early", true, Duration::ZERO), vec![120, 120]);
+        let late = colds_after("glide-cold-late", false, Duration::from_millis(30));
+        assert_eq!(late.len(), 3, "{late:?}");
+        assert!(late[2] < 600, "{late:?}");
+    }
+
+    #[test]
+    fn tables_from_another_version_swap_plainly_with_no_layer() {
+        let (daemon, fake, _, spawned) = glide_rig("glide-old-tables", true);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let output = daemon.store.load().screens["main"].output.clone().unwrap();
+        let name = output.file_name().unwrap().to_string_lossy().into_owned();
+        let file = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.path()).find(|path| path.file_name().is_some_and(|file| file.to_string_lossy().starts_with(&name)) && path.extension().is_some_and(|ext| ext == "tables")).unwrap();
+        let mut bytes = std::fs::read(&file).unwrap();
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        let body = bytes.len() - 8;
+        let sum = crate::live::canvas::fingerprint(0, 0, &bytes[..body]);
+        bytes[body..].copy_from_slice(&sum.to_le_bytes());
+        std::fs::write(&file, &bytes).unwrap();
+        daemon.glider.lock().unwrap().reset_for_test();
+        fake.events.lock().unwrap().clear();
+        let before = *spawned.lock().unwrap();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let seen = events(&fake);
+        assert!(!seen.iter().any(|event| event.starts_with("open ") || event.starts_with("glide ")), "{seen:?}");
+        assert!(seen.iter().any(|event| event.starts_with("set ")), "{seen:?}");
+        assert_eq!(*spawned.lock().unwrap(), before, "{seen:?}");
     }
 
     #[test]

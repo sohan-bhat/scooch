@@ -3916,9 +3916,12 @@ mod probe {
         pump(Duration::from_millis(400));
         let shut_glided = shut.log.iter().any(|line| gliding(line));
         let hidden = shut.log.iter().any(|line| line.contains("glide skipped, hidden"));
+        let shut_waited = shut.log.iter().find_map(|line| line.split("glide decision at the set").nth(1).and_then(|rest| rest.split("waited ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<u64>().ok()));
+        let at_once = !shut_glided && shut_waited == Some(0);
         p.line(format!("- the same move while a window covers the whole desktop, covered seen {covered_desktop}: new wallpaper {}, glided {shut_glided}, logged skipped hidden {hidden}, tick `{}`, log {:?}", shut.new != shut.old, tick_of(&shut), shut.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
-        if shut.new == shut.old || !hidden {
-            p.failed.push("a covered desktop did not skip the glide as hidden and set the wallpaper".into());
+        p.line(format!("  - the decision waited {shut_waited:?} ms, a plain swap at once {at_once}"));
+        if shut.new == shut.old || shut_glided || !(hidden || at_once) {
+            p.failed.push("a covered desktop neither skipped the glide as hidden nor swapped plainly at once, or set no wallpaper".into());
         }
         pump(Duration::from_millis(1500));
         let start = log_lines(&log).len();

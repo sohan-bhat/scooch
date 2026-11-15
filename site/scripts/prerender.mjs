@@ -33,7 +33,7 @@ try {
     ...['basis_transcoder.js', 'basis_transcoder.wasm'].map((file) => [`/scooch/basis/${file}`, 'high']),
     ['/scooch/hdri/studio.hdr', 'low'],
   ];
-  const images = [manifest.photo.saliency, 'atlas.png'];
+  const images = [manifest.photo.saliency, 'atlas.png', 'shade.png'];
   const home = await readFile(join(dist, 'index.html'), 'utf8');
   const entry = home.match(/<script type="module" crossorigin src="\/scooch\/assets\/([^"]+\.js)"/)?.[1];
   const sheets = [...home.matchAll(/<link rel="stylesheet" crossorigin href="\/scooch\/assets\/([^"]+\.css)"/g)].map((match) => match[1]);

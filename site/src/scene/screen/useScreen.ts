@@ -26,11 +26,12 @@ function prepareTexture(texture: Texture, srgb: boolean, anisotropy: number) {
 }
 
 function useScreenTextures(manifest: DemoManifest) {
-  const [saliency, atlas] = useTexture([asset(`demo/${manifest.photo.saliency}`), asset('demo/atlas.png')]);
+  const [saliency, atlas, shade] = useTexture([asset(`demo/${manifest.photo.saliency}`), asset('demo/atlas.png'), asset('demo/shade.png')]);
   prepareTexture(atlas, true, 8);
+  prepareTexture(shade, false, 8);
   prepareTexture(saliency, false, 1);
   const main = suspend(() => loadScenery(manifest.scenery, true), ['scooch-scenery-main']);
-  return { saliency, atlas, main };
+  return { saliency, atlas, shade, main };
 }
 
 export function ScreenTextures({ manifest }: { manifest: DemoManifest }) {
@@ -43,7 +44,7 @@ function colors(averages: [number, number, number][]) {
 }
 
 export function useScreens(manifest: DemoManifest) {
-  const { saliency, atlas, main } = useScreenTextures(manifest);
+  const { saliency, atlas, shade, main } = useScreenTextures(manifest);
   const gl = useThree((state) => state.gl);
 
   return useMemo(() => {
@@ -58,9 +59,11 @@ export function useScreens(manifest: DemoManifest) {
     const crt = createCrtMaterial();
     crt.uniforms.uFrame.value = mainFrame.texture;
     crt.uniforms.uAtlas.value = atlas;
+    crt.uniforms.uShade.value = shade;
     crt.uniforms.uRim.value = tokenColor('rim');
     const lcd = createLcdMaterial();
     lcd.uniforms.uAtlas.value = atlas;
+    lcd.uniforms.uShade.value = shade;
     lcd.uniforms.uRim.value = tokenColor('rim');
     const picture = manifest.pictures[0];
     manifest.icons.forEach((icon, index) => {
@@ -73,11 +76,12 @@ export function useScreens(manifest: DemoManifest) {
       lcd,
       saliency,
       atlas,
+      shade,
       main: mainFrame,
       balloon: colors([before.average, fixed.average, fixed.average, moved.average]),
       secondColor: colors([picture.frames.fixed.average, picture.frames.fixed.average]),
     };
-  }, [saliency, atlas, main, manifest, gl]);
+  }, [saliency, atlas, shade, main, manifest, gl]);
 }
 
 export function measureScreen(mesh: Mesh, frame: Group, aspect: number, fill = [0.95, 0.93]) {

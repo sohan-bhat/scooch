@@ -808,7 +808,7 @@ impl Glider {
             let device = launched.zip(trace.device).map(|(launched, device)| launched + device);
             let canvas = launched.zip(trace.canvas).map(|(launched, canvas)| launched + canvas);
             let show = device.and_then(|device| Some(device.max(open + median(&remembered.windows)?) + median(&remembered.draws)? + median(&remembered.reveals)?));
-            let ready = canvas.or_else(|| device.zip(median(&remembered.canvases)).map(|(device, canvas)| device + canvas));
+            let ready = canvas.or_else(|| device.zip(median(&remembered.canvases)).map(|(device, canvas)| device.max(open) + canvas));
             match (show, median(&remembered.colds)) {
                 (Some(show), _) => Some(ready.map_or(show, |ready| show.max(ready))),
                 (None, Some(cold)) => Some(open + cold),
@@ -838,9 +838,11 @@ impl Glider {
         let shown_at = link.shown(id, Self::left(deadline))?;
         trace.drawn = link.drawn(id);
         trace.shown = since(shown_at);
+        let device_at = launched.zip(link.device_ready()).map(|(launched, device)| launched + device);
+        let canvas_at = launched.zip(link.canvas_ready()).map(|(launched, canvas)| launched + canvas);
         let opened = opened_at.unwrap_or(open_at);
-        let cold = self.ready_at.is_some_and(|ready| ready > opened);
-        let canvas = trace.device.zip(trace.canvas).map(|(device, canvas)| canvas.saturating_sub(device));
+        let cold = device_at.is_some_and(|device| device > opened);
+        let canvas = device_at.zip(canvas_at).map(|(device, canvas)| canvas.saturating_duration_since(device.max(opened)));
         let drawn = trace.drawn;
         if let Some(adapter) = self.adapter.clone() {
             self.learn(&adapter, |start| {

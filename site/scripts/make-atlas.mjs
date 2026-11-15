@@ -47,6 +47,12 @@ const data = await page.evaluate(
     canvas.width = cell * 4;
     canvas.height = cell * 4;
     const context = canvas.getContext('2d');
+    const shadeCanvas = document.createElement('canvas');
+    shadeCanvas.width = canvas.width;
+    shadeCanvas.height = canvas.height;
+    const shade = shadeCanvas.getContext('2d');
+    shade.fillStyle = '#000000';
+    shade.fillRect(0, 0, shadeCanvas.width, shadeCanvas.height);
     const image = async (source, fill) => {
       const sized = source.replace('<svg ', '<svg width="512" height="512" ').replace(/currentColor/g, fill);
       const element = new Image();
@@ -64,16 +70,24 @@ const data = await page.evaluate(
       context.shadowBlur = 10;
       context.shadowOffsetY = 3;
       context.drawImage(body, left + (cell - glyph) / 2, top + 14, glyph, glyph);
+      context.shadowColor = 'transparent';
       context.font = '600 30px Label';
       context.textAlign = 'center';
       context.textBaseline = 'alphabetic';
-      context.shadowBlur = 6;
-      context.shadowOffsetY = 1;
-      context.shadowColor = 'rgba(10, 8, 6, 0.9)';
       context.fillStyle = palette.paper;
       context.fillText(icon.label, left + cell / 2, top + 206, cell - 16);
-      context.fillText(icon.label, left + cell / 2, top + 206, cell - 16);
       context.restore();
+      shade.font = '600 30px Label';
+      shade.textAlign = 'center';
+      shade.textBaseline = 'alphabetic';
+      shade.filter = 'blur(3px)';
+      shade.lineJoin = 'round';
+      shade.lineWidth = 4;
+      shade.strokeStyle = '#ffffff';
+      shade.fillStyle = '#ffffff';
+      shade.strokeText(icon.label, left + cell / 2, top + 207, cell - 16);
+      shade.fillText(icon.label, left + cell / 2, top + 207, cell - 16);
+      shade.filter = 'none';
       const [lineLeft, lineTop] = place(index, 2);
       const line = await image(icon.line, palette.pad);
       context.drawImage(line, lineLeft + (cell - glyph) / 2, lineTop + 14, glyph, glyph);
@@ -93,12 +107,14 @@ const data = await page.evaluate(
     context.drawImage(outline, left, top, size, size);
     context.restore();
     context.drawImage(body, left + size * 0.06, top + size * 0.06, size * 0.88, size * 0.88);
-    return canvas.toDataURL('image/png');
+    return [canvas.toDataURL('image/png'), shadeCanvas.toDataURL('image/png')];
   },
   { icons, cursor, palette: { pad: color('pad'), paper: color('paper'), ink: color('ink') } },
 );
 await browser.close();
-const png = Buffer.from(data.split(',')[1], 'base64');
+const [atlas, shade] = data.map((url) => Buffer.from(url.split(',')[1], 'base64'));
 const out = join(site, 'public', 'demo', 'atlas.png');
-await writeFile(out, await sharp(png).png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer());
-console.log('wrote', out);
+await writeFile(out, await sharp(atlas).png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer());
+const shadeOut = join(site, 'public', 'demo', 'shade.png');
+await writeFile(shadeOut, await sharp(shade).extractChannel(0).png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer());
+console.log('wrote', out, shadeOut);

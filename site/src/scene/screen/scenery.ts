@@ -48,6 +48,7 @@ export type BundleState = {
 
 export type SceneryInfo = {
   folder: string;
+  tables: string;
   width: number;
   height: number;
   grid_cell: number;
@@ -194,7 +195,10 @@ async function canvasTexture(base: string, info: SceneryInfo, longest = 0) {
   return canvas;
 }
 
+export const TABLES = 'scooch tables v2';
+
 export async function loadScenery(info: SceneryInfo, plainStates: boolean, longest = 0): Promise<Scenery> {
+  if (info.tables !== TABLES) throw new Error(`demo/${info.folder} holds ${info.tables ?? 'unstamped'} tables, the site draws ${TABLES}`);
   const base = asset(`demo/${info.folder}`);
   if (!plainStates || !info.fill) {
     const [canvas, ...states] = await Promise.all([canvasTexture(base, info, longest), ...info.states.map((state) => lookOf(base, state))]);
@@ -241,6 +245,7 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
     grain_scale: { value: number('grain_scale') },
     grain_floor: { value: number('grain_floor') },
     grain_lod: { value: Math.log2((4 * info.canvas.width) / info.width) },
+    spare: { value: 0 },
     core_lift: { value: number('core_lift') },
     core_drop: { value: number('core_drop') },
     volume_lit: { value: number('volume_lit') },
@@ -301,7 +306,7 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
   let custom = false;
   let generation = 0;
   let plain: { texture: Texture; lod: number } | null = null;
-  const keys = ['unit', 'ramp_low', 'ramp_high', 'reach', 'grain_amount', 'grain_scale', 'grain_floor', 'core_lift', 'core_drop', 'volume_lit', 'volume_dark', 'shadow_at', 'rim_at', 'belly_at'] as const;
+  const keys = ['unit', 'ramp_low', 'ramp_high', 'reach', 'grain_amount', 'grain_scale', 'grain_floor', 'spare', 'core_lift', 'core_drop', 'volume_lit', 'volume_dark', 'shadow_at', 'rim_at', 'belly_at'] as const;
   const defaults = Object.fromEntries(keys.map((key) => [key, uniforms[key].value]));
 
   const bind = (suffix: 'a' | 'b', look: Look) => {
@@ -505,6 +510,7 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
         uniforms.grain_amount.value = constants[11];
         uniforms.grain_scale.value = constants[12];
         uniforms.grain_floor.value = constants[13];
+        uniforms.spare.value = constants[19];
         uniforms.core_lift.value = constants[15];
         uniforms.core_drop.value = constants[16];
         uniforms.volume_lit.value = constants[17];
