@@ -2949,7 +2949,8 @@ pub mod tests {
         let name = output.file_name().unwrap().to_string_lossy().into_owned();
         let file = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.path()).find(|path| path.file_name().is_some_and(|file| file.to_string_lossy().starts_with(&name)) && path.extension().is_some_and(|ext| ext == "tables")).unwrap();
         let mut bytes = std::fs::read(&file).unwrap();
-        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(bytes[4..8], scooch_core::TABLES_VERSION.to_le_bytes());
+        bytes[4..8].copy_from_slice(&(scooch_core::TABLES_VERSION - 1).to_le_bytes());
         let body = bytes.len() - 8;
         let sum = crate::live::canvas::fingerprint(0, 0, &bytes[..body]);
         bytes[body..].copy_from_slice(&sum.to_le_bytes());

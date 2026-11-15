@@ -2934,7 +2934,8 @@ mod probe {
             let mut bytes = fs::read(file).ok()?;
             let body = bytes.len().checked_sub(8).filter(|body| *body > 8)?;
             let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
-            bytes[4..8].copy_from_slice(&version.checked_sub(1)?.to_le_bytes());
+            let back = scooch_core::TABLES_VERSION.checked_sub(1).filter(|_| version == scooch_core::TABLES_VERSION)?;
+            bytes[4..8].copy_from_slice(&back.to_le_bytes());
             let sum = scooch::live::canvas::fingerprint(0, 0, &bytes[..body]);
             bytes[body..].copy_from_slice(&sum.to_le_bytes());
             fs::write(file, &bytes).ok()
@@ -2953,7 +2954,7 @@ mod probe {
                 break;
             }
         }
-        p.line(format!("- tables rewritten one version back {:?}, then a drag: logged another version {named}, new wallpaper {:?} ms, glided {}, a layer opened {opened}, skip {:?}, the drags after it glided {again:?}", rewritten.is_some(), first.set, first.glided, first.skip));
+        p.line(format!("- tables rewritten from version {} to {} {:?}, then a drag: logged another version {named}, new wallpaper {:?} ms, glided {}, a layer opened {opened}, skip {:?}, the drags after it glided {again:?}", scooch_core::TABLES_VERSION, scooch_core::TABLES_VERSION - 1, rewritten.is_some(), first.set, first.glided, first.skip));
         if rewritten.is_none() || !named || first.set.is_none() || first.glided || opened || !again.contains(&true) {
             p.fail("tables from another version did not give one plain swap at once and then a glide");
         }
