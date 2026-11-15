@@ -1,4 +1,4 @@
-import { quiet } from '@/lib/idle';
+import { afterFrame, quiet, WAIT } from '@/lib/idle';
 import { runtime } from '@/story/state';
 import { quality } from './quality';
 import { still } from './still';
@@ -53,19 +53,40 @@ export function level(): Level {
 const HEADROOM = 600;
 const PATIENCE = 4000;
 
+function granted(within: number) {
+  return new Promise<boolean>((resolve) => {
+    const resume = () => {
+      window.clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = window.setTimeout(() => {
+      const index = waiting.indexOf(resume);
+      if (index >= 0) waiting.splice(index, 1);
+      resolve(false);
+    }, within);
+    waiting.push(resume);
+  });
+}
+
 export async function calm() {
+  const until = performance.now() + WAIT;
   for (;;) {
+    const left = until - performance.now();
+    if (left <= 0) {
+      await afterFrame();
+      return;
+    }
     if (stillsPlanned()) {
-      await new Promise<void>((resolve) => waiting.push(resolve));
-      if (stillsPlanned()) return;
+      if ((await granted(left)) && stillsPlanned()) return;
       continue;
     }
-    await quiet();
     const now = performance.now();
     const resting = !quality.moving && quality.chain === 'sharp';
-    if (resting && now - quality.slowAt > HEADROOM) return;
-    if (resting && now - still.inputAt > PATIENCE) return;
-    await new Promise((resolve) => window.setTimeout(resolve, 300));
+    if (resting && (now - quality.slowAt > HEADROOM || now - still.inputAt > PATIENCE)) {
+      await quiet();
+      return;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, Math.min(50, left)));
   }
 }
 
