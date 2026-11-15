@@ -2768,6 +2768,7 @@ mod probe {
         if state(p)["glide"] != serde_json::json!(true) {
             let _ = p.scooch(&["glide"], LIMIT);
         }
+        old_tables(p, &screen, name, places);
         p.line("- ten drags with the glide on, each after 35 s at rest so the helper is gone".to_string());
         let on = cold_round(p, &screen, name, places, "cold");
         let glided = on.iter().filter(|cold| cold.glided).count();
@@ -2815,6 +2816,38 @@ mod probe {
         }
         bare_wakes(p);
         Ok(())
+    }
+
+    fn old_tables(p: &mut Probe, screen: &Screen, name: &str, places: ((f32, f32), (f32, f32))) {
+        let output = state(p)["screens"].as_object().and_then(|screens| screens.values().next().and_then(|entry| entry["output"].as_str().map(PathBuf::from)));
+        let prefix = output.as_ref().and_then(|output| output.file_name()).map(|name| format!("{}.", name.to_string_lossy()));
+        let file = prefix.and_then(|prefix| fs::read_dir(p.home.join("cache").join("tables")).ok()?.flatten().map(|entry| entry.path()).find(|path| path.extension().is_some_and(|ext| ext == "tables") && path.file_name().is_some_and(|file| file.to_string_lossy().starts_with(&prefix))));
+        let rewritten = file.as_ref().and_then(|file| {
+            let mut bytes = fs::read(file).ok()?;
+            let body = bytes.len().checked_sub(8).filter(|body| *body > 8)?;
+            bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+            let sum = scooch::live::canvas::fingerprint(0, 0, &bytes[..body]);
+            bytes[body..].copy_from_slice(&sum.to_le_bytes());
+            fs::write(file, &bytes).ok()
+        });
+        let lines = daemon_log(p).lines().count();
+        let first = cold_drag(p, screen, name, places);
+        let log = new_lines(&daemon_log(p), lines);
+        let named = log.iter().any(|line| line.contains("the tables come from another version"));
+        let opened = log.iter().any(|line| line.contains(" glide open"));
+        let mut again = Vec::new();
+        for _ in 0..2 {
+            std::thread::sleep(Duration::from_millis(1500));
+            let next = cold_drag(p, screen, name, places);
+            again.push(next.glided);
+            if next.glided {
+                break;
+            }
+        }
+        p.line(format!("- tables rewritten as version 1 {:?}, then a drag: logged another version {named}, new wallpaper {:?} ms, glided {}, a layer opened {opened}, skip {:?}, the drags after it glided {again:?}", rewritten.is_some(), first.set, first.glided, first.skip));
+        if rewritten.is_none() || !named || first.set.is_none() || first.glided || opened || !again.contains(&true) {
+            p.fail("tables from another version did not give one plain swap at once and then a glide");
+        }
     }
 
     fn bare_wakes(p: &mut Probe) {
@@ -3087,10 +3120,12 @@ mod probe {
         let rendered = |log: &[String]| log.iter().find(|line| line.contains(" tick ") && line.contains("Rendered")).cloned();
         let tick = |log: &[String]| rendered(log).and_then(|line| line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<u64>().ok()));
         let laps = |log: &[String], names: &[&str]| rendered(log).map(|line| line.split(", ").filter_map(|part| part.rsplit_once(' ')).filter(|(name, _)| names.iter().any(|wanted| name.ends_with(wanted))).filter_map(|(_, ms)| ms.parse::<u64>().ok()).sum::<u64>());
-        let hidden = covered_log.iter().any(|line| line.contains("glide skipped, hidden") || line.contains("glide skipped, helper budget"));
+        let hidden = covered_log.iter().any(|line| line.contains("glide skipped, hidden"));
+        let covered_waited = covered_log.iter().find_map(|line| line.split("glide decision at the set").nth(1).and_then(|rest| rest.split("waited ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<u64>().ok()));
+        let at_once = !covered_log.iter().any(|line| line.contains("shown and gliding")) && covered_waited == Some(0);
         let delay = laps(&covered_log, &["early", "tables", "open"]);
-        p.line(format!("- a move while a window covers the whole desktop: new wallpaper after {covered:?} ms, the daemon answered hidden {hidden}, time the glide added to the tick {delay:?} ms, tick {:?} ms against {:?} ms for the glide off move, log {covered_log:?}", tick(&covered_log), tick(&off_log)));
-        if covered.is_none() || !hidden || delay.is_none_or(|delay| delay > 400) {
+        p.line(format!("- a move while a window covers the whole desktop: new wallpaper after {covered:?} ms, the daemon answered hidden {hidden}, the decision waited {covered_waited:?} ms, a plain swap at once {at_once}, time the glide added to the tick {delay:?} ms, tick {:?} ms against {:?} ms for the glide off move, log {covered_log:?}", tick(&covered_log), tick(&off_log)));
+        if covered.is_none() || !(hidden || at_once) || delay.is_none_or(|delay| delay > 400) {
             p.fail("a covered desktop delayed the plain swap");
         }
         std::thread::sleep(Duration::from_millis(1500));
