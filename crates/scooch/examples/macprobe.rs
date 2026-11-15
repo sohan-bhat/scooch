@@ -1212,6 +1212,21 @@ mod probe {
         let _ = p.scooch(&["scenery"], LIMIT);
         let painted = icon.as_ref().map(|icon| ring(&on_shot, &off_shot, icon, screen));
         p.line(format!("- pixels within 40 points around the dragged item that differ between scenery on and off on the {label} picture {painted:?}"));
+        let seen = daemon_log(p).lines().count();
+        let mut swaps = 0;
+        for _ in 0..5 {
+            away(p, name, calm);
+            let before = shown();
+            let _ = place(p, name, onto);
+            poke(p);
+            if wait_until(Duration::from_secs(12), || shown() != before).is_some() {
+                swaps += 1;
+            }
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        let mut laps = render_laps(p, seen);
+        laps.sort_unstable();
+        p.line(format!("- {label} picture, scenery `{}`, Apple Event moves from calm ground onto the subject that brought a new wallpaper {swaps} of 5, render laps {laps:?} ms, median {:?}, to set beside section 5 on a build where section 5 used this picture", state(p)["options"]["scenery"].as_str().unwrap_or("missing"), laps.get(laps.len() / 2)));
         if let Some(subject) = p.subject.clone() {
             let ran = p.scooch(&["use", &subject.to_string_lossy()], Duration::from_secs(60));
             let back = wait_render(p, Duration::from_secs(45), Some(&subject), false);
