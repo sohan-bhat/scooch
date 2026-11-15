@@ -31,6 +31,7 @@ export const still = {
   builtAt: 0,
   rebuilds: 0,
   arrived: false,
+  startedAt: 0,
   target: 0,
   from: null as TextureType | null,
 };

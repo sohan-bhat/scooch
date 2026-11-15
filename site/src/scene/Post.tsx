@@ -528,6 +528,7 @@ export function Post({ phone }: { phone: boolean }) {
         if (!calm) return;
         freeze(time);
         still.phase = 'capture';
+        still.startedAt = now;
         quality.hold = true;
         return;
       }
@@ -665,6 +666,7 @@ export function Post({ phone }: { phone: boolean }) {
           still.stale = false;
           still.arrived = false;
           still.rebuilds += 1;
+          still.startedAt = now;
           still.refresh = true;
           still.row = 0;
           still.band = 0;
@@ -693,7 +695,7 @@ export function Post({ phone }: { phone: boolean }) {
         still.target = 1 - still.target;
         still.refresh = false;
       }
-      still.builtAt = performance.now();
+      if (!still.tick) still.builtAt = still.startedAt;
       still.from = null;
       still.phase = 'still';
       still.tick = false;
