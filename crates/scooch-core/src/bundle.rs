@@ -22,6 +22,8 @@ const UNDER: f32 = 0.15;
 const BROAD_MIX: f32 = 0.9;
 const UNDER_MIX: f32 = 0.9;
 const GRAIN_DOUBLE: f32 = 0.6;
+const GRAIN_MIX: [u32; 3] = [0x8da6_b343, 0xd816_3841, 0x5bd1_e995];
+const GRAIN_SHIFT: [u32; 3] = [13, 15, 8];
 const GLIDE_REACH: f32 = 1.8;
 const GLIDE_BLEND: f32 = 0.1;
 const GLIDE_EDGE: f32 = 4.0;
@@ -130,11 +132,11 @@ fn ramps(u: f32) -> Vec<u8> {
 }
 
 pub fn grain_hash(x: u32, y: u32) -> f32 {
-    let mut h = x.wrapping_mul(0x8da6_b343) ^ y.wrapping_mul(0xd816_3841);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0x5bd1_e995);
-    h ^= h >> 15;
-    (h >> 8) as f32 / 16_777_215.0
+    let mut h = x.wrapping_mul(GRAIN_MIX[0]) ^ y.wrapping_mul(GRAIN_MIX[1]);
+    h ^= h >> GRAIN_SHIFT[0];
+    h = h.wrapping_mul(GRAIN_MIX[2]);
+    h ^= h >> GRAIN_SHIFT[1];
+    (h >> GRAIN_SHIFT[2]) as f32 / 16_777_215.0
 }
 
 #[inline(always)]
@@ -456,22 +458,27 @@ fn lerp4(line: &[[f32; 4]], probe: &Probe) -> [f32; 4] {
     std::array::from_fn(|k| p[k] + (q[k] - p[k]) * probe.t)
 }
 
-fn line4(values: &[[f32; 4]], w: usize, row: &Probe, (lo, hi): (usize, usize)) -> Vec<[f32; 4]> {
+fn line4(values: &[[f32; 4]], w: usize, row: &Probe, (lo, hi): (usize, usize), out: &mut Vec<[f32; 4]>) {
     let (top, bottom) = (&values[row.a * w..(row.a + 1) * w], &values[row.b * w..(row.b + 1) * w]);
-    let mut out = vec![[0.0f32; 4]; w];
+    out.resize(w, [0.0; 4]);
     for (o, (p, q)) in out[lo..hi].iter_mut().zip(top[lo..hi].iter().zip(&bottom[lo..hi])) {
         *o = std::array::from_fn(|k| p[k] + (q[k] - p[k]) * row.t);
     }
-    out
 }
 
-fn line1(values: &[f32], w: usize, row: &Probe, (lo, hi): (usize, usize)) -> Vec<f32> {
+fn line1(values: &[f32], w: usize, row: &Probe, (lo, hi): (usize, usize), out: &mut Vec<f32>) {
     let (top, bottom) = (&values[row.a * w..(row.a + 1) * w], &values[row.b * w..(row.b + 1) * w]);
-    let mut out = vec![0.0f32; w];
+    out.resize(w, 0.0);
     for (o, (p, q)) in out[lo..hi].iter_mut().zip(top[lo..hi].iter().zip(&bottom[lo..hi])) {
         *o = p + (q - p) * row.t;
     }
-    out
+}
+
+#[derive(Default)]
+struct Lines {
+    fields: Vec<Vec<f32>>,
+    looks: Vec<Vec<[f32; 4]>>,
+    tints: Vec<Vec<Vec<[f32; 4]>>>,
 }
 
 fn field_at(field: &[f32], grid: &Grid, x: f32, y: f32) -> f32 {
@@ -489,7 +496,7 @@ fn field_at(field: &[f32], grid: &Grid, x: f32, y: f32) -> f32 {
 fn gap(a: &[f32], b: &[f32], grid: &Grid, (x, y): (f32, f32), here: f32, reach: f32) -> f32 {
     let change = |dx: f32, dy: f32| (field_at(a, grid, x + dx, y + dy) - field_at(b, grid, x + dx, y + dy)).abs();
     let side = reach * std::f32::consts::FRAC_1_SQRT_2;
-    here.max(change(side, side)).max(change(side, -side))
+    here.max(change(side, side)).max(change(side, -side)).max(change(-side, side)).max(change(-side, -side))
 }
 
 struct Plane {
@@ -640,6 +647,15 @@ pub fn frame_with(a: &Bundle, b: &Bundle, s: f32, glide: Glide) -> RgbImage {
     picture
 }
 
+pub fn frame_through(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
+    if !compatible(a, b) {
+        return crossfade(a, b, s.clamp(0.0, 1.0));
+    }
+    let (mut picture, layer) = draw_both(a, b, s, &a.canvas, Glide::ByKind, false);
+    paint::composite(&mut picture, &layer);
+    picture
+}
+
 pub fn layers(a: &Bundle, b: &Bundle, s: f32) -> (RgbImage, RgbaImage) {
     draw(a, b, s, &a.canvas)
 }
@@ -670,8 +686,14 @@ pub fn draw(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8]) -> (RgbImage, RgbaIma
 }
 
 fn draw_with(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8], glide: Glide) -> (RgbImage, RgbaImage) {
+    draw_both(a, b, s, canvas, glide, true)
+}
+
+fn draw_both(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8], glide: Glide, ends: bool) -> (RgbImage, RgbaImage) {
     let s = if s.is_finite() { s.clamp(0.0, 1.0) } else { 0.0 };
-    let (a, b, s) = if !compatible(a, b) {
+    let (a, b, s) = if !ends && compatible(a, b) {
+        (a, b, s)
+    } else if !compatible(a, b) {
         if s < 0.5 {
             (a, a, 0.0)
         } else {
@@ -688,7 +710,7 @@ fn draw_with(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8], glide: Glide) -> (Rg
     if width == 0 || height == 0 || a.canvas_width == 0 || a.canvas_height == 0 || canvas.len() != (a.canvas_width * a.canvas_height * 3) as usize {
         return (RgbImage::new(width, height), RgbaImage::new(width, height));
     }
-    let same = std::ptr::eq(a, b) || s == 0.0;
+    let same = std::ptr::eq(a, b) || (ends && s == 0.0);
     let (xmap, ymap): (Cow<[f64]>, Cow<[f64]>) = if same {
         (Cow::Borrowed(&a.xmap), Cow::Borrowed(&a.ymap))
     } else {
@@ -697,7 +719,7 @@ fn draw_with(a: &Bundle, b: &Bundle, s: f32, canvas: &[u8], glide: Glide) -> (Rg
     };
     let ratio = if same { a.ratio } else { a.ratio.max(b.ratio) };
     let picture = render::picture((canvas, a.canvas_width, a.canvas_height), (&xmap, &ymap), ratio, (width, height));
-    finish_with(a, b, s, picture, None, glide)
+    finish_with(a, b, s, picture, None, glide, ends)
 }
 
 pub struct Scope {
@@ -737,11 +759,11 @@ impl Scope {
 }
 
 pub fn finish(a: &Bundle, b: &Bundle, s: f32, picture: RgbImage, scope: Option<&Scope>) -> (RgbImage, RgbaImage) {
-    finish_with(a, b, s, picture, scope, Glide::ByKind)
+    finish_with(a, b, s, picture, scope, Glide::ByKind, true)
 }
 
-fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Option<&Scope>, glide: Glide) -> (RgbImage, RgbaImage) {
-    let same = std::ptr::eq(a, b) || s == 0.0;
+fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Option<&Scope>, glide: Glide, ends: bool) -> (RgbImage, RgbaImage) {
+    let same = std::ptr::eq(a, b) || (ends && s == 0.0);
     let (width, height) = (a.width, a.height);
     let mut layer = RgbaImage::new(width, height);
     let decode = color::decode_table();
@@ -804,7 +826,7 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
     let tint_columns = probes(w, P, paint_grid.w);
     let tint_rows = probes(h, P, paint_grid.h);
     let out: &mut [u8] = &mut layer;
-    out.par_chunks_mut(w * 4).enumerate().for_each(|(y, line)| {
+    out.par_chunks_mut(w * 4).enumerate().for_each_init(Lines::default, |lines, (y, line)| {
         let row = &rows[y];
         let j = row.a;
         if !active[j * grid.w..(j + 1) * grid.w].iter().any(|a| *a) {
@@ -818,9 +840,20 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
         let (first, last) = (ranges[0].0, ranges[ranges.len() - 1].1);
         let span = ((first / Q).saturating_sub(1), (last / Q + 2).min(grid.w));
         let tint_span = ((first / P).saturating_sub(1), (last / P + 2).min(paint_grid.w));
-        let field_lines: Vec<Vec<f32>> = fields.iter().map(|f| line1(f, grid.w, row, span)).collect();
-        let look_lines: Vec<Vec<[f32; 4]>> = planes.iter().map(|p| line4(&p.look, grid.w, row, span)).collect();
-        let tint_lines: Vec<Vec<Vec<[f32; 4]>>> = planes.iter().map(|p| p.paints.iter().map(|layer| line4(layer, paint_grid.w, tint_row, tint_span)).collect()).collect();
+        lines.fields.resize_with(fields.len(), Vec::new);
+        lines.looks.resize_with(planes.len(), Vec::new);
+        lines.tints.resize_with(planes.len(), Vec::new);
+        for (f, out) in fields.iter().zip(&mut lines.fields) {
+            line1(f, grid.w, row, span, out);
+        }
+        for ((p, look), tint) in planes.iter().zip(&mut lines.looks).zip(&mut lines.tints) {
+            line4(&p.look, grid.w, row, span, look);
+            tint.resize_with(p.paints.len(), Vec::new);
+            for (layer, out) in p.paints.iter().zip(tint.iter_mut()) {
+                line4(layer, paint_grid.w, tint_row, tint_span, out);
+            }
+        }
+        let (field_lines, look_lines, tint_lines) = (&lines.fields, &lines.looks, &lines.tints);
         let cells = line.as_chunks_mut::<4>().0;
         for x in ranges.into_iter().flat_map(|(x0, x1)| x0..x1) {
             let px = &mut cells[x];
@@ -829,7 +862,7 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
                 continue;
             }
             let mut ds = [f32::MAX; 2];
-            for (slot, f) in ds.iter_mut().zip(&field_lines) {
+            for (slot, f) in ds.iter_mut().zip(field_lines.iter()) {
                 *slot = f[column.a] + (f[column.b] - f[column.a]) * column.t;
             }
             if ds.iter().all(|d| *d > c.reach) {
@@ -896,8 +929,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_shaders_hold_the_numbers_the_cpu_frame_uses() {
+        let (wgsl, glsl) = (include_str!("../shaders/frame.wgsl"), include_str!("../shaders/frame.glsl"));
+        let side = std::f32::consts::FRAC_1_SQRT_2;
+        let both = [
+            (format!("> {:?} && both < {:?}", GLIDE_FELT.0, GLIDE_FELT.1), 1),
+            (format!("{:?} * (grain_hash(", GRAIN_DOUBLE), 1),
+            (format!("(x * {:#x}u) ^ (y * {:#x}u)", GRAIN_MIX[0], GRAIN_MIX[1]), 1),
+            (format!("h * {:#x}u", GRAIN_MIX[2]), 1),
+            (format!("h ^ (h >> {}u)", GRAIN_SHIFT[0]), 1),
+            (format!("h ^ (h >> {}u)", GRAIN_SHIFT[1]), 1),
+            (format!("(h >> {}u) / 16777215.0", GRAIN_SHIFT[2]), 1),
+        ];
+        for (text, count) in &both {
+            assert_eq!(wgsl.matches(text.as_str()).count(), *count, "wgsl {text}");
+            assert_eq!(glsl.matches(text.as_str()).count(), *count, "glsl {text}");
+        }
+        let edge = format!("min({:?} * ", GLIDE_EDGE);
+        assert_eq!((wgsl.matches(edge.as_str()).count(), glsl.matches(edge.as_str()).count()), (2, 2), "{edge}");
+        assert_eq!(wgsl.matches(&format!("let side = {:?} * frame.unit * {side:?};", GLIDE_SPAN)).count(), 1);
+        assert_eq!(glsl.matches(&format!("float side = {:?} * unit * {side:?};", GLIDE_SPAN)).count(), 1);
+    }
+
+    #[test]
     fn the_glide_gate_is_skipped_only_where_the_ramps_are_flat() {
-        for u in [24.0f32, 60.0, 110.0, 240.0] {
+        for u in [shape::UNIT_FLOOR, 24.0, 60.0, 110.0, 240.0] {
             let table = ramps(u);
             let entry = |k: usize| [table[k * 4 + 1], table[k * 4 + 2], table[k * 4 + 3], table[(RAMP + k) * 4], table[(RAMP + k) * 4 + 1], table[(RAMP + k) * 4 + 2]];
             let at = |k: usize| RAMP_RANGE.0 + (RAMP_RANGE.1 - RAMP_RANGE.0) * k as f32 / (RAMP - 1) as f32;

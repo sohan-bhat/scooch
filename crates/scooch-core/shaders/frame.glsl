@@ -51,7 +51,9 @@ float change(vec2 p) {
 
 float gap(vec2 p, float here) {
     float side = 0.3 * unit * 0.70710677;
-    return max(here, max(change(p + vec2(side, side)), change(p + vec2(side, -side))));
+    float ahead = max(change(p + vec2(side, side)), change(p + vec2(side, -side)));
+    float behind = max(change(p - vec2(side, side)), change(p - vec2(side, -side)));
+    return max(here, max(ahead, behind));
 }
 
 vec2 coarse(vec2 p) {
