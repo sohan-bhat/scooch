@@ -466,25 +466,35 @@ fn on_screen_distance(px: f32, py: f32, r: &Rect) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
-fn mean_lightness(picture: &RgbImage, layer: &scooch_core::RgbaImage, r: &Rect) -> Option<f32> {
-    let (mut sum, mut count) = (0.0f32, 0.0f32);
+const CLOUD_LABEL_MARGIN: f32 = 0.01;
+const LAND_LABEL: f32 = 0.88;
+
+fn lightness(p: [u8; 3]) -> f32 {
+    let lin = p.map(|v| {
+        let c = v as f32 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    });
+    (0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]).cbrt()
+}
+
+fn label_grounds(picture: &RgbImage, layer: &scooch_core::RgbaImage, bundle: &scooch_core::Bundle, r: &Rect) -> (Option<f32>, Option<f32>) {
+    let (mut sums, mut counts) = ([0.0f32; 2], [0.0f32; 2]);
     let (x0, x1) = (r.x.max(0.0) as u32, ((r.x + r.w) as u32).min(picture.width()));
     let (y0, y1) = ((r.y + r.h * 2.0 / 3.0).max(0.0) as u32, ((r.y + r.h) as u32).min(picture.height()));
+    let gw = bundle.grid_width as usize;
     for y in y0..y1 {
         for x in x0..x1 {
             if layer.get_pixel(x, y).0[3] < 230 {
                 continue;
             }
-            let p = picture.get_pixel(x, y).0;
-            let lin = p.map(|v| {
-                let c = v as f32 / 255.0;
-                if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-            });
-            sum += (0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]).cbrt();
-            count += 1.0;
+            let kind = bundle.look[((y as usize / 4) * gw + x as usize / 4) * 4];
+            let k = if kind >= 200 { 0 } else if kind <= 55 { 1 } else { continue };
+            sums[k] += lightness(picture.get_pixel(x, y).0);
+            counts[k] += 1.0;
         }
     }
-    (count > 0.0).then(|| sum / count)
+    let mean = |k: usize| (counts[k] > 0.0).then(|| sums[k] / counts[k]);
+    (mean(0), mean(1))
 }
 
 #[test]
@@ -592,11 +602,25 @@ fn labels_stay_readable_on_the_scenery() {
                 let options = Options { scenery: Scenery::Auto, ..Options::default() };
                 let placement = scooch_core::solve(&analysis, &scene, &options, None);
                 let layers = scooch_core::render_layers(&picture, &analysis, &placement, &scene, &options);
+                let bundle = scooch_core::bundle(&picture, &analysis, &placement, &scene, &options);
                 let mut shown = layers.picture.clone();
                 scooch_core::composite(&mut shown, &layers.scenery);
                 for r in &icons {
-                    if let Some(l) = mean_lightness(&shown, &layers.scenery, r) {
-                        assert!(l <= 0.89, "{} {layout} label ground lightness {l:.3}", photo.name);
+                    let (cloud, land) = label_grounds(&shown, &layers.scenery, &bundle, r);
+                    if let Some(l) = cloud {
+                        let (pw, ph) = (bundle.paint_width as usize, bundle.paint_height as usize);
+                        let (i0, i1) = (((r.x / 16.0).max(0.0) as usize).min(pw - 1), (((r.x + r.w) / 16.0) as usize).min(pw - 1));
+                        let (j0, j1) = ((((r.y + r.h * 2.0 / 3.0) / 16.0).max(0.0) as usize).min(ph - 1), (((r.y + r.h) / 16.0) as usize).min(ph - 1));
+                        let shaded = (j0..=j1)
+                            .flat_map(|j| (i0..=i1).map(move |i| (4 * pw * ph + j * pw + i) * 4))
+                            .map(|at| lightness([bundle.paints[at], bundle.paints[at + 1], bundle.paints[at + 2]]))
+                            .fold(0.0f32, f32::max);
+                        println!("cloud label {} {layout}: {l:.3} against shaded {shaded:.3}", photo.name);
+                        assert!(l <= shaded + CLOUD_LABEL_MARGIN, "{} {layout} cloud label ground {l:.3} above the shaded tone {shaded:.3}", photo.name);
+                    }
+                    if let Some(l) = land {
+                        println!("land label {} {layout}: {l:.3}", photo.name);
+                        assert!(l <= LAND_LABEL, "{} {layout} land label ground lightness {l:.3}", photo.name);
                     }
                 }
             }

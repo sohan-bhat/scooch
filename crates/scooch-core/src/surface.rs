@@ -8,6 +8,7 @@ use rayon::prelude::*;
 pub struct Live {
     lattice: Lattice,
     icons: Vec<Icon>,
+    labels: Spots,
     raw: Vec<[f32; 3]>,
     clouds: Vec<[f32; 3]>,
     isles: Vec<[f32; 3]>,
@@ -31,6 +32,10 @@ fn field_of(px: f32, u: f32) -> f32 {
 }
 
 impl Live {
+    pub fn sites(&self) -> usize {
+        self.lattice.len()
+    }
+
     pub fn bytes(&self) -> usize {
         let floats = [&self.cloud, &self.land, &self.deep, &self.lit, &self.px].iter().map(|v| v.len()).sum::<usize>();
         floats * 4 + self.solid.len() + self.closed.len() + self.look.len() + (self.raw.len() + self.clouds.len() + self.isles.len() + self.cores.len() + self.puffs.len()) * 12 + self.piles.len() + self.prio.len() * 4
@@ -143,11 +148,16 @@ fn label(icon: &Icon, grow: f32) -> [f32; 4] {
     [r[0] - grow, r[1] + LABEL_TOP * (r[3] - r[1]) - grow, r[2] + grow, r[3] + grow]
 }
 
-fn label_hold(icons: &[Icon], x: f32, y: f32, cell: f32) -> f32 {
+fn labels_of(icons: &[Icon], grid: &Grid, cell: f32) -> Spots {
+    let rects: Vec<[f32; 4]> = icons.iter().map(|icon| label(icon, LABEL_FALL * cell)).collect();
+    Spots::new(&rects, 2.0 * cell, (grid.w * grid.cell) as f32, (grid.h * grid.cell) as f32)
+}
+
+fn label_hold(icons: &[Icon], labels: &Spots, x: f32, y: f32, cell: f32) -> f32 {
     let fall = LABEL_FALL * cell;
     let mut most = 0.0f32;
-    for icon in icons {
-        let r = label(icon, 0.0);
+    for &k in labels.at(x, y) {
+        let r = label(&icons[k as usize], 0.0);
         let (dx, dy) = ((r[0] - x).max(x - r[2]).max(0.0), (r[1] - y).max(y - r[3]).max(0.0));
         if dx >= fall || dy >= fall {
             continue;
@@ -178,6 +188,7 @@ pub fn live(fixed: &Fixed, g: &Ground) -> Live {
     let mut out = Live {
         lattice,
         icons: Vec::new(),
+        labels: Spots::new(&[], 2.0 * cell, width as f32, height as f32),
         raw: vec![[0.0; 3]; n],
         clouds: vec![[0.0; 3]; n],
         isles: vec![[0.0; 3]; n],
@@ -196,13 +207,14 @@ pub fn live(fixed: &Fixed, g: &Ground) -> Live {
         look: vec![0; cells * 4],
     };
     let all: Vec<usize> = (0..n).collect();
-    let shape = Shape { fixed, icons: icons(g, cell), cell, floor: math::exp(-0.5 * SUPPORT * SUPPORT) };
+    let shape = Shape::new(fixed, icons(g, cell), cell);
     let Cores { land: cores, air: puffs, bare } = shape.cores();
     out.raw = lattice_raw(&shape, &out.lattice, &all, &out.raw);
     out.clouds = finished(&out.lattice, &out.raw, &all, &out.clouds, cell);
     out.isles = isles(&shape, &out.lattice, &all, &out.isles, &bare);
     out.cores = cores;
     out.puffs = puffs;
+    out.labels = labels_of(&shape.icons, &grid, cell);
     out.icons = shape.icons;
     let whole = shape::whole(&grid);
     rebuild(fixed, &mut out, &[whole]);
@@ -367,7 +379,7 @@ fn look_cell(run: &Run, live: &Live, piles: &Buckets, i: usize) -> [u8; 4] {
     let (px, py) = grid.center(i);
     let kind = smoothstep(-KIND * cell, KIND * cell, live.land[i] - live.cloud[i]);
     if live.px[i] >= HOLD.1 * run.u {
-        return [byte(kind), 0, 0, 128];
+        return [byte(smoothstep(0.3, 0.7, fixed.at(&fixed.sky, px, py))), 0, 0, 128];
     }
     let light = fixed.light(px, py);
     let (gx, gy) = gradient(&live.px, &grid, i);
@@ -377,7 +389,7 @@ fn look_cell(run: &Run, live: &Live, piles: &Buckets, i: usize) -> [u8; 4] {
     let blend = fixed.blend(px, py);
     let middle = 4.0 * blend * (1.0 - blend);
     let broad = 1.0 - smoothstep(BROAD.0 * cell, BROAD.1 * cell, live.lit[i]);
-    let hold = label_hold(&live.icons, px, py, cell);
+    let hold = label_hold(&live.icons, &live.labels, px, py, cell);
     let broad = (broad + (1.0 - broad) * MIDDLE_LIFT * middle) * (1.0 - hold);
     let (mut arc, mut shade) = (0.0f32, 0.0f32);
     if live.cloud[i] <= grid.cell as f32 {
@@ -423,15 +435,13 @@ pub fn relive(fixed: &Fixed, live: &mut Live, g: &Ground, moved: &[[f32; 4]]) ->
     if fresh_icons.len() != live.icons.len() {
         return None;
     }
-    let shape = Shape { fixed, icons: fresh_icons, cell, floor: math::exp(-0.5 * SUPPORT * SUPPORT) };
+    let shape = Shape::new(fixed, fresh_icons, cell);
     let old_icons = std::mem::take(&mut live.icons);
-    let mut boxes: Vec<[f32; 4]> = Vec::new();
-    for (a, b) in old_icons.iter().zip(&shape.icons) {
-        if a != b {
-            boxes.push(a.reach);
-            boxes.push(b.reach);
-        }
-    }
+    let rects = |icons: &[Icon]| icons.iter().map(|icon| icon.r).collect::<Vec<[f32; 4]>>();
+    let (old_rects, new_rects) = (rects(&old_icons), rects(&shape.icons));
+    let (gone, came) = (only_in(&old_rects, &new_rects), only_in(&new_rects, &old_rects));
+    let changed: Vec<&Icon> = old_icons.iter().filter(|icon| gone.contains(&bits(&icon.r))).chain(shape.icons.iter().filter(|icon| came.contains(&bits(&icon.r)))).collect();
+    let mut boxes: Vec<[f32; 4]> = changed.iter().map(|icon| icon.reach).collect();
     for r in moved {
         let pad = 2.0 * cell;
         boxes.push([r[0] - pad, r[1] - pad, r[2] + pad, r[3] + pad]);
@@ -447,20 +457,11 @@ pub fn relive(fixed: &Fixed, live: &mut Live, g: &Ground, moved: &[[f32; 4]]) ->
     finish_points.dedup();
     let clouds = finished(&live.lattice, &raw, &finish_points, &live.clouds, cell);
     let Cores { land: cores, air: puffs, bare } = shape.cores();
-    let mut bare_boxes = Vec::new();
-    for (icon, _) in &bare {
-        let r = icon.r;
-        let pad = BARE.1 * cell + PUSH * cell;
-        bare_boxes.push([r[0] - pad, r[1] - pad, r[2] + pad, r[3] + pad]);
-    }
-    let old_bare: Vec<[f32; 4]> = {
-        let was = Shape { fixed, icons: old_icons.clone(), cell, floor: shape.floor }.cores();
-        was.bare.iter().map(|(icon, _)| icon.r).collect()
-    };
-    for r in old_bare {
-        let pad = BARE.1 * cell + PUSH * cell;
-        bare_boxes.push([r[0] - pad, r[1] - pad, r[2] + pad, r[3] + pad]);
-    }
+    let marks = |list: &[(Icon, f32)]| list.iter().map(|(icon, weight)| [icon.r[0], icon.r[1], icon.r[2], icon.r[3], *weight]).collect::<Vec<[f32; 5]>>();
+    let (new_bare, old_bare) = (marks(&bare), marks(&Shape::new(fixed, old_icons.clone(), cell).cores().bare));
+    let (bare_gone, bare_came) = (only_in(&old_bare, &new_bare), only_in(&new_bare, &old_bare));
+    let pad = BARE.1 * cell + PUSH * cell;
+    let bare_boxes: Vec<[f32; 4]> = old_bare.iter().filter(|m| bare_gone.contains(&bits(m))).chain(new_bare.iter().filter(|m| bare_came.contains(&bits(m)))).map(|m| [m[0] - pad, m[1] - pad, m[2] + pad, m[3] + pad]).collect();
     let mut isle_points: Vec<usize> = boxes.iter().chain(&bare_boxes).flat_map(|b| live.lattice.within([b[0] - PUSH * cell, b[1] - PUSH * cell, b[2] + PUSH * cell, b[3] + PUSH * cell])).collect();
     isle_points.sort_unstable();
     isle_points.dedup();
@@ -471,11 +472,8 @@ pub fn relive(fixed: &Fixed, live: &mut Live, g: &Ground, moved: &[[f32; 4]]) ->
     let land_grow = high * (SHALLOW.0 + SHALLOW.1) + COAST.0 * cell + LAND_K * cell + grid.cell as f32;
     let mut areas = Vec::new();
     let fall = LABEL_FALL * cell + grid.cell as f32;
-    for (a, b) in old_icons.iter().zip(&shape.icons) {
-        if a != b {
-            areas.push(cells_of(&grid, label(a, fall)));
-            areas.push(cells_of(&grid, label(b, fall)));
-        }
+    for icon in &changed {
+        areas.push(cells_of(&grid, label(icon, fall)));
     }
     for (k, (a, b)) in live.clouds.iter().zip(&clouds).enumerate() {
         if a != b {
@@ -491,17 +489,13 @@ pub fn relive(fixed: &Fixed, live: &mut Live, g: &Ground, moved: &[[f32; 4]]) ->
             }
         }
     }
-    for (a, b) in live.puffs.iter().zip(&puffs) {
-        if a != b {
-            if a[2] > 0.0 {
-                areas.push(cells_of(&grid, bounds(a, cloud_grow)));
-            }
-            if b[2] > 0.0 {
-                areas.push(cells_of(&grid, bounds(b, cloud_grow)));
-            }
-        }
+    for p in moved_puffs(&live.puffs, &puffs) {
+        areas.push(cells_of(&grid, bounds(&p, cloud_grow)));
     }
-    for (a, b) in live.isles.iter().zip(&isles_now).chain(live.cores.iter().zip(&cores)) {
+    for p in moved_puffs(&live.cores, &cores) {
+        areas.push(cells_of(&grid, bounds(&p, land_grow)));
+    }
+    for (a, b) in live.isles.iter().zip(&isles_now) {
         if a != b {
             if a[2] > 0.0 {
                 areas.push(cells_of(&grid, bounds(a, land_grow)));
@@ -516,10 +510,27 @@ pub fn relive(fixed: &Fixed, live: &mut Live, g: &Ground, moved: &[[f32; 4]]) ->
     live.isles = isles_now;
     live.cores = cores;
     live.puffs = puffs;
+    if !changed.is_empty() {
+        live.labels = labels_of(&shape.icons, &grid, cell);
+    }
     live.icons = shape.icons;
     let areas: Vec<Area> = areas.into_iter().filter(|a| a[0] < a[2] && a[1] < a[3]).collect();
     if areas.is_empty() {
         return Some((Vec::new(), Vec::new()));
     }
     Some(rebuild(fixed, live, &areas))
+}
+
+fn bits<const N: usize>(v: &[f32; N]) -> [u32; N] {
+    v.map(f32::to_bits)
+}
+
+fn only_in<const N: usize>(a: &[[f32; N]], b: &[[f32; N]]) -> std::collections::HashSet<[u32; N]> {
+    let there: std::collections::HashSet<[u32; N]> = b.iter().map(bits).collect();
+    a.iter().map(bits).filter(|k| !there.contains(k)).collect()
+}
+
+fn moved_puffs(old: &[[f32; 3]], new: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let (gone, came) = (only_in(old, new), only_in(new, old));
+    old.iter().filter(|p| gone.contains(&bits(p))).chain(new.iter().filter(|p| came.contains(&bits(p)))).filter(|p| p[2] > 0.0).copied().collect()
 }

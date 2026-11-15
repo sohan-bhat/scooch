@@ -48,7 +48,9 @@ fn change(p: vec2<f32>) -> f32 {
 
 fn gap(p: vec2<f32>, here: f32) -> f32 {
     let side = 0.3 * frame.unit * 0.70710677;
-    return max(here, max(change(p + vec2<f32>(side, side)), change(p + vec2<f32>(side, -side))));
+    let ahead = max(change(p + vec2<f32>(side, side)), change(p + vec2<f32>(side, -side)));
+    let behind = max(change(p - vec2<f32>(side, side)), change(p - vec2<f32>(side, -side)));
+    return max(here, max(ahead, behind));
 }
 
 fn coarse(p: vec2<f32>) -> vec2<f32> {

@@ -11,17 +11,57 @@ pub(crate) struct Icon {
     pub(crate) reach: [f32; 4],
 }
 
+pub const SITES_MOST: usize = 250_000;
+const SPREAD_NOISE: f32 = 1.3;
+const BUCKET: f32 = 2.0;
+
 pub(crate) fn icons(g: &Ground, cell: f32) -> Vec<Icon> {
     g.icons
         .iter()
-        .enumerate()
-        .map(|(k, r)| {
-            let sx = SPREAD.0 * cell * (SCALE.0 + SCALE.1 * unit_hash(k as i32, 7, 41));
-            let sy = SPREAD.1 * cell * (0.85 + 0.3 * unit_hash(k as i32, 8, 41));
+        .map(|r| {
+            let (cx, cy) = (0.5 * (r[0] + r[2]), 0.5 * (r[1] + r[3]));
+            let spread = |seed: u32| smoothstep(0.15, 0.85, 0.5 + 0.5 * shape::noise(cx / (SPREAD_NOISE * cell), cy / (SPREAD_NOISE * cell), seed));
+            let sx = SPREAD.0 * cell * (SCALE.0 + SCALE.1 * spread(41));
+            let sy = SPREAD.1 * cell * (0.85 + 0.3 * spread(43));
             let wide = SUPPORT * sx * (STRETCH.0 + STRETCH.1) * (1.0 + FLARE.0);
             Icon { r: *r, sx, sy, reach: [r[0] - wide, r[1] - SUPPORT * sy, r[2] + wide, r[3] + SUPPORT * BELOW * sy] }
         })
         .collect()
+}
+
+pub(crate) struct Spots {
+    origin: f32,
+    size: f32,
+    w: i32,
+    h: i32,
+    cells: Vec<Vec<u32>>,
+}
+
+impl Spots {
+    pub(crate) fn new(rects: &[[f32; 4]], size: f32, width: f32, height: f32) -> Self {
+        let origin = -2.0 * size;
+        let (w, h) = (((width - 2.0 * origin) / size).ceil().max(1.0) as i32, ((height - 2.0 * origin) / size).ceil().max(1.0) as i32);
+        let mut out = Self { origin, size, w, h, cells: vec![Vec::new(); (w * h) as usize] };
+        for (k, r) in rects.iter().enumerate() {
+            let ((i0, j0), (i1, j1)) = (out.bucket(r[0], r[1]), out.bucket(r[2], r[3]));
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    out.cells[(j * w + i) as usize].push(k as u32);
+                }
+            }
+        }
+        out
+    }
+
+    fn bucket(&self, x: f32, y: f32) -> (i32, i32) {
+        let at = |v: f32, n: i32| (((v - self.origin) / self.size).floor() as i32).clamp(0, n - 1);
+        (at(x, self.w), at(y, self.h))
+    }
+
+    pub(crate) fn at(&self, x: f32, y: f32) -> &[u32] {
+        let (i, j) = self.bucket(x, y);
+        &self.cells[(j * self.w + i) as usize]
+    }
 }
 
 pub(crate) struct Shape<'a> {
@@ -29,9 +69,17 @@ pub(crate) struct Shape<'a> {
     pub(crate) icons: Vec<Icon>,
     pub(crate) cell: f32,
     pub(crate) floor: f32,
+    spots: Spots,
 }
 
-impl Shape<'_> {
+impl<'a> Shape<'a> {
+    pub(crate) fn new(fixed: &'a Fixed, icons: Vec<Icon>, cell: f32) -> Self {
+        let reach: Vec<[f32; 4]> = icons.iter().map(|icon| icon.reach).collect();
+        let (width, height) = ((fixed.grid.w * fixed.grid.cell) as f32, (fixed.grid.h * fixed.grid.cell) as f32);
+        let spots = Spots::new(&reach, BUCKET * cell, width, height);
+        Self { fixed, icons, cell, floor: math::exp(-0.5 * SUPPORT * SUPPORT), spots }
+    }
+
     pub(crate) fn stretch(&self, x: f32, y: f32) -> f32 {
         smoothstep(0.2, 0.8, 0.5 + 0.5 * shape::noise(x / (STRETCH.2 * self.cell), y / (STRETCH.2 * self.cell), STRETCH.3))
     }
@@ -39,7 +87,8 @@ impl Shape<'_> {
     pub(crate) fn cover(&self, x: f32, y: f32) -> f32 {
         let reach = STRETCH.0 + STRETCH.1 * self.stretch(x, y);
         let mut keep = 1.0f32;
-        for icon in &self.icons {
+        for &k in self.spots.at(x, y) {
+            let icon = &self.icons[k as usize];
             if x <= icon.reach[0] || x >= icon.reach[2] || y <= icon.reach[1] || y >= icon.reach[3] {
                 continue;
             }
@@ -180,8 +229,15 @@ pub(crate) struct Lattice {
 
 impl Lattice {
     pub(crate) fn new(width: usize, height: usize, cell: f32) -> Self {
-        let spacing = SPACING * cell;
-        Self { spacing, cols: (width as f32 / spacing).ceil() as i32 + 6, rows: (height as f32 / spacing).ceil() as i32 + 6 }
+        let (w, h) = (width.max(1) as f32, height.max(1) as f32);
+        let mut spacing = (SPACING * cell).max((w * h / SITES_MOST as f32).sqrt());
+        loop {
+            let out = Self { spacing, cols: (w / spacing).ceil() as i32 + 6, rows: (h / spacing).ceil() as i32 + 6 };
+            if out.len() <= SITES_MOST {
+                return out;
+            }
+            spacing *= 1.05;
+        }
     }
 
     pub(crate) fn len(&self) -> usize {

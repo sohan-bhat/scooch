@@ -28,8 +28,8 @@
 //! | `volume_lit`, `volume_dark` | how far broad light lifts a cloud toward its light tone, and how far the underside darkens it |
 //! | `grain_scale` | how far a glide shrinks what only bundle A covers and grows what only bundle B covers, in units |
 //! | `grain_floor` | the field range over which a glide hands the look from A to B |
-//! | `shadow` (`shadow_at` in GLSL) | how deep an overlap of the two bundles a glide eats mid way, in units, and the change between them, the largest at the pixel and at two points 0.3 units away on the diagonals, below which it eats nothing |
-//! | `spare` | 0 dissolves sky scenery and shrinks and grows land through a glide, 1 dissolves all of it, kept for comparison |
+//! | `shadow` (`shadow_at` in GLSL) | how deep an overlap of the two bundles a glide eats mid way, in units, and the change between them, the largest at the pixel and at four points 0.3 units away on the diagonals, below which it eats nothing |
+//! | `spare` | 0 dissolves sky scenery, which never passes both end states, and shrinks and grows land, which passes them by at most `shadow` and only near a change, 1 dissolves all of it, kept for comparison |
 //! | `rim`, `belly`, `grain_lod` | unused, kept so the block keeps its layout |
 
 mod analysis;
@@ -56,6 +56,8 @@ mod warp;
 pub use bundle::{Bundle, Constants, RAMP};
 pub use pack::{half_bits, Canvas, TablesError};
 pub use session::Session;
+#[doc(hidden)]
+pub use puffs::SITES_MOST;
 pub use image::{GrayImage, RgbImage, RgbaImage};
 pub use paint::Materials;
 pub use shape::FIELD_STEP as SCENERY_FIELD_STEP;
@@ -198,6 +200,11 @@ pub fn canvas(image: &RgbImage, width: u32, height: u32) -> Canvas {
 
 pub fn frame(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
     bundle::frame(a, b, s)
+}
+
+#[doc(hidden)]
+pub fn frame_through(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
+    bundle::frame_through(a, b, s)
 }
 
 pub fn frame_dissolve(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
