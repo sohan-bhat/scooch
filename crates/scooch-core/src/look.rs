@@ -153,7 +153,6 @@ pub struct Belonging {
     pub empty: bool,
     source: (u32, u32),
     stamp: u64,
-    u: f32,
 }
 
 impl Belonging {
@@ -163,10 +162,6 @@ impl Belonging {
 
     pub fn fits(&self, source: (u32, u32), stamp: u64) -> bool {
         self.source == source && self.stamp == stamp
-    }
-
-    pub fn unit(&self) -> f32 {
-        self.u
     }
 
     pub fn at(&self, values: &[f32], fx: f64, fy: f64) -> f32 {
@@ -602,7 +597,7 @@ pub fn belonging_map(input: &Sampled, source: (u32, u32), screen: (u32, u32), op
         }
     };
     let empty = belong.iter().all(|b| *b <= 0.0);
-    Belonging { grid, size, sky, belong, empty, source, stamp, u }
+    Belonging { grid, size, sky, belong, empty, source, stamp }
 }
 
 pub fn fixed(input: &Sampled, belonging: &Belonging, materials: &Materials, u: f32, (width, height): (usize, usize)) -> Fixed {
@@ -701,4 +696,3 @@ pub fn fixed(input: &Sampled, belonging: &Belonging, materials: &Materials, u: f
     }
     Fixed { sky, belong, paints, paint_grid, grid, u, subject, solid, light, blend }
 }
-

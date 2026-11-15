@@ -62,6 +62,7 @@ pub struct Core {
     height: u32,
     placement: Option<Placement>,
     options: Options,
+    chosen: Option<(u64, Options)>,
 }
 
 pub struct Answer {
@@ -73,7 +74,7 @@ impl Core {
     pub fn new(picture: &[u8], width: u32, height: u32, analysis: &[u8]) -> Result<Core, String> {
         let picture = RgbImage::from_raw(width, height, picture.to_vec()).ok_or_else(|| format!("the picture is not {width} x {height} RGB"))?;
         let analysis = Analysis::from_bytes(analysis).map_err(|e| e.to_string())?;
-        Ok(Core { picture, analysis, session: Session::new(), width: 0, height: 0, placement: None, options: Options { scenery: Scenery::Auto, ..Options::default() } })
+        Ok(Core { picture, analysis, session: Session::new(), width: 0, height: 0, placement: None, options: Options { scenery: Scenery::Auto, ..Options::default() }, chosen: None })
     }
 
     pub fn screen(&mut self, width: u32, height: u32) {
@@ -90,23 +91,35 @@ impl Core {
         Scene { width: self.width, height: self.height, icons }
     }
 
+    fn options(&mut self, scene: &Scene) -> Options {
+        let stamp = scooch_core::belonging_stamp(&self.analysis, scene, &self.options);
+        if let Some((_, options)) = self.chosen.filter(|c| c.0 == stamp) {
+            return options;
+        }
+        let options = self.session.options(&self.picture, &self.analysis, scene, &self.options);
+        self.chosen = Some((stamp, options));
+        options
+    }
+
     pub fn drop_icons(&mut self, icons: &[f32]) -> Answer {
         let scene = self.scene(icons);
-        let placement = scooch_core::solve(&self.analysis, &scene, &self.options, self.placement.as_ref());
-        self.answer(&scene, placement)
+        let options = self.options(&scene);
+        let placement = scooch_core::solve(&self.analysis, &scene, &options, self.placement.as_ref());
+        self.answer(&scene, placement, &options)
     }
 
     pub fn drag(&mut self, icons: &[f32], budget: Duration, elapsed: &dyn Fn() -> Duration) -> Answer {
         let scene = self.scene(icons);
+        let options = self.options(&scene);
         let placement = match &self.placement {
-            Some(previous) => scooch_core::solve_near_timed(&self.analysis, &scene, &self.options, previous, budget, elapsed),
-            None => scooch_core::solve(&self.analysis, &scene, &self.options, None),
+            Some(previous) => scooch_core::solve_near_timed(&self.analysis, &scene, &options, previous, budget, elapsed),
+            None => scooch_core::solve(&self.analysis, &scene, &options, None),
         };
-        self.answer(&scene, placement)
+        self.answer(&scene, placement, &options)
     }
 
-    fn answer(&mut self, scene: &Scene, placement: Placement) -> Answer {
-        let bundle = self.session.tables_shared(&self.picture, &self.analysis, &placement, scene, &self.options);
+    fn answer(&mut self, scene: &Scene, placement: Placement, options: &Options) -> Answer {
+        let bundle = self.session.tables_shared(&self.picture, &self.analysis, &placement, scene, options);
         self.placement = Some(placement);
         let fits = (bundle.canvas_width, bundle.canvas_height) == self.picture.dimensions();
         Answer { bundle, fits }
@@ -285,5 +298,65 @@ impl Tables {
 
     pub fn canvas(&self) -> Vec<u8> {
         self.answer.bundle.canvas.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn navy() -> RgbImage {
+        let (w, h) = (1600u32, 1000u32);
+        RgbImage::from_fn(w, h, |x, y| {
+            let (u, v) = (x as f32 / w as f32, y as f32 / h as f32);
+            let (dx, dy) = (u - 0.7, (v - 0.45) * h as f32 / w as f32);
+            if dx * dx + dy * dy < 0.045 * 0.045 {
+                return image::Rgb([240, 200, 150]);
+            }
+            image::Rgb([(10.0 + 10.0 * v) as u8, (30.0 + 15.0 * v) as u8, (70.0 + 25.0 * v) as u8])
+        })
+    }
+
+    fn scattered(w: u32, h: u32, count: usize, seed: u32) -> Vec<f32> {
+        let mut state = seed;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32
+        };
+        (0..count).flat_map(|_| [next() * (w as f32 - 76.0), next() * (h as f32 - 94.0), 76.0, 94.0]).collect()
+    }
+
+    fn scene(w: u32, h: u32, icons: &[f32]) -> Scene {
+        Scene { width: w, height: h, icons: icons.as_chunks::<4>().0.iter().map(|r| Rect { x: r[0], y: r[1], w: r[2], h: r[3] }).collect() }
+    }
+
+    #[test]
+    fn a_bare_picture_is_placed_as_with_scenery_off_on_the_page() {
+        let image = navy();
+        let analysis = scooch_core::analyze(&image);
+        let (w, h) = (1024u32, 768u32);
+        let (auto, off) = (Options { scenery: Scenery::Auto, ..Options::default() }, Options { scenery: Scenery::Off, ..Options::default() });
+        let icons = (1..60)
+            .flat_map(|seed| (6..16).map(move |n| scattered(w, h, n, seed)))
+            .find(|icons| scooch_core::solve(&analysis, &scene(w, h, icons), &auto, None) != scooch_core::solve(&analysis, &scene(w, h, icons), &off, None))
+            .expect("a layout where scenery on moves the bare picture");
+        let (raw, plain) = (scooch_core::solve(&analysis, &scene(w, h, &icons), &auto, None), scooch_core::solve(&analysis, &scene(w, h, &icons), &off, None));
+        println!("raw auto shift {:?} zoom {:.3} against off shift {:?} zoom {:.3}", raw.shift, raw.zoom, plain.shift, plain.zoom);
+        let bytes = analysis.to_bytes();
+        let mut on = Core::new(image.as_raw(), image.width(), image.height(), &bytes).expect("core");
+        let mut bare = Core::new(image.as_raw(), image.width(), image.height(), &bytes).expect("core");
+        bare.options = off;
+        on.screen(w, h);
+        bare.screen(w, h);
+        let same = |a: &Answer, b: &Answer| a.bundle.xmap == b.bundle.xmap && a.bundle.ymap == b.bundle.ymap;
+        assert!(same(&on.drop_icons(&icons), &bare.drop_icons(&icons)), "at rest the page placed the bare picture unlike scenery off");
+        let mut moving = icons.clone();
+        for step in 0..12 {
+            moving[0] = (moving[0] + 9.0).min(w as f32 - 76.0);
+            moving[1] = (moving[1] + 5.0).min(h as f32 - 94.0);
+            let zero = || Duration::ZERO;
+            assert!(same(&on.drag(&moving, Duration::from_secs(1), &zero), &bare.drag(&moving, Duration::from_secs(1), &zero)), "drag step {step} placed the bare picture unlike scenery off");
+        }
+        assert!(same(&on.drop_icons(&moving), &bare.drop_icons(&moving)), "the drop after the drag placed the bare picture unlike scenery off");
     }
 }

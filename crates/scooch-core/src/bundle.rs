@@ -121,7 +121,7 @@ pub fn half(v: f32) -> f32 {
     f32::from_bits(kept)
 }
 
-fn ramps(u: f32) -> Vec<u8> {
+pub(crate) fn ramps(u: f32) -> Vec<u8> {
     let mut out = vec![0u8; RAMP * 8];
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     let cell = look::CELL * u;
@@ -373,6 +373,7 @@ pub fn fill(out: &mut Bundle, framed: &Framed, fixed: Option<&look::Fixed>, live
 }
 
 pub struct Parts {
+    pub unit: f32,
     pub framed: Framed,
     pub grounded: Option<Grounded>,
     pub belonging: Option<Arc<look::Belonging>>,
@@ -397,8 +398,7 @@ impl Parts {
     pub fn tables(&self, materials: &Materials) -> Bundle {
         let mut out = shell(&self.framed, materials);
         if !self.framed.empty() {
-            let unit = self.fixed.as_ref().map(|f| f.u()).or(self.belonging.as_ref().map(|b| b.unit())).unwrap_or(1.0);
-            fill(&mut out, &self.framed, self.fixed.as_ref(), self.live.as_ref(), self.pad(), unit);
+            fill(&mut out, &self.framed, self.fixed.as_ref(), self.live.as_ref(), self.pad(), self.unit);
         }
         out
     }
@@ -437,7 +437,8 @@ pub fn map_of(canvas: &RgbImage, found: &Analysis, source: (u32, u32), scene: &S
 pub fn parts(source: (u32, u32), (canvas, kept): (RgbImage, Option<Arc<look::Belonging>>), found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> Parts {
     let (width, height) = (scene.width, scene.height);
     let framed = framed(source, canvas, placement, width, height);
-    let mut out = Parts { framed, grounded: None, belonging: None, fixed: None, live: None, calm: None, pads: None };
+    let unit = shape::ground(scene).map_or(1.0, |g| g.u);
+    let mut out = Parts { unit, framed, grounded: None, belonging: None, fixed: None, live: None, calm: None, pads: None };
     if out.framed.empty() {
         return out;
     }

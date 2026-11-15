@@ -64,7 +64,8 @@ fn main() {
         let analysis = scooch_core::analyze(&image);
         let scene = Scene { width: sw, height: sh, icons: icons.clone() };
         let options = Options { scenery: Scenery::Auto, pads: 0.0, ..Options::default() };
-        let placement = scooch_core::Session::new().solve(&image, &analysis, &scene, &options, None);
+        let options = scooch_core::Session::new().options(&image, &analysis, &scene, &options);
+        let placement = scooch_core::solve(&analysis, &scene, &options, None);
         let mut product = scooch_core::render_with(&image, &analysis, &placement, &scene, &options);
         marks(&mut product, icons);
         product.save(out.join(format!("{name}-product.png"))).expect("product");

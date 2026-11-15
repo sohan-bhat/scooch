@@ -116,8 +116,8 @@ fn main() {
     let start_scene = scene(&start);
     let fill = scooch_core::fill(photo.width(), photo.height(), &start_scene);
     let before = scooch_core::hidden_share(&analysis, &start_scene, &fill);
-    let mut session = scooch_core::Session::new();
-    let fixed = session.solve(&photo, &analysis, &start_scene, &options, None);
+    let options = scooch_core::Session::new().options(&photo, &analysis, &start_scene, &options);
+    let fixed = scooch_core::solve(&analysis, &start_scene, &options, None);
     let fixed_hidden = scooch_core::hidden_share(&analysis, &start_scene, &fixed);
     let (look_before, look_fixed) = (seen(&subject, &fill), seen(&subject, &fixed));
     println!("before hidden {before:.3} whole {} | fixed hidden {fixed_hidden:.3} zoom {:.2} shift {:?} whole {} shape {:.3}", look_before.whole, fixed.zoom, fixed.shift, look_fixed.whole, look_fixed.shape);
@@ -152,7 +152,7 @@ fn main() {
                 continue;
             }
             covering += 1;
-            let placement = session.solve(&photo, &analysis, &moved_scene, &options, Some(&fixed));
+            let placement = scooch_core::solve(&analysis, &moved_scene, &options, Some(&fixed));
             let hidden = scooch_core::hidden_share(&analysis, &moved_scene, &placement);
             let look = seen(&subject, &placement);
             let moved = (look.center.0 - look_fixed.center.0).abs().max((look.center.1 - look_fixed.center.1).abs());

@@ -52,9 +52,11 @@ fn main() {
         let photo = scooch_core::open(&path).expect("open");
         let analysis = scooch_core::analyze(&photo);
         let (sa, sb) = (Scene { width: w, height: h, icons: first }, Scene { width: w, height: h, icons: second.clone() });
-        let pa = scooch_core::solve(&analysis, &sa, &options, None);
-        let pb = scooch_core::solve(&analysis, &sb, &options, Some(&pa));
-        let (a, b) = (scooch_core::bundle(&photo, &analysis, &pa, &sa, &options), scooch_core::bundle(&photo, &analysis, &pb, &sb, &options));
+        let mut session = scooch_core::Session::new();
+        let (oa, ob) = (session.options(&photo, &analysis, &sa, &options), session.options(&photo, &analysis, &sb, &options));
+        let pa = scooch_core::solve(&analysis, &sa, &oa, None);
+        let pb = scooch_core::solve(&analysis, &sb, &ob, Some(&pa));
+        let (a, b) = (scooch_core::bundle(&photo, &analysis, &pa, &sa, &oa), scooch_core::bundle(&photo, &analysis, &pb, &sb, &ob));
         println!("{name}: {photo_name} compatible {} moved picture {}", scooch_core::compatible(&a, &b), pa != pb);
         for k in 0..FRAMES {
             let s = k as f32 / (FRAMES - 1) as f32;
