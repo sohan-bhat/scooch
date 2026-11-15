@@ -554,7 +554,7 @@ mod probe {
     }
 
     fn subject_picture(width: u32, height: u32, at: (f32, f32)) -> RgbImage {
-        disc_picture(width, height, at, [20, 110, 120])
+        disc_picture(width, height, at, scooch_core::ISLAND_WATER)
     }
 
     fn green_picture(width: u32, height: u32, at: (f32, f32)) -> RgbImage {
