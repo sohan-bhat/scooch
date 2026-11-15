@@ -25,6 +25,10 @@ function loading() {
   return !(runtime.props && runtime.gallery && runtime.painted && runtime.inside);
 }
 
+function holding() {
+  return runtime.still < 0 && (still.off || quality.stillScale >= 0.999);
+}
+
 const arrived = { mark: '' };
 
 function arrival() {
@@ -202,6 +206,7 @@ export function Post({ phone }: { phone: boolean }) {
     return pass;
   }, []);
   const totals = useMemo(() => [0, 1].map(() => new WebGLRenderTarget(1, 1, { depthBuffer: false, colorSpace: SRGBColorSpace })), []);
+  const heldTarget = useMemo(() => new WebGLRenderTarget(1, 1, { depthBuffer: false, colorSpace: SRGBColorSpace }), []);
   const accumulate = useMemo(() => {
     const pass = new CopyPass(totals[0], false) as CopyPass & { renderTarget: WebGLRenderTarget };
     pass.fullscreenMaterial.transparent = true;
@@ -232,8 +237,9 @@ export function Post({ phone }: { phone: boolean }) {
       present.dispose();
       accumulate.dispose();
       for (const target of totals) target.dispose();
+      heldTarget.dispose();
     };
-  }, [copy, overlay, present, accumulate, totals]);
+  }, [copy, overlay, present, accumulate, totals, heldTarget]);
 
   useEffect(() => holdQuiet(() => loading() && (BUILDING.has(still.phase) || performance.now() - still.inputAt < YIELD)), []);
 
@@ -245,6 +251,8 @@ export function Post({ phone }: { phone: boolean }) {
     for (const name of events) window.addEventListener(name, input, { passive: true });
     let watchdog = 0;
     const lost = () => {
+      still.lost = true;
+      if (still.held) still.image = null;
       nativeOff();
       switchWanted.current = false;
       release();
@@ -253,7 +261,11 @@ export function Post({ phone }: { phone: boolean }) {
         if (gl.getContext().isContextLost()) giveUp();
       }, LOST_FOR);
     };
-    const restored = () => window.clearTimeout(watchdog);
+    const restored = () => {
+      window.clearTimeout(watchdog);
+      still.lost = false;
+      changed();
+    };
     gl.domElement.addEventListener('webglcontextlost', lost);
     gl.domElement.addEventListener('webglcontextrestored', restored);
     return () => {
@@ -503,13 +515,35 @@ export function Post({ phone }: { phone: boolean }) {
     [gl, size],
   );
 
+  const keep = useCallback(
+    (image: Texture) => {
+      const { width, height } = image.image as { width: number; height: number };
+      if (heldTarget.width !== width || heldTarget.height !== height) heldTarget.setSize(width, height);
+      accumulate.renderTarget = heldTarget;
+      accumulate.fullscreenMaterial.blendAlpha = 1;
+      const clear = gl.autoClear;
+      gl.autoClear = false;
+      accumulate.render(gl, { texture: image } as WebGLRenderTarget, null as never);
+      gl.autoClear = clear;
+      still.image = heldTarget.texture;
+      still.from = null;
+      still.held = true;
+      still.tick = true;
+      still.pass = JITTER.length - 1;
+      still.builtAt = still.startedAt;
+      still.second = Math.floor(wallClock() / 1000);
+      still.phase = 'show';
+    },
+    [gl, accumulate, heldTarget],
+  );
+
   const settle = useCallback(
     (now: number, moving: boolean, time: number) => {
       arrival();
       if (!introAt.current) introAt.current = performance.getEntriesByName('scooch:intro')[0]?.startTime ?? 0;
+      const hold = holding();
       const calm =
-        still.ready &&
-        !still.off &&
+        (hold ? !still.lost : still.ready && !still.off) &&
         !moving &&
         !live.pressing &&
         !live.tape &&
@@ -528,6 +562,7 @@ export function Post({ phone }: { phone: boolean }) {
         still.box = null;
         still.refresh = false;
         still.from = null;
+        still.held = false;
         quality.hold = false;
         thaw();
         return;
@@ -544,12 +579,21 @@ export function Post({ phone }: { phone: boolean }) {
         const composer = quality.composer;
         const render = sharpRender.current;
         const last = composer?.passes[composer.passes.length - 1];
+        if (hold) {
+          runtime.muted = true;
+          hooks.frame?.render(gl, story.place);
+          runtime.muted = false;
+        }
         still.live = composer && render && last ? grab(last, () => render(0)) : null;
         still.band = 0;
         still.pass = 0;
         still.row = 0;
         still.tick = false;
         still.stale = false;
+        if (hold && still.live) {
+          keep(still.live);
+          return;
+        }
         still.phase = still.live ? 'screen' : 'live';
         return;
       }
@@ -650,6 +694,19 @@ export function Post({ phone }: { phone: boolean }) {
       }
       if (still.phase === 'still') {
         if (runtime.changedAt > still.builtAt) still.stale = true;
+        const due = still.stale && (still.arrived || !budget.busy || now - budget.lastStepAt > 1000) && (!loading() || now - still.builtAt > COALESCE);
+        if (still.held) {
+          const second = Math.floor(wallClock() / 1000);
+          const tick = second !== still.second && inView(things.clock, camera);
+          if (!tick && !due) return;
+          if (due) {
+            still.arrived = false;
+            still.rebuilds += 1;
+          }
+          still.startedAt = now;
+          still.phase = 'capture';
+          return;
+        }
         if (still.pass < JITTER.length - 1) {
           still.pass += 1;
           still.band = 0;
@@ -667,7 +724,7 @@ export function Post({ phone }: { phone: boolean }) {
           still.phase = 'bands';
           return;
         }
-        if (still.stale && (still.arrived || !budget.busy || now - budget.lastStepAt > 1000) && (!loading() || now - still.builtAt > COALESCE)) {
+        if (due) {
           still.stale = false;
           still.arrived = false;
           still.rebuilds += 1;
@@ -680,7 +737,7 @@ export function Post({ phone }: { phone: boolean }) {
         }
       }
     },
-    [band, camera, accumulate, gl, totals, fit],
+    [band, camera, accumulate, gl, totals, fit, keep],
   );
 
   const show = useCallback(
@@ -738,7 +795,7 @@ export function Post({ phone }: { phone: boolean }) {
     settle(now, moving, state.clock.elapsedTime - runtime.timeShift);
     grant(still.phase === 'still' && still.pass >= JITTER.length - 1 && !still.tick && !still.refresh);
     if (still.phase === 'show') still.showing = true;
-    place(still.showing);
+    place(still.showing && !still.held);
     if (still.phase === 'show') show(now);
   });
 
