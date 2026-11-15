@@ -1,0 +1,12 @@
+[package]
+name = "scooch-reference"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+scooch-core = { path = "../../../crates/scooch-core" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+serde_json = "1"
