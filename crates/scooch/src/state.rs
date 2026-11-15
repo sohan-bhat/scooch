@@ -50,6 +50,7 @@ pub struct Start {
     pub colds: Vec<u32>,
     pub draw: u32,
     pub window: u32,
+    pub canvas: u32,
     pub at: u64,
 }
 

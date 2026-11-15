@@ -43,6 +43,7 @@ pub trait Link: Send {
     fn alive(&mut self) -> bool;
     fn broke(&mut self) -> bool;
     fn greeted(&mut self) -> Option<Duration>;
+    fn device_ready(&mut self) -> Option<Duration>;
     fn ready_after(&mut self) -> Option<Adapter>;
 }
 
@@ -87,11 +88,13 @@ struct Real {
     answered: Option<Adapter>,
     hello: Option<Duration>,
     drawn: Vec<(u32, [u32; 3])>,
+    device_warm: Option<u32>,
+    device_after: Option<Duration>,
 }
 
 impl Real {
     fn new(helper: Helper) -> Self {
-        Self { helper, shown: Vec::new(), gone: Vec::new(), failed: Vec::new(), heard: Vec::new(), readies: Vec::new(), warm_id: None, answered: None, hello: None, drawn: Vec::new() }
+        Self { helper, shown: Vec::new(), gone: Vec::new(), failed: Vec::new(), heard: Vec::new(), readies: Vec::new(), warm_id: None, answered: None, hello: None, drawn: Vec::new(), device_warm: None, device_after: None }
     }
 
     fn pump(&mut self, timeout: Duration) -> Result<bool> {
@@ -120,6 +123,9 @@ impl Real {
             Reply::Ready { adapter, kind, warm_id, from, scale, .. } => {
                 let after = self.helper.since_launch();
                 let adapter = Adapter { name: adapter, kind, from, scale, after };
+                if warm_id.is_some() && warm_id == self.device_warm {
+                    self.device_after = self.device_after.or(after);
+                }
                 if warm_id.is_some() && warm_id == self.warm_id && self.answered.is_none() {
                     self.answered = Some(adapter.clone());
                 }
@@ -153,8 +159,13 @@ impl Real {
 
 impl Link for Real {
     fn device(&mut self) -> Result<()> {
-        self.helper.ask_warm_with(Hints::default(), None, None, None, BTreeMap::new())?;
+        self.device_warm = Some(self.helper.ask_warm_with(Hints::default(), None, None, None, BTreeMap::new())?);
         Ok(())
+    }
+
+    fn device_ready(&mut self) -> Option<Duration> {
+        while self.device_warm.is_some() && self.device_after.is_none() && matches!(self.pump(Duration::ZERO), Ok(true)) {}
+        self.device_after
     }
 
     fn warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>, scales: &BTreeMap<String, f32>) -> Result<()> {
@@ -400,6 +411,7 @@ pub struct Glider {
 #[derive(Default)]
 struct Trace {
     hello: Option<Duration>,
+    device: Option<Duration>,
     ready: Option<Duration>,
     shown: Option<Duration>,
     predicted: Option<Duration>,
@@ -715,9 +727,10 @@ impl Glider {
         note(
             &mut self.said,
             format!(
-                "decision at the set, helper launched {} ms before it, after launch hello {}, ready {}, shown {}, predicted shown {}, waited {} ms, {}, the helper made its window in {} ms, drew in {} ms and revealed in {} ms",
+                "decision at the set, helper launched {} ms before it, after launch hello {}, device {}, ready {}, shown {}, predicted shown {}, waited {} ms, {}, the helper made its window in {} ms, drew in {} ms and revealed in {} ms",
                 shown_ms(launched),
                 shown_ms(trace.hello),
+                shown_ms(trace.device),
                 shown_ms(trace.ready),
                 shown_ms(trace.shown),
                 shown_ms(trace.predicted),
@@ -762,9 +775,12 @@ impl Glider {
                 Err(error) => return Err(error),
             }
         }
+        trace.device = self.link.as_mut().and_then(|link| link.device_ready());
         let waits_for_ready = !self.ready;
         let predicted = if waits_for_ready {
-            let from_launch = known(remembered.cold).or_else(|| known(remembered.ready).zip(known(remembered.draw)).map(|(ready, draw)| ready + draw));
+            let window_done = |device: Duration| launched.zip(opened_at).zip(known(remembered.window)).map_or(device, |((launched, opened), window)| opened.saturating_duration_since(launched) + window);
+            let from_device = trace.device.zip(known(remembered.draw)).map(|(device, draw)| (device.max(window_done(device)) + draw).max(device + known(remembered.canvas).unwrap_or_default()));
+            let from_launch = from_device.or_else(|| known(remembered.cold)).or_else(|| known(remembered.ready).zip(known(remembered.draw)).map(|(ready, draw)| ready + draw));
             match (from_launch, launched) {
                 (Some(after), Some(launched)) => Some(launched + after),
                 _ => return Err(anyhow!("no cold start is remembered for this adapter yet, so this move swaps plainly")),
@@ -797,6 +813,7 @@ impl Glider {
         let warm = self.ready_at.is_some_and(|ready| ready <= opened);
         let drawn = trace.drawn;
         let fresh = launched.filter(|launched| waits_for_ready && started.saturating_duration_since(*launched) <= COLD_WITHIN);
+        let canvas = trace.device.zip(trace.ready).map(|(device, ready)| ready.saturating_sub(device));
         if let Some(adapter) = self.adapter.clone() {
             self.learn(&adapter, |start| {
                 if let Some(launched) = fresh {
@@ -807,6 +824,9 @@ impl Glider {
                 }
                 if warm {
                     start.shown = ms(shown_at.saturating_duration_since(opened));
+                }
+                if let Some(canvas) = canvas {
+                    start.canvas = ms(canvas);
                 }
                 if let Some([window, first, reveal]) = drawn {
                     start.window = window;
@@ -1049,6 +1069,7 @@ pub mod tests {
         pub settle_after: Duration,
         pub slow_hello: Duration,
         pub ready_after: Duration,
+        pub device_after: Option<Duration>,
     }
 
     pub type Waits = Arc<Mutex<Vec<(&'static str, Duration)>>>;
@@ -1245,6 +1266,10 @@ pub mod tests {
         fn greeted(&mut self) -> Option<Duration> {
             let hello = self.script().slow_hello;
             (self.born.elapsed() >= hello).then_some(hello)
+        }
+
+        fn device_ready(&mut self) -> Option<Duration> {
+            self.script().device_after.filter(|after| self.born.elapsed() >= *after)
         }
 
         fn ready_after(&mut self) -> Option<Adapter> {

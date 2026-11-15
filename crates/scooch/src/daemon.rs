@@ -2873,6 +2873,30 @@ pub mod tests {
     }
 
     #[test]
+    fn a_device_already_made_outweighs_a_slow_remembered_cold_start() {
+        let ((daemon, fake, script, _), waits) = glide_rig_waits("glide-device-made", true);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let mut state = daemon.store.load();
+        state.starts.insert("Fake GPU".into(), crate::state::Start { ready: 60_000, cold: 60_000, colds: vec![60_000], draw: 5, window: 5, canvas: 5, at: 1, ..Default::default() });
+        daemon.store.save(&state).unwrap();
+        {
+            let mut script = script.lock().unwrap();
+            script.ready_after = Duration::from_millis(80);
+            script.device_after = Some(Duration::ZERO);
+        }
+        daemon.glider.lock().unwrap().reset_for_test();
+        fake.events.lock().unwrap().clear();
+        waits.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let seen = events(&fake);
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(seen.iter().any(|event| event.starts_with("glide ")), "{seen:?} {said:?}");
+        assert!(waits.lock().unwrap().iter().all(|(_, wait)| *wait <= crate::glide::PATIENCE), "{:?}", waits.lock().unwrap());
+    }
+
+    #[test]
     fn the_scale_a_glide_ends_at_is_kept_for_the_next_cold_start() {
         let (daemon, fake, script, _) = glide_rig("glide-scale-kept", true);
         script.lock().unwrap().glided = Some((20, 0));
