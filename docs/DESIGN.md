@@ -133,6 +133,7 @@ A subject that touches the screen edge under the icons cannot slide clear on a s
 | Label ground lightness under white labels, 17 photos on four layouts at 960 by 600 | Cloud at most 0.812, which is 1.8 to 1, and sand at most 0.745, which is 2.3 to 1 | Owner's Mac, 997217e |
 | Pictures that get scenery, 17 photos and 14 made pictures on two layouts at 2880 by 1800 | balloon-sky, moon-sky, seagull-sky, tree-field, two-swans, a sky blue gradient and a flat water colour. Every other picture under 0.05% of the screen | Owner's Mac, 997217e |
 | Web package | 195,785 bytes gzipped | Owner's Mac, 997217e |
+| First still and one move on balloon-sky, instructions on one thread, at 2880 by 1800 | Mac column 5,425M and 651M, scattered 7,741M and 1,104M | Owner's Mac, 997217e |
 
 ## Desktop adapter
 
