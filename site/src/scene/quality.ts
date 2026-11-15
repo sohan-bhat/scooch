@@ -81,6 +81,8 @@ const COMFORT = 0.6;
 const REFRESH = [1000 / 240, 1000 / 165, 1000 / 144, 1000 / 120, 1000 / 100, 1000 / 90, 1000 / 75, 1000 / 60];
 const MAX_BOKEH = 3.2;
 const GRAIN = 0.05;
+const GPU_SAMPLES = 90;
+const HEADROOM_SHARE = 0.4;
 
 export type Chain = 'sharp' | 'fast';
 
@@ -124,6 +126,18 @@ class Quality {
   failed = new Map<GpuClass, number>();
   changes = 0;
   onLevel: ((level: GpuClass) => void) | null = null;
+  gpuSamples: number[] = [];
+
+  noteGpu(ms: number) {
+    this.gpuSamples.push(ms);
+    if (this.gpuSamples.length > GPU_SAMPLES) this.gpuSamples.shift();
+  }
+
+  headroom() {
+    if (this.gpuSamples.length < GPU_SAMPLES / 2) return true;
+    const sorted = [...this.gpuSamples].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)] <= this.period * HEADROOM_SHARE;
+  }
 
   configure(phone: boolean, deviceDpr: number, gpu: GpuClass) {
     if (this.configured) return;
@@ -171,6 +185,7 @@ class Quality {
     }
     this.fastScale = Math.min(1, (FAST ?? chosen.fast) / this.sharpDpr);
     this.changes += 1;
+    this.gpuSamples = [];
     this.composer?.setSize(0, 0);
     this.fastComposer?.setSize(0, 0);
     this.onLevel?.(level);

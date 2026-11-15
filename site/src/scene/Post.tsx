@@ -196,6 +196,8 @@ export function Post({ phone }: { phone: boolean }) {
   useEffect(() => {
     if (applied.current === level) return;
     applied.current = level;
+    quality.composer?.setSize(0, 0);
+    quality.fastComposer?.setSize(0, 0);
     void precompile(gl, scene, camera, [quality.composer, quality.fastComposer, quality.nativeComposer]).finally(() => changed());
   }, [level, gl, scene, camera]);
   const copy = useMemo(() => new CopyPass(), []);

@@ -13,7 +13,7 @@ const plan = { next: null as GpuClass | null, lastAt: -1e9, rises: 0 };
 
 function bounds(): [number, number] {
   const rate = 1000 / quality.period;
-  return [rate * 0.85, rate * 0.97];
+  return [rate * 0.75, rate * 0.97];
 }
 
 function resting() {
@@ -40,6 +40,10 @@ export function Tiering() {
     if (next) plan.next = next;
   }, []);
   const incline = useCallback(() => {
+    if (!quality.headroom()) {
+      plan.rises = 0;
+      return;
+    }
     plan.rises += 1;
     if (plan.rises < RISE) return;
     const next = quality.step(1);

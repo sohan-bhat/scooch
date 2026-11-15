@@ -100,6 +100,7 @@ export function Governor() {
       const tag = state.tags.get(query);
       if (tag && !context.getParameter(timer.GPU_DISJOINT_EXT)) {
         const gpu = context.getQueryParameter(query, context.QUERY_RESULT) / 1e6;
+        if (tag.moving && tag.settled) quality.noteGpu(gpu);
         if (tag.moving && tag.settled && tag.chain === 'fast') quality.earn(gpu, tag.frame);
         if (tag.moving && tag.settled && tag.chain === 'sharp' && quality.motionSharp && gpu > quality.period) quality.miss();
       }
