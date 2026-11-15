@@ -18,6 +18,7 @@ type Target = { isWebGLMultipleRenderTargets?: boolean; textures?: Texture[] & {
 
 const SHARP_AFTER = 250;
 const COALESCE = 2000;
+const YIELD = 300;
 const BUILDING = new Set(['capture', 'screen', 'bands', 'post']);
 
 function loading() {
@@ -224,7 +225,7 @@ export function Post({ phone }: { phone: boolean }) {
     };
   }, [copy, overlay, present, accumulate, totals]);
 
-  useEffect(() => holdQuiet(() => loading() && BUILDING.has(still.phase)), []);
+  useEffect(() => holdQuiet(() => loading() && (BUILDING.has(still.phase) || performance.now() - still.inputAt < YIELD)), []);
 
   useEffect(() => {
     const input = () => {
