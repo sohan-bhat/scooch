@@ -10,6 +10,7 @@ use crate::{look, pads, render, scenery, shape, solver, Analysis, Options, Place
 #[derive(Default)]
 pub struct Session {
     held: Option<Held>,
+    kept: Option<(u64, (u32, u32), Arc<look::Belonging>)>,
 }
 
 struct Held {
@@ -37,18 +38,6 @@ fn glance(width: u32, height: u32, bytes: &[u8]) -> u64 {
         }
     }
     fingerprint(width, height, &[lanes.iter().flat_map(|l| l.to_le_bytes()).collect::<Vec<u8>>(), rest.to_vec()].concat())
-}
-
-fn print(found: &Analysis) -> u64 {
-    let mut bytes = Vec::with_capacity((found.saliency.len() + found.busy.len() + found.palette.len() * 4 + 8) * 4);
-    for v in [found.width, found.height, found.source_width, found.source_height, found.flat as u32, found.saliency.len() as u32, found.busy.len() as u32, found.palette.len() as u32] {
-        bytes.extend_from_slice(&v.to_le_bytes());
-    }
-    let s = found.subject;
-    for v in [s.x, s.y, s.w, s.h].iter().chain(&found.saliency).chain(&found.busy).chain(found.palette.iter().flatten()) {
-        bytes.extend_from_slice(&v.to_bits().to_le_bytes());
-    }
-    fingerprint(0, 0, &bytes)
 }
 
 fn changes(old: &[[f64; 4]], new: &[[f64; 4]]) -> Option<Vec<[f64; 4]>> {
@@ -98,6 +87,37 @@ impl Session {
 
     pub fn forget(&mut self) {
         self.held = None;
+        self.kept = None;
+    }
+
+    /// Whether scenery belongs anywhere on this picture for this screen, these icons and this setting. False when scenery is off, when there are no icons to size it by, or when the belonging map is zero everywhere, which is when a still draws no scenery at all. The map is worked out here or taken from an earlier call, and a later `still`, `still_shared` or `tables_shared` with the same picture reuses it.
+    pub fn belongs(&mut self, image: &RgbImage, analysis: &Analysis, scene: &Scene, options: &Options) -> bool {
+        let source = image.dimensions();
+        let Some(g) = scenery::active(scene, options).then(|| shape::ground(scene)).flatten() else { return false };
+        if source.0 == 0 || source.1 == 0 {
+            return false;
+        }
+        let (picture, stamp) = (glance(source.0, source.1, image.as_raw()), look::stamp(analysis, scene, options));
+        let held = self.held.as_ref().filter(|h| h.image == picture && h.source == source).and_then(|h| h.parts.belonging.clone());
+        let kept = self.kept.as_ref().filter(|k| k.0 == picture && k.1 == source).map(|k| Arc::clone(&k.2));
+        let map = match held.into_iter().chain(kept).find(|b| b.fits(source, stamp)) {
+            Some(map) => map,
+            None => Arc::new(bundle::map_of(&bundle::canvas(image, scene.width, scene.height), analysis, source, scene, options, &paint::materials(analysis), g.u)),
+        };
+        let empty = map.empty;
+        self.kept = Some((picture, source, map));
+        !empty
+    }
+
+    /// Places the picture like `scooch_core::solve`, except that where nothing belongs anywhere on the picture it solves with scenery off, since no scenery will be drawn there and the placement must match the one scenery off gives.
+    pub fn solve(&mut self, image: &RgbImage, analysis: &Analysis, scene: &Scene, options: &Options, previous: Option<&Placement>) -> Placement {
+        let options = if self.belongs(image, analysis, scene, options) { *options } else { Options { scenery: crate::Scenery::Off, ..*options } };
+        crate::solve(analysis, scene, &options, previous)
+    }
+
+    #[doc(hidden)]
+    pub fn map_id(&self) -> Option<usize> {
+        self.held.as_ref().and_then(|h| h.parts.belonging.as_ref()).or(self.kept.as_ref().map(|k| &k.2)).map(|b| Arc::as_ptr(b) as usize)
     }
 
     pub fn redrawn(&self, x: u32, y: u32) -> bool {
@@ -157,17 +177,18 @@ impl Session {
             self.held = None;
             return None;
         }
-        let key = (glance(sw, sh, image.as_raw()), print(analysis));
+        let key = (glance(sw, sh, image.as_raw()), look::print(analysis));
+        let spare = self.kept.as_ref().filter(|k| k.0 == key.0 && k.1 == (sw, sh)).map(|k| Arc::clone(&k.2));
         let held = match self.held.take() {
             Some(mut h) if h.image == key.0 && h.source == (sw, sh) && h.scene.width == scene.width && h.scene.height == scene.height => {
                 if h.analysis == key.1 && h.placement == *placement && h.options == *options {
                     shift::<DRAW>(h, image, analysis, scene, key)
                 } else {
-                    let kept = (reuse(&mut h), h.parts.belonging.take().filter(|_| h.analysis == key.1));
+                    let kept = (reuse(&mut h), h.parts.belonging.take().filter(|_| h.analysis == key.1).or(spare));
                     build(image, analysis, placement, scene, options, key, kept)
                 }
             }
-            _ => build(image, analysis, placement, scene, options, key, (None, None)),
+            _ => build(image, analysis, placement, scene, options, key, (None, spare)),
         };
         let mut held = held;
         if !DRAW {
@@ -265,7 +286,7 @@ fn lean<const DRAW: bool>(h: &mut Held, analysis: &Analysis, scene: &Scene, move
     let Some(g) = shape::ground(scene) else { return false };
     let options = h.options;
     let parts = &mut h.parts;
-    let bare = parts.fixed.is_none() && parts.belonging.as_ref().is_some_and(|b| b.empty && b.fits(h.source, (scene.width, scene.height), g.u, &options));
+    let bare = parts.fixed.is_none() && parts.belonging.as_ref().is_some_and(|b| b.empty && b.fits(h.source, look::stamp(analysis, scene, &options)));
     let Some(grounded) = parts.grounded.as_ref() else { return false };
     if parts.pads.as_ref().is_some_and(|p| p.feather().to_bits() != pads::feather(scene).to_bits()) {
         return false;

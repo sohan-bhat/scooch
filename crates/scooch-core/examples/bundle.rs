@@ -61,7 +61,8 @@ fn main() {
     let options = Options { scenery: Scenery::Auto, ..Options::default() };
     let read = |path: &str| -> Scene { serde_json::from_str(&std::fs::read_to_string(path).expect("layout")).expect("layout json") };
     let first = read(&args[1]);
-    let placement = scooch_core::solve(&analysis, &first, &options, None);
+    let mut session = scooch_core::Session::new();
+    let placement = session.solve(&photo, &analysis, &first, &options, None);
     let a = scooch_core::bundle(&photo, &analysis, &placement, &first, &options);
     let canvas = scooch_core::RgbImage::from_raw(a.canvas_width, a.canvas_height, a.canvas.clone()).expect("canvas");
     std::fs::write(out.join("canvas.jpg"), scooch_core::encode_jpeg(&canvas, 92).expect("jpeg")).expect("canvas");
@@ -69,7 +70,7 @@ fn main() {
     let mut states = vec![serde_json::json!({ "name": "a", "tables": write(&a, &out, "a.") })];
     if args.len() == 4 {
         let second = read(&args[2]);
-        let next = scooch_core::solve(&analysis, &second, &options, Some(&placement));
+        let next = session.solve(&photo, &analysis, &second, &options, Some(&placement));
         let b = scooch_core::bundle(&photo, &analysis, &next, &second, &options);
         assert!(scooch_core::compatible(&a, &b), "the two bundles do not share a canvas");
         states.push(serde_json::json!({ "name": "b", "tables": write(&b, &out, "b.") }));

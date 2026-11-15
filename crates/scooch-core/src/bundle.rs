@@ -78,6 +78,11 @@ pub struct Bundle {
 }
 
 impl Bundle {
+    /// True when these tables carry no scenery at all, so no field, look, paints or guard were built. That is so when scenery is off and when nothing belongs anywhere on the picture.
+    pub fn bare(&self) -> bool {
+        self.paints.iter().all(|b| *b == 0) && self.look.iter().all(|b| *b == 0)
+    }
+
     pub fn mirrored(&self) -> bool {
         self.xmap.len() > 1 && self.xmap[self.xmap.len() - 1] < self.xmap[0]
     }
@@ -424,6 +429,11 @@ impl Parts {
     }
 }
 
+pub fn map_of(canvas: &RgbImage, found: &Analysis, source: (u32, u32), scene: &Scene, options: &Options, materials: &Materials, u: f32) -> look::Belonging {
+    let screen = (scene.width, scene.height);
+    look::belonging_map(&home(canvas, found, source, screen).sampled(), source, screen, options, u, paint::sand(materials)[0], look::stamp(found, scene, options))
+}
+
 pub fn parts(source: (u32, u32), (canvas, kept): (RgbImage, Option<Arc<look::Belonging>>), found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> Parts {
     let (width, height) = (scene.width, scene.height);
     let framed = framed(source, canvas, placement, width, height);
@@ -433,9 +443,10 @@ pub fn parts(source: (u32, u32), (canvas, kept): (RgbImage, Option<Arc<look::Bel
     }
     let grounded = grounded(&out.framed, found);
     let ground = scenery::active(scene, options).then(|| shape::ground(scene)).flatten();
-    out.belonging = ground.as_ref().map(|g| match kept.filter(|b| b.fits(source, (width, height), g.u, options)) {
+    let stamp = look::stamp(found, scene, options);
+    out.belonging = ground.as_ref().map(|g| match kept.filter(|b| b.fits(source, stamp)) {
         Some(b) => b,
-        None => Arc::new(look::belonging_map(&home(&out.framed.canvas, found, source, (width, height)).sampled(), source, (width, height), options, g.u, paint::sand(materials)[0])),
+        None => Arc::new(map_of(&out.framed.canvas, found, source, scene, options, materials, g.u)),
     });
     out.fixed = ground.as_ref().zip(out.belonging.as_deref().filter(|b| !b.empty)).map(|(g, b)| look::fixed(&grounded.sampled(&out.framed), b, materials, g.u, (width as usize, height as usize)));
     out.live = ground.as_ref().zip(out.fixed.as_ref()).map(|(g, f)| look::live(f, g));

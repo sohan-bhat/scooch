@@ -1,6 +1,7 @@
 use crate::area::{self, Area};
 use crate::paint::{self, Materials, LAYERS};
 use crate::shape::{self, smoothstep, Grid};
+use crate::pack::fingerprint;
 use crate::{blur, color, math, scenery, table, Analysis, Options, Placement, Scene, Scenery};
 use rayon::prelude::*;
 use std::cmp::Reverse;
@@ -151,9 +152,8 @@ pub struct Belonging {
     pub belong: Vec<f32>,
     pub empty: bool,
     source: (u32, u32),
-    screen: (u32, u32),
+    stamp: u64,
     u: f32,
-    scenery: Scenery,
 }
 
 impl Belonging {
@@ -161,8 +161,8 @@ impl Belonging {
         (self.sky.len() + self.belong.len()) * 4
     }
 
-    pub fn fits(&self, source: (u32, u32), screen: (u32, u32), u: f32, options: &Options) -> bool {
-        self.source == source && self.screen == screen && self.u.to_bits() == u.to_bits() && self.scenery == options.scenery
+    pub fn fits(&self, source: (u32, u32), stamp: u64) -> bool {
+        self.source == source && self.stamp == stamp
     }
 
     pub fn unit(&self) -> f32 {
@@ -564,7 +564,25 @@ impl Fixed {
     }
 }
 
-pub fn belonging_map(input: &Sampled, source: (u32, u32), screen: (u32, u32), options: &Options, u: f32, sand: f32) -> Belonging {
+pub(crate) fn print(found: &Analysis) -> u64 {
+    let mut bytes = Vec::with_capacity((found.saliency.len() + found.busy.len() + found.palette.len() * 4 + 8) * 4);
+    for v in [found.width, found.height, found.source_width, found.source_height, found.flat as u32, found.saliency.len() as u32, found.busy.len() as u32, found.palette.len() as u32] {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    let s = found.subject;
+    for v in [s.x, s.y, s.w, s.h].iter().chain(&found.saliency).chain(&found.busy).chain(found.palette.iter().flatten()) {
+        bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+    }
+    fingerprint(0, 0, &bytes)
+}
+
+pub(crate) fn stamp(found: &Analysis, scene: &Scene, options: &Options) -> u64 {
+    let u = scenery::active(scene, options).then(|| shape::ground(scene)).flatten().map_or(0.0, |g| g.u);
+    let words = [print(found), u.to_bits() as u64, options.scenery as u64];
+    fingerprint(scene.width, scene.height, &words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>())
+}
+
+pub fn belonging_map(input: &Sampled, source: (u32, u32), screen: (u32, u32), options: &Options, u: f32, sand: f32, stamp: u64) -> Belonging {
     let grid = input.grid;
     let cells = grid.w * grid.h;
     let size = home_grid(source, screen).1;
@@ -584,7 +602,7 @@ pub fn belonging_map(input: &Sampled, source: (u32, u32), screen: (u32, u32), op
         }
     };
     let empty = belong.iter().all(|b| *b <= 0.0);
-    Belonging { grid, size, sky, belong, empty, source, screen, u, scenery: options.scenery }
+    Belonging { grid, size, sky, belong, empty, source, stamp, u }
 }
 
 pub fn fixed(input: &Sampled, belonging: &Belonging, materials: &Materials, u: f32, (width, height): (usize, usize)) -> Fixed {
