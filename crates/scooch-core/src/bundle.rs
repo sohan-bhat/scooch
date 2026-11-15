@@ -27,6 +27,8 @@ const GRAIN_MIX: [u32; 3] = [0x8da6_b343, 0xd816_3841, 0x5bd1_e995];
 const GRAIN_SHIFT: [u32; 3] = [13, 15, 8];
 const GLIDE_REACH: f32 = 1.8;
 const LABEL_DEEPEN: f32 = 0.2;
+const LABEL_CAP: f32 = 0.373;
+const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 const GLIDE_BLEND: f32 = 0.1;
 const GLIDE_EDGE: f32 = 4.0;
 const GLIDE_KEEP: f32 = 0.3;
@@ -681,9 +683,10 @@ fn pieces<L: Fn(usize) -> [f32; 4]>(c: &Constants, ramps: &[[f32; 8]], (d, own):
         shallow = shallow.scaled(keep);
         let mut land = Paint::default();
         land.over(rgb(layer(FOAM)), here.at(1) * mark);
-        let body = mix3(rgb(sand), rgb(layer(WET)), here.at(3));
-        let deeper = 1.0 - LABEL_DEEPEN * broad;
-        land.over(body.map(|v| (v * grain * deeper).min(1.0)), here.at(2));
+        let body = mix3(rgb(sand), rgb(layer(WET)), here.at(3)).map(|v| v * grain);
+        let luma = LUMA[0] * body[0] + LUMA[1] * body[1] + LUMA[2] * body[2];
+        let deeper = 1.0 - broad * LABEL_DEEPEN.max(1.0 - LABEL_CAP / luma.max(1e-4));
+        land.over(body.map(|v| (v * deeper).min(1.0)), here.at(2));
         rest = land.scaled(keep);
     }
     if kind > 0.0 && here.at(4) > 0.0 {
@@ -1040,7 +1043,9 @@ mod tests {
         let both = [
             (format!("> {:?} && both < {:?}", GLIDE_FELT.0, GLIDE_FELT.1), 1),
             (format!("{:?} * (grain_hash(", GRAIN_DOUBLE), 1),
-            (format!("* grain * (1.0 - {:?} * broad)", LABEL_DEEPEN), 1),
+            ("* grain;".to_string(), 1),
+            (format!("1.0 - broad * max({LABEL_DEEPEN:?}, 1.0 - {LABEL_CAP:?} / max(dot(body, "), 1),
+            (format!("({:?}, {:?}, {:?})), 0.0001));", LUMA[0], LUMA[1], LUMA[2]), 1),
             (format!("(x * {:#x}u) ^ (y * {:#x}u)", GRAIN_MIX[0], GRAIN_MIX[1]), 1),
             (format!("h * {:#x}u", GRAIN_MIX[2]), 1),
             (format!("h ^ (h >> {}u)", GRAIN_SHIFT[0]), 1),

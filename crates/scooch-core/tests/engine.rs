@@ -468,6 +468,7 @@ fn on_screen_distance(px: f32, py: f32, r: &Rect) -> f32 {
 
 const CLOUD_LABEL_MARGIN: f32 = 0.01;
 const LAND_LABEL: f32 = 0.76;
+const LABEL_SHARE: f32 = 0.1;
 
 fn lightness(p: [u8; 3]) -> f32 {
     let lin = p.map(|v| {
@@ -493,7 +494,8 @@ fn label_grounds(picture: &RgbImage, layer: &scooch_core::RgbaImage, bundle: &sc
             counts[k] += 1.0;
         }
     }
-    let mean = |k: usize| (counts[k] > 0.0).then(|| sums[k] / counts[k]);
+    let area = ((x1.saturating_sub(x0)) * (y1.saturating_sub(y0))) as f32;
+    let mean = |k: usize| (counts[k] >= LABEL_SHARE * area && counts[k] > 0.0).then(|| sums[k] / counts[k]);
     (mean(0), mean(1))
 }
 
@@ -592,14 +594,17 @@ fn old_option_files_load_with_scenery_off() {
 #[test]
 fn labels_stay_readable_on_the_scenery() {
     let (w, h) = (960, 600);
+    let mut grounds = [0usize; 2];
+    let mut failures = Vec::new();
+    let mut worst = [0.0f32; 2];
     for photo in photos() {
         let picture = small(&photo.image, 1200);
         let analysis = scooch_core::analyze(&picture);
         for layout in ["mac", "windows", "scattered", "cluster"] {
-            {
+            for scenery in [Scenery::Clouds, Scenery::Islands, Scenery::Auto] {
                 let icons = layouts::layout(layout, &analysis, w, h);
                 let scene = Scene { width: w, height: h, icons: icons.clone() };
-                let options = Options { scenery: Scenery::Auto, ..Options::default() };
+                let options = Options { scenery, ..Options::default() };
                 let placement = scooch_core::solve(&analysis, &scene, &options, None);
                 let layers = scooch_core::render_layers(&picture, &analysis, &placement, &scene, &options);
                 let bundle = scooch_core::bundle(&picture, &analysis, &placement, &scene, &options);
@@ -615,17 +620,28 @@ fn labels_stay_readable_on_the_scenery() {
                             .flat_map(|j| (i0..=i1).map(move |i| (4 * pw * ph + j * pw + i) * 4))
                             .map(|at| lightness([bundle.paints[at], bundle.paints[at + 1], bundle.paints[at + 2]]))
                             .fold(0.0f32, f32::max);
-                        println!("cloud label {} {layout}: {l:.3} against shaded {shaded:.3}", photo.name);
-                        assert!(l <= shaded + CLOUD_LABEL_MARGIN, "{} {layout} cloud label ground {l:.3} above the shaded tone {shaded:.3}", photo.name);
+                        println!("cloud label {} {layout} {scenery:?}: {l:.3} against shaded {shaded:.3}", photo.name);
+                        if l > shaded + CLOUD_LABEL_MARGIN {
+                            failures.push(format!("{} {layout} {scenery:?} cloud label ground {l:.3} above the shaded tone {shaded:.3}", photo.name));
+                        }
+                        worst[0] = worst[0].max(l);
+                        grounds[0] += 1;
                     }
                     if let Some(l) = land {
-                        println!("land label {} {layout}: {l:.3}", photo.name);
-                        assert!(l <= LAND_LABEL, "{} {layout} land label ground lightness {l:.3}", photo.name);
+                        println!("land label {} {layout} {scenery:?}: {l:.3}", photo.name);
+                        if l > LAND_LABEL {
+                            failures.push(format!("{} {layout} {scenery:?} land label ground lightness {l:.3}", photo.name));
+                        }
+                        worst[1] = worst[1].max(l);
+                        grounds[1] += 1;
                     }
                 }
             }
         }
     }
+    println!("labels checked on cloud {} and on land {}, worst {:.3} and {:.3}", grounds[0], grounds[1], worst[0], worst[1]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(grounds.iter().all(|g| *g >= 200), "too few label grounds checked: {grounds:?}");
 }
 
 fn solid_seen(bundle: &scooch_core::Bundle, cells: &(Vec<bool>, u32, u32), columns: &[f64], rows: &[f64]) -> Vec<bool> {

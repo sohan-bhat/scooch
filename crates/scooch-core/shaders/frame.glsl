@@ -136,7 +136,9 @@ Parts parts(int which, vec2 p, float d, float own, vec3 picture, float grain) {
     shallow = over(shallow, min(picture * gain.rgb * 4.0, vec3(1.0)), ramp(which, 0.0, own).r * gain.a);
     vec4 land = vec4(0.0);
     land = over(land, layer(which, p, 1).rgb, first.g * mark);
-    land = over(land, min(mix(sand.rgb, layer(which, p, 3).rgb, first.a) * grain * (1.0 - 0.2 * broad), vec3(1.0)), first.b);
+    vec3 body = mix(sand.rgb, layer(which, p, 3).rgb, first.a) * grain;
+    float deeper = 1.0 - broad * max(0.2, 1.0 - 0.373 / max(dot(body, vec3(0.2126, 0.7152, 0.0722)), 0.0001));
+    land = over(land, min(body * deeper, vec3(1.0)), first.b);
     vec4 shaded = layer(which, p, 4);
     vec3 lit = layer(which, p, 5).rgb;
     vec3 deep = layer(which, p, 6).rgb;

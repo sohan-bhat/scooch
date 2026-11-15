@@ -127,7 +127,9 @@ fn parts(looks: texture_2d<f32>, paints: texture_2d_array<f32>, table: texture_2
     shallow = over(shallow, min(picture * gain.rgb * 4.0, vec3<f32>(1.0)), ramp(table, 0.0, own).r * gain.a);
     var land = vec4<f32>(0.0);
     land = over(land, layer(paints, p, 1).rgb, first.g * mark);
-    land = over(land, min(mix(sand.rgb, layer(paints, p, 3).rgb, first.a) * grain * (1.0 - 0.2 * broad), vec3<f32>(1.0)), first.b);
+    let body = mix(sand.rgb, layer(paints, p, 3).rgb, first.a) * grain;
+    let deeper = 1.0 - broad * max(0.2, 1.0 - 0.373 / max(dot(body, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0001));
+    land = over(land, min(body * deeper, vec3<f32>(1.0)), first.b);
     let shaded = layer(paints, p, 4);
     let lit = layer(paints, p, 5).rgb;
     let deep = layer(paints, p, 6).rgb;
