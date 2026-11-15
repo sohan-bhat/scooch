@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 pub const Q: usize = 4;
 pub const FIELD_STEP: f32 = 1.0 / 64.0;
 pub const FAR: f32 = 4.0;
+pub const UNIT_FLOOR: f32 = 16.0;
 const GROW: f32 = 0.20;
 const ROUND: f32 = 0.25;
 const SMOOTH: f32 = 0.30;
@@ -42,16 +43,18 @@ pub fn ground(scene: &Scene) -> Option<Ground> {
     if scene.width == 0 || scene.height == 0 {
         return None;
     }
-    let icons: Vec<[f32; 4]> = solver::screen_rects(scene).into_iter().map(|r| r.map(|v| v as f32)).collect();
+    let mut icons: Vec<[f32; 4]> = solver::screen_rects(scene).into_iter().map(|r| r.map(|v| v as f32)).collect();
     if icons.is_empty() {
         return None;
     }
-    let mut heights: Vec<f32> = icons.iter().map(|r| r[3] - r[1]).collect();
+    icons.sort_by(|a, b| a.iter().zip(b).map(|(p, q)| p.total_cmp(q)).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal));
+    let mut heights = solver::screen_heights(scene);
     heights.sort_by(f32::total_cmp);
     let u = heights[heights.len() / 2];
     if u <= 0.5 {
         return None;
     }
+    let u = u.max(UNIT_FLOOR);
     let rects: Vec<[f32; 4]> = icons.iter().map(|r| anchor(r, u, scene)).collect();
     let anchored = rects.iter().zip(&icons).map(|(r, i)| r != i).collect();
     Some(Ground { rects, icons, anchored, u })

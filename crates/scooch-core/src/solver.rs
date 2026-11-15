@@ -55,20 +55,23 @@ impl<'a> Boxes<'a> {
     }
 }
 
+fn on_screen(r: &crate::Rect, width: f64, height: f64) -> Option<[f64; 4]> {
+    let (x, y, w, h) = (r.x as f64, r.y as f64, r.w as f64, r.h as f64);
+    if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) || w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let rect = [x.max(0.0), y.max(0.0), (x + w).min(width), (y + h).min(height)];
+    (rect[2] > rect[0] && rect[3] > rect[1]).then_some(rect)
+}
+
 pub fn screen_rects(scene: &Scene) -> Vec<[f64; 4]> {
     let (width, height) = (scene.width as f64, scene.height as f64);
-    scene
-        .icons
-        .iter()
-        .filter_map(|r| {
-            let (x, y, w, h) = (r.x as f64, r.y as f64, r.w as f64, r.h as f64);
-            if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) || w <= 0.0 || h <= 0.0 {
-                return None;
-            }
-            let rect = [x.max(0.0), y.max(0.0), (x + w).min(width), (y + h).min(height)];
-            (rect[2] > rect[0] && rect[3] > rect[1]).then_some(rect)
-        })
-        .collect()
+    scene.icons.iter().filter_map(|r| on_screen(r, width, height)).collect()
+}
+
+pub fn screen_heights(scene: &Scene) -> Vec<f32> {
+    let (width, height) = (scene.width as f64, scene.height as f64);
+    scene.icons.iter().filter(|r| on_screen(r, width, height).is_some()).map(|r| r.h).collect()
 }
 
 pub fn footprints(scene: &Scene) -> Vec<Footprint> {
