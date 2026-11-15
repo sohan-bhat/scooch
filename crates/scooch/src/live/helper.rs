@@ -545,6 +545,7 @@ mod running {
 
         fn start(&mut self, want: Want) {
             let (events, waker, out) = (self.events.clone(), self.waker.clone(), self.out.clone());
+            let warm_id = want.waiters.iter().flatten().next().copied();
             let device = self.gpu.as_ref().map(|(gpu, _)| gpu.clone());
             let (key, cached, composition) = (want.key.clone(), want.canvas.clone(), want.composition);
             let spawned = std::thread::Builder::new().name("scooch-live-warm".into()).spawn(move || {
@@ -598,6 +599,9 @@ mod running {
                     };
                     Ok(Loaded { canvas: Arc::new(canvas), picture })
                 });
+                if let Some(Ok(_)) = &loaded {
+                    say(&out, &Reply::Canvas { warm_id, ms: started.elapsed().as_millis() as u64 });
+                }
                 let _ = events.send(Event::Warmed { gpu: made, loaded, from, ms: started.elapsed().as_millis() as u64 });
                 waker();
             });
