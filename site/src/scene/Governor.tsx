@@ -85,6 +85,7 @@ export function Governor() {
     const now = performance.now();
     const ms = delta * 1000;
     state.ms = ms;
+    if (ms > 24) quality.slowAt = now;
     if (ms > 0 && ms < 120) state.frames.push(now, ms);
     if (now - state.checked > 1000) {
       state.checked = now;

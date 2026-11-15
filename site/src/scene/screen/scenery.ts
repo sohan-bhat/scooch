@@ -402,7 +402,7 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       const context = gl.getContext() as WebGL2RenderingContext;
       const handle = (gl.properties.get(texture) as { __webglTexture?: WebGLTexture }).__webglTexture;
       if (!handle) return false;
-      const rows = Math.max(64, Math.ceil(height / 12));
+      const rows = Math.max(32, Math.ceil(height / 24));
       for (let y = 0; y < height; y += rows) {
         await wait();
         if (started !== generation || context.isContextLost()) {

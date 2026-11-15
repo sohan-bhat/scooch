@@ -3,7 +3,7 @@ import { quiet } from '@/lib/idle';
 
 export type Pixels = { data: Uint8Array | Uint8ClampedArray; width: number; height: number };
 
-const STRIP = 1 << 20;
+const STRIP = 1 << 19;
 
 type Source = HTMLCanvasElement | ImageBitmap | Pixels;
 

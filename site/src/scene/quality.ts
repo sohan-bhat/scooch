@@ -92,6 +92,7 @@ class Quality {
   fastReady = false;
   warmFast: (() => void) | null = null;
   moving = false;
+  slowAt = 0;
   period = 1000 / 60;
   allowed = false;
   motionSharp = false;

@@ -34,10 +34,12 @@ export function level(): Level {
   return amount >= 4 ? 'main' : 'none';
 }
 
+const HEADROOM = 600;
+
 export async function calm() {
   for (;;) {
     await quiet();
-    if (!quality.moving && quality.chain === 'sharp') return;
+    if (!quality.moving && quality.chain === 'sharp' && performance.now() - quality.slowAt > HEADROOM) return;
     await new Promise((resolve) => window.setTimeout(resolve, 300));
   }
 }
