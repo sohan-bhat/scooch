@@ -29,6 +29,7 @@ export const still = {
   stale: false,
   refresh: false,
   builtAt: 0,
+  rebuilds: 0,
   target: 0,
   from: null as TextureType | null,
 };

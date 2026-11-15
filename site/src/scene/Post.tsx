@@ -4,7 +4,7 @@ import { BlendFunction, CopyPass, ToneMappingMode } from 'postprocessing';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinusConstantAlphaFactor, SRGBColorSpace, Vector2, WebGLRenderTarget, type Texture } from 'three';
 import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass } from 'postprocessing';
-import { quiet } from '@/lib/idle';
+import { holdQuiet, quiet } from '@/lib/idle';
 import { release as releaseLoader } from '@/lib/load';
 import { runtime, story, wallClock } from '@/story/state';
 import { beats, TOTAL } from '@/story/timeline';
@@ -17,6 +17,12 @@ import { precompile } from './warm';
 type Target = { isWebGLMultipleRenderTargets?: boolean; textures?: Texture[] & { mipmaps?: unknown[] } };
 
 const SHARP_AFTER = 250;
+const COALESCE = 2000;
+const BUILDING = new Set(['capture', 'screen', 'bands', 'post']);
+
+function loading() {
+  return !(runtime.props && runtime.gallery && runtime.painted && runtime.inside);
+}
 const LOST_FOR = 4000;
 
 function giveUp() {
@@ -208,6 +214,8 @@ export function Post({ phone }: { phone: boolean }) {
     };
   }, [copy, overlay, present, accumulate, totals]);
 
+  useEffect(() => holdQuiet(() => loading() && BUILDING.has(still.phase)), []);
+
   useEffect(() => {
     const input = () => {
       still.inputAt = performance.now();
@@ -242,7 +250,7 @@ export function Post({ phone }: { phone: boolean }) {
     const wait = () => {
       if (stopped) return;
       const intro = performance.getEntriesByName('scooch:intro')[0]?.startTime;
-      if (!runtime.painted || intro === undefined || performance.now() - intro < 1000) {
+      if (intro === undefined || performance.now() - intro < 1000) {
         timer = window.setTimeout(wait, 500);
         return;
       }
@@ -487,16 +495,13 @@ export function Post({ phone }: { phone: boolean }) {
         !live.pressing &&
         !live.tape &&
         runtime.settled &&
-        runtime.props &&
-        runtime.gallery &&
-        runtime.inside &&
         !document.hidden &&
         introAt.current > 0 &&
         now - introAt.current > 2500 &&
         quality.chain === 'sharp' &&
         now - quality.blendAt > BLEND &&
         now - still.inputAt > STILL_AFTER &&
-        (still.showing || still.phase === 'still' || still.refresh || now - runtime.changedAt > STILL_AFTER);
+        (still.showing || still.phase === 'still' || still.refresh || loading() || now - runtime.changedAt > STILL_AFTER);
       if (still.phase !== 'live' && !calm) {
         still.phase = 'live';
         still.showing = false;
@@ -645,8 +650,9 @@ export function Post({ phone }: { phone: boolean }) {
           still.phase = 'bands';
           return;
         }
-        if (still.stale && (!budget.busy || now - budget.lastStepAt > 1000)) {
+        if (still.stale && (!budget.busy || now - budget.lastStepAt > 1000) && (!loading() || now - still.builtAt > COALESCE)) {
           still.stale = false;
+          still.rebuilds += 1;
           still.refresh = true;
           still.row = 0;
           still.band = 0;
