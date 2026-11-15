@@ -393,6 +393,7 @@ fn look_cell(run: &Run, live: &Live, piles: &Buckets, i: usize) -> [u8; 4] {
     let broad = (broad + (1.0 - broad) * MIDDLE_LIFT * middle) * (1.0 - hold);
     let (mut arc, mut shade) = (0.0f32, 0.0f32);
     if live.cloud[i] <= grid.cell as f32 {
+        let rim = RIM * grid.cell as f32;
         let mut front = f32::MIN;
         for k in piles.near(px, py) {
             let p = &live.clouds[k as usize];
@@ -402,7 +403,7 @@ fn look_cell(run: &Run, live: &Live, piles: &Buckets, i: usize) -> [u8; 4] {
             if d < p[2] && prio > front {
                 front = prio;
                 let toward = if d > 1e-3 { (dx * light[0] + dy * light[1]) / d } else { 0.0 };
-                arc = smoothstep(ARC.0 * p[2], ARC.1 * p[2], d - p[2]) * math::powf(toward.max(0.0), ARC_POWER);
+                arc = smoothstep(ARC.0 * p[2], ARC.1 * p[2], d - p[2]) * math::powf(toward.max(0.0), ARC_POWER) * smoothstep(0.0, rim, p[2] - d);
             }
         }
         for k in piles.near(px, py) {
@@ -412,7 +413,7 @@ fn look_cell(run: &Run, live: &Live, piles: &Buckets, i: usize) -> [u8; 4] {
             let prio = live.prio[k as usize];
             if d >= p[2] && prio > front && d > 1e-3 {
                 let away = -(dx * light[0] + dy * light[1]) / d;
-                shade = shade.max(smoothstep(TUCK * p[2], 0.0, d - p[2]) * smoothstep(AWAY.0, AWAY.1, away));
+                shade = shade.max(smoothstep(TUCK * p[2], 0.0, d - p[2]) * smoothstep(AWAY.0, AWAY.1, away) * smoothstep(0.0, rim, d - p[2]));
             }
         }
     }

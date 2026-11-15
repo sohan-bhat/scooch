@@ -27,7 +27,7 @@ const SHALLOW_CHROMA: f32 = 1.65;
 const GAIN_MOST: f32 = 3.98;
 const FOAM_LIGHT: f32 = 0.96;
 const FOAM_TINT: f32 = 0.2;
-const LAND_FADE: (f32, f32) = (0.66, 0.72);
+pub(crate) const UNDER_SAND: (f32, f32) = (0.1, 0.02);
 pub(crate) const SHADED: (f32, f32) = (0.81, 0.25);
 const BRIGHT: (f32, f32) = (0.97, 0.07);
 const WARM_LIT: f32 = 0.35;
@@ -73,7 +73,8 @@ pub fn tones(local: [f32; 3], sand: [f32; 3], mottle: f32) -> Tones {
     let water = to_linear(local);
     let shallow = to_linear([(local[0] + SHALLOW_RISE).min(SHALLOW_TOP), local[1] * SHALLOW_CHROMA, local[2] * SHALLOW_CHROMA]);
     let gain: [f32; 3] = std::array::from_fn(|k| (shallow[k] / water[k].max(1e-3)).min(GAIN_MOST) / GAIN);
-    let land = 1.0 - smoothstep(LAND_FADE.0, LAND_FADE.1, local[0]);
+    let top = sand[0] - UNDER_SAND.0;
+    let land = 1.0 - smoothstep(top - UNDER_SAND.1, top + UNDER_SAND.1, local[0]);
     let cloud = smoothstep(CONTRAST.0, CONTRAST.1, contrast);
     Tones {
         colors: [

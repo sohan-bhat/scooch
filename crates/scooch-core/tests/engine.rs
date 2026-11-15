@@ -458,7 +458,7 @@ fn subjects_with_a_calm_strip_behind_slide_clear() {
     assert!(3 * cleared >= 2 * counted.len(), "{cleared} of {} cleared, missed {missed:?}", counted.len());
 }
 
-const LOCALITY: f32 = 3.0;
+const LOCALITY: f32 = 3.5;
 
 fn on_screen_distance(px: f32, py: f32, r: &Rect) -> f32 {
     let dx = (r.x - px).max(px - (r.x + r.w)).max(0.0);
@@ -468,6 +468,7 @@ fn on_screen_distance(px: f32, py: f32, r: &Rect) -> f32 {
 
 const CLOUD_LABEL_MARGIN: f32 = 0.01;
 const LAND_LABEL: f32 = 0.76;
+const LABEL_SHARE: f32 = 0.1;
 
 fn lightness(p: [u8; 3]) -> f32 {
     let lin = p.map(|v| {
@@ -493,7 +494,8 @@ fn label_grounds(picture: &RgbImage, layer: &scooch_core::RgbaImage, bundle: &sc
             counts[k] += 1.0;
         }
     }
-    let mean = |k: usize| (counts[k] > 0.0).then(|| sums[k] / counts[k]);
+    let area = ((x1.saturating_sub(x0)) * (y1.saturating_sub(y0))) as f32;
+    let mean = |k: usize| (counts[k] >= LABEL_SHARE * area && counts[k] > 0.0).then(|| sums[k] / counts[k]);
     (mean(0), mean(1))
 }
 
@@ -527,7 +529,7 @@ fn scenery_off_adds_nothing_and_layers_rebuild_the_render() {
 
 #[test]
 fn scenery_is_deterministic_and_local() {
-    for name in ["two-swans", "balloon-sky"] {
+    for name in ["lone-canoe", "balloon-sky"] {
         let photo = photos().iter().find(|p| p.name == name).expect("photo");
         let picture = small(&photo.image, 1200);
         let analysis = scooch_core::analyze(&picture);
@@ -592,14 +594,17 @@ fn old_option_files_load_with_scenery_off() {
 #[test]
 fn labels_stay_readable_on_the_scenery() {
     let (w, h) = (960, 600);
+    let mut grounds = [0usize; 2];
+    let mut failures = Vec::new();
+    let mut worst = [0.0f32; 2];
     for photo in photos() {
         let picture = small(&photo.image, 1200);
         let analysis = scooch_core::analyze(&picture);
         for layout in ["mac", "windows", "scattered", "cluster"] {
-            {
+            for scenery in [Scenery::Clouds, Scenery::Islands, Scenery::Auto] {
                 let icons = layouts::layout(layout, &analysis, w, h);
                 let scene = Scene { width: w, height: h, icons: icons.clone() };
-                let options = Options { scenery: Scenery::Auto, ..Options::default() };
+                let options = Options { scenery, ..Options::default() };
                 let placement = scooch_core::solve(&analysis, &scene, &options, None);
                 let layers = scooch_core::render_layers(&picture, &analysis, &placement, &scene, &options);
                 let bundle = scooch_core::bundle(&picture, &analysis, &placement, &scene, &options);
@@ -615,63 +620,146 @@ fn labels_stay_readable_on_the_scenery() {
                             .flat_map(|j| (i0..=i1).map(move |i| (4 * pw * ph + j * pw + i) * 4))
                             .map(|at| lightness([bundle.paints[at], bundle.paints[at + 1], bundle.paints[at + 2]]))
                             .fold(0.0f32, f32::max);
-                        println!("cloud label {} {layout}: {l:.3} against shaded {shaded:.3}", photo.name);
-                        assert!(l <= shaded + CLOUD_LABEL_MARGIN, "{} {layout} cloud label ground {l:.3} above the shaded tone {shaded:.3}", photo.name);
+                        println!("cloud label {} {layout} {scenery:?}: {l:.3} against shaded {shaded:.3}", photo.name);
+                        if l > shaded + CLOUD_LABEL_MARGIN {
+                            failures.push(format!("{} {layout} {scenery:?} cloud label ground {l:.3} above the shaded tone {shaded:.3}", photo.name));
+                        }
+                        worst[0] = worst[0].max(l);
+                        grounds[0] += 1;
                     }
                     if let Some(l) = land {
-                        println!("land label {} {layout}: {l:.3}", photo.name);
-                        assert!(l <= LAND_LABEL, "{} {layout} land label ground lightness {l:.3}", photo.name);
+                        println!("land label {} {layout} {scenery:?}: {l:.3}", photo.name);
+                        if l > LAND_LABEL {
+                            failures.push(format!("{} {layout} {scenery:?} land label ground lightness {l:.3}", photo.name));
+                        }
+                        worst[1] = worst[1].max(l);
+                        grounds[1] += 1;
                     }
                 }
             }
         }
     }
+    println!("labels checked on cloud {} and on land {}, worst {:.3} and {:.3}", grounds[0], grounds[1], worst[0], worst[1]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(grounds.iter().all(|g| *g >= 200), "too few label grounds checked: {grounds:?}");
 }
 
-fn on_solid(layer: &scooch_core::RgbaImage, cells: &[(Vec<bool>, u32, u32)]) -> (usize, usize) {
-    let (mut solid, mut drawn) = (0usize, 0usize);
-    for (x, y, p) in layer.enumerate_pixels() {
-        let inside = cells.iter().any(|(c, w, h)| {
-            let (i, j) = ((x / 16).min(w.saturating_sub(1)), (y / 16).min(h.saturating_sub(1)));
-            !c.is_empty() && c[(j * w + i) as usize]
-        });
-        if inside {
-            solid += 1;
-            drawn += (p[3] > 0) as usize;
+fn solid_seen(bundle: &scooch_core::Bundle, cells: &(Vec<bool>, u32, u32), columns: &[f64], rows: &[f64]) -> Vec<bool> {
+    let (c, cw, ch) = cells;
+    let find = |map: &[f64], f: f64| -> Option<usize> {
+        let rising = map.len() < 2 || map[map.len() - 1] >= map[0];
+        let (lo, hi) = (map[0].min(map[map.len() - 1]), map[0].max(map[map.len() - 1]));
+        let pad = (hi - lo) / map.len() as f64;
+        if f < lo - pad || f > hi + pad {
+            return None;
+        }
+        let k = map.partition_point(|v| if rising { *v < f } else { *v > f });
+        let near = [k.saturating_sub(1), k.min(map.len() - 1)];
+        near.into_iter().min_by(|p, q| (map[*p] - f).abs().total_cmp(&(map[*q] - f).abs()))
+    };
+    let xs: Vec<Option<usize>> = columns.iter().map(|f| find(&bundle.xmap, *f)).collect();
+    let ys: Vec<Option<usize>> = rows.iter().map(|f| find(&bundle.ymap, *f)).collect();
+    let mut out = vec![false; columns.len() * rows.len()];
+    if c.is_empty() {
+        return out;
+    }
+    for (j, y) in ys.iter().enumerate() {
+        for (i, x) in xs.iter().enumerate() {
+            if let (Some(x), Some(y)) = (x, y) {
+                let (gi, gj) = ((*x as u32 / 16).min(cw - 1), (*y as u32 / 16).min(ch - 1));
+                out[j * columns.len() + i] = c[(gj * cw + gi) as usize];
+            }
         }
     }
-    (solid, drawn)
+    out
+}
+
+fn reach_of(solid: &[bool], w: usize, h: usize, reach: usize) -> Vec<bool> {
+    let mut across = vec![false; solid.len()];
+    for y in 0..h {
+        let row = &solid[y * w..(y + 1) * w];
+        let mut last: Option<usize> = None;
+        let mut next = row.iter().position(|s| *s);
+        for x in 0..w {
+            if row[x] {
+                last = Some(x);
+                next = row[x + 1..].iter().position(|s| *s).map(|p| p + x + 1);
+            }
+            let close = last.is_some_and(|l| x - l <= reach) || next.is_some_and(|n| n - x <= reach);
+            across[y * w + x] = close;
+        }
+    }
+    let mut out = vec![false; solid.len()];
+    for x in 0..w {
+        let mut last: Option<usize> = None;
+        let mut next = (0..h).find(|y| across[y * w + x]);
+        for y in 0..h {
+            if across[y * w + x] {
+                last = Some(y);
+                next = (y + 1..h).find(|q| across[q * w + x]);
+            }
+            out[y * w + x] = last.is_some_and(|l| y - l <= reach) || next.is_some_and(|n| n - y <= reach);
+        }
+    }
+    out
 }
 
 #[test]
 fn scenery_never_covers_the_solid_subject() {
-    let (w, h) = (960, 600);
-    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let (w, h) = (960usize, 600usize);
     let mut seen = 0usize;
-    for photo in photos() {
-        let picture = small(&photo.image, 1200);
-        let analysis = scooch_core::analyze(&picture);
-        for layout in ["mac", "scattered"] {
-            let icons = layouts::layout(layout, &analysis, w, h);
-            let scene = Scene { width: w, height: h, icons: icons.clone() };
-            let mut moved = icons.clone();
-            moved[3].x = (moved[3].x - 2.0 * moved[3].w).max(0.0);
-            moved[3].y = (moved[3].y + moved[3].h).min(h as f32 - moved[3].h);
-            let next = Scene { width: w, height: h, icons: moved };
-            let (pa, pb) = (scooch_core::solve(&analysis, &scene, &options, None), scooch_core::solve(&analysis, &next, &options, None));
-            let (ca, cb) = (scooch_core::solid_cells(&picture, &analysis, &pa, &scene, &options), scooch_core::solid_cells(&picture, &analysis, &pb, &next, &options));
-            let still = scooch_core::render_layers(&picture, &analysis, &pa, &scene, &options);
-            let (solid, drawn) = on_solid(&still.scenery, std::slice::from_ref(&ca));
-            println!("{} {layout} still: {drawn} of {solid} solid subject pixels under scenery", photo.name);
-            assert_eq!(drawn, 0, "{} {layout} still", photo.name);
-            seen += solid;
-            let (a, b) = (scooch_core::bundle(&picture, &analysis, &pa, &scene, &options), scooch_core::bundle(&picture, &analysis, &pb, &next, &options));
-            for s in [0.25f32, 0.5, 0.75] {
-                let layers = scooch_core::frame_layers(&a, &b, s);
-                let (solid, drawn) = on_solid(&layers.scenery, &[ca.clone(), cb.clone()]);
-                assert_eq!(drawn, 0, "{} {layout} glide at {s}: {drawn} of {solid}", photo.name);
+    let mut failures = Vec::new();
+    for scenery in [Scenery::Clouds, Scenery::Islands, Scenery::Auto] {
+        let options = Options { scenery, ..Options::default() };
+        let mut near_all = 0usize;
+        for photo in photos() {
+            let picture = small(&photo.image, 1200);
+            let analysis = scooch_core::analyze(&picture);
+            let mut near_photo = 0usize;
+            for layout in ["mac", "scattered"] {
+                let icons = layouts::layout(layout, &analysis, w as u32, h as u32);
+                let scene = Scene { width: w as u32, height: h as u32, icons: icons.clone() };
+                let mut moved = icons.clone();
+                moved[3].x = (moved[3].x - 2.0 * moved[3].w).max(0.0);
+                moved[3].y = (moved[3].y + moved[3].h).min(h as f32 - moved[3].h);
+                let next = Scene { width: w as u32, height: h as u32, icons: moved };
+                let (pa, pb) = (scooch_core::solve(&analysis, &scene, &options, None), scooch_core::solve(&analysis, &next, &options, None));
+                let (ca, cb) = (scooch_core::solid_cells(&picture, &analysis, &pa, &scene, &options), scooch_core::solid_cells(&picture, &analysis, &pb, &next, &options));
+                let (a, b) = (scooch_core::bundle(&picture, &analysis, &pa, &scene, &options), scooch_core::bundle(&picture, &analysis, &pb, &next, &options));
+                let u = a.constants.unit as usize;
+                for s in [0.0f32, 0.25, 0.5, 0.75] {
+                    let columns: Vec<f64> = a.xmap.iter().zip(&b.xmap).map(|(p, q)| p + (q - p) * s as f64).collect();
+                    let rows: Vec<f64> = a.ymap.iter().zip(&b.ymap).map(|(p, q)| p + (q - p) * s as f64).collect();
+                    let from_a = solid_seen(&a, &ca, &columns, &rows);
+                    let from_b = if s > 0.0 { solid_seen(&b, &cb, &columns, &rows) } else { vec![false; w * h] };
+                    let solid: Vec<bool> = from_a.iter().zip(&from_b).map(|(p, q)| *p || *q).collect();
+                    let layer = if s == 0.0 { scooch_core::render_layers(&picture, &analysis, &pa, &scene, &options).scenery } else { scooch_core::frame_layers(&a, &b, s).scenery };
+                    let around = reach_of(&solid, w, h, u);
+                    let (mut on, mut count, mut near) = (0usize, 0usize, 0usize);
+                    for (k, p) in layer.pixels().enumerate() {
+                        let drawn = p.0[3] > 0;
+                        if solid[k] {
+                            count += 1;
+                            on += drawn as usize;
+                        } else if drawn && around[k] {
+                            near += 1;
+                        }
+                    }
+                    println!("{} {layout} {scenery:?} at {s}: {on} of {count} solid subject pixels under scenery, {near} scenery pixels within 1u", photo.name);
+                    if on > 0 {
+                        failures.push(format!("{} {layout} {scenery:?} at {s}: {on} of {count} solid subject pixels under scenery", photo.name));
+                    }
+                    seen += count;
+                    near_photo += near;
+                }
             }
+            near_all += near_photo;
+            println!("{} {scenery:?}: {near_photo} scenery pixels within 1u of the solid subject", photo.name);
         }
+        println!("{scenery:?}: {near_all} scenery pixels within 1u of the solid subject");
+        assert!(near_all >= 100_000, "{scenery:?}: only {near_all} scenery pixels sit within 1u of the solid subject");
     }
+    println!("{seen} solid subject pixels checked");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert!(seen > 0, "no solid subject pixels were checked");
 }

@@ -9,6 +9,7 @@ use crate::{color, math, scenery, Analysis, Options, Placement, RgbImage, RgbaIm
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::sync::Arc;
 
 pub const RAMP: usize = 512;
 const RAMP_RANGE: (f32, f32) = (look::FLOOR, look::HOLD.1);
@@ -26,12 +27,15 @@ const GRAIN_MIX: [u32; 3] = [0x8da6_b343, 0xd816_3841, 0x5bd1_e995];
 const GRAIN_SHIFT: [u32; 3] = [13, 15, 8];
 const GLIDE_REACH: f32 = 1.8;
 const LABEL_DEEPEN: f32 = 0.2;
+const LABEL_CAP: f32 = 0.373;
+const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 const GLIDE_BLEND: f32 = 0.1;
 const GLIDE_EDGE: f32 = 4.0;
 const GLIDE_KEEP: f32 = 0.3;
 const GLIDE_GATE: f32 = 0.2;
 const GLIDE_SPAN: f32 = 0.3;
 const GLIDE_FELT: (f32, f32) = (-0.4, 0.06);
+const FOLLOW_STEPS: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Constants {
@@ -173,16 +177,63 @@ fn sample(canvas: &RgbImage, decode: &[f32; 256], x: f64, y: f64) -> [f32; 3] {
     })
 }
 
-fn small_picture(canvas: &RgbImage, xmap: &[f64], ymap: &[f64], grid: &Grid) -> Vec<[f32; 3]> {
+fn centers(map: &[f64], cells: usize) -> Vec<f64> {
+    (0..cells)
+        .map(|cell| {
+            let (a, b) = ((cell * Q + Q / 2 - 1).min(map.len() - 1), (cell * Q + Q / 2).min(map.len() - 1));
+            (map[a] + map[b]) * 0.5
+        })
+        .collect()
+}
+
+fn small_picture(canvas: &RgbImage, columns: &[f64], rows: &[f64]) -> Vec<[f32; 3]> {
     let decode = color::decode_table();
     let (cw, ch) = (canvas.width() as f64, canvas.height() as f64);
-    let at = |map: &[f64], cell: usize, size: f64| {
-        let (a, b) = ((cell * Q + Q / 2 - 1).min(map.len() - 1), (cell * Q + Q / 2).min(map.len() - 1));
-        (map[a] + map[b]) * 0.5 * size - 0.5
+    let (xs, ys): (Vec<f64>, Vec<f64>) = (columns.iter().map(|f| f * cw - 0.5).collect(), rows.iter().map(|f| f * ch - 0.5).collect());
+    (0..xs.len() * ys.len()).into_par_iter().map(|c| sample(canvas, decode, xs[c % xs.len()], ys[c / xs.len()])).collect()
+}
+
+fn planes(found: &Analysis, ax: Vec<f32>, ay: Vec<f32>, grid: &Grid) -> (Lookup, bool, Vec<f32>, Vec<f32>) {
+    let (aw, ah) = (found.width as usize, found.height as usize);
+    let usable = aw > 0 && ah > 0 && found.saliency.len() == aw * ah && found.busy.len() == aw * ah;
+    let lookup = Lookup { ax, ay, aw: aw.max(1), ah: ah.max(1) };
+    let clean = |v: &f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+    let (saliency, busy) = if usable {
+        let s: Vec<f32> = if found.flat { vec![0.0; aw * ah] } else { found.saliency.iter().map(clean).collect() };
+        let b: Vec<f32> = found.busy.iter().map(clean).collect();
+        (lookup.plane(&s, grid), lookup.plane(&b, grid))
+    } else {
+        (vec![0.0; grid.w * grid.h], vec![0.0; grid.w * grid.h])
     };
-    let columns: Vec<f64> = (0..grid.w).map(|i| at(xmap, i, cw)).collect();
-    let rows: Vec<f64> = (0..grid.h).map(|j| at(ymap, j, ch)).collect();
-    (0..grid.w * grid.h).into_par_iter().map(|c| sample(canvas, decode, columns[c % grid.w], rows[c / grid.w])).collect()
+    (lookup, usable, saliency, busy)
+}
+
+pub struct Home {
+    pub grid: Grid,
+    pub small: Vec<[f32; 3]>,
+    pub saliency: Vec<f32>,
+    pub busy: Vec<f32>,
+    pub columns: Vec<f64>,
+    pub rows: Vec<f64>,
+}
+
+impl Home {
+    pub fn sampled(&self) -> Sampled<'_> {
+        Sampled { grid: self.grid, small: &self.small, saliency: &self.saliency, busy: &self.busy, columns: &self.columns, rows: &self.rows }
+    }
+}
+
+pub fn home(canvas: &RgbImage, found: &Analysis, source: (u32, u32), screen: (u32, u32)) -> Home {
+    let (grid, size) = look::home_grid(source, screen);
+    let fraction = |k: usize, span: f64| ((k * grid.cell) as f64 + grid.cell as f64 / 2.0) / span;
+    let columns: Vec<f64> = (0..grid.w).map(|i| fraction(i, size[0])).collect();
+    let rows: Vec<f64> = (0..grid.h).map(|j| fraction(j, size[1])).collect();
+    let small = small_picture(canvas, &columns, &rows);
+    let (aw, ah) = (found.width.max(1) as f64, found.height.max(1) as f64);
+    let ax = columns.iter().map(|f| (f * aw - 0.5) as f32).collect();
+    let ay = rows.iter().map(|f| (f * ah - 0.5) as f32).collect();
+    let (_, _, saliency, busy) = planes(found, ax, ay, &grid);
+    Home { grid, small, saliency, busy, columns, rows }
 }
 
 pub fn make(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> Bundle {
@@ -199,6 +250,8 @@ pub struct Framed {
     pub ratio: f64,
     pub grid: Grid,
     pub small: Vec<[f32; 3]>,
+    pub columns: Vec<f64>,
+    pub rows: Vec<f64>,
     pub width: u32,
     pub height: u32,
 }
@@ -217,9 +270,11 @@ pub fn framed((sw, sh): (u32, u32), canvas: RgbImage, placement: &Placement, wid
     let ymap: Vec<f64> = (0..height).map(|j| yc.at((j as f64 + 0.5) / height as f64)).collect();
     let ratio = render::worst_ratio(&placement.fx, cw, width).max(render::worst_ratio(&placement.fy, ch, height));
     let grid = Grid::of(width as usize, height as usize, Q);
-    let mut out = Framed { placement, canvas, canvas_width: cw, canvas_height: ch, xmap, ymap, ratio, grid, small: Vec::new(), width, height };
+    let mut out = Framed { placement, canvas, canvas_width: cw, canvas_height: ch, xmap, ymap, ratio, grid, small: Vec::new(), columns: Vec::new(), rows: Vec::new(), width, height };
     if !out.empty() {
-        out.small = small_picture(&out.canvas, &out.xmap, &out.ymap, &grid);
+        out.columns = centers(&out.xmap, grid.w);
+        out.rows = centers(&out.ymap, grid.h);
+        out.small = small_picture(&out.canvas, &out.columns, &out.rows);
     }
     out
 }
@@ -233,28 +288,16 @@ pub struct Grounded {
 
 impl Grounded {
     pub fn sampled<'a>(&'a self, framed: &'a Framed) -> Sampled<'a> {
-        Sampled { grid: framed.grid, small: &framed.small, saliency: &self.saliency, busy: &self.busy }
+        Sampled { grid: framed.grid, small: &framed.small, saliency: &self.saliency, busy: &self.busy, columns: &framed.columns, rows: &framed.rows }
     }
 }
 
 pub fn grounded(framed: &Framed, found: &Analysis) -> Grounded {
     let (grid, width, height) = (framed.grid, framed.width, framed.height);
-    let (aw, ah) = (found.width as usize, found.height as usize);
-    let usable = aw > 0 && ah > 0 && found.saliency.len() == aw * ah && found.busy.len() == aw * ah;
-    let lookup = Lookup {
-        ax: (0..grid.w).map(|i| (framed.xmap[(i * Q + Q / 2).min(width as usize - 1)] * aw as f64 - 0.5) as f32).collect(),
-        ay: (0..grid.h).map(|j| (framed.ymap[(j * Q + Q / 2).min(height as usize - 1)] * ah as f64 - 0.5) as f32).collect(),
-        aw: aw.max(1),
-        ah: ah.max(1),
-    };
-    let clean = |v: &f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
-    let (saliency, busy) = if usable {
-        let s: Vec<f32> = if found.flat { vec![0.0; aw * ah] } else { found.saliency.iter().map(clean).collect() };
-        let b: Vec<f32> = found.busy.iter().map(clean).collect();
-        (lookup.plane(&s, &grid), lookup.plane(&b, &grid))
-    } else {
-        (vec![0.0; grid.w * grid.h], vec![0.0; grid.w * grid.h])
-    };
+    let (aw, ah) = (found.width.max(1) as f64, found.height.max(1) as f64);
+    let ax = (0..grid.w).map(|i| (framed.xmap[(i * Q + Q / 2).min(width as usize - 1)] * aw - 0.5) as f32).collect();
+    let ay = (0..grid.h).map(|j| (framed.ymap[(j * Q + Q / 2).min(height as usize - 1)] * ah - 0.5) as f32).collect();
+    let (lookup, usable, saliency, busy) = planes(found, ax, ay, &grid);
     Grounded { lookup, usable, saliency, busy }
 }
 
@@ -328,6 +371,7 @@ pub fn fill(out: &mut Bundle, framed: &Framed, fixed: Option<&look::Fixed>, live
 pub struct Parts {
     pub framed: Framed,
     pub grounded: Option<Grounded>,
+    pub belonging: Option<Arc<look::Belonging>>,
     pub fixed: Option<look::Fixed>,
     pub live: Option<look::Live>,
     pub calm: Option<pads::Calm>,
@@ -337,9 +381,9 @@ pub struct Parts {
 impl Parts {
     pub fn bytes(&self) -> usize {
         let f = &self.framed;
-        let framed = f.canvas.as_raw().len() + (f.xmap.len() + f.ymap.len()) * 8 + f.small.len() * 12;
+        let framed = f.canvas.as_raw().len() + (f.xmap.len() + f.ymap.len() + f.columns.len() + f.rows.len()) * 8 + f.small.len() * 12;
         let grounded = self.grounded.as_ref().map_or(0, |g| (g.saliency.len() + g.busy.len() + g.lookup.ax.len() + g.lookup.ay.len()) * 4);
-        framed + grounded + self.fixed.as_ref().map_or(0, |x| x.bytes()) + self.live.as_ref().map_or(0, |x| x.bytes()) + self.calm.as_ref().map_or(0, |x| x.bytes()) + self.pads.as_ref().map_or(0, |x| x.bytes())
+        framed + grounded + self.belonging.as_ref().map_or(0, |b| b.bytes()) + self.fixed.as_ref().map_or(0, |x| x.bytes()) + self.live.as_ref().map_or(0, |x| x.bytes()) + self.calm.as_ref().map_or(0, |x| x.bytes()) + self.pads.as_ref().map_or(0, |x| x.bytes())
     }
 
     pub fn pad(&self) -> Option<Vec<u8>> {
@@ -380,16 +424,20 @@ impl Parts {
     }
 }
 
-pub fn parts(source: (u32, u32), canvas: RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> Parts {
+pub fn parts(source: (u32, u32), (canvas, kept): (RgbImage, Option<Arc<look::Belonging>>), found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> Parts {
     let (width, height) = (scene.width, scene.height);
     let framed = framed(source, canvas, placement, width, height);
-    let mut out = Parts { framed, grounded: None, fixed: None, live: None, calm: None, pads: None };
+    let mut out = Parts { framed, grounded: None, belonging: None, fixed: None, live: None, calm: None, pads: None };
     if out.framed.empty() {
         return out;
     }
     let grounded = grounded(&out.framed, found);
     let ground = scenery::active(scene, options).then(|| shape::ground(scene)).flatten();
-    out.fixed = ground.as_ref().map(|g| look::fixed(&grounded.sampled(&out.framed), options, materials, g.u, width as usize, height as usize));
+    out.belonging = ground.as_ref().map(|g| match kept.filter(|b| b.fits(source, (width, height), g.u, options)) {
+        Some(b) => b,
+        None => Arc::new(look::belonging_map(&home(&out.framed.canvas, found, source, (width, height)).sampled(), source, (width, height), options, g.u, paint::sand(materials)[0])),
+    });
+    out.fixed = ground.as_ref().zip(out.belonging.as_deref().filter(|b| !b.empty)).map(|(g, b)| look::fixed(&grounded.sampled(&out.framed), b, materials, g.u, (width as usize, height as usize)));
     out.live = ground.as_ref().zip(out.fixed.as_ref()).map(|(g, f)| look::live(f, g));
     out.grounded = Some(grounded);
     out.repad(found, scene, options);
@@ -397,14 +445,14 @@ pub fn parts(source: (u32, u32), canvas: RgbImage, found: &Analysis, placement: 
 }
 
 pub fn still(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> Bundle {
-    let parts = parts(image.dimensions(), canvas(image, scene.width, scene.height).into_owned(), found, placement, scene, options, materials);
+    let parts = parts(image.dimensions(), (canvas(image, scene.width, scene.height).into_owned(), None), found, placement, scene, options, materials);
     let mut out = parts.tables(materials);
     out.canvas = parts.framed.canvas.into_raw();
     out
 }
 
 pub fn regions(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> (Vec<[u8; 4]>, u32, u32) {
-    let parts = parts(image.dimensions(), canvas(image, scene.width, scene.height).into_owned(), found, placement, scene, options, materials);
+    let parts = parts(image.dimensions(), (canvas(image, scene.width, scene.height).into_owned(), None), found, placement, scene, options, materials);
     let grid = &parts.framed.grid;
     let cells = match &parts.fixed {
         Some(f) => f.sky.iter().zip(&f.belong).map(|(s, b)| [look::byte(*s), look::byte(*b), 0, 0]).collect(),
@@ -414,9 +462,17 @@ pub fn regions(image: &RgbImage, found: &Analysis, placement: &Placement, scene:
 }
 
 pub fn solid_cells(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> (Vec<bool>, u32, u32) {
-    let parts = parts(image.dimensions(), canvas(image, scene.width, scene.height).into_owned(), found, placement, scene, options, materials);
+    let parts = parts(image.dimensions(), (canvas(image, scene.width, scene.height).into_owned(), None), found, placement, scene, options, materials);
     match &parts.fixed {
         Some(f) => (f.solid_cells(), f.paint_grid.w as u32, f.paint_grid.h as u32),
+        None => (Vec::new(), 0, 0),
+    }
+}
+
+pub fn belonging_map(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> (Vec<[f32; 2]>, u32, u32) {
+    let parts = parts(image.dimensions(), (canvas(image, scene.width, scene.height).into_owned(), None), found, placement, scene, options, materials);
+    match &parts.belonging {
+        Some(b) => (b.sky.iter().zip(&b.belong).map(|(s, k)| [*s, *k]).collect(), b.grid.w as u32, b.grid.h as u32),
         None => (Vec::new(), 0, 0),
     }
 }
@@ -442,11 +498,39 @@ struct Probe {
 }
 
 fn probes(count: usize, cell: usize, cells: usize) -> Vec<Probe> {
-    (0..count)
-        .map(|x| {
-            let g = ((x as f32 + 0.5) / cell as f32 - 0.5).clamp(0.0, (cells - 1) as f32);
-            let a = g as usize;
-            Probe { a, b: (a + 1).min(cells - 1), t: g - a as f32 }
+    (0..count).map(|x| probe_at(x as f32 + 0.5, cell, cells)).collect()
+}
+
+fn probe_at(at: f32, cell: usize, cells: usize) -> Probe {
+    let g = (at / cell as f32 - 0.5).clamp(0.0, (cells - 1) as f32);
+    let a = g as usize;
+    Probe { a, b: (a + 1).min(cells - 1), t: g - a as f32 }
+}
+
+fn followed(own: &[f64], other: &[f64], s: f32, cell: usize, cells: usize) -> Vec<Probe> {
+    let own: Vec<f32> = own.iter().map(|v| *v as f32).collect();
+    let other: Vec<f32> = other.iter().map(|v| *v as f32).collect();
+    let last = own.len().saturating_sub(1);
+    let seek = |want: f32, start: f32| {
+        let mut q = start;
+        for _ in 0..FOLLOW_STEPS {
+            let g = (q - 0.5).clamp(0.0, last as f32);
+            let i = (g as usize).min(last.saturating_sub(1));
+            let a = own[i];
+            let slope = own[(i + 1).min(last)] - a;
+            if slope != 0.0 {
+                q += (want - (a + slope * (g - i as f32))) / slope;
+            }
+        }
+        q
+    };
+    (0..own.len())
+        .map(|i| {
+            let (lo, hi) = (i.saturating_sub(1), (i + 1).min(last));
+            let slope = (own[hi] - own[lo]) / (hi - lo).max(1) as f32;
+            let want = own[i] + (other[i] - own[i]) * s;
+            let start = i as f32 + 0.5 + if slope != 0.0 { (want - own[i]) / slope } else { 0.0 };
+            probe_at(seek(want, start), cell, cells)
         })
         .collect()
 }
@@ -599,9 +683,10 @@ fn pieces<L: Fn(usize) -> [f32; 4]>(c: &Constants, ramps: &[[f32; 8]], (d, own):
         shallow = shallow.scaled(keep);
         let mut land = Paint::default();
         land.over(rgb(layer(FOAM)), here.at(1) * mark);
-        let body = mix3(rgb(sand), rgb(layer(WET)), here.at(3));
-        let deeper = 1.0 - LABEL_DEEPEN * broad;
-        land.over(body.map(|v| (v * grain * deeper).min(1.0)), here.at(2));
+        let body = mix3(rgb(sand), rgb(layer(WET)), here.at(3)).map(|v| v * grain);
+        let luma = LUMA[0] * body[0] + LUMA[1] * body[1] + LUMA[2] * body[2];
+        let deeper = 1.0 - broad * LABEL_DEEPEN.max(1.0 - LABEL_CAP / luma.max(1e-4));
+        land.over(body.map(|v| (v * deeper).min(1.0)), here.at(2));
         rest = land.scaled(keep);
     }
     if kind > 0.0 && here.at(4) > 0.0 {
@@ -835,6 +920,13 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
     let paint_grid = a.paint_grid();
     let tint_columns = probes(w, P, paint_grid.w);
     let tint_rows = probes(h, P, paint_grid.h);
+    let follows = !same && (a.xmap != b.xmap || a.ymap != b.ymap);
+    let held = follows.then(|| {
+        [
+            (followed(&a.xmap, &b.xmap, s, P, paint_grid.w), followed(&a.ymap, &b.ymap, s, P, paint_grid.h)),
+            (followed(&b.xmap, &a.xmap, 1.0 - s, P, paint_grid.w), followed(&b.ymap, &a.ymap, 1.0 - s, P, paint_grid.h)),
+        ]
+    });
     let out: &mut [u8] = &mut layer;
     out.par_chunks_mut(w * 4).enumerate().for_each_init(Lines::default, |lines, (y, line)| {
         let row = &rows[y];
@@ -921,7 +1013,10 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
             } else {
                 faded().scaled(1.0 - tide).plus(moved().scaled(tide))
             };
-            let guard = |k: usize| lerp4(&tint_lines[k][GUARD], tint_column)[3];
+            let guard = |k: usize| match &held {
+                Some(held) => bilinear4(&planes[k].paints[GUARD], paint_grid.w, &held[k].0[x], &held[k].1[y])[3],
+                None => lerp4(&tint_lines[k][GUARD], tint_column)[3],
+            };
             let block = if planes.len() == 1 { guard(0) } else { (guard(0) * (GLIDE_EDGE * (1.0 - s)).min(1.0)).max(guard(1) * (GLIDE_EDGE * s).min(1.0)) };
             let total = total.scaled(1.0 - block);
             if total.a <= 1e-4 {
@@ -948,7 +1043,9 @@ mod tests {
         let both = [
             (format!("> {:?} && both < {:?}", GLIDE_FELT.0, GLIDE_FELT.1), 1),
             (format!("{:?} * (grain_hash(", GRAIN_DOUBLE), 1),
-            (format!("* grain * (1.0 - {:?} * broad)", LABEL_DEEPEN), 1),
+            ("* grain;".to_string(), 1),
+            (format!("1.0 - broad * max({LABEL_DEEPEN:?}, 1.0 - {LABEL_CAP:?} / max(dot(body, "), 1),
+            (format!("({:?}, {:?}, {:?})), 0.0001));", LUMA[0], LUMA[1], LUMA[2]), 1),
             (format!("(x * {:#x}u) ^ (y * {:#x}u)", GRAIN_MIX[0], GRAIN_MIX[1]), 1),
             (format!("h * {:#x}u", GRAIN_MIX[2]), 1),
             (format!("h ^ (h >> {}u)", GRAIN_SHIFT[0]), 1),
@@ -963,6 +1060,20 @@ mod tests {
         assert_eq!((wgsl.matches(edge.as_str()).count(), glsl.matches(edge.as_str()).count()), (4, 4), "{edge}");
         let guard = format!(", {GUARD})");
         assert_eq!((wgsl.matches(guard.as_str()).count(), glsl.matches(guard.as_str()).count()), (2, 2), "{guard}");
+        let guards = [
+            (format!("let guard_a = layer(paints_a, follow(map_a, pixel, from_a, uv, p), {GUARD}).a;"), format!("float guard_a = layer(0, follow(0, pixel, from_a, uv, p), {GUARD}).a;")),
+            (format!("let guard_b = layer(paints_b, follow(map_b, pixel, from_b, uv, p), {GUARD}).a;"), format!("float guard_b = layer(1, follow(1, pixel, from_b, uv, p), {GUARD}).a;")),
+            (
+                format!("let block = max(guard_a * min({GLIDE_EDGE:?} * (1.0 - frame.s), 1.0), guard_b * min({GLIDE_EDGE:?} * frame.s, 1.0));"),
+                format!("float block = max(guard_a * min({GLIDE_EDGE:?} * (1.0 - s), 1.0), guard_b * min({GLIDE_EDGE:?} * s, 1.0));"),
+            ),
+        ];
+        for (w, g) in &guards {
+            assert_eq!(wgsl.matches(w.as_str()).count(), 1, "wgsl {w}");
+            assert_eq!(glsl.matches(g.as_str()).count(), 1, "glsl {g}");
+        }
+        assert_eq!(wgsl.matches(&format!("for (var k = 0; k < {FOLLOW_STEPS}; k = k + 1)")).count(), 1);
+        assert_eq!(glsl.matches(&format!("for (int k = 0; k < {FOLLOW_STEPS}; k++)")).count(), 1);
         assert_eq!(wgsl.matches(&format!("let side = {:?} * frame.unit * {side:?};", GLIDE_SPAN)).count(), 1);
         assert_eq!(glsl.matches(&format!("float side = {:?} * unit * {side:?};", GLIDE_SPAN)).count(), 1);
     }

@@ -21,13 +21,13 @@ fn pair(name: &str) -> (&'static str, Vec<Rect>, Vec<Rect>) {
             a.push(icon(260.0, 330.0));
             let mut b = fixed;
             b.push(icon(700.0, 360.0));
-            ("two-swans", a, b)
+            ("lone-canoe", a, b)
         }
         "split" => {
             let a = vec![icon(300.0, 380.0), icon(380.0, 380.0), icon(460.0, 380.0), icon(1100.0, 640.0)];
             let mut b = a.clone();
             b[2] = icon(700.0, 420.0);
-            ("two-swans", a, b)
+            ("lone-canoe", a, b)
         }
         _ => {
             let column: Vec<Rect> = (0..6).map(|k| icon(1194.0, 20.0 + 100.0 * k as f32)).collect();

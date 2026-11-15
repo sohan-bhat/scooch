@@ -50,8 +50,8 @@ fn main() {
         ("balloon-scattered", "balloon-sky", w, h, &scattered),
         ("balloon-column", "balloon-sky", w, h, &column),
         ("moon-column", "moon-sky", w, h, &column),
-        ("swans-column", "two-swans", w, h, &column),
-        ("swans-scattered", "two-swans", w, h, &scattered),
+        ("canoe-column", "lone-canoe", w, h, &column),
+        ("canoe-scattered", "lone-canoe", w, h, &scattered),
         ("main-a", "balloon-sky", 1280, 960, &site),
     ];
     let only = args.get(3);

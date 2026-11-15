@@ -54,7 +54,7 @@ mod table;
 mod warp;
 
 pub use bundle::{Bundle, Constants, RAMP};
-pub use pack::{half_bits, Canvas, TablesError};
+pub use pack::{half_bits, Canvas, TablesError, TABLES_VERSION};
 pub use session::Session;
 #[doc(hidden)]
 pub use puffs::SITES_MOST;
@@ -205,6 +205,11 @@ pub fn frame(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
 #[doc(hidden)]
 pub fn solid_cells(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Vec<bool>, u32, u32) {
     bundle::solid_cells(image, analysis, placement, scene, options, &paint::materials(analysis))
+}
+
+#[doc(hidden)]
+pub fn belonging_map(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Vec<[f32; 2]>, u32, u32) {
+    bundle::belonging_map(image, analysis, placement, scene, options, &paint::materials(analysis))
 }
 
 #[doc(hidden)]

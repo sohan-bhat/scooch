@@ -241,3 +241,25 @@ fn a_session_after_forget_or_an_empty_call_starts_clean() {
         assert!(bundle == want.0 && still.as_raw() == want.1.as_raw());
     }
 }
+
+#[test]
+fn a_picture_that_gets_nothing_builds_no_scenery() {
+    let (w, h) = (960, 600);
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let path = layouts::photos().into_iter().find(|p| p.to_string_lossy().contains("fox")).expect("fox");
+    let image = scooch_core::open(&path).expect("open");
+    let analysis = scooch_core::analyze(&image);
+    let icons = layouts::layout("scattered", &analysis, w, h);
+    let scene = Scene { width: w, height: h, icons: icons.clone() };
+    let placement = scooch_core::solve(&analysis, &scene, &options, None);
+    let mut session = Session::new();
+    let (bundle, _) = session.still(&image, &analysis, &placement, &scene, &options);
+    assert_eq!(session.sites(), 0);
+    assert!(bundle.field.iter().all(|f| *f > bundle.constants.reach), "fox drew scenery");
+    let mut moved = icons;
+    moved[2].x = (moved[2].x + moved[2].w).min(w as f32 - moved[2].w);
+    let next = Scene { icons: moved, ..scene };
+    let (_, shown) = session.still(&image, &analysis, &placement, &next, &options);
+    assert_eq!(session.sites(), 0);
+    assert!(shown.as_raw() == scooch_core::still(&image, &analysis, &placement, &next, &options).1.as_raw());
+}

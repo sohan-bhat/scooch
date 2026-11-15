@@ -51,7 +51,7 @@ pub fn sample(width: u32, height: u32) -> scooch_core::RgbImage {
             let dx = x as f32 / width as f32 - 0.5;
             let dy = y as f32 / height as f32 - 0.5;
             let lit = (dx * dx * 9.0 + dy * dy) < 0.02;
-            bytes.extend_from_slice(if lit { &[250, 240, 220] } else { &[19, 90, 48] });
+            bytes.extend_from_slice(if lit { &[250, 240, 220] } else { &[20, 110, 120] });
         }
     }
     scooch_core::RgbImage::from_raw(width, height, bytes).unwrap()

@@ -16,7 +16,7 @@ const PICKS: [(&str, &str); 12] = [
     ("golden-tree", "mac"),
     ("city-night", "mac"),
     ("balloon-sky", "scattered"),
-    ("two-swans", "scattered"),
+    ("lone-canoe", "scattered"),
     ("dragonfly", "scattered"),
     ("frosty-tree", "scattered"),
     ("great-wave", "scattered"),
@@ -32,7 +32,7 @@ enum Spot {
 
 const CLOSE: [(&str, &str, Spot); 4] = [
     ("beach-sitter", "mac", Spot::Edge(4)),
-    ("two-swans", "scattered", Spot::Loner { top: false }),
+    ("lone-canoe", "scattered", Spot::Loner { top: false }),
     ("seagull-sky", "mac", Spot::Edge(1)),
     ("balloon-sky", "scattered", Spot::Loner { top: true }),
 ];
