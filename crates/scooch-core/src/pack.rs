@@ -3,7 +3,7 @@ use crate::paint::LAYERS;
 use crate::{Analysis, Rect};
 
 const MAGIC: [u8; 4] = *b"SCBT";
-const VERSION: u32 = 3;
+pub const TABLES_VERSION: u32 = 3;
 const GRID: u32 = 4;
 const PAINT: u32 = 16;
 
@@ -87,7 +87,7 @@ impl Bundle {
     pub fn tables_to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.table_bytes() + 256);
         out.extend_from_slice(&MAGIC);
-        let words = [VERSION, self.width, self.height, self.canvas_width, self.canvas_height, self.grid_width, self.grid_height, self.paint_width, self.paint_height];
+        let words = [TABLES_VERSION, self.width, self.height, self.canvas_width, self.canvas_height, self.grid_width, self.grid_height, self.paint_width, self.paint_height];
         words.iter().for_each(|w| out.extend_from_slice(&w.to_le_bytes()));
         out.extend_from_slice(&fingerprint(self.canvas_width, self.canvas_height, &self.canvas).to_le_bytes());
         out.extend_from_slice(&self.ratio.to_le_bytes());
@@ -114,7 +114,7 @@ impl Bundle {
             return Err(TablesError::Checksum);
         }
         let mut reader = Reader { bytes: &bytes[..body], at: 4 };
-        if reader.u32()? != VERSION {
+        if reader.u32()? != TABLES_VERSION {
             return Err(TablesError::Version);
         }
         let [width, height, canvas_width, canvas_height, grid_width, grid_height, paint_width, paint_height] = std::array::from_fn(|_| reader.u32().unwrap_or(u32::MAX));
@@ -322,7 +322,7 @@ mod tests {
         let bytes = bundle.tables_to_bytes();
         assert_eq!(&bytes[..8], b"SCBT\x03\x00\x00\x00");
         assert_eq!(Bundle::tables_from_bytes(&bytes, canvas.clone()), Ok(bundle));
-        for version in [1u32, 2] {
+        for version in 1..TABLES_VERSION {
             let mut old = bytes[..bytes.len() - 8].to_vec();
             old[4..8].copy_from_slice(&version.to_le_bytes());
             let sum = fingerprint(0, 0, &old);
