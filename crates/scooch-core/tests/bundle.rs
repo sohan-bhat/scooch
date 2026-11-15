@@ -261,6 +261,17 @@ fn mirror(b: &Bundle) -> Bundle {
 }
 
 #[test]
+fn a_bare_picture_keeps_the_real_unit() {
+    let (w, h) = (960, 600);
+    let photo = photos().iter().find(|p| p.name == "fox").expect("fox");
+    let scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &photo.analysis, w, h) };
+    let bundle = state(photo, &scene, &on());
+    assert!(bundle.field.iter().all(|f| *f > bundle.constants.reach), "fox drew scenery");
+    let u = scene.icons.iter().map(|r| r.h).fold(0.0f32, f32::max);
+    assert_eq!(bundle.constants.unit, u, "a bare state glides with unit {}", bundle.constants.unit);
+}
+
+#[test]
 fn a_mirrored_pair_glides_as_the_mirror() {
     let (w, h) = (640, 400);
     for name in ["lone-canoe", "balloon-sky"] {

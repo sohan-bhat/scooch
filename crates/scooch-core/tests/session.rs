@@ -262,4 +262,119 @@ fn a_picture_that_gets_nothing_builds_no_scenery() {
     let (_, shown) = session.still(&image, &analysis, &placement, &next, &options);
     assert_eq!(session.sites(), 0);
     assert!(shown.as_raw() == scooch_core::still(&image, &analysis, &placement, &next, &options).1.as_raw());
+    let kept = (0..h).step_by(8).flat_map(|y| (0..w).step_by(8).map(move |x| (x, y))).filter(|(x, y)| !session.redrawn(*x, *y)).count();
+    assert!(kept * 2 > ((w / 8) * (h / 8)) as usize, "the move redrew the whole still, so it was rebuilt: {kept} cells kept");
+}
+
+fn made(name: &str) -> RgbImage {
+    let (w, h) = (1600u32, 1000u32);
+    RgbImage::from_fn(w, h, |x, y| {
+        let mut n = x.wrapping_mul(0x8da6_b343) ^ y.wrapping_mul(0xd816_3841);
+        n ^= n >> 13;
+        n = n.wrapping_mul(0x5bd1_e995);
+        let grain = ((n ^ (n >> 15)) >> 8) as f32 / 16_777_215.0 - 0.5;
+        let v = y as f32 / h as f32;
+        let c: [f32; 3] = match name {
+            "navy" => [10.0 + 10.0 * v, 30.0 + 15.0 * v, 70.0 + 25.0 * v],
+            "deep-sky" => [20.0 + 65.0 * v, 45.0 + 100.0 * v, 110.0 + 110.0 * v],
+            _ => scooch_core::ISLAND_WATER.map(|c| c as f32),
+        };
+        image::Rgb(c.map(|c| (c + 2.0 * grain).round().clamp(0.0, 255.0) as u8))
+    })
+}
+
+fn navy(sx: f32) -> RgbImage {
+    let mut image = made("navy");
+    let (w, h) = image.dimensions();
+    for (x, y, p) in image.enumerate_pixels_mut() {
+        let (dx, dy) = (x as f32 / w as f32 - sx, (y as f32 / h as f32 - 0.45) * h as f32 / w as f32);
+        if dx * dx + dy * dy < 0.045 * 0.045 {
+            *p = image::Rgb([240, 200, 150]);
+        }
+    }
+    image
+}
+
+fn picture(name: &str) -> RgbImage {
+    match name {
+        "two-swans" => scooch_core::open(&layouts::photos().into_iter().find(|p| p.to_string_lossy().contains("two-swans")).expect("photo")).expect("open"),
+        _ => made(name),
+    }
+}
+
+#[test]
+fn a_bare_picture_is_placed_as_with_scenery_off() {
+    let (w, h) = (1024u32, 768u32);
+    let (auto, off) = (Options { scenery: Scenery::Auto, ..Options::default() }, Options { scenery: Scenery::Off, ..Options::default() });
+    let mut bit = 0;
+    for sx in [0.15f32, 0.3, 0.7, 0.85] {
+    let image = navy(sx);
+    let analysis = scooch_core::analyze(&image);
+    let mut scenes: Vec<Scene> = ["mac", "windows", "scattered", "cluster"].iter().map(|l| Scene { width: w, height: h, icons: layouts::layout(l, &analysis, w, h) }).collect();
+    scenes.extend((1..12).map(|seed| Scene { width: w, height: h, icons: layouts::scattered(w, h, 6 + seed as usize % 10, seed) }));
+    for scene in &scenes {
+        let (raw, plain) = (scooch_core::solve(&analysis, scene, &auto, None), scooch_core::solve(&analysis, scene, &off, None));
+        let mut session = Session::new();
+        assert!(!session.belongs(&image, &analysis, scene, &auto));
+        assert!(session.solve(&image, &analysis, scene, &auto, None) == plain, "the session placed a bare picture unlike scenery off");
+        if raw != plain {
+            bit += 1;
+            println!("navy with its subject at {sx} at {w}x{h} with {} icons: raw auto zoom {:.3} shift {:?} against off zoom {:.3} shift {:?}", scene.icons.len(), raw.zoom, raw.shift, plain.zoom, plain.shift);
+        }
+    }
+    }
+    assert!(bit > 0, "no layout placed the navy picture differently with scenery on, so this test does not bite");
+}
+
+#[test]
+fn belongs_says_what_the_bundle_carries() {
+    let (w, h) = (960u32, 600u32);
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    for (name, want) in [("navy", false), ("two-swans", false), ("flat-water", true), ("deep-sky", true)] {
+        let image = picture(name);
+        let analysis = scooch_core::analyze(&image);
+        for layout in ["mac", "scattered"] {
+            let scene = Scene { width: w, height: h, icons: layouts::layout(layout, &analysis, w, h) };
+            for call in ["still", "still_shared", "tables_shared"] {
+                let mut session = Session::new();
+                let belongs = session.belongs(&image, &analysis, &scene, &options);
+                assert_eq!(belongs, want, "{name} {layout}");
+                let map = session.map_id();
+                let placement = session.solve(&image, &analysis, &scene, &options, None);
+                let bundle = match call {
+                    "still" => session.still(&image, &analysis, &placement, &scene, &options).0,
+                    "still_shared" => (*session.still_shared(&image, &analysis, &placement, &scene, &options).0).clone(),
+                    _ => (*session.tables_shared(&image, &analysis, &placement, &scene, &options)).clone(),
+                };
+                assert_eq!(bundle.bare(), !belongs, "{name} {layout} {call}");
+                assert_eq!(session.map_id(), map, "{name} {layout} {call}: the map was worked out again");
+                let canvas = scooch_core::canvas(&image, w, h);
+                let plain = scooch_core::bundle(&image, &analysis, &placement, &scene, &options);
+                let back = scooch_core::Bundle::tables_from_bytes(&plain.tables_to_bytes(), canvas).expect("tables");
+                assert_eq!(back.bare(), !belongs, "{name} {layout} read back");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_belonging_stamp_follows_what_the_map_depends_on() {
+    let (w, h) = (960u32, 600u32);
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let (image, other) = (made("navy"), made("deep-sky"));
+    let (analysis, elsewhere) = (scooch_core::analyze(&image), scooch_core::analyze(&other));
+    let scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &analysis, w, h) };
+    let stamp = scooch_core::belonging_stamp(&analysis, &scene, &options);
+    let mut moved = scene.clone();
+    moved.icons[2].x += moved.icons[2].w;
+    assert_eq!(scooch_core::belonging_stamp(&analysis, &moved, &options), stamp, "an icon move changed the stamp");
+    let wider = Scene { width: w + 64, ..scene.clone() };
+    let mut taller = scene.clone();
+    for r in &mut taller.icons {
+        r.h *= 1.25;
+    }
+    let islands = Options { scenery: Scenery::Islands, ..options };
+    for (what, other) in [("screen", scooch_core::belonging_stamp(&analysis, &wider, &options)), ("icon height", scooch_core::belonging_stamp(&analysis, &taller, &options)), ("setting", scooch_core::belonging_stamp(&analysis, &scene, &islands)), ("analysis", scooch_core::belonging_stamp(&elsewhere, &scene, &options))] {
+        assert_ne!(other, stamp, "the {what} did not change the stamp");
+    }
 }

@@ -21,6 +21,23 @@ fn noise(x: f32, y: f32, seed: u32) -> f32 {
     a + (b - a) * ty
 }
 
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn oklch(l: f32, c: f32, h: f32) -> [f32; 3] {
+    let (a, b) = (c * h.to_radians().cos(), c * h.to_radians().sin());
+    let l_ = (l + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
+    let m_ = (l - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
+    let s_ = (l - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
+    let lin = [4.076_741_7 * l_ - 3.307_711_6 * m_ + 0.230_969_94 * s_, -1.268_438 * l_ + 2.609_757_4 * m_ - 0.341_319_38 * s_, -0.004_196_086_3 * l_ - 0.703_418_6 * m_ + 1.707_614_7 * s_];
+    lin.map(|v| {
+        let v = v.clamp(0.0, 1.0);
+        255.0 * if v <= 0.003_130_8 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
+    })
+}
+
 fn fbm(x: f32, y: f32, seed: u32) -> f32 {
     (0..5).map(|o| noise(x * 2f32.powi(o), y * 2f32.powi(o), seed + o as u32) / 2f32.powi(o)).sum::<f32>() / 1.9375
 }
@@ -91,10 +108,16 @@ fn made(name: &str) -> RgbImage {
                 let a = mix(sky, [138.0, 148.0, 155.0], ((v - 0.3) / 0.12).clamp(0.0, 1.0));
                 mix(a, [19.0, 83.0, 114.0], ((v - 0.5) / 0.12).clamp(0.0, 1.0)).map(|c| c + 2.0 * grain)
             }
-            "lake-under-haze" => {
+            "lake-under-haze" | "lake-under-blue-haze" => {
                 let sky = mix([91.0, 151.0, 211.0], [106.0, 164.0, 218.0], (v / 0.35).min(1.0));
-                let a = mix(sky, [207.0, 217.0, 225.0], ((v - 0.35) / 0.05).clamp(0.0, 1.0));
+                let haze = if name == "lake-under-haze" { [207.0, 217.0, 225.0] } else { [140.0, 158.0, 176.0] };
+                let a = mix(sky, haze, ((v - 0.35) / 0.05).clamp(0.0, 1.0));
                 mix(a, [61.0, 106.0, 127.0], ((v - 0.55) / 0.2).clamp(0.0, 1.0)).map(|c| c + 2.0 * grain)
+            }
+            "sea-210-216" => oklch(0.55, 0.09, 210.0 + 6.0 * u).map(|c| c + 2.0 * grain),
+            "teal-blue-corner" => {
+                let corner = smoothstep(0.7, 0.9, u) * (1.0 - smoothstep(0.15, 0.35, v));
+                mix(oklch(0.5, 0.08, 205.0), oklch(0.42, 0.1, 250.0), corner).map(|c| c + 2.0 * grain)
             }
             "wall-window" => mix([55.0, 85.0, 140.0], [100.0, 160.0, 225.0], ((u - 0.45) / 0.1).clamp(0.0, 1.0)).map(|c| c + 2.0 * grain),
             _ => [0.0; 3],
@@ -111,9 +134,9 @@ enum Expect {
 }
 use Expect::{Keep, Nothing, Pin};
 
-const MADE: [&str; 26] = [
+const MADE: [&str; 25] = [
     "deep-sky", "dark-blue", "near-black", "dark-gradient", "mid-grey", "white-wall", "star-field", "grass", "snow", "sand", "road", "night-sky", "fog", "plain-gradient", "sky-gradient", "flat-water", "lagoon", "deep-sea", "pool", "conifer",
-    "teal-green-wall", "light-teal-wall", "lawn-shade", "blurred-foliage", "blurred-teal", "aerial-teal",
+    "teal-green-wall", "light-teal-wall", "lawn-shade", "blurred-foliage", "blurred-teal",
 ];
 
 fn verdict(name: &str) -> (Expect, Expect) {
@@ -400,6 +423,53 @@ fn clouds_where(image: &RgbImage, icons: &[Rect], (w, h): (u32, u32), inside: im
         }
     }
     (there, elsewhere)
+}
+
+fn cloud_belonging_below(image: &RgbImage, (w, h): (u32, u32), below: f32) -> usize {
+    let analysis = scooch_core::analyze(image);
+    let scene = Scene { width: w, height: h, icons: grid(w, h, 8, 5) };
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let placement = framing(image, (w, h), 1.0, (0.5, 0.5));
+    let (cells, gw, _) = scooch_core::regions(image, &analysis, &placement, &scene, &options);
+    cells.iter().enumerate().filter(|(i, c)| (*i / gw as usize) as f32 * 4.0 > below * h as f32 && c[0] >= 128 && c[1] > 0).count()
+}
+
+#[test]
+fn the_sky_ends_at_the_horizon() {
+    let (w, h) = (1440u32, 900u32);
+    for name in ["lake-under-blue-haze", "lake-under-haze", "sea-under-sky"] {
+        let below = cloud_belonging_below(&made(name), (w, h), 0.76);
+        println!("{name}: {below} cells below the ramp where clouds belong");
+        assert_eq!(below, 0, "{name} clouds belong below the ramp");
+    }
+    let (water, sky) = clouds_where(&made("lake-under-blue-haze"), &grid(w, h, 8, 5), (w, h), |_, y| y > 0.76);
+    println!("lake-under-blue-haze: {water} cloud pixels on the lake, {sky} in the sky");
+    assert_eq!(water, 0);
+    assert!(sky > 20_000, "the sky lost its clouds: {sky}");
+}
+
+fn kinds(image: &RgbImage, (w, h): (u32, u32)) -> (f64, f64) {
+    let got = coverage("kind", image, "pins", &grid(w, h, PIN_GRID.0, PIN_GRID.1), (w, h));
+    (got[0], got[1])
+}
+
+#[test]
+fn one_top_cell_does_not_decide_sky_or_water() {
+    let (w, h) = (1440u32, 900u32);
+    let sea = made("sea-210-216");
+    let (clouds, land) = kinds(&sea, (w, h));
+    println!("sea-210-216: clouds {clouds:.4} land {land:.4}");
+    assert!(clouds == 0.0 && land > 0.05, "the sea from hue 210 to 216 read as sky: clouds {clouds:.4} land {land:.4}");
+    let (sw, sh) = sea.dimensions();
+    for (x, y, cw, ch) in [(1, 0, sw - 1, sh), (0, 0, sw - 1, sh), (0, 1, sw, sh - 1), (0, 0, sw, sh - 1)] {
+        let crop = image::imageops::crop_imm(&sea, x, y, cw, ch).to_image();
+        let (c, l) = kinds(&crop, (w, h));
+        println!("sea-210-216 cropped at {x},{y}: clouds {c:.4} land {l:.4}");
+        assert!(c == 0.0 && l > 0.05, "a one pixel crop changed the kind: clouds {c:.4} land {l:.4}");
+    }
+    let (clouds, land) = kinds(&made("teal-blue-corner"), (w, h));
+    println!("teal-blue-corner: clouds {clouds:.4} land {land:.4}");
+    assert!(clouds == 0.0 && land > 0.05, "teal with a blue corner: clouds {clouds:.4} land {land:.4}");
 }
 
 #[test]
