@@ -544,7 +544,7 @@ mod running {
         }
 
         fn start(&mut self, want: Want) {
-            let (events, waker) = (self.events.clone(), self.waker.clone());
+            let (events, waker, out) = (self.events.clone(), self.waker.clone(), self.out.clone());
             let device = self.gpu.as_ref().map(|(gpu, _)| gpu.clone());
             let (key, cached, composition) = (want.key.clone(), want.canvas.clone(), want.composition);
             let spawned = std::thread::Builder::new().name("scooch-live-warm".into()).spawn(move || {
@@ -552,6 +552,7 @@ mod running {
                 let reading = key.as_ref().and(cached).map(|path| std::thread::spawn(move || crate::live::canvas::read(&path).map(Arc::new).map_err(|error| format!("{error:#}"))));
                 let made = device.is_none().then(|| Gpu::new(composition));
                 if let Some(Ok(gpu)) = &made {
+                    say(&out, &Reply::Device { ms: started.elapsed().as_millis() as u64 });
                     if events.send(Event::Device { gpu: gpu.clone(), composition }).is_ok() {
                         waker();
                     }

@@ -88,13 +88,12 @@ struct Real {
     answered: Option<Adapter>,
     hello: Option<Duration>,
     drawn: Vec<(u32, [u32; 3])>,
-    device_warm: Option<u32>,
     device_after: Option<Duration>,
 }
 
 impl Real {
     fn new(helper: Helper) -> Self {
-        Self { helper, shown: Vec::new(), gone: Vec::new(), failed: Vec::new(), heard: Vec::new(), readies: Vec::new(), warm_id: None, answered: None, hello: None, drawn: Vec::new(), device_warm: None, device_after: None }
+        Self { helper, shown: Vec::new(), gone: Vec::new(), failed: Vec::new(), heard: Vec::new(), readies: Vec::new(), warm_id: None, answered: None, hello: None, drawn: Vec::new(), device_after: None }
     }
 
     fn pump(&mut self, timeout: Duration) -> Result<bool> {
@@ -109,6 +108,7 @@ impl Real {
             Reply::Shown { id, .. } if self.gone.contains(&id) => {}
             Reply::Shown { id, .. } => self.shown.push((id, self.helper.arrived().unwrap_or_else(Instant::now))),
             Reply::Closed { .. } => {}
+            Reply::Device { .. } => self.device_after = self.device_after.or(self.helper.since_launch()),
             Reply::Drawn { id, window, first, reveal } => {
                 if self.drawn.len() >= 8 {
                     self.drawn.remove(0);
@@ -123,9 +123,6 @@ impl Real {
             Reply::Ready { adapter, kind, warm_id, from, scale, .. } => {
                 let after = self.helper.since_launch();
                 let adapter = Adapter { name: adapter, kind, from, scale, after };
-                if warm_id.is_some() && warm_id == self.device_warm {
-                    self.device_after = self.device_after.or(after);
-                }
                 if warm_id.is_some() && warm_id == self.warm_id && self.answered.is_none() {
                     self.answered = Some(adapter.clone());
                 }
@@ -159,12 +156,12 @@ impl Real {
 
 impl Link for Real {
     fn device(&mut self) -> Result<()> {
-        self.device_warm = Some(self.helper.ask_warm_with(Hints::default(), None, None, None, BTreeMap::new())?);
+        self.helper.ask_warm_with(Hints::default(), None, None, None, BTreeMap::new())?;
         Ok(())
     }
 
     fn device_ready(&mut self) -> Option<Duration> {
-        while self.device_warm.is_some() && self.device_after.is_none() && matches!(self.pump(Duration::ZERO), Ok(true)) {}
+        while self.device_after.is_none() && matches!(self.pump(Duration::ZERO), Ok(true)) {}
         self.device_after
     }
 
