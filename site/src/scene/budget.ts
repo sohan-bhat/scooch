@@ -1,13 +1,29 @@
 import { quiet } from '@/lib/idle';
+import { runtime } from '@/story/state';
 import { quality } from './quality';
+import { still } from './still';
 
 type Connection = { saveData?: boolean; effectiveType?: string };
 type Level = 'none' | 'main' | 'all';
 
-export const budget = { stage: 0, busy: true, since: performance.now() };
+export const budget = { stage: 0, busy: true, steps: 0, lastStepAt: 0 };
 
-export function idleBudget() {
-  return !budget.busy || performance.now() - budget.since > 60000;
+const waiting: (() => void)[] = [];
+
+export function stillsPlanned() {
+  return quality.stillScale < 0.999 && runtime.still < 0 && !still.off;
+}
+
+export function grant(open: boolean) {
+  if (!open || waiting.length === 0) return;
+  budget.steps += 1;
+  budget.lastStepAt = performance.now();
+  still.stale = true;
+  waiting.shift()?.();
+}
+
+export function release() {
+  for (const resume of waiting.splice(0)) resume();
 }
 
 export function finished() {
@@ -38,6 +54,11 @@ const HEADROOM = 600;
 
 export async function calm() {
   for (;;) {
+    if (stillsPlanned()) {
+      await new Promise<void>((resolve) => waiting.push(resolve));
+      if (stillsPlanned()) return;
+      continue;
+    }
     await quiet();
     if (!quality.moving && quality.chain === 'sharp' && performance.now() - quality.slowAt > HEADROOM) return;
     await new Promise((resolve) => window.setTimeout(resolve, 300));

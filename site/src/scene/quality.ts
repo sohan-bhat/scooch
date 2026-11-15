@@ -58,6 +58,7 @@ const settings: Record<GpuClass, Settings> = {
 };
 
 const FAST: number | undefined = undefined;
+const LATE: boolean | undefined = undefined;
 const NATIVE = 2;
 const EARN = 2000;
 const EARN_LIMIT = 32000;
@@ -84,6 +85,10 @@ class Quality {
   sharpDpr = 1;
   nativeDpr = 1;
   liveScale = 1;
+  stillScale = 1;
+  late = true;
+  switched = false;
+  onNative: (() => void) | null = null;
   fastScale = 1;
   chain: Chain = 'sharp';
   switchAt = -1e9;
@@ -109,8 +114,14 @@ class Quality {
     this.grain = chosen.grain;
     this.nativeDpr = Math.min(Math.max(deviceDpr, 1), NATIVE);
     this.sharpDpr = Math.min(chosen.sharp, this.nativeDpr);
-    this.liveScale = this.sharpDpr / this.nativeDpr;
+    this.stillScale = this.sharpDpr / this.nativeDpr;
+    this.late = LATE ?? true;
+    this.liveScale = this.late && !this.switched ? 1 : this.stillScale;
     this.fastScale = Math.min(1, (FAST ?? chosen.fast) / this.sharpDpr);
+  }
+
+  get canvasDpr() {
+    return this.liveScale < 0.999 ? this.nativeDpr : this.sharpDpr;
   }
 
   liveSize(gl: WebGLRenderer, out: Vector2) {

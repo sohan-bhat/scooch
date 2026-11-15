@@ -96,7 +96,13 @@ export default function Stage({ onReady }: { onReady: () => void }) {
   const phone = layoutFor(window.innerWidth, window.innerHeight) === 'phone';
   const deviceDpr = window.devicePixelRatio || 1;
   quality.configure(phone, deviceDpr, gpuClass().gpu);
-  const dpr = runtime.still >= 0 ? Math.min(deviceDpr, 2) : quality.nativeDpr;
+  const [dpr, setDpr] = useState(() => (runtime.still >= 0 ? Math.min(deviceDpr, 2) : quality.canvasDpr));
+  useEffect(() => {
+    quality.onNative = () => setDpr(quality.nativeDpr);
+    return () => {
+      quality.onNative = null;
+    };
+  }, []);
 
   return (
     <div ref={host} className="absolute inset-0 overflow-hidden">

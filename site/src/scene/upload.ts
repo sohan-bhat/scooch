@@ -38,10 +38,9 @@ async function strips(gl: WebGLRenderer, texture: Texture, source: Source, wait:
   const rows = Math.max(16, Math.floor(STRIP / (width * 4)));
   const image = source instanceof ImageBitmap ? source : null;
   for (let y = 0; y < height; y += rows) {
-    await wait();
-    if (!alive()) return false;
     const count = Math.min(rows, height - y);
     const part = image ? await createImageBitmap(image, 0, y, width, count, { imageOrientation: texture.flipY ? 'flipY' : 'from-image' }) : null;
+    await wait();
     if (!alive()) {
       part?.close();
       return false;

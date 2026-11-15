@@ -8,7 +8,7 @@ import { quiet } from '@/lib/idle';
 import { runtime, story, wallClock } from '@/story/state';
 import { quality, type Toggle } from './quality';
 import { allocate, freeze, inView, nativeAllowed, nativeOff, screenBox, still, thaw } from './still';
-import { idleBudget } from './budget';
+import { budget, grant, release } from './budget';
 import { animating, hooks, live, things } from './touch';
 import { precompile } from './warm';
 
@@ -113,6 +113,30 @@ export function Post({ phone }: { phone: boolean }) {
   const sharpRender = useRef<((delta?: number) => void) | null>(null);
   const nativeRender = useRef<((delta?: number) => void) | null>(null);
   const [native, setNative] = useState(false);
+  const setDpr = useThree((state) => state.setDpr);
+  const switchWanted = useRef(false);
+  const warming = useRef(0);
+  const measured = useMemo(() => ({ css: new Vector2(), buffer: new Vector2() }), []);
+  const turnNative = useCallback(() => {
+    switchWanted.current = false;
+    const context = gl.getContext();
+    if (context.isContextLost() || still.off) return;
+    setDpr(quality.nativeDpr);
+    gl.getSize(measured.css);
+    gl.getDrawingBufferSize(measured.buffer);
+    const wide = Math.floor(measured.css.x * quality.nativeDpr);
+    const tall = Math.floor(measured.css.y * quality.nativeDpr);
+    if (context.isContextLost() || Math.abs(measured.buffer.x - wide) > 1 || Math.abs(measured.buffer.y - tall) > 1) {
+      setDpr(quality.sharpDpr);
+      nativeOff();
+      release();
+      return;
+    }
+    quality.switched = true;
+    quality.liveScale = quality.stillScale;
+    quality.onNative?.();
+    setNative(true);
+  }, [gl, setDpr, measured]);
   const full = !phone && quality.tier === 'full';
   const fast = quality.hasFast && runtime.still < 0;
   const copy = useMemo(() => new CopyPass(), []);
@@ -135,9 +159,9 @@ export function Post({ phone }: { phone: boolean }) {
     pass.fullscreenMaterial.depthWrite = false;
     return pass;
   }, []);
-  const total = useMemo(() => new WebGLRenderTarget(1, 1, { depthBuffer: false, colorSpace: SRGBColorSpace }), []);
+  const totals = useMemo(() => [0, 1].map(() => new WebGLRenderTarget(1, 1, { depthBuffer: false, colorSpace: SRGBColorSpace })), []);
   const accumulate = useMemo(() => {
-    const pass = new CopyPass(total, false);
+    const pass = new CopyPass(totals[0], false);
     pass.fullscreenMaterial.transparent = true;
     pass.fullscreenMaterial.blending = CustomBlending;
     pass.fullscreenMaterial.blendSrc = ConstantAlphaFactor;
@@ -145,7 +169,7 @@ export function Post({ phone }: { phone: boolean }) {
     pass.fullscreenMaterial.depthTest = false;
     pass.fullscreenMaterial.depthWrite = false;
     return pass;
-  }, [total]);
+  }, [totals]);
   const size = useMemo(() => new Vector2(), []);
 
   useEffect(() => {
@@ -165,9 +189,9 @@ export function Post({ phone }: { phone: boolean }) {
       overlay.dispose();
       present.dispose();
       accumulate.dispose();
-      total.dispose();
+      for (const target of totals) target.dispose();
     };
-  }, [copy, overlay, present, accumulate, total]);
+  }, [copy, overlay, present, accumulate, totals]);
 
   useEffect(() => {
     const input = () => {
@@ -175,7 +199,11 @@ export function Post({ phone }: { phone: boolean }) {
     };
     const events = ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'] as const;
     for (const name of events) window.addEventListener(name, input, { passive: true });
-    const lost = () => nativeOff();
+    const lost = () => {
+      nativeOff();
+      switchWanted.current = false;
+      release();
+    };
     gl.domElement.addEventListener('webglcontextlost', lost);
     return () => {
       for (const name of events) window.removeEventListener(name, input);
@@ -184,7 +212,7 @@ export function Post({ phone }: { phone: boolean }) {
   }, [gl]);
 
   useEffect(() => {
-    if (runtime.still >= 0 || quality.liveScale >= 0.999) return;
+    if (runtime.still >= 0 || quality.stillScale >= 0.999) return;
     let stopped = false;
     let timer = 0;
     const wait = () => {
@@ -194,9 +222,14 @@ export function Post({ phone }: { phone: boolean }) {
         timer = window.setTimeout(wait, 500);
         return;
       }
-      if (!nativeAllowed(gl)) return;
+      if (!nativeAllowed(gl)) {
+        still.off = true;
+        release();
+        return;
+      }
       still.bands = quality.gpu === 'low' && !quality.phone ? 6 : 3;
-      setNative(true);
+      if (quality.liveScale < 0.999) setNative(true);
+      else switchWanted.current = true;
     };
     timer = window.setTimeout(wait, 500);
     return () => {
@@ -269,15 +302,21 @@ export function Post({ phone }: { phone: boolean }) {
         await quiet();
         await precompile(gl, scene, camera, [value, { passes: [present, overlay, accumulate] }]);
         gl.getDrawingBufferSize(size);
-        total.setSize(size.x, size.y);
-        await quiet();
-        gl.initRenderTarget(total);
+        for (const target of totals) {
+          target.setSize(size.x, size.y);
+          await quiet();
+          gl.initRenderTarget(target);
+        }
         await quiet();
         hooks.frame?.prepare(gl);
-        if (await allocate(gl, value)) still.ready = true;
-      })().catch(() => nativeOff());
+        if (await allocate(gl, value)) warming.current = 3;
+        else release();
+      })().catch(() => {
+        nativeOff();
+        release();
+      });
     },
-    [gl, scene, camera, size, total, present, overlay, accumulate],
+    [gl, scene, camera, size, totals, present, overlay, accumulate],
   );
 
   useEffect(() => {
@@ -341,6 +380,53 @@ export function Post({ phone }: { phone: boolean }) {
     return true;
   }, [gl, scene, camera]);
 
+  const warm = useCallback(() => {
+    const composer = quality.nativeComposer;
+    const render = nativeRender.current;
+    if (!composer || !render || still.off) {
+      warming.current = 0;
+      return;
+    }
+    const step = warming.current;
+    warming.current -= 1;
+    if (step === 3) {
+      const target = composer.inputBuffer;
+      target.scissor.set(0, 0, 1, 1);
+      target.scissorTest = true;
+      const previous = gl.getRenderTarget();
+      const clear = gl.autoClear;
+      gl.setRenderTarget(target);
+      gl.clear();
+      gl.autoClear = false;
+      gl.render(scene, camera);
+      gl.autoClear = clear;
+      gl.setRenderTarget(previous);
+      target.scissorTest = false;
+      return;
+    }
+    if (step === 2) {
+      const first = composer.passes[0];
+      first.enabled = false;
+      grab(composer.passes[composer.passes.length - 1], () => render(0));
+      first.enabled = true;
+      return;
+    }
+    runtime.muted = true;
+    hooks.frame?.renderRows(gl, story.place, 0, 1);
+    runtime.muted = false;
+    const into = totals[1 - still.target];
+    accumulate.renderTarget = into;
+    accumulate.fullscreenMaterial.blendAlpha = 1;
+    into.scissor.set(0, 0, 1, 1);
+    into.scissorTest = true;
+    const clear = gl.autoClear;
+    gl.autoClear = false;
+    accumulate.render(gl, composer.outputBuffer, null as never);
+    gl.autoClear = clear;
+    into.scissorTest = false;
+    still.ready = true;
+  }, [gl, scene, camera, totals, accumulate]);
+
   const place = useCallback(
     (full: boolean) => {
       if (quality.liveScale >= 0.999) return;
@@ -375,13 +461,14 @@ export function Post({ phone }: { phone: boolean }) {
         quality.chain === 'sharp' &&
         now - quality.blendAt > BLEND &&
         now - still.inputAt > STILL_AFTER &&
-        now - runtime.changedAt > STILL_AFTER &&
-        idleBudget();
+        (still.phase === 'still' || still.refresh || now - runtime.changedAt > STILL_AFTER);
       if (still.phase !== 'live' && !calm) {
         still.phase = 'live';
         still.showing = false;
         still.full = false;
         still.box = null;
+        still.refresh = false;
+        still.from = null;
         quality.hold = false;
         thaw();
         return;
@@ -402,6 +489,7 @@ export function Post({ phone }: { phone: boolean }) {
         still.pass = 0;
         still.row = 0;
         still.tick = false;
+        still.stale = false;
         still.phase = still.live ? 'screen' : 'live';
         return;
       }
@@ -446,21 +534,24 @@ export function Post({ phone }: { phone: boolean }) {
           still.showing = false;
           return;
         }
+        const into = totals[still.refresh ? 1 - still.target : still.target];
+        accumulate.renderTarget = into;
         accumulate.fullscreenMaterial.blendAlpha = 1 / (still.pass + 1);
         const clear = gl.autoClear;
         gl.autoClear = false;
         const box = still.box;
         if (box) {
-          total.scissor.set(box.x, box.y, box.w, box.h);
-          total.scissorTest = true;
+          into.scissor.set(box.x, box.y, box.w, box.h);
+          into.scissorTest = true;
         }
         accumulate.render(gl, { texture: image } as WebGLRenderTarget, null as never);
-        total.scissorTest = false;
+        into.scissorTest = false;
         gl.autoClear = clear;
-        still.image = total.texture;
-        if (still.pass === 0 && !still.tick) {
+        if (!still.refresh) still.image = into.texture;
+        if (still.pass === 0 && !still.tick && !still.refresh) {
           still.phase = 'show';
           still.shownAt = now;
+          still.from = still.live;
           still.second = Math.floor(wallClock() / 1000);
           return;
         }
@@ -470,11 +561,20 @@ export function Post({ phone }: { phone: boolean }) {
           still.phase = 'bands';
           return;
         }
+        if (still.refresh) {
+          still.from = still.image;
+          still.image = into.texture;
+          still.shownAt = now;
+          still.tick = false;
+          still.phase = 'show';
+          return;
+        }
         still.tick = true;
         still.phase = 'show';
         return;
       }
       if (still.phase === 'still') {
+        if (runtime.changedAt > still.builtAt) still.stale = true;
         if (still.pass < JITTER.length - 1) {
           still.pass += 1;
           still.band = 0;
@@ -490,10 +590,19 @@ export function Post({ phone }: { phone: boolean }) {
           still.pass = 0;
           still.tick = true;
           still.phase = 'bands';
+          return;
+        }
+        if (still.stale && (!budget.busy || now - budget.lastStepAt > 1000)) {
+          still.stale = false;
+          still.refresh = true;
+          still.row = 0;
+          still.band = 0;
+          still.pass = 0;
+          still.phase = 'screen';
         }
       }
     },
-    [band, camera, accumulate, gl, total],
+    [band, camera, accumulate, gl, totals],
   );
 
   const show = useCallback(
@@ -501,14 +610,20 @@ export function Post({ phone }: { phone: boolean }) {
       if (!still.image) return;
       present.render(gl, { texture: still.image } as WebGLRenderTarget, null as never);
       const t = still.tick ? 1 : (now - still.shownAt) / BLEND;
-      if (t < 1 && still.live) {
+      if (t < 1 && still.from) {
         overlay.fullscreenMaterial.blendAlpha = 1 - t;
         const clear = gl.autoClear;
         gl.autoClear = false;
-        overlay.render(gl, { texture: still.live } as WebGLRenderTarget, null as never);
+        overlay.render(gl, { texture: still.from } as WebGLRenderTarget, null as never);
         gl.autoClear = clear;
         return;
       }
+      if (still.refresh) {
+        still.target = 1 - still.target;
+        still.refresh = false;
+      }
+      still.builtAt = performance.now();
+      still.from = null;
       still.phase = 'still';
       still.tick = false;
       still.box = null;
@@ -531,7 +646,10 @@ export function Post({ phone }: { phone: boolean }) {
       quality.switchAt = now;
       quality.chain = want;
     }
+    if (switchWanted.current && !moving && !live.pressing && still.phase === 'live') turnNative();
+    else if (warming.current > 0 && !moving && still.phase === 'live') warm();
     settle(now, moving, state.clock.elapsedTime - runtime.timeShift);
+    grant(still.phase === 'still' && still.pass >= JITTER.length - 1 && !still.tick && !still.refresh);
     if (still.phase === 'show') still.showing = true;
     place(still.showing);
     if (still.phase === 'show') show(now);

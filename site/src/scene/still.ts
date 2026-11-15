@@ -2,6 +2,7 @@ import type { EffectComposer, Pass } from 'postprocessing';
 import { Box3, Frustum, Matrix4, Texture, Vector2, Vector3, type Camera, type Object3D, type Texture as TextureType, type WebGLRenderer, type WebGLRenderTarget } from 'three';
 import { quiet } from '@/lib/idle';
 import { changed, runtime } from '@/story/state';
+import { quality } from './quality';
 
 export type Phase = 'live' | 'capture' | 'screen' | 'bands' | 'post' | 'show' | 'still';
 
@@ -25,6 +26,11 @@ export const still = {
   ready: false,
   off: false,
   box: null as { x: number; y: number; w: number; h: number } | null,
+  stale: false,
+  refresh: false,
+  builtAt: 0,
+  target: 0,
+  from: null as TextureType | null,
 };
 
 const descriptor = Object.getOwnPropertyDescriptor(Texture.prototype, 'needsUpdate');
@@ -48,9 +54,9 @@ export function nativeAllowed(gl: WebGLRenderer) {
   const memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
   if (memory !== undefined && memory < 4) return false;
   const context = gl.getContext();
-  const size = gl.getDrawingBufferSize(new Vector2());
+  const size = gl.getSize(new Vector2()).multiplyScalar(quality.nativeDpr);
   const largest = context.getParameter(context.MAX_TEXTURE_SIZE) as number;
-  return size.x <= largest && size.y <= largest;
+  return Math.ceil(size.x) <= largest && Math.ceil(size.y) <= largest;
 }
 
 export function nativeOff() {

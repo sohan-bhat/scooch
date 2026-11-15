@@ -404,13 +404,14 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       if (!handle) return false;
       const rows = Math.max(32, Math.ceil(height / 24));
       for (let y = 0; y < height; y += rows) {
+        const strip = await createImageBitmap(bitmap, 0, y, width, Math.min(rows, height - y));
         await wait();
         if (started !== generation || context.isContextLost()) {
+          strip.close();
           bitmap.close();
           texture.dispose();
           return false;
         }
-        const strip = await createImageBitmap(bitmap, 0, y, width, Math.min(rows, height - y));
         gl.state.bindTexture(context.TEXTURE_2D, handle);
         gl.state.pixelStorei(context.UNPACK_FLIP_Y_WEBGL, false);
         gl.state.pixelStorei(context.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
