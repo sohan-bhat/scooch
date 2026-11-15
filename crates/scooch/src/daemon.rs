@@ -856,7 +856,8 @@ impl Daemon {
             return Ok(Outcome::Plain);
         }
         let drawn = scene::fingerprint(&source, scene, options);
-        if !wanted && !entry.painted && showing_output && entry.placement.as_ref() == Some(&placement) && (options.pads <= 0.0 || entry.drawn.as_deref() == Some(drawn.as_str())) {
+        let ours = showing_output || (output.is_some() && current.is_none() && self.settling(&screen.id));
+        if !wanted && !entry.painted && ours && entry.placement.as_ref() == Some(&placement) && (options.pads <= 0.0 || entry.drawn.as_deref() == Some(drawn.as_str())) {
             if let Some(glider) = glider.as_deref_mut() {
                 glider.close_early_for(&screen.id);
             }
