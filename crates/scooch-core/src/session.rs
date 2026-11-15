@@ -120,7 +120,7 @@ impl Session {
     }
 
     pub fn still(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Bundle, RgbImage) {
-        let Some(held) = self.advance(image, analysis, placement, scene, options, true) else { return render::still(image, analysis, placement, scene, options) };
+        let Some(held) = self.advance::<true>(image, analysis, placement, scene, options) else { return render::still(image, analysis, placement, scene, options) };
         let mut bundle = (*held.bundle).clone();
         if !held.shrunk && bundle.canvas.is_empty() {
             bundle.canvas = image.as_raw().clone();
@@ -130,7 +130,7 @@ impl Session {
     }
 
     pub fn still_shared(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Arc<Bundle>, Arc<RgbImage>) {
-        let Some(held) = self.advance(image, analysis, placement, scene, options, true) else {
+        let Some(held) = self.advance::<true>(image, analysis, placement, scene, options) else {
             let (bundle, still) = render::still(image, analysis, placement, scene, options);
             return (Arc::new(bundle), Arc::new(still));
         };
@@ -142,7 +142,7 @@ impl Session {
     }
 
     pub fn tables_shared(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> Arc<Bundle> {
-        let Some(held) = self.advance(image, analysis, placement, scene, options, false) else {
+        let Some(held) = self.advance::<false>(image, analysis, placement, scene, options) else {
             return Arc::new(crate::bundle(image, analysis, placement, scene, options));
         };
         if !held.shrunk && held.bundle.canvas.is_empty() {
@@ -151,7 +151,7 @@ impl Session {
         Arc::clone(&held.bundle)
     }
 
-    fn advance(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options, draw: bool) -> Option<&mut Held> {
+    fn advance<const DRAW: bool>(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> Option<&mut Held> {
         let (sw, sh) = image.dimensions();
         if sw == 0 || sh == 0 || scene.width == 0 || scene.height == 0 {
             self.held = None;
@@ -161,7 +161,7 @@ impl Session {
         let held = match self.held.take() {
             Some(mut h) if h.image == key.0 && h.source == (sw, sh) && h.scene.width == scene.width && h.scene.height == scene.height => {
                 if h.analysis == key.1 && h.placement == *placement && h.options == *options {
-                    shift(h, image, analysis, scene, key)
+                    shift::<DRAW>(h, image, analysis, scene, key)
                 } else {
                     let kept = (reuse(&mut h), h.parts.belonging.take().filter(|_| h.analysis == key.1));
                     build(image, analysis, placement, scene, options, key, kept)
@@ -170,7 +170,7 @@ impl Session {
             _ => build(image, analysis, placement, scene, options, key, (None, None)),
         };
         let mut held = held;
-        if !draw {
+        if !DRAW {
             held.still = None;
         } else if held.still.is_none() {
             paint_still(&mut held, image, analysis, scene, options);
@@ -230,7 +230,7 @@ fn paint_still(h: &mut Held, image: &RgbImage, analysis: &Analysis, scene: &Scen
     h.redraw = None;
 }
 
-fn shift(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key: (u64, u64)) -> Held {
+fn shift<const DRAW: bool>(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key: (u64, u64)) -> Held {
     let (old, new) = (solver::screen_rects(&h.scene), solver::screen_rects(scene));
     if old == new {
         h.scene = scene.clone();
@@ -238,7 +238,8 @@ fn shift(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key:
         return h;
     }
     let options = h.options;
-    let (was, now) = (scenery::active(&h.scene, &options), scenery::active(scene, &options));
+    let bare = h.parts.fixed.is_none() && h.parts.belonging.as_ref().is_some_and(|b| b.empty && shape::ground(scene).is_some_and(|g| b.fits(h.source, (scene.width, scene.height), g.u, &options)));
+    let (was, now) = (scenery::active(&h.scene, &options) && !bare, scenery::active(scene, &options) && !bare);
     if !was && !now {
         h.parts.repad(analysis, scene, &options);
         let grid = h.parts.framed.grid;
@@ -252,7 +253,7 @@ fn shift(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key:
         return h;
     }
     match (was && now).then(|| changes(&old, &new)).flatten() {
-        Some(moved) if lean(&mut h, analysis, scene, &moved) => h,
+        Some(moved) if lean::<DRAW>(&mut h, analysis, scene, &moved) => h,
         _ => {
             let placement = h.placement.clone();
             let kept = (reuse(&mut h), h.parts.belonging.take());
@@ -261,7 +262,7 @@ fn shift(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key:
     }
 }
 
-fn lean(h: &mut Held, analysis: &Analysis, scene: &Scene, moved: &[[f64; 4]]) -> bool {
+fn lean<const DRAW: bool>(h: &mut Held, analysis: &Analysis, scene: &Scene, moved: &[[f64; 4]]) -> bool {
     let Some(g) = shape::ground(scene) else { return false };
     let parts = &mut h.parts;
     let (Some(fixed), Some(live), Some(grounded)) = (parts.fixed.as_ref(), parts.live.as_mut(), parts.grounded.as_ref()) else { return false };
@@ -320,7 +321,7 @@ fn lean(h: &mut Held, analysis: &Analysis, scene: &Scene, moved: &[[f64; 4]]) ->
     let mut around: Vec<Area> = halves.iter().map(|a| area::grow(*a, margin, w, hh)).collect();
     around.extend(boxes.iter().map(|a| area::grow(*a, 3, w, hh)));
     let around = area::merge(around);
-    let Some(picture) = h.picture.as_ref().filter(|_| h.still.is_some()) else {
+    let Some(picture) = h.picture.as_ref().filter(|_| DRAW && h.still.is_some()) else {
         h.still = None;
         h.redraw = None;
         return true;

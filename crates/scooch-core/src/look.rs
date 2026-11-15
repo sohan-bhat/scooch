@@ -216,9 +216,7 @@ pub fn active(found: &Analysis, placement: &Placement, scene: &Scene, options: &
 }
 
 fn skyish(lab: [f32; 3]) -> bool {
-    let [l, a, b] = lab;
-    let chroma = (a * a + b * b).sqrt();
-    let hue = math::atan2(b, a).to_degrees().rem_euclid(360.0);
+    let (l, chroma, hue) = colour_of(lab);
     (chroma >= SKY_CHROMA && hue >= SKY_HUE.0 && hue <= SKY_HUE.1) || (chroma < WHITE_CHROMA && l > WHITE_LIGHT)
 }
 
@@ -302,8 +300,9 @@ fn allowances(lab: &[[f32; 3]], grid: &Grid, u: f32, sand: f32) -> (Vec<f32>, Ve
     let spread = |k: f32| k * u / grid.cell as f32;
     let soft: Vec<Vec<f32>> = (0..3).map(|k| blurred(&lab.iter().map(|c| c[k]).collect::<Vec<f32>>(), grid, spread(ALLOW_COLOUR))).collect();
     let colour: Vec<[f32; 3]> = (0..lab.len()).map(|i| [soft[0][i], soft[1][i], soft[2][i]]).collect();
-    let seed = |pass: &dyn Fn([f32; 3]) -> f32| opened(&colour.iter().map(|c| pass(*c) >= 0.5).collect::<Vec<bool>>(), grid, ALLOW_OPEN * u);
-    (blurred(&grown(&seed(&sky_colour), &colour, grid), grid, spread(ALLOW_SOFT)), blurred(&seed(&|c| water_colour(c, sand)), grid, spread(ALLOW_SOFT)))
+    let marks: Vec<[bool; 2]> = colour.iter().map(|c| [sky_colour(*c) >= 0.5, water_colour(*c, sand) >= 0.5]).collect();
+    let seed = |k: usize| opened(&marks.iter().map(|m| m[k]).collect::<Vec<bool>>(), grid, ALLOW_OPEN * u);
+    (blurred(&grown(&seed(0), &colour, grid), grid, spread(ALLOW_SOFT)), blurred(&seed(1), grid, spread(ALLOW_SOFT)))
 }
 
 fn blurred(values: &[f32], grid: &Grid, spread: f32) -> Vec<f32> {
