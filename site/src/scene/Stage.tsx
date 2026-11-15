@@ -4,11 +4,13 @@ import { Canvas, useThree } from '@react-three/fiber';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { setConsoleFunction } from 'three';
 import { suspend } from 'suspend-react';
+import { detectTier } from '@/lib/tier';
 import { loadManifest } from '@/story/demo';
 import { pointer, runtime } from '@/story/state';
 import { Post } from './Post';
 import { Governor } from './Governor';
-import { gpuClass, quality } from './quality';
+import { Tiering } from './Tiering';
+import { firstGuess, gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { ScreenTextures } from './screen/useScreen';
 import { Surroundings, World } from './World';
@@ -95,7 +97,9 @@ export default function Stage({ onReady }: { onReady: () => void }) {
   const shown = useShown();
   const phone = layoutFor(window.innerWidth, window.innerHeight) === 'phone';
   const deviceDpr = window.devicePixelRatio || 1;
-  quality.configure(phone, deviceDpr, gpuClass().gpu);
+  const detected = suspend(detectTier, ['scooch-tier']);
+  quality.detected = detected;
+  quality.configure(phone, deviceDpr, firstGuess(gpuClass().gpu, detected));
   const [dpr, setDpr] = useState(() => (runtime.still >= 0 ? Math.min(deviceDpr, 2) : quality.canvasDpr));
   useEffect(() => {
     quality.onNative = () => setDpr(quality.nativeDpr);
@@ -126,6 +130,7 @@ export default function Stage({ onReady }: { onReady: () => void }) {
         </Suspense>
         <Pauser host={host} />
         {runtime.still < 0 && <Governor />}
+        {runtime.still < 0 && <Tiering />}
       </Canvas>
       {shown ? (
         <Suspense fallback={null}>

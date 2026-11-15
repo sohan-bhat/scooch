@@ -185,6 +185,19 @@ export function Post({ phone }: { phone: boolean }) {
   }, [gl, setDpr, measured]);
   const full = !phone && quality.tier === 'full';
   const fast = quality.hasFast && runtime.still < 0;
+  const [level, setLevel] = useState(quality.gpu);
+  const applied = useRef(level);
+  useEffect(() => {
+    quality.onLevel = setLevel;
+    return () => {
+      quality.onLevel = null;
+    };
+  }, []);
+  useEffect(() => {
+    if (applied.current === level) return;
+    applied.current = level;
+    void precompile(gl, scene, camera, [quality.composer, quality.fastComposer, quality.nativeComposer]).finally(() => changed());
+  }, [level, gl, scene, camera]);
   const copy = useMemo(() => new CopyPass(), []);
   const overlay = useMemo(() => {
     const pass = new CopyPass();

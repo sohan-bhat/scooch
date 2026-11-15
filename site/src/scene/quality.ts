@@ -27,6 +27,21 @@ function classify(renderer: string): GpuClass {
   return 'high';
 }
 
+const ORDER: GpuClass[] = ['low', 'mid', 'high'];
+
+function lower(a: GpuClass, b: GpuClass) {
+  return ORDER[Math.min(ORDER.indexOf(a), ORDER.indexOf(b))];
+}
+
+export type Detected = { tier: number; type: string } | null;
+
+export function firstGuess(named: GpuClass, detected: Detected): GpuClass {
+  if (!detected) return lower(named, 'mid');
+  if (detected.type === 'BENCHMARK') return lower(named, detected.tier >= 3 ? 'high' : detected.tier === 2 ? 'mid' : 'low');
+  if (detected.type === 'FALLBACK') return lower(named, 'mid');
+  return 'low';
+}
+
 export function gpuClass(): Probe {
   if (probed) return probed;
   const extensions = new Set<string>();
@@ -103,8 +118,16 @@ class Quality {
   motionSharp = false;
   earned = 0;
   earnFor = EARN;
+  native = false;
+  configured = false;
+  detected: Detected = null;
+  failed = new Map<GpuClass, number>();
+  changes = 0;
+  onLevel: ((level: GpuClass) => void) | null = null;
 
   configure(phone: boolean, deviceDpr: number, gpu: GpuClass) {
+    if (this.configured) return;
+    this.configured = true;
     this.phone = phone;
     this.gpu = phone ? 'low' : gpu;
     this.tier = this.gpu === 'low' ? 'light' : 'full';
@@ -118,6 +141,39 @@ class Quality {
     this.late = LATE ?? true;
     this.liveScale = this.late && !this.switched ? 1 : this.stillScale;
     this.fastScale = Math.min(1, (FAST ?? chosen.fast) / this.sharpDpr);
+    this.native = this.stillScale < 0.999;
+  }
+
+  get ceiling(): GpuClass {
+    return this.phone ? 'low' : this.tier === 'full' ? 'high' : 'low';
+  }
+
+  step(direction: 1 | -1): GpuClass | null {
+    const index = ORDER.indexOf(this.gpu) + direction;
+    if (index < 0 || index > ORDER.indexOf(this.ceiling)) return null;
+    const next = ORDER[index];
+    if (direction > 0 && (this.failed.get(next) ?? 0) >= 2) return null;
+    return next;
+  }
+
+  setLevel(level: GpuClass) {
+    if (level === this.gpu || this.phone) return;
+    if (ORDER.indexOf(level) < ORDER.indexOf(this.gpu)) this.failed.set(this.gpu, (this.failed.get(this.gpu) ?? 0) + 1);
+    const chosen = settings[level];
+    this.gpu = level;
+    this.dof = chosen.dof;
+    this.ao = chosen.ao;
+    this.grain = chosen.grain;
+    if (this.native) {
+      this.sharpDpr = Math.min(chosen.sharp, this.nativeDpr * 0.9);
+      this.stillScale = this.sharpDpr / this.nativeDpr;
+      if (this.switched) this.liveScale = this.stillScale;
+    }
+    this.fastScale = Math.min(1, (FAST ?? chosen.fast) / this.sharpDpr);
+    this.changes += 1;
+    this.composer?.setSize(0, 0);
+    this.fastComposer?.setSize(0, 0);
+    this.onLevel?.(level);
   }
 
   get canvasDpr() {

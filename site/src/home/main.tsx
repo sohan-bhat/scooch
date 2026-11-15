@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot, hydrateRoot } from 'react-dom/client';
 import '@/styles/global.css';
+import { detectTier } from '@/lib/tier';
 import { loadManifest } from '@/story/demo';
 import { App } from './App';
 
@@ -10,6 +11,7 @@ const html = document.documentElement;
 const story = !html.classList.contains('stills-mode') && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 if (story) {
   void loadManifest();
+  void detectTier();
   void import('@/scene/Stage');
 }
 
