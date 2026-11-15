@@ -554,7 +554,15 @@ mod probe {
     }
 
     fn subject_picture(width: u32, height: u32, at: (f32, f32)) -> RgbImage {
-        let mut image = filled(width, height, [19, 90, 48]);
+        disc_picture(width, height, at, [20, 110, 120])
+    }
+
+    fn green_picture(width: u32, height: u32, at: (f32, f32)) -> RgbImage {
+        disc_picture(width, height, at, [19, 90, 48])
+    }
+
+    fn disc_picture(width: u32, height: u32, at: (f32, f32), water: [u8; 3]) -> RgbImage {
+        let mut image = filled(width, height, water);
         let (cx, cy) = (at.0 * width as f32, at.1 * height as f32);
         let radius = height as f32 / 7.0;
         for (x, y, pixel) in image.enumerate_pixels_mut() {
@@ -891,7 +899,7 @@ mod probe {
         p.line(format!("- {} sits on the subject and the other probe items sit in a calm column", PROBES[0].0));
         std::thread::sleep(Duration::from_millis(1500));
         let kind = format!("{:?}", store::describe(&screen.id));
-        p.line(format!("- wallpaper set to a calm water test JPEG with one bright subject in the middle {}, store kind {kind}", subject.display()));
+        p.line(format!("- wallpaper set to a teal water test JPEG with one bright subject in the middle {}, store kind {kind}", subject.display()));
         p.kind_before = Some(kind);
         let started = Instant::now();
         let ran = p.scooch(&[], Duration::from_secs(60));
@@ -1173,17 +1181,18 @@ mod probe {
         if matched.is_none_or(|share| share < 0.9) {
             p.fail("the scenery off capture does not match the scenery off render");
         }
-        navy_check(p, &screen, display, (to, subject))
+        bare_check(p, &screen, display, (to, subject), "navy", navy_picture)?;
+        bare_check(p, &screen, display, (to, subject), "green", green_picture)
     }
 
-    fn navy_check(p: &mut Probe, screen: &Screen, display: u32, (calm, onto): ((f32, f32), (f32, f32))) -> Result<()> {
+    fn bare_check(p: &mut Probe, screen: &Screen, display: u32, (calm, onto): ((f32, f32), (f32, f32)), label: &str, picture: fn(u32, u32, (f32, f32)) -> RgbImage) -> Result<()> {
         let desktop = platform::current()?;
         let name = PROBES[0].0;
         let (width, height) = pixels(screen);
-        let navy = picture_file(p, "probe-navy.jpg", &navy_picture(width, height, (0.5, 0.5)))?;
-        let ran = p.scooch(&["use", &navy.to_string_lossy()], Duration::from_secs(60));
-        let switched = wait_render(p, Duration::from_secs(45), Some(&navy), false);
-        p.line(format!("- scooch use on a navy picture with scenery `{}` exit {:?}, rendered after {:?} ms", state(p)["options"]["scenery"].as_str().unwrap_or("missing"), ran.code, switched.map(|time| time.as_millis())));
+        let bare = picture_file(p, &format!("probe-{label}.jpg"), &picture(width, height, (0.5, 0.5)))?;
+        let ran = p.scooch(&["use", &bare.to_string_lossy()], Duration::from_secs(60));
+        let switched = wait_render(p, Duration::from_secs(45), Some(&bare), false);
+        p.line(format!("- scooch use on a {label} picture with scenery `{}` exit {:?}, rendered after {:?} ms", state(p)["options"]["scenery"].as_str().unwrap_or("missing"), ran.code, switched.map(|time| time.as_millis())));
         away(p, name, calm);
         quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
         let start = position(p, name).unwrap_or(calm);
@@ -1195,24 +1204,24 @@ mod probe {
         let swapped = wait_until(Duration::from_secs(12), || shown() != before).map(|_| dropped.elapsed().as_millis());
         std::thread::sleep(Duration::from_millis(1200));
         let icon = icon_rect(name);
-        let on_shot = grab(display).context("the screen could not be captured on the navy picture")?;
-        p.line(format!("- navy picture, scenery on, drag from calm ground onto the subject at {:.0},{:.0}: new wallpaper after {swapped:?} ms, daemon ticks {:?}", onto.0, onto.1, tick_lines(p, seen)));
+        let on_shot = grab(display).with_context(|| format!("the screen could not be captured on the {label} picture"))?;
+        p.line(format!("- {label} picture, scenery on, drag from calm ground onto the subject at {:.0},{:.0}: new wallpaper after {swapped:?} ms, daemon ticks {:?}", onto.0, onto.1, tick_lines(p, seen)));
         let _ = p.scooch(&["scenery"], LIMIT);
         std::thread::sleep(Duration::from_millis(1500));
-        let off_shot = grab(display).context("the screen could not be captured on the navy picture with scenery off")?;
+        let off_shot = grab(display).with_context(|| format!("the screen could not be captured on the {label} picture with scenery off"))?;
         let _ = p.scooch(&["scenery"], LIMIT);
         let painted = icon.as_ref().map(|icon| ring(&on_shot, &off_shot, icon, screen));
-        p.line(format!("- pixels within 40 points around the dragged item that differ between scenery on and off on the navy picture {painted:?}"));
+        p.line(format!("- pixels within 40 points around the dragged item that differ between scenery on and off on the {label} picture {painted:?}"));
         if let Some(subject) = p.subject.clone() {
             let ran = p.scooch(&["use", &subject.to_string_lossy()], Duration::from_secs(60));
             let back = wait_render(p, Duration::from_secs(45), Some(&subject), false);
-            p.line(format!("- back to the water picture exit {:?}, rendered after {:?} ms", ran.code, back.map(|time| time.as_millis())));
+            p.line(format!("- back to the teal water picture exit {:?}, rendered after {:?} ms", ran.code, back.map(|time| time.as_millis())));
         }
         if swapped.is_none() {
-            p.fail("a drag on the navy picture with scenery on brought no new wallpaper");
+            p.fail(format!("a drag on the {label} picture with scenery on brought no new wallpaper"));
         }
         if painted.is_none_or(|count| count >= 200) {
-            p.fail("scenery showed on a navy picture, where it does not belong");
+            p.fail(format!("scenery showed on a {label} picture, where it does not belong"));
         }
         Ok(())
     }
