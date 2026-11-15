@@ -244,6 +244,27 @@ fn apart(a: [f32; 3], b: [f32; 3]) -> f32 {
     (0..3).map(|k| (a[k] - b[k]).powi(2)).sum::<f32>().sqrt()
 }
 
+const NONE: usize = usize::MAX;
+
+fn flood(grid: &Grid, mut origin: Vec<usize>, down: bool, accept: &dyn Fn(usize, usize, usize) -> bool) -> Vec<usize> {
+    let mut queue: VecDeque<usize> = (0..origin.len()).filter(|i| origin[*i] != NONE).collect();
+    while let Some(i) = queue.pop_front() {
+        let (x, y) = (i % grid.w, i / grid.w);
+        let next = [(x > 0).then(|| i - 1), (x + 1 < grid.w).then(|| i + 1), (y > 0).then(|| i - grid.w), (down && y + 1 < grid.h).then(|| i + grid.w)];
+        for n in next.into_iter().flatten() {
+            if origin[n] == NONE && accept(i, n, origin[i]) {
+                origin[n] = origin[i];
+                queue.push_back(n);
+            }
+        }
+    }
+    origin
+}
+
+fn marks(origin: &[usize]) -> Vec<f32> {
+    origin.iter().map(|o| if *o == NONE { 0.0 } else { 1.0 }).collect()
+}
+
 fn grown(seed: &[f32], colour: &[[f32; 3]], grid: &Grid) -> Vec<f32> {
     let open: Vec<bool> = colour
         .iter()
@@ -252,33 +273,13 @@ fn grown(seed: &[f32], colour: &[[f32; 3]], grid: &Grid) -> Vec<f32> {
             window(hue, SKY_WINDOW) >= 0.5 && chroma >= SKY_GROW.0 && l >= SKY_GROW.1 && under_cloud(l) >= 0.5
         })
         .collect();
-    let none = usize::MAX;
-    let mut origin: Vec<usize> = (0..seed.len()).map(|i| if seed[i] >= 0.5 { i } else { none }).collect();
-    let mut queue: VecDeque<usize> = (0..seed.len()).filter(|i| origin[*i] != none).collect();
-    while let Some(i) = queue.pop_front() {
-        let (x, y) = (i % grid.w, i / grid.w);
-        let next = [((x > 0).then(|| i - 1), SKY_SIDE), ((x + 1 < grid.w).then(|| i + 1), SKY_SIDE), ((y > 0).then(|| i - grid.w), SKY_GROW.2)];
-        for (n, step) in next.into_iter().filter_map(|(n, step)| n.map(|n| (n, step))) {
-            if origin[n] == none && open[n] && apart(colour[n], colour[i]) < step && apart(colour[n], colour[origin[i]]) <= SKY_DRIFT {
-                origin[n] = origin[i];
-                queue.push_back(n);
-            }
-        }
-    }
-    let reached: Vec<bool> = origin.iter().map(|o| *o != none).collect();
-    let mut kept: Vec<bool> = (0..reached.len()).map(|i| i < grid.w && reached[i]).collect();
-    let mut queue: VecDeque<usize> = (0..grid.w.min(reached.len())).filter(|i| kept[*i]).collect();
-    while let Some(i) = queue.pop_front() {
-        let (x, y) = (i % grid.w, i / grid.w);
-        let next = [(x > 0).then(|| i - 1), (x + 1 < grid.w).then(|| i + 1), (y > 0).then(|| i - grid.w), (y + 1 < grid.h).then(|| i + grid.w)];
-        for n in next.into_iter().flatten() {
-            if reached[n] && !kept[n] {
-                kept[n] = true;
-                queue.push_back(n);
-            }
-        }
-    }
-    kept.into_iter().map(|r| if r { 1.0 } else { 0.0 }).collect()
+    let seeds = (0..seed.len()).map(|i| if seed[i] >= 0.5 { i } else { NONE }).collect();
+    let origin = flood(grid, seeds, false, &|i, n, o| {
+        let step = if n + grid.w == i { SKY_GROW.2 } else { SKY_SIDE };
+        open[n] && apart(colour[n], colour[i]) < step && apart(colour[n], colour[o]) <= SKY_DRIFT
+    });
+    let top = (0..origin.len()).map(|i| if i < grid.w && origin[i] != NONE { i } else { NONE }).collect();
+    marks(&flood(grid, top, true, &|_, n, _| origin[n] != NONE))
 }
 
 pub(crate) fn water_colour(c: [f32; 3]) -> f32 {
@@ -310,24 +311,8 @@ fn sky_region(lab: &[[f32; 3]], busy: &[f32], grid: &Grid) -> Vec<f32> {
     let open: Vec<bool> = lab.iter().zip(busy).map(|(c, b)| skyish(*c) && *b < SKY_BUSY).collect();
     let calm: Vec<bool> = busy.iter().map(|b| *b < SKY_BUSY).collect();
     let soft: Vec<Vec<f32>> = (0..3).map(|k| blurred(&lab.iter().map(|c| c[k]).collect::<Vec<f32>>(), grid, SKY_SMOOTH.1)).collect();
-    let mut reached = vec![false; lab.len()];
-    let mut queue: VecDeque<usize> = (0..grid.w).filter(|i| open[*i]).collect();
-    for i in &queue {
-        reached[*i] = true;
-    }
-    while let Some(i) = queue.pop_front() {
-        let (x, y) = (i % grid.w, i / grid.w);
-        let next = [(x > 0).then(|| i - 1), (x + 1 < grid.w).then(|| i + 1), (y > 0).then(|| i - grid.w), (y + 1 < grid.h).then(|| i + grid.w)];
-        for n in next.into_iter().flatten() {
-            let jump = (0..3).map(|k| (lab[n][k] - lab[i][k]).powi(2)).sum::<f32>().sqrt();
-            let smooth = || (0..3).map(|k| (soft[k][n] - soft[k][i]).powi(2)).sum::<f32>().sqrt() < SKY_SMOOTH.0;
-            if !reached[n] && ((open[n] && jump < SKY_JUMP) || (calm[n] && smooth())) {
-                reached[n] = true;
-                queue.push_back(n);
-            }
-        }
-    }
-    reached.into_iter().map(|r| if r { 1.0 } else { 0.0 }).collect()
+    let top = (0..lab.len()).map(|i| if i < grid.w && open[i] { i } else { NONE }).collect();
+    marks(&flood(grid, top, true, &|i, n, _| (open[n] && apart(lab[n], lab[i]) < SKY_JUMP) || (calm[n] && (0..3).map(|k| (soft[k][n] - soft[k][i]).powi(2)).sum::<f32>().sqrt() < SKY_SMOOTH.0)))
 }
 
 pub(crate) fn byte(v: f32) -> u8 {
