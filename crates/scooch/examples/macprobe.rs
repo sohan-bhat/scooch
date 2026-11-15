@@ -2598,6 +2598,7 @@ mod probe {
         launch: Option<f64>,
         hello: Option<f64>,
         device: Option<f64>,
+        canvas: Option<f64>,
         ready_at: Option<f64>,
         shown_at: Option<f64>,
         decided: Option<f64>,
@@ -2647,6 +2648,7 @@ mod probe {
             launch,
             hello: from_launch("hello "),
             device: from_launch("device "),
+            canvas: from_launch(", canvas "),
             ready_at: from_launch("ready ").or_else(|| launch.zip(later_ready).map(|(at, after)| at + after)),
             shown_at: from_launch(", shown "),
             decided,
@@ -2684,7 +2686,7 @@ mod probe {
             let cold = cold_drag(p, screen, name, places);
             *last = Instant::now();
             p.line(format!(
-                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}",
+                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}",
                 index + 1,
                 cold.glided,
                 cold.skip,
@@ -2693,6 +2695,7 @@ mod probe {
                 rounded(cold.launch),
                 rounded(cold.hello),
                 rounded(cold.device),
+                rounded(cold.canvas),
                 rounded(cold.ready_at),
                 rounded(cold.shown_at),
                 rounded(cold.predicted),
