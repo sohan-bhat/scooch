@@ -3838,7 +3838,7 @@ mod probe {
             setup = Some(watched);
         }
         let setup = setup.context("no setup drag")?;
-        let wrote_tables = setup.log.iter().any(|line| line.contains(" tick ") && line.rsplit("] ").next().is_some_and(|laps| laps.split(", ").any(|lap| lap.starts_with("tables "))));
+        let wrote_tables = setup.log.iter().any(|line| line.contains(" tick ") && line.rsplit("] ").next().is_some_and(|laps| laps.split(", ").any(|lap| lap.starts_with("tables ") || lap.starts_with("later "))));
         let ticks: Vec<String> = setup.log.iter().filter(|line| line.contains(" tick ")).map(|line| line.chars().take(300).collect()).collect();
         p.line(format!("- the last setup drag's tick lines {ticks:?}"));
         p.line(format!("- the last setup drag rendered with a tables entry {wrote_tables}"));
