@@ -99,6 +99,16 @@ function Effects({ full }: { full: boolean }) {
 }
 
 const motion = { until: 0, was: false };
+const passLists = new WeakMap<EffectComposerType, Pass[]>();
+
+function resized(composer: EffectComposerType | null) {
+  if (!composer) return;
+  const passes = passLists.get(composer);
+  const same = passes !== undefined && passes.length === composer.passes.length && passes.every((pass, index) => pass === composer.passes[index]);
+  if (same) return;
+  passLists.set(composer, [...composer.passes]);
+  if (passes !== undefined) composer.setSize(0, 0);
+}
 const corner = { scale: '' };
 
 type Sized = EffectComposerType & { depthRenderTarget?: { setSize: (width: number, height: number) => void } | null };
@@ -782,6 +792,8 @@ export function Post({ phone }: { phone: boolean }) {
   );
 
   useFrame((state, delta) => {
+    resized(quality.composer);
+    resized(quality.fastComposer);
     const now = performance.now();
     if (live.pressing || animating(now)) motion.until = Math.max(motion.until, now + SHARP_AFTER);
     const moving = now < motion.until;
