@@ -64,14 +64,15 @@ const data = await page.evaluate(
       context.shadowBlur = 10;
       context.shadowOffsetY = 3;
       context.drawImage(body, left + (cell - glyph) / 2, top + 14, glyph, glyph);
+      context.shadowColor = 'transparent';
       context.font = '600 30px Label';
       context.textAlign = 'center';
       context.textBaseline = 'alphabetic';
-      context.shadowBlur = 6;
-      context.shadowOffsetY = 1;
-      context.shadowColor = 'rgba(10, 8, 6, 0.9)';
+      context.filter = `blur(${palette.blur}px)`;
+      context.fillStyle = palette.shade;
+      for (let pass = 0; pass < palette.passes; pass++) context.fillText(icon.label, left + cell / 2, top + 206 + palette.drop, cell - 16);
+      context.filter = 'none';
       context.fillStyle = palette.paper;
-      context.fillText(icon.label, left + cell / 2, top + 206, cell - 16);
       context.fillText(icon.label, left + cell / 2, top + 206, cell - 16);
       context.restore();
       const [lineLeft, lineTop] = place(index, 2);
@@ -95,7 +96,7 @@ const data = await page.evaluate(
     context.drawImage(body, left + size * 0.06, top + size * 0.06, size * 0.88, size * 0.88);
     return canvas.toDataURL('image/png');
   },
-  { icons, cursor, palette: { pad: color('pad'), paper: color('paper'), ink: color('ink') } },
+  { icons, cursor, palette: { pad: color('pad'), paper: color('paper'), ink: color('ink'), shade: 'rgba(8, 6, 4, 0.92)', blur: 5, drop: 3, passes: 3 } },
 );
 await browser.close();
 const png = Buffer.from(data.split(',')[1], 'base64');
