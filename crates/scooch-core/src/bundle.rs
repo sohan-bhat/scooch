@@ -863,7 +863,8 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
                 let ((sa, ra), (sb, rb)) = (part(0, d, da), part(1, d, db));
                 under((sa.scaled(1.0 - s).plus(sb.scaled(s)), ra.scaled(1.0 - w).plus(rb.scaled(w))))
             };
-            let tide = if planes.len() == 1 || glide == Glide::Dissolve { 0.0 } else { 1.0 - lerp4(&look_lines[0], column)[0].max(lerp4(&look_lines[1], column)[0]) };
+            let sky = |k: usize| lerp4(&look_lines[k], column)[0] * (1.0 - smoothstep(0.5 * c.reach, c.reach, ds[k]));
+            let tide = if planes.len() == 1 || glide == Glide::Dissolve { 0.0 } else { 1.0 - sky(0).max(sky(1)) };
             let total = if planes.len() == 1 {
                 under(part(0, ds[0], ds[0]))
             } else if tide <= 0.0 {

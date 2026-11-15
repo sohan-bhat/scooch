@@ -171,7 +171,9 @@ void main() {
         Parts b = parts(1, p, d_b, d_b, picture, grain);
         land = mix(under(a.shallow, a.rest), under(b.shallow, b.rest), s);
     } else {
-        float tide = 1.0 - max(textureLod(look_a, quarter(p), 0.0).r, textureLod(look_b, quarter(p), 0.0).r);
+        float sky_a = textureLod(look_a, quarter(p), 0.0).r * (1.0 - smoothstep(0.5 * reach, reach, d_a));
+        float sky_b = textureLod(look_b, quarter(p), 0.0).r * (1.0 - smoothstep(0.5 * reach, reach, d_b));
+        float tide = 1.0 - max(sky_a, sky_b);
         vec4 faded = vec4(0.0);
         if (tide < 1.0) {
             Parts a = parts(0, p, d_a, d_a, picture, grain);

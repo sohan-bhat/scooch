@@ -172,7 +172,9 @@ fn draw(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         let b = parts(look_b, paints_b, ramps_b, p, d_b, d_b, picture, grain);
         land = mix(under(a.shallow, a.rest), under(b.shallow, b.rest), frame.s);
     } else {
-        let tide = 1.0 - max(textureSampleLevel(look_a, smooth_filter, quarter(p), 0.0).r, textureSampleLevel(look_b, smooth_filter, quarter(p), 0.0).r);
+        let sky_a = textureSampleLevel(look_a, smooth_filter, quarter(p), 0.0).r * (1.0 - smoothstep(0.5 * frame.reach, frame.reach, d_a));
+        let sky_b = textureSampleLevel(look_b, smooth_filter, quarter(p), 0.0).r * (1.0 - smoothstep(0.5 * frame.reach, frame.reach, d_b));
+        let tide = 1.0 - max(sky_a, sky_b);
         var faded = vec4<f32>(0.0);
         if (tide < 1.0) {
             let a = parts(look_a, paints_a, ramps_a, p, d_a, d_a, picture, grain);
