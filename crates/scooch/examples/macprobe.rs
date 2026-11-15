@@ -209,6 +209,8 @@ mod probe {
         gpu: Option<Gpu>,
         finder: bool,
         motion: Option<Option<String>>,
+        scanned: usize,
+        struck: bool,
     }
 
     impl Probe {
@@ -250,6 +252,7 @@ mod probe {
                 self.line(format!("- **check failed** {error:#}"));
                 self.failed.push(format!("{title} stopped with {error:#}"));
             }
+            stutters(self);
             self.line(format!("- took {} ms", started.elapsed().as_millis()));
             self.save();
         }
@@ -350,6 +353,8 @@ mod probe {
             gpu: None,
             finder: true,
             motion: None,
+            scanned: 0,
+            struck: false,
         };
         probe.section("1 Session facts", facts);
         if !probe.runner {
@@ -724,6 +729,26 @@ mod probe {
 
     fn daemon_log(p: &Probe) -> String {
         fs::read_to_string(p.home.join("watch.log")).unwrap_or_default()
+    }
+
+    fn stutters(p: &mut Probe) -> bool {
+        let log = daemon_log(p);
+        let fresh = new_lines(&log, p.scanned);
+        p.scanned = log.lines().count();
+        for line in fresh {
+            if let Some(rest) = line.split(" glide glided ").nth(1) {
+                let words: Vec<&str> = rest.split_whitespace().collect();
+                let number = |at: usize| words.get(at).and_then(|word| word.trim_end_matches(',').parse::<f64>().ok());
+                if let Some((frames, slow)) = number(2).zip(number(4)).filter(|(frames, slow)| slow * 2.0 > *frames) {
+                    p.line(format!("- glide {} stuttered, {slow} of {frames} frames slow at scale {}", words.first().unwrap_or(&"?"), words.get(8).map_or("unknown", |scale| scale.trim_end_matches(','))));
+                }
+            }
+            if line.contains("glides in a row stuttered") {
+                p.struck = true;
+                p.fail("the strike rule fired, two glides in a row stuttered, so the daemon turned the glide off until it starts again");
+            }
+        }
+        p.struck
     }
 
     fn scooch_pid(p: &Probe) -> Option<i32> {
@@ -2769,6 +2794,8 @@ mod probe {
         let Some(mut child) = p.stand.take() else { return Ok(false) };
         let _ = child.kill();
         let _ = child.wait();
+        stutters(p);
+        p.struck = false;
         let _ = fs::remove_file(p.home.join("watch.pid"));
         let log = fs::OpenOptions::new().create(true).append(true).open(p.home.join("watch.log"))?;
         let mut command = Command::new(&p.bin);
@@ -2791,6 +2818,10 @@ mod probe {
     }
 
     fn cold_drags_check(p: &mut Probe) -> Result<()> {
+        if restart_daemon(p, false)? {
+            let calm = quiet_log(p, Duration::from_millis(1500), Duration::from_secs(15));
+            p.line(format!("- the daemon restarted before the cold drags so they start with no strikes, its log quiet after {calm}"));
+        }
         let result = cold_drags(p);
         put_motion_back(p);
         if p.stand.is_some() {
@@ -3160,6 +3191,10 @@ mod probe {
         let (_, warm_log) = wallpaper_after(p, &screen, |_| drag(from, to));
         p.line(format!("- a drag with reduce motion off again, so the next move has tables, log {warm_log:?}"));
         quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
+        let struck = stutters(p);
+        if struck {
+            p.line("- the strike rule turned the glide off for this daemon, so the covered move, the kill and the drag after it are judged only as plain swaps".to_string());
+        }
         let window = cover(marker, &screen)?;
         let target = if position(p, name).is_some_and(|at| (at.0 - subject.0).abs() < 5.0) { aside } else { subject };
         let (covered, covered_log) = wallpaper_after(p, &screen, |p| {
@@ -3178,7 +3213,7 @@ mod probe {
         let at_once = !covered_log.iter().any(|line| line.contains("shown and gliding")) && covered_waited == Some(0);
         let delay = laps(&covered_log, &["early", "tables", "open"]);
         p.line(format!("- a move while a window covers the whole desktop: new wallpaper after {covered:?} ms, the daemon answered hidden {hidden}, the decision waited {covered_waited:?} ms, a plain swap at once {at_once}, time the glide added to the tick {delay:?} ms, tick {:?} ms against {:?} ms for the glide off move, log {covered_log:?}", tick(&covered_log), tick(&off_log)));
-        if covered.is_none() || !(hidden || at_once) || delay.is_none_or(|delay| delay > 400) {
+        if covered.is_none() || (!struck && (!(hidden || at_once) || delay.is_none_or(|delay| delay > 400))) {
             p.fail("a covered desktop delayed the plain swap");
         }
         std::thread::sleep(Duration::from_millis(1500));
@@ -3209,7 +3244,7 @@ mod probe {
         let again = watch_drag(p, display, &screen, from, to, &masks).context("the drag after the kill could not be watched")?;
         let glided_again = logged(&again, " glide settled").is_some();
         p.line(format!("- the next drag glides again {glided_again}, log {:?}", again.log.iter().map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()));
-        if killed.is_empty() || now_shown != recorded || !matches.is_some_and(|share| share >= 0.9) || !alive || !glided_again {
+        if !alive || now_shown != recorded || !matches.is_some_and(|share| share >= 0.9) || (!struck && (killed.is_empty() || !glided_again)) {
             p.fail("killing the helper mid glide was not handled cleanly");
         }
         let last = Instant::now();
