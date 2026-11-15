@@ -57,6 +57,30 @@ fn coarse(p: vec2<f32>) -> vec2<f32> {
     return p / 16.0 / frame.paint;
 }
 
+fn seek(map: texture_2d<f32>, row: i32, count: i32, want: f32, start: f32) -> f32 {
+    var q = start;
+    for (var k = 0; k < 2; k = k + 1) {
+        let g = clamp(q - 0.5, 0.0, f32(count - 1));
+        let i = min(i32(g), max(count - 2, 0));
+        let a = textureLoad(map, vec2<i32>(i, row), 0).r;
+        let slope = textureLoad(map, vec2<i32>(min(i + 1, count - 1), row), 0).r - a;
+        if (slope != 0.0) {
+            q = q + (want - (a + slope * (g - f32(i)))) / slope;
+        }
+    }
+    return q;
+}
+
+fn follow(map: texture_2d<f32>, pixel: vec2<i32>, seen: vec2<f32>, uv: vec2<f32>, p: vec2<f32>) -> vec2<f32> {
+    let count = vec2<i32>(frame.size);
+    let lo = max(pixel - vec2<i32>(1), vec2<i32>(0));
+    let hi = min(pixel + vec2<i32>(1), count - vec2<i32>(1));
+    let rise = vec2<f32>(textureLoad(map, vec2<i32>(hi.x, 0), 0).r - textureLoad(map, vec2<i32>(lo.x, 0), 0).r, textureLoad(map, vec2<i32>(hi.y, 1), 0).r - textureLoad(map, vec2<i32>(lo.y, 1), 0).r);
+    let slope = rise / vec2<f32>(max(hi - lo, vec2<i32>(1)));
+    let start = p + select(vec2<f32>(0.0), (uv - seen) / slope, slope != vec2<f32>(0.0));
+    return vec2<f32>(seek(map, 0, count.x, uv.x, start.x), seek(map, 1, count.y, uv.y, start.y));
+}
+
 fn ramp(table: texture_2d<f32>, row: f32, d: f32) -> vec4<f32> {
     let x = clamp((d - frame.ramp_low) / (frame.ramp_high - frame.ramp_low), 0.0, 1.0);
     return textureSampleLevel(table, smooth_filter, vec2<f32>((x * 511.0 + 0.5) / 512.0, (row + 0.5) / 2.0), 0.0);
@@ -204,8 +228,8 @@ fn draw(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         }
         land = mix(faded, moved, clamp(tide, 0.0, 1.0));
     }
-    let guard_a = layer(paints_a, p, 7).a;
-    let guard_b = layer(paints_b, p, 7).a;
+    let guard_a = layer(paints_a, follow(map_a, pixel, from_a, uv, p), 7).a;
+    let guard_b = layer(paints_b, follow(map_b, pixel, from_b, uv, p), 7).a;
     let block = max(guard_a * min(4.0 * (1.0 - frame.s), 1.0), guard_b * min(4.0 * frame.s, 1.0));
     land = land * (1.0 - block);
     return vec4<f32>(over_picture(picture, land), 1.0);

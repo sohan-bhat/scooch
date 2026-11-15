@@ -33,6 +33,7 @@ const GLIDE_KEEP: f32 = 0.3;
 const GLIDE_GATE: f32 = 0.2;
 const GLIDE_SPAN: f32 = 0.3;
 const GLIDE_FELT: (f32, f32) = (-0.4, 0.06);
+const FOLLOW_STEPS: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Constants {
@@ -495,11 +496,39 @@ struct Probe {
 }
 
 fn probes(count: usize, cell: usize, cells: usize) -> Vec<Probe> {
-    (0..count)
-        .map(|x| {
-            let g = ((x as f32 + 0.5) / cell as f32 - 0.5).clamp(0.0, (cells - 1) as f32);
-            let a = g as usize;
-            Probe { a, b: (a + 1).min(cells - 1), t: g - a as f32 }
+    (0..count).map(|x| probe_at(x as f32 + 0.5, cell, cells)).collect()
+}
+
+fn probe_at(at: f32, cell: usize, cells: usize) -> Probe {
+    let g = (at / cell as f32 - 0.5).clamp(0.0, (cells - 1) as f32);
+    let a = g as usize;
+    Probe { a, b: (a + 1).min(cells - 1), t: g - a as f32 }
+}
+
+fn followed(own: &[f64], other: &[f64], s: f32, cell: usize, cells: usize) -> Vec<Probe> {
+    let own: Vec<f32> = own.iter().map(|v| *v as f32).collect();
+    let other: Vec<f32> = other.iter().map(|v| *v as f32).collect();
+    let last = own.len().saturating_sub(1);
+    let seek = |want: f32, start: f32| {
+        let mut q = start;
+        for _ in 0..FOLLOW_STEPS {
+            let g = (q - 0.5).clamp(0.0, last as f32);
+            let i = (g as usize).min(last.saturating_sub(1));
+            let a = own[i];
+            let slope = own[(i + 1).min(last)] - a;
+            if slope != 0.0 {
+                q += (want - (a + slope * (g - i as f32))) / slope;
+            }
+        }
+        q
+    };
+    (0..own.len())
+        .map(|i| {
+            let (lo, hi) = (i.saturating_sub(1), (i + 1).min(last));
+            let slope = (own[hi] - own[lo]) / (hi - lo).max(1) as f32;
+            let want = own[i] + (other[i] - own[i]) * s;
+            let start = i as f32 + 0.5 + if slope != 0.0 { (want - own[i]) / slope } else { 0.0 };
+            probe_at(seek(want, start), cell, cells)
         })
         .collect()
 }
@@ -888,6 +917,13 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
     let paint_grid = a.paint_grid();
     let tint_columns = probes(w, P, paint_grid.w);
     let tint_rows = probes(h, P, paint_grid.h);
+    let follows = !same && (a.xmap != b.xmap || a.ymap != b.ymap);
+    let held = follows.then(|| {
+        [
+            (followed(&a.xmap, &b.xmap, s, P, paint_grid.w), followed(&a.ymap, &b.ymap, s, P, paint_grid.h)),
+            (followed(&b.xmap, &a.xmap, 1.0 - s, P, paint_grid.w), followed(&b.ymap, &a.ymap, 1.0 - s, P, paint_grid.h)),
+        ]
+    });
     let out: &mut [u8] = &mut layer;
     out.par_chunks_mut(w * 4).enumerate().for_each_init(Lines::default, |lines, (y, line)| {
         let row = &rows[y];
@@ -974,7 +1010,10 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
             } else {
                 faded().scaled(1.0 - tide).plus(moved().scaled(tide))
             };
-            let guard = |k: usize| lerp4(&tint_lines[k][GUARD], tint_column)[3];
+            let guard = |k: usize| match &held {
+                Some(held) => bilinear4(&planes[k].paints[GUARD], paint_grid.w, &held[k].0[x], &held[k].1[y])[3],
+                None => lerp4(&tint_lines[k][GUARD], tint_column)[3],
+            };
             let block = if planes.len() == 1 { guard(0) } else { (guard(0) * (GLIDE_EDGE * (1.0 - s)).min(1.0)).max(guard(1) * (GLIDE_EDGE * s).min(1.0)) };
             let total = total.scaled(1.0 - block);
             if total.a <= 1e-4 {
@@ -1016,6 +1055,20 @@ mod tests {
         assert_eq!((wgsl.matches(edge.as_str()).count(), glsl.matches(edge.as_str()).count()), (4, 4), "{edge}");
         let guard = format!(", {GUARD})");
         assert_eq!((wgsl.matches(guard.as_str()).count(), glsl.matches(guard.as_str()).count()), (2, 2), "{guard}");
+        let guards = [
+            (format!("let guard_a = layer(paints_a, follow(map_a, pixel, from_a, uv, p), {GUARD}).a;"), format!("float guard_a = layer(0, follow(0, pixel, from_a, uv, p), {GUARD}).a;")),
+            (format!("let guard_b = layer(paints_b, follow(map_b, pixel, from_b, uv, p), {GUARD}).a;"), format!("float guard_b = layer(1, follow(1, pixel, from_b, uv, p), {GUARD}).a;")),
+            (
+                format!("let block = max(guard_a * min({GLIDE_EDGE:?} * (1.0 - frame.s), 1.0), guard_b * min({GLIDE_EDGE:?} * frame.s, 1.0));"),
+                format!("float block = max(guard_a * min({GLIDE_EDGE:?} * (1.0 - s), 1.0), guard_b * min({GLIDE_EDGE:?} * s, 1.0));"),
+            ),
+        ];
+        for (w, g) in &guards {
+            assert_eq!(wgsl.matches(w.as_str()).count(), 1, "wgsl {w}");
+            assert_eq!(glsl.matches(g.as_str()).count(), 1, "glsl {g}");
+        }
+        assert_eq!(wgsl.matches(&format!("for (var k = 0; k < {FOLLOW_STEPS}; k = k + 1)")).count(), 1);
+        assert_eq!(glsl.matches(&format!("for (int k = 0; k < {FOLLOW_STEPS}; k++)")).count(), 1);
         assert_eq!(wgsl.matches(&format!("let side = {:?} * frame.unit * {side:?};", GLIDE_SPAN)).count(), 1);
         assert_eq!(glsl.matches(&format!("float side = {:?} * unit * {side:?};", GLIDE_SPAN)).count(), 1);
     }
