@@ -82,7 +82,7 @@ const REFRESH = [1000 / 240, 1000 / 165, 1000 / 144, 1000 / 120, 1000 / 100, 100
 const MAX_BOKEH = 3.2;
 const GRAIN = 0.05;
 const GPU_SAMPLES = 90;
-const HEADROOM_SHARE = 0.4;
+const HEADROOM_SHARE = 0.6;
 
 export type Chain = 'sharp' | 'fast';
 
