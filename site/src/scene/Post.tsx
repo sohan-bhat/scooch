@@ -163,7 +163,7 @@ export function Post({ phone }: { phone: boolean }) {
   }, []);
   const totals = useMemo(() => [0, 1].map(() => new WebGLRenderTarget(1, 1, { depthBuffer: false, colorSpace: SRGBColorSpace })), []);
   const accumulate = useMemo(() => {
-    const pass = new CopyPass(totals[0], false);
+    const pass = new CopyPass(totals[0], false) as CopyPass & { renderTarget: WebGLRenderTarget };
     pass.fullscreenMaterial.transparent = true;
     pass.fullscreenMaterial.blending = CustomBlending;
     pass.fullscreenMaterial.blendSrc = ConstantAlphaFactor;
