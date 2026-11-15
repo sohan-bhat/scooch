@@ -461,7 +461,7 @@ export function Post({ phone }: { phone: boolean }) {
         quality.chain === 'sharp' &&
         now - quality.blendAt > BLEND &&
         now - still.inputAt > STILL_AFTER &&
-        (still.phase === 'still' || still.refresh || now - runtime.changedAt > STILL_AFTER);
+        (still.showing || still.phase === 'still' || still.refresh || now - runtime.changedAt > STILL_AFTER);
       if (still.phase !== 'live' && !calm) {
         still.phase = 'live';
         still.showing = false;
