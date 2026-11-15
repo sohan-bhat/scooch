@@ -1172,6 +1172,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         times.sort_unstable();
         p.line(format!("- median move to new wallpaper {:?} ms", times.get(times.len() / 2)));
+        switch_check(p, &linux, &screen, &program)?;
         std::thread::sleep(Duration::from_secs(3));
         let before = proc_numbers(process);
         std::thread::sleep(Duration::from_secs(60));
@@ -1194,6 +1195,45 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         for line in trace.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev() {
             p.line(format!("  - `{line}`"));
         }
+        Ok(())
+    }
+
+    fn navy_picture(width: u32, height: u32) -> RgbImage {
+        let (w, h) = (width.max(1) as f32, height.max(1) as f32);
+        RgbImage::from_fn(width, height, |x, y| {
+            let distance = ((x as f32 - 0.5 * w).powi(2) + (y as f32 - 0.5 * h).powi(2)).sqrt();
+            if distance < h / 7.0 { [245, 196, 92].into() } else if (x / 24 + y / 24) % 2 == 0 { [30, 42, 70].into() } else { [24, 34, 58].into() }
+        })
+    }
+
+    fn switch_check(p: &mut Probe, linux: &Linux, screen: &Screen, program: &Path) -> Result<()> {
+        let frame = primary_frame(p).unwrap_or(screen.frame);
+        let navy = p.home.join("probe-navy.jpg");
+        fs::write(&navy, jpeg(&navy_picture((screen.frame.w * screen.scale) as u32, (screen.frame.h * screen.scale) as u32))?)?;
+        let home = p.home.clone();
+        let wanted = navy.to_string_lossy().into_owned();
+        linux.set_wallpaper(screen, &navy)?;
+        let adopted = wait_until(Duration::from_secs(30), || state_entries(&home).iter().any(|(_, entry)| entry["source"].as_str() == Some(wanted.as_str()) && entry["output"].is_string()));
+        std::thread::sleep(Duration::from_secs(2));
+        let before = linux.wallpaper(screen).ok().flatten();
+        let detail = move_icon(p, (frame.x + frame.w * 0.5, frame.y + frame.h * 0.5)).unwrap_or_else(|error| format!("failed {error:#}"));
+        let swapped = wait_until(Duration::from_secs(10), || linux.wallpaper(screen).ok().flatten() != before);
+        std::thread::sleep(Duration::from_secs(2));
+        p.line(format!("- the navy picture taken in after {:?} ms, the icon moved onto its subject, {detail}, new wallpaper after {:?} ms", adopted.map(|time| time.as_millis()), swapped.map(|time| time.as_millis())));
+        let held = |home: &Path| state_entries(home).into_iter().find(|(_, entry)| entry["source"].as_str() == Some(wanted.as_str())).map(|(_, entry)| (entry["placement"].clone(), entry["output"].clone(), entry["belongs"]["answer"].clone()));
+        let toggle = || Command::new(program).arg("scenery").env("SCOOCH_HOME", &home).output().map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
+        let log = p.out.join("watch.log");
+        let seen = fs::read_to_string(&log).unwrap_or_default().lines().count();
+        let (kept, shown) = (held(&home), linux.wallpaper(screen).ok().flatten());
+        let said = toggle();
+        std::thread::sleep(Duration::from_secs(3));
+        let (now, showing) = (held(&home), linux.wallpaper(screen).ok().flatten());
+        let sets = fs::read_to_string(&log).unwrap_or_default().lines().skip(seen).filter(|line| line.contains(" set ")).count();
+        let back = toggle();
+        std::thread::sleep(Duration::from_secs(3));
+        let same = kept.as_ref().zip(now.as_ref()).is_some_and(|(a, b)| a.0 == b.0 && a.1 == b.1);
+        let mark = if same && shown == showing && sets == 0 { "" } else { "**missing** " };
+        p.line(format!("- {mark}navy picture with the icon on the subject, scenery auto then off, scooch scenery said {said:?} then {back:?}, the daemon's answer belongs {:?}, same placement and file {same}, wallpaper unchanged {}, wallpapers set {sets}", kept.as_ref().map(|held| held.2.clone()), shown == showing));
         Ok(())
     }
 

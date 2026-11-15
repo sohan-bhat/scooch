@@ -1072,6 +1072,10 @@ mod probe {
         new_lines(&daemon_log(p), from).iter().filter(|line| line.contains(" tick ") && line.contains("Rendered")).filter_map(|line| line.split(", ").find_map(|lap| lap.trim().strip_prefix("render ")).and_then(|millis| millis.trim().parse().ok())).collect()
     }
 
+    fn named_laps(p: &Probe, from: usize, name: &str) -> Vec<u64> {
+        new_lines(&daemon_log(p), from).iter().filter(|line| line.contains(" tick ") && line.contains("Rendered")).map(|line| line.split(", ").filter_map(|lap| lap.trim().strip_prefix(name)).filter_map(|millis| millis.trim().parse::<u64>().ok()).sum()).collect()
+    }
+
     fn icon_rect(name: &str) -> Option<Rect> {
         finder::named(&finder::view()).ok()?.into_iter().find(|(found, _)| found == name).map(|(_, rect)| rect)
     }
@@ -1195,6 +1199,20 @@ mod probe {
         p.line(format!("- scooch use on a {label} picture with scenery `{}` exit {:?}, rendered after {:?} ms", state(p)["options"]["scenery"].as_str().unwrap_or("missing"), ran.code, switched.map(|time| time.as_millis())));
         away(p, name, onto);
         quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
+        let held = |p: &Probe| state(p)["screens"].as_object().and_then(|screens| screens.values().next().map(|entry| (entry["placement"].clone(), entry["output"].clone(), entry["belongs"]["answer"].clone())));
+        let (kept, shot, seen) = (held(p), grab(display), daemon_log(p).lines().count());
+        let _ = p.scooch(&["scenery"], LIMIT);
+        quiet_log(p, Duration::from_millis(1500), Duration::from_secs(10));
+        let (now, later) = (held(p), grab(display));
+        let sets = new_lines(&daemon_log(p), seen).iter().filter(|line| line.contains(" set ")).count();
+        let moved = shot.as_ref().zip(later.as_ref()).zip(icon_rect(name)).map(|((a, b), icon)| ring(a, b, &icon, screen));
+        let _ = p.scooch(&["scenery"], LIMIT);
+        quiet_log(p, Duration::from_millis(1500), Duration::from_secs(10));
+        let same = kept.as_ref().zip(now.as_ref()).is_some_and(|(a, b)| a.0 == b.0 && a.1 == b.1);
+        p.line(format!("- {label} picture with the icon on the subject, scenery auto then off, the daemon's answer belongs {:?}, same placement and file {same}, wallpapers set {sets}, pixels changed around the icon {moved:?}", kept.as_ref().map(|held| held.2.clone())));
+        if !same || sets > 0 || moved.is_none_or(|count| count >= 200) {
+            p.fail(format!("switching scenery off moved the {label} picture or changed the screen"));
+        }
         let start = position(p, name).unwrap_or(onto);
         let shown = || desktop.wallpaper(screen).ok().flatten();
         let before = shown();
@@ -1224,9 +1242,10 @@ mod probe {
             }
             std::thread::sleep(Duration::from_millis(400));
         }
+        let decodes = named_laps(p, seen, "decode ");
         let mut laps = render_laps(p, seen);
         laps.sort_unstable();
-        p.line(format!("- {label} picture, scenery `{}`, Apple Event moves from calm ground onto the subject that brought a new wallpaper {swaps} of 5, render laps {laps:?} ms, median {:?}, to set beside section 5 on a build where section 5 used this picture", state(p)["options"]["scenery"].as_str().unwrap_or("missing"), laps.get(laps.len() / 2)));
+        p.line(format!("- {label} picture, scenery `{}`, Apple Event moves from calm ground onto the subject that brought a new wallpaper {swaps} of 5, render laps {laps:?} ms, median {:?}, decode laps in tick order {decodes:?} ms, to set beside section 5 on a build where section 5 used this picture", state(p)["options"]["scenery"].as_str().unwrap_or("missing"), laps.get(laps.len() / 2)));
         if let Some(subject) = p.subject.clone() {
             let ran = p.scooch(&["use", &subject.to_string_lossy()], Duration::from_secs(60));
             let back = wait_render(p, Duration::from_secs(45), Some(&subject), false);
