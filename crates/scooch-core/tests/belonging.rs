@@ -61,7 +61,7 @@ fn made(name: &str) -> RgbImage {
             "fog" => mix([170.0, 176.0, 182.0], [222.0, 225.0, 228.0], 0.6 * v + 0.4 * fbm(u * 3.0, v * 2.0, 71)).map(|c| c + 3.0 * grain),
             "plain-gradient" => mix([240.0, 140.0, 70.0], [110.0, 60.0, 150.0], 0.6 * v + 0.4 * u).map(|c| c + 2.0 * grain),
             "sky-gradient" => mix([70.0, 128.0, 206.0], [168.0, 206.0, 238.0], v).map(|c| c + 2.0 * grain),
-            "flat-water" => [20.0, 110.0, 120.0].map(|c| c + 3.0 * grain),
+            "flat-water" => scooch_core::ISLAND_WATER.map(|c| c as f32 + 3.0 * grain),
             "lagoon" => {
                 let float = ((u - 0.3) / 0.05).powi(2) + ((v - 0.55) / 0.08).powi(2) < 1.0;
                 if float { [230.0, 120.0, 60.0] } else { mix([40.0, 170.0, 170.0], [30.0, 150.0, 160.0], fbm(u * 5.0, v * 3.0, 105)) }.map(|c| c + 2.0 * grain)
@@ -349,6 +349,15 @@ fn moving_an_icon_that_moves_the_picture_keeps_what_belongs() {
         }
     }
     assert!(moved_any >= 3, "too few moves changed the picture: {moved_any}");
+}
+
+#[test]
+fn the_island_water_colour_gets_islands() {
+    let (w, h) = (1440u32, 900u32);
+    let image = made("flat-water");
+    assert!(image.pixels().all(|p| (0..3).all(|k| p.0[k].abs_diff(scooch_core::ISLAND_WATER[k]) <= 2)));
+    let got = coverage("island-water", &image, "pins", &grid(w, h, PIN_GRID.0, PIN_GRID.1), (w, h));
+    assert!(got[0] == 0.0 && got[3] > 0.95, "the island water colour drew clouds {:.4} and land under icons {:.4}", got[0], got[3]);
 }
 
 #[test]

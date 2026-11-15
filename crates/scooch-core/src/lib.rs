@@ -65,6 +65,9 @@ use serde::{Deserialize, Serialize};
 
 pub const TABLE: usize = 257;
 
+#[doc(hidden)]
+pub const ISLAND_WATER: [u8; 3] = [20, 110, 120];
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f32,
