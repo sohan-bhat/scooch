@@ -529,7 +529,7 @@ fn scenery_off_adds_nothing_and_layers_rebuild_the_render() {
 
 #[test]
 fn scenery_is_deterministic_and_local() {
-    for name in ["two-swans", "balloon-sky"] {
+    for name in ["lone-canoe", "balloon-sky"] {
         let photo = photos().iter().find(|p| p.name == name).expect("photo");
         let picture = small(&photo.image, 1200);
         let analysis = scooch_core::analyze(&picture);

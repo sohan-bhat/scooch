@@ -61,7 +61,25 @@ fn made(name: &str) -> RgbImage {
             "fog" => mix([170.0, 176.0, 182.0], [222.0, 225.0, 228.0], 0.6 * v + 0.4 * fbm(u * 3.0, v * 2.0, 71)).map(|c| c + 3.0 * grain),
             "plain-gradient" => mix([240.0, 140.0, 70.0], [110.0, 60.0, 150.0], 0.6 * v + 0.4 * u).map(|c| c + 2.0 * grain),
             "sky-gradient" => mix([70.0, 128.0, 206.0], [168.0, 206.0, 238.0], v).map(|c| c + 2.0 * grain),
-            "flat-water" => [19.0, 90.0, 48.0].map(|c| c + 3.0 * grain),
+            "flat-water" => [20.0, 110.0, 120.0].map(|c| c + 3.0 * grain),
+            "lagoon" => {
+                let float = ((u - 0.3) / 0.05).powi(2) + ((v - 0.55) / 0.08).powi(2) < 1.0;
+                if float { [230.0, 120.0, 60.0] } else { mix([40.0, 170.0, 170.0], [30.0, 150.0, 160.0], fbm(u * 5.0, v * 3.0, 105)) }.map(|c| c + 2.0 * grain)
+            }
+            "deep-sea" => if v < 0.3 { mix([200.0, 208.0, 214.0], [218.0, 222.0, 226.0], v / 0.3) } else { mix([0.0, 72.0, 104.0], [0.0, 84.0, 120.0], fbm(u * 6.0, v * 4.0, 101)) }.map(|c| c + 3.0 * grain),
+            "pool" => {
+                let deck = v < 0.1 || v > 0.9;
+                if deck { [200.0, 195.0, 185.0] } else { mix([55.0, 160.0, 200.0], [65.0, 170.0, 210.0], fbm(u * 8.0, v * 5.0, 103)) }.map(|c| c + 2.0 * grain)
+            }
+            "conifer" => mix([16.0, 58.0, 38.0], [42.0, 108.0, 74.0], fbm(u * 90.0, v * 30.0, 23)).map(|c| c + 14.0 * grain),
+            "teal-green-wall" => [30.0, 90.0, 60.0].map(|c| c + 3.0 * grain),
+            "light-teal-wall" => [140.0, 210.0, 210.0].map(|c| c + 2.0 * grain),
+            "lawn-shade" => mix([20.0, 48.0, 22.0], [55.0, 92.0, 40.0], fbm(u * 60.0, v * 40.0, 21)).map(|c| c + 16.0 * grain),
+            "blurred-foliage" | "blurred-teal" => {
+                let subject = ((u - 0.5) / 0.16).powi(2) + ((v - 0.55) / 0.3).powi(2) < 1.0;
+                let (a, b) = if name == "blurred-foliage" { ([40.0, 100.0, 50.0], [100.0, 155.0, 80.0]) } else { ([25.0, 105.0, 85.0], [75.0, 150.0, 105.0]) };
+                if subject { [170.0, 90.0, 40.0] } else { mix(a, b, fbm(u * 3.0, v * 2.0, 25)) }.map(|c| c + 2.0 * grain)
+            }
             "deep-sky" => mix([20.0, 45.0, 110.0], [85.0, 145.0, 220.0], v).map(|c| c + 2.0 * grain),
             "dark-blue" => [25.0, 45.0, 105.0].map(|c| c + 2.0 * grain),
             "thin-sky" | "sky-band" => {
@@ -93,14 +111,16 @@ enum Expect {
 }
 use Expect::{Keep, Nothing, Pin};
 
-const MADE: [&str; 16] = ["deep-sky", "dark-blue", "near-black", "dark-gradient", "mid-grey", "white-wall", "star-field", "grass", "snow", "sand", "road", "night-sky", "fog", "plain-gradient", "sky-gradient", "flat-water"];
+const MADE: [&str; 26] = [
+    "deep-sky", "dark-blue", "near-black", "dark-gradient", "mid-grey", "white-wall", "star-field", "grass", "snow", "sand", "road", "night-sky", "fog", "plain-gradient", "sky-gradient", "flat-water", "lagoon", "deep-sea", "pool", "conifer",
+    "teal-green-wall", "light-teal-wall", "lawn-shade", "blurred-foliage", "blurred-teal", "aerial-teal",
+];
 
 fn verdict(name: &str) -> (Expect, Expect) {
     match name {
         "balloon-sky" | "deep-sky" => (Keep, Nothing),
         "moon-sky" | "sky-gradient" => (Pin, Nothing),
-        "two-swans" => (Nothing, Keep),
-        "flat-water" => (Nothing, Keep),
+        "lone-canoe" | "flat-water" | "lagoon" | "deep-sea" | "pool" => (Nothing, Keep),
         _ => (Nothing, Nothing),
     }
 }
@@ -131,13 +151,19 @@ fn coverage(name: &str, image: &RgbImage, layout: &str, icons: &[Rect], (w, h): 
     out
 }
 
-const TODAY: [(&str, &str, f64, f64); 8] = [
+const TODAY: [(&str, &str, f64, f64); 14] = [
     ("balloon-sky", "column", 1.0, 0.0),
     ("balloon-sky", "scattered", 1.0, 0.0),
-    ("two-swans", "column", 0.0, 1.0),
-    ("two-swans", "scattered", 0.0, 0.9167),
+    ("lone-canoe", "column", 0.0, 0.7016),
+    ("lone-canoe", "scattered", 0.0, 0.624),
     ("flat-water", "column", 0.0, 1.0),
     ("flat-water", "scattered", 0.0, 1.0),
+    ("lagoon", "column", 0.0, 1.0),
+    ("lagoon", "scattered", 0.0, 1.0),
+    ("deep-sea", "column", 0.0, 0.5773),
+    ("deep-sea", "scattered", 0.0, 0.3333),
+    ("pool", "column", 0.0, 0.6848),
+    ("pool", "scattered", 0.0, 0.4578),
     ("deep-sky", "column", 1.0, 0.0),
     ("deep-sky", "scattered", 1.0, 0.0),
 ];
@@ -213,10 +239,10 @@ fn scenery_pictures() -> Vec<(String, RgbImage)> {
     let mut out: Vec<(String, RgbImage)> = layouts::photos()
         .into_iter()
         .map(|p| (p.file_stem().unwrap().to_string_lossy().to_string(), p))
-        .filter(|(n, _)| ["balloon-sky", "moon-sky", "two-swans"].contains(&n.as_str()))
+        .filter(|(n, _)| ["balloon-sky", "moon-sky", "lone-canoe"].contains(&n.as_str()))
         .map(|(n, p)| (n, scooch_core::open(&p).expect("open")))
         .collect();
-    out.extend(["deep-sky", "sky-gradient", "flat-water"].iter().map(|n| (n.to_string(), made(n))));
+    out.extend(["deep-sky", "sky-gradient", "flat-water", "lagoon"].iter().map(|n| (n.to_string(), made(n))));
     out
 }
 
@@ -300,7 +326,7 @@ fn moving_an_icon_that_moves_the_picture_keeps_what_belongs() {
     let (w, h) = (1440u32, 900u32);
     let options = Options { scenery: Scenery::Auto, ..Options::default() };
     let mut moved_any = 0;
-    for (name, image) in scenery_pictures().into_iter().filter(|(n, _)| ["balloon-sky", "moon-sky", "two-swans"].contains(&n.as_str())) {
+    for (name, image) in scenery_pictures().into_iter().filter(|(n, _)| ["balloon-sky", "moon-sky", "lone-canoe"].contains(&n.as_str())) {
         let analysis = scooch_core::analyze(&image);
         let icons = layouts::layout("scattered", &analysis, w, h);
         let scene = Scene { width: w, height: h, icons: icons.clone() };
@@ -322,7 +348,27 @@ fn moving_an_icon_that_moves_the_picture_keeps_what_belongs() {
             break;
         }
     }
-    assert!(moved_any >= 2, "too few moves changed the picture: {moved_any}");
+    assert!(moved_any >= 3, "too few moves changed the picture: {moved_any}");
+}
+
+#[test]
+fn green_water_draws_only_when_islands_are_forced() {
+    let (w, h) = (1440u32, 900u32);
+    let path = layouts::photos().into_iter().find(|p| p.to_string_lossy().contains("two-swans")).expect("two-swans");
+    let image = scooch_core::open(&path).expect("open");
+    let analysis = scooch_core::analyze(&image);
+    let scene = Scene { width: w, height: h, icons: grid(w, h, PIN_GRID.0, PIN_GRID.1) };
+    for (scenery, draws) in [(Scenery::Auto, false), (Scenery::Islands, true)] {
+        let options = Options { scenery, ..Options::default() };
+        let placement = scooch_core::solve(&analysis, &scene, &options, None);
+        let layers = scooch_core::render_layers(&image, &analysis, &placement, &scene, &options);
+        let drawn = layers.scenery.pixels().filter(|p| p.0[3] > 0).count();
+        println!("two-swans {scenery:?}: {drawn} scenery pixels");
+        assert_eq!(drawn > 10_000, draws, "two-swans {scenery:?} drew {drawn}");
+        if !draws {
+            assert_eq!(drawn, 0, "two-swans {scenery:?}");
+        }
+    }
 }
 
 fn clouds_where(image: &RgbImage, icons: &[Rect], (w, h): (u32, u32), inside: impl Fn(f32, f32) -> bool) -> (usize, usize) {

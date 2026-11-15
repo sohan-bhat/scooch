@@ -435,7 +435,7 @@ pub fn parts(source: (u32, u32), (canvas, kept): (RgbImage, Option<Arc<look::Bel
     let ground = scenery::active(scene, options).then(|| shape::ground(scene)).flatten();
     out.belonging = ground.as_ref().map(|g| match kept.filter(|b| b.fits(source, (width, height), g.u, options)) {
         Some(b) => b,
-        None => Arc::new(look::belonging_map(&home(&out.framed.canvas, found, source, (width, height)).sampled(), source, (width, height), options, g.u)),
+        None => Arc::new(look::belonging_map(&home(&out.framed.canvas, found, source, (width, height)).sampled(), source, (width, height), options, g.u, paint::sand(materials)[0])),
     });
     out.fixed = ground.as_ref().zip(out.belonging.as_deref()).map(|(g, b)| look::fixed(&grounded.sampled(&out.framed), b, materials, g.u, (width as usize, height as usize)));
     out.live = ground.as_ref().zip(out.fixed.as_ref()).map(|(g, f)| look::live(f, g));

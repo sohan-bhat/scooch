@@ -21,6 +21,7 @@ pub(crate) const BELONG_BUSY: (f32, f32) = (0.20, 0.45);
 pub(crate) const BELONG_SPREAD: f32 = 0.35;
 pub(crate) const SEAM: (f32, f32) = (0.6, 0.95);
 pub(crate) const SKY_HUE: (f32, f32) = (200.0, 290.0);
+pub(crate) const SKY_SEED: (f32, f32) = (215.0, 0.02);
 pub(crate) const SKY_CHROMA: f32 = 0.03;
 pub(crate) const WHITE_CHROMA: f32 = 0.04;
 pub(crate) const WHITE_LIGHT: f32 = 0.6;
@@ -39,9 +40,9 @@ pub(crate) const SKY_GROW: (f32, f32, f32) = (0.015, 0.3, 0.01);
 pub(crate) const SKY_SIDE: f32 = 0.003;
 pub(crate) const SKY_DRIFT: f32 = 0.3;
 pub(crate) const HOME_MOST: f64 = 4.0;
-pub(crate) const WATER_WINDOW: (f32, f32, f32) = (150.0, 205.0, 10.0);
+pub(crate) const WATER_WINDOW: (f32, f32, f32) = (191.0, 235.0, 10.0);
 pub(crate) const WATER_CHROMA: (f32, f32) = (0.04, 0.06);
-pub(crate) const WATER_LIGHT: (f32, f32, f32, f32) = (0.22, 0.28, 0.52, 0.58);
+pub(crate) const WATER_LIGHT: (f32, f32) = (0.22, 0.28);
 pub(crate) const ALLOW_COLOUR: f32 = 0.2;
 pub(crate) const ALLOW_OPEN: f32 = 1.35;
 pub(crate) const ALLOW_SOFT: f32 = 0.45;
@@ -282,9 +283,10 @@ fn grown(seed: &[f32], colour: &[[f32; 3]], grid: &Grid) -> Vec<f32> {
     marks(&flood(grid, top, true, &|_, n, _| origin[n] != NONE))
 }
 
-pub(crate) fn water_colour(c: [f32; 3]) -> f32 {
+pub(crate) fn water_colour(c: [f32; 3], sand: f32) -> f32 {
     let (l, chroma, hue) = colour_of(c);
-    window(hue, WATER_WINDOW) * smoothstep(WATER_CHROMA.0, WATER_CHROMA.1, chroma) * smoothstep(WATER_LIGHT.0, WATER_LIGHT.1, l) * (1.0 - smoothstep(WATER_LIGHT.2, WATER_LIGHT.3, l))
+    let top = sand - paint::UNDER_SAND.0;
+    window(hue, WATER_WINDOW) * smoothstep(WATER_CHROMA.0, WATER_CHROMA.1, chroma) * smoothstep(WATER_LIGHT.0, WATER_LIGHT.1, l) * (1.0 - smoothstep(top - paint::UNDER_SAND.1, top + paint::UNDER_SAND.1, l))
 }
 
 fn opened(mask: &[bool], grid: &Grid, r: f32) -> Vec<f32> {
@@ -295,12 +297,12 @@ fn opened(mask: &[bool], grid: &Grid, r: f32) -> Vec<f32> {
     core.iter().map(|d| if *d <= r { 1.0 } else { 0.0 }).collect()
 }
 
-fn allowances(lab: &[[f32; 3]], grid: &Grid, u: f32) -> (Vec<f32>, Vec<f32>) {
+fn allowances(lab: &[[f32; 3]], grid: &Grid, u: f32, sand: f32) -> (Vec<f32>, Vec<f32>) {
     let spread = |k: f32| k * u / grid.cell as f32;
     let soft: Vec<Vec<f32>> = (0..3).map(|k| blurred(&lab.iter().map(|c| c[k]).collect::<Vec<f32>>(), grid, spread(ALLOW_COLOUR))).collect();
     let colour: Vec<[f32; 3]> = (0..lab.len()).map(|i| [soft[0][i], soft[1][i], soft[2][i]]).collect();
-    let seed = |pass: fn([f32; 3]) -> f32| opened(&colour.iter().map(|c| pass(*c) >= 0.5).collect::<Vec<bool>>(), grid, ALLOW_OPEN * u);
-    (blurred(&grown(&seed(sky_colour), &colour, grid), grid, spread(ALLOW_SOFT)), blurred(&seed(water_colour), grid, spread(ALLOW_SOFT)))
+    let seed = |pass: &dyn Fn([f32; 3]) -> f32| opened(&colour.iter().map(|c| pass(*c) >= 0.5).collect::<Vec<bool>>(), grid, ALLOW_OPEN * u);
+    (blurred(&grown(&seed(&sky_colour), &colour, grid), grid, spread(ALLOW_SOFT)), blurred(&seed(&|c| water_colour(c, sand)), grid, spread(ALLOW_SOFT)))
 }
 
 fn blurred(values: &[f32], grid: &Grid, spread: f32) -> Vec<f32> {
@@ -311,7 +313,11 @@ fn sky_region(lab: &[[f32; 3]], busy: &[f32], grid: &Grid) -> Vec<f32> {
     let open: Vec<bool> = lab.iter().zip(busy).map(|(c, b)| skyish(*c) && *b < SKY_BUSY).collect();
     let calm: Vec<bool> = busy.iter().map(|b| *b < SKY_BUSY).collect();
     let soft: Vec<Vec<f32>> = (0..3).map(|k| blurred(&lab.iter().map(|c| c[k]).collect::<Vec<f32>>(), grid, SKY_SMOOTH.1)).collect();
-    let top = (0..lab.len()).map(|i| if i < grid.w && open[i] { i } else { NONE }).collect();
+    let seeded = |i: usize| {
+        let (l, chroma, hue) = colour_of([soft[0][i], soft[1][i], soft[2][i]]);
+        (chroma < SKY_SEED.1 && l > WHITE_LIGHT) || hue >= SKY_SEED.0
+    };
+    let top = (0..lab.len()).map(|i| if i < grid.w && open[i] && seeded(i) { i } else { NONE }).collect();
     marks(&flood(grid, top, true, &|i, n, _| (open[n] && apart(lab[n], lab[i]) < SKY_JUMP) || (calm[n] && (0..3).map(|k| (soft[k][n] - soft[k][i]).powi(2)).sum::<f32>().sqrt() < SKY_SMOOTH.0)))
 }
 
@@ -488,7 +494,7 @@ impl Fixed {
     }
 }
 
-pub fn belonging_map(input: &Sampled, source: (u32, u32), screen: (u32, u32), options: &Options, u: f32) -> Belonging {
+pub fn belonging_map(input: &Sampled, source: (u32, u32), screen: (u32, u32), options: &Options, u: f32, sand: f32) -> Belonging {
     let grid = input.grid;
     let cells = grid.w * grid.h;
     let size = home_grid(source, screen).1;
@@ -502,7 +508,7 @@ pub fn belonging_map(input: &Sampled, source: (u32, u32), screen: (u32, u32), op
         Scenery::Auto => {
             let lab = lab();
             let sky: Vec<f32> = blurred(&sky_region(&lab, input.busy, &grid), &grid, spread(SKY_SPREAD)).into_iter().map(|v| smoothstep(SKY_EDGE.0, SKY_EDGE.1, v)).collect();
-            let (air, water) = allowances(&lab, &grid, u);
+            let (air, water) = allowances(&lab, &grid, u, sand);
             let belong = (0..cells).map(|i| calm[i] * smoothstep(SEAM.0, SEAM.1, (2.0 * sky[i] - 1.0).abs()) * (sky[i] * air[i] + (1.0 - sky[i]) * water[i])).collect();
             (sky, belong)
         }
