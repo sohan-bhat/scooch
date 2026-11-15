@@ -53,10 +53,10 @@ All sums use summed-area tables on the 320 pixel maps, so a solve takes about te
 ```text
 cost = 4.0  * saliency hidden under icons, as a share of all saliency
      + 0.35 * busyness under icons
-     + 1.5  * saliency the centered crop shows that this crop does not
+     + 1.5  * saliency the home frame shows that this crop does not
      + 2.0  * subject newly cut by a crop edge
      + 0.6  * (zoom - 1)
-     + 0.15 * distance of the crop from center
+     + 0.15 * distance of the crop from the home frame
      + 0.25 if mirrored
 ```
 
@@ -64,7 +64,9 @@ cost = 4.0  * saliency hidden under icons, as a share of all saliency
 
 **One decision.** The best crop for every zoom level is warped on both axes, and all results are scored with one function. The lowest total wins. On a soft background the subject slides at zoom 1.0. Zoom appears only when a slide cannot clear the icons.
 
-**Never worse.** The result never hides more of the subject than the plain centered fill. With no icons, or icons that cover nothing important, the output equals a normal fill wallpaper.
+**Home frame.** When the picture and the screen differ in shape, a fill crops one axis. The home frame is the pan along that axis the screen shows with no icons at all. Among the pans that keep within 2% of the most saliency any pan keeps, it is the one centered nearest the subject's centroid. It replaces the centered crop only when the centered crop keeps under 90% of that most or cuts the subject's border by more than 0.15 of its size, and only when the new pan shows at least 95% of the solid subject or 20 points more of it than the centered crop. Icons never change the home frame, and the crop costs above are measured from it.
+
+**Never worse.** The result never hides more of the subject than the home frame. With no icons, or icons that cover nothing important, the output equals the home frame, which is a normal fill wallpaper whenever the centered crop already shows the subject.
 
 **Stability.** The previous placement is kept unless the new one is clearly better, so a small nudge of one icon does not move the picture.
 
@@ -78,9 +80,53 @@ For each output pixel, the renderer looks up the source position through `fx` an
 
 Measured on a six core laptop from 2018, a 2880 by 1800 render takes about 95 ms and a 5120 by 2880 render about 230 ms, decode not included.
 
+### Scenery
+
+With scenery on, the still can also carry clouds or sand islands that gather around the icons and give their labels a calm ground.
+
+**Where it is drawn.** Clouds go only where the picture is sky blue at mid brightness or above, in a calm region that reaches the top edge. Islands go only where the picture is coloured like water, green cyan to cyan at mid lightness, in a calm region. Each colour test runs on the picture blurred by 0.2 icon units, is opened by 1.35 units so strips and small patches drop out, and is blurred by 0.45 units so scenery fades out where belonging ends. Whether a place belongs depends only on the picture and the icon size, so a pan or an icon move never switches it. Everything else gets no scenery, and the pads still work there.
+
+**Subject guard.** Scenery is cleared from every 16 pixel cell that holds solid subject, which is saliency of at least 0.35 in a colour at least 0.1 apart from the blurred backdrop, and from every cell within 24 pixels or 0.2 units of one, whichever is larger. Past that it fades back in over half a unit. The guard travels in the paint table, so the still, the CPU frame and both shaders apply it, and a glide applies the guard of both states.
+
+**Unit and lattice.** The unit u is the median height of the icons on the screen, measured before clipping, with a floor of 16 pixels. A median under 0.5 pixels turns scenery off. Clouds and islands grow from jittered sites spaced a third of a cell apart, where a cell is 1.1 u. A screen gets at most 250,000 sites, and the spacing widens when it would need more.
+
+**Tables.** Each still hands its scenery to the frame as tables, version 2.
+
+| Table | Grid | Holds |
+|---|---|---|
+| field | 4 pixels | Distance to the scenery edge in u, negative inside, held between minus 1.7 and 1.15 |
+| look | 4 pixels | Kind, cloud or land. The pile mark on cloud or foam on land. Broad light on cloud or the label hold on land. Facing |
+| paints | 16 pixels, 8 layers | Shallows gain, foam, sand, wet sand, cloud, lit cloud, deep cloud, and the subject guard in alpha |
+| ramps | 2 rows of 512 | Shallows, foam line, sand cover, wet band, cloud cover, lit band and under shade, over the field from minus 0.6 to 1.15 |
+
+**Label hold.** Under the bottom third of each icon, fading out over 0.7 cell, cloud drops its broad light, lit arcs and lit rim, and sand is drawn 20% darker.
+
+**Grain.** Sand grain comes from one integer hash written in Rust, WGSL and GLSL. A test reads both shader files and checks their numbers against the Rust constants, together with the glide numbers below.
+
+**Glide.** Each pixel picks its glide from the kind its two states carry within reach. Sky cross dissolves. Land shrinks and swells. With s running from 0 to 1, the land distance is the least of the old distance plus 1.8 s, the new distance plus 1.8 times 1 minus s, and the larger of the two distances raised by up to 0.3 u times the square of 4 s times 1 minus s. That raise grows with how much the two fields differ, up to a difference of 0.2, at the pixel or at four points 0.3 u away on the diagonals. Those four reads are skipped where the distance lies outside minus 0.4 to 0.06, since the ramps are flat there and the pixel comes out the same. The CPU frame and both shaders compute the same terms.
+
 ### What the engine cannot do
 
 A subject that touches the screen edge under the icons cannot slide clear on a screen with the same shape as the picture, because there is no picture beyond that edge to fill in. Flipping the picture clears it. Flipping is off by default, since a flipped photo of a known place or person looks wrong. `scooch flip` turns it on, and the status line says when it would help.
+
+### What scenery cannot do
+
+- Clouds need a sky blue region that reaches the top of the picture. Overcast, pale, foggy, night and sunset skies get none, and so does sky blue that sits lower in the frame.
+- Islands need water from green cyan to cyan at mid lightness. A deep blue sea, a pale lake and a dark lake get none.
+- In a glide that also moves the picture, the guard clears the subject's place in both states, not every place the subject passes between them.
+- White label text on scenery reaches about 1.7 to 1 contrast at worst.
+- Icons smaller than 16 pixels get scenery sized for 16 pixel icons.
+- Past 250,000 sites the puffs spread apart, which starts near a 7680 by 4320 screen with 16 pixel icons.
+- Mid glide, land near a change shrinks by up to 0.3 u before it grows back.
+
+### Scenery measured
+
+| What | Result | Where, commit |
+|---|---|---|
+| One land glide frame, four gate reads against none, fastest of 160 frames | 0.12 ms more at s 0.25, 0.49 ms more at s 0.5 | Owner's Mac, Intel UHD Graphics 630, 2880 by 1800, two-swans, 7bc00dc |
+| First still and one move, instructions on one thread, fox at 2880 by 1800 | Mac column 4,677M and 657M, scattered 5,423M and 734M | Owner's Mac, 7bc00dc |
+| 300 icons at 5120 by 2880 | First still 24,973M, move 479M | Owner's Mac, 7bc00dc |
+| A 1 pixel icon at 1920 by 1080, and 120 icons of 16 pixels at 7680 by 4320 | 63,794 sites in 0.45 s, and 233,324 sites in 1.82 s | Owner's Mac, 7bc00dc |
 
 ## Desktop adapter
 
@@ -154,7 +200,7 @@ On macOS and Windows a move can slide the picture into its new place. A layer ov
 
 On macOS the layer is a borderless window at the desktop window level, above the wallpaper and below Finder's icons, that takes no mouse input. It opens only when a wallpaper window and Finder's icon window are both on that screen and no window covers the whole desktop. On Windows the layer is a child window of Explorer's desktop below the icon view, under Progman or under the wallpaper WorkerW, depending on how the shell is laid out.
 
-**Tables.** For each output the daemon writes `<output>.<key>.tables` in the cache, where the key is a hash of the picture and the flip setting. Tables of version 1 start with `SCBT` and hold the screen and canvas sizes, the warp maps, the field, look, pad, paint and ramp grids, the canvas fingerprint and a checksum. For a glide the daemon hands the helper the tables of the picture on screen and of the new one.
+**Tables.** For each output the daemon writes `<output>.<key>.tables` in the cache, where the key is a hash of the picture and the flip setting. Tables of version 2 start with `SCBT` and hold the screen and canvas sizes, the warp maps, the field, look, pad, paint and ramp grids, the canvas fingerprint and a checksum. For a glide the daemon hands the helper the tables of the picture on screen and of the new one.
 
 **The canvas file.** One per screen, `<screen>.<key>.canvas` beside the tables. Its 36 byte header is `SCCV`, then version 2, width, height, 4 channels, colour 1 for sRGB and the number of mip levels as 32 bit numbers, then the canvas fingerprint that the tables also hold. Every mip level follows as RGBA. A 2880 by 1800 canvas makes a file of 27,647,488 bytes. The daemon writes the file after a set when none exists for that picture and those options, and deletes the screen's older canvas files. The helper reads it while it makes the device, uploads the stored levels and checks the fingerprint. When the file is missing or does not match, the helper decodes the picture instead.
 

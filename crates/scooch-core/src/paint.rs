@@ -10,6 +10,7 @@ pub const WET: usize = 3;
 pub const CLOUD: usize = 4;
 pub const LIT: usize = 5;
 pub const DEEP: usize = 6;
+pub const GUARD: usize = 7;
 pub const GAIN: f32 = 4.0;
 
 const GRAIN: f32 = 0.16;

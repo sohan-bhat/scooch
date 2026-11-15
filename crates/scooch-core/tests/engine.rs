@@ -627,3 +627,51 @@ fn labels_stay_readable_on_the_scenery() {
         }
     }
 }
+
+fn on_solid(layer: &scooch_core::RgbaImage, cells: &[(Vec<bool>, u32, u32)]) -> (usize, usize) {
+    let (mut solid, mut drawn) = (0usize, 0usize);
+    for (x, y, p) in layer.enumerate_pixels() {
+        let inside = cells.iter().any(|(c, w, h)| {
+            let (i, j) = ((x / 16).min(w.saturating_sub(1)), (y / 16).min(h.saturating_sub(1)));
+            !c.is_empty() && c[(j * w + i) as usize]
+        });
+        if inside {
+            solid += 1;
+            drawn += (p[3] > 0) as usize;
+        }
+    }
+    (solid, drawn)
+}
+
+#[test]
+fn scenery_never_covers_the_solid_subject() {
+    let (w, h) = (960, 600);
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let mut seen = 0usize;
+    for photo in photos() {
+        let picture = small(&photo.image, 1200);
+        let analysis = scooch_core::analyze(&picture);
+        for layout in ["mac", "scattered"] {
+            let icons = layouts::layout(layout, &analysis, w, h);
+            let scene = Scene { width: w, height: h, icons: icons.clone() };
+            let mut moved = icons.clone();
+            moved[3].x = (moved[3].x - 2.0 * moved[3].w).max(0.0);
+            moved[3].y = (moved[3].y + moved[3].h).min(h as f32 - moved[3].h);
+            let next = Scene { width: w, height: h, icons: moved };
+            let (pa, pb) = (scooch_core::solve(&analysis, &scene, &options, None), scooch_core::solve(&analysis, &next, &options, None));
+            let (ca, cb) = (scooch_core::solid_cells(&picture, &analysis, &pa, &scene, &options), scooch_core::solid_cells(&picture, &analysis, &pb, &next, &options));
+            let still = scooch_core::render_layers(&picture, &analysis, &pa, &scene, &options);
+            let (solid, drawn) = on_solid(&still.scenery, std::slice::from_ref(&ca));
+            println!("{} {layout} still: {drawn} of {solid} solid subject pixels under scenery", photo.name);
+            assert_eq!(drawn, 0, "{} {layout} still", photo.name);
+            seen += solid;
+            let (a, b) = (scooch_core::bundle(&picture, &analysis, &pa, &scene, &options), scooch_core::bundle(&picture, &analysis, &pb, &next, &options));
+            for s in [0.25f32, 0.5, 0.75] {
+                let layers = scooch_core::frame_layers(&a, &b, s);
+                let (solid, drawn) = on_solid(&layers.scenery, &[ca.clone(), cb.clone()]);
+                assert_eq!(drawn, 0, "{} {layout} glide at {s}: {drawn} of {solid}", photo.name);
+            }
+        }
+    }
+    assert!(seen > 0, "no solid subject pixels were checked");
+}

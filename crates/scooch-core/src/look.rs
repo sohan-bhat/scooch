@@ -29,10 +29,23 @@ pub(crate) const SKY_JUMP: f32 = 0.03;
 pub(crate) const SKY_SMOOTH: (f32, f32) = (0.004, 2.0);
 pub(crate) const SKY_SPREAD: f32 = 0.15;
 pub(crate) const SKY_EDGE: (f32, f32) = (0.4, 0.6);
+pub(crate) const SKY_WINDOW: (f32, f32, f32) = (175.0, 295.0, 15.0);
+pub(crate) const SKY_NEED: (f32, f32, f32) = (0.03, 0.018, 0.1);
+pub(crate) const SKY_TURN: (f32, f32) = (215.0, 250.0);
+pub(crate) const SKY_PALE: f32 = 0.66;
+pub(crate) const SKY_LIGHT: (f32, f32, f32, f32) = (0.62, 0.35, 0.025, 0.05);
+pub(crate) const WATER_WINDOW: (f32, f32, f32) = (150.0, 205.0, 10.0);
+pub(crate) const WATER_CHROMA: (f32, f32) = (0.04, 0.06);
+pub(crate) const WATER_LIGHT: (f32, f32, f32, f32) = (0.22, 0.28, 0.52, 0.58);
+pub(crate) const ALLOW_COLOUR: f32 = 0.2;
+pub(crate) const ALLOW_OPEN: f32 = 1.35;
+pub(crate) const ALLOW_SOFT: f32 = 0.45;
 pub(crate) const SLACK: f32 = 1e-3;
 pub(crate) const LOCAL_SPREAD: f32 = 0.3;
 pub(crate) const SALIENT: f32 = 0.35;
 pub(crate) const APART: f32 = 0.1;
+pub(crate) const GUARD_CLEAR: (f32, f32) = (1.5, 0.2);
+pub(crate) const GUARD_FADE: f32 = 0.5;
 pub(crate) const BACKDROP: f32 = 2.0;
 pub(crate) const FALLBACK: [f32; 2] = [-0.6, -0.8];
 pub(crate) const LEAN: f32 = 0.4;
@@ -164,6 +177,44 @@ fn skyish(lab: [f32; 3]) -> bool {
     (chroma >= SKY_CHROMA && hue >= SKY_HUE.0 && hue <= SKY_HUE.1) || (chroma < WHITE_CHROMA && l > WHITE_LIGHT)
 }
 
+fn colour_of([l, a, b]: [f32; 3]) -> (f32, f32, f32) {
+    (l, (a * a + b * b).sqrt(), math::atan2(b, a).to_degrees().rem_euclid(360.0))
+}
+
+fn window(hue: f32, (lo, hi, soft): (f32, f32, f32)) -> f32 {
+    smoothstep(lo - soft, lo, hue) * (1.0 - smoothstep(hi, hi + soft, hue))
+}
+
+pub(crate) fn sky_colour(c: [f32; 3]) -> f32 {
+    let (l, chroma, hue) = colour_of(c);
+    let need = (SKY_NEED.0 + (SKY_NEED.1 - SKY_NEED.0) * smoothstep(SKY_TURN.0, SKY_TURN.1, hue)).max(SKY_NEED.2 * (l - SKY_PALE));
+    let least = SKY_LIGHT.0 + (SKY_LIGHT.1 - SKY_LIGHT.0) * smoothstep(SKY_LIGHT.2, SKY_LIGHT.3, chroma);
+    window(hue, SKY_WINDOW) * smoothstep(0.85 * need, 1.15 * need, chroma) * smoothstep(least - 0.05, least + 0.05, l)
+}
+
+pub(crate) fn water_colour(c: [f32; 3]) -> f32 {
+    let (l, chroma, hue) = colour_of(c);
+    window(hue, WATER_WINDOW) * smoothstep(WATER_CHROMA.0, WATER_CHROMA.1, chroma) * smoothstep(WATER_LIGHT.0, WATER_LIGHT.1, l) * (1.0 - smoothstep(WATER_LIGHT.2, WATER_LIGHT.3, l))
+}
+
+fn opened(mask: &[bool], grid: &Grid, r: f32) -> Vec<f32> {
+    let whole = shape::whole(grid);
+    let cap = r + grid.cell as f32;
+    let room = chamfer(grid, whole, cap, &|i| !mask[i]);
+    let core = chamfer(grid, whole, cap, &|i| room[i] >= r);
+    core.iter().map(|d| if *d <= r { 1.0 } else { 0.0 }).collect()
+}
+
+fn allowances(lab: &[[f32; 3]], grid: &Grid, u: f32) -> (Vec<f32>, Vec<f32>) {
+    let spread = |k: f32| k * u / grid.cell as f32;
+    let soft: Vec<Vec<f32>> = (0..3).map(|k| blurred(&lab.iter().map(|c| c[k]).collect::<Vec<f32>>(), grid, spread(ALLOW_COLOUR))).collect();
+    let shaped = |pass: fn([f32; 3]) -> f32| {
+        let mask: Vec<bool> = (0..lab.len()).map(|i| pass([soft[0][i], soft[1][i], soft[2][i]]) >= 0.5).collect();
+        blurred(&opened(&mask, grid, ALLOW_OPEN * u), grid, spread(ALLOW_SOFT))
+    };
+    (shaped(sky_colour), shaped(water_colour))
+}
+
 fn blurred(values: &[f32], grid: &Grid, spread: f32) -> Vec<f32> {
     blur::gaussian_parallel(values, grid.w, grid.h, spread)
 }
@@ -220,7 +271,9 @@ pub fn none(grid: Grid, width: usize, height: usize) -> Scenic {
     Scenic { field: vec![HOLD.1; grid.w * grid.h], look: vec![0; grid.w * grid.h * 4], paints: vec![0; paint_grid.w * paint_grid.h * 4 * LAYERS], paint_grid }
 }
 
-pub(crate) fn chamfer(grid: &Grid, area: Area, cap: f32, source: impl Fn(usize) -> bool) -> Vec<f32> {
+pub(crate) type Key = [u32; 5];
+
+pub(crate) fn chamfer(grid: &Grid, area: Area, cap: f32, source: &dyn Fn(usize) -> bool) -> Vec<f32> {
     let step = grid.cell as f32;
     let margin = (cap / step).ceil() as usize + 1;
     let crop = area::grow(area, margin, grid.w, grid.h);
@@ -325,6 +378,10 @@ impl Fixed {
         self.coarse(&self.subject, x, y)
     }
 
+    pub(crate) fn solid_cells(&self) -> Vec<bool> {
+        self.solid.iter().map(|d| *d <= 0.0).collect()
+    }
+
     pub(crate) fn solid(&self, x: f32, y: f32) -> f32 {
         self.coarse(&self.solid, x, y)
     }
@@ -373,7 +430,16 @@ pub fn fixed(input: &Sampled, options: &Options, materials: &Materials, u: f32, 
         Scenery::Islands => vec![0.0; cells],
         _ => blurred(&sky_region(&lab, input.busy, &grid), &grid, spread(SKY_SPREAD)).into_iter().map(|v| smoothstep(SKY_EDGE.0, SKY_EDGE.1, v)).collect(),
     };
-    let belong: Vec<f32> = calm.iter().zip(&sky).map(|(c, s)| if options.scenery == Scenery::Auto { c * smoothstep(SEAM.0, SEAM.1, (2.0 * s - 1.0).abs()) } else { *c }).collect();
+    let allow = (options.scenery == Scenery::Auto).then(|| allowances(&lab, &grid, u));
+    let belong: Vec<f32> = calm
+        .iter()
+        .zip(&sky)
+        .enumerate()
+        .map(|(i, (c, s))| match &allow {
+            Some((air, water)) => c * smoothstep(SEAM.0, SEAM.1, (2.0 * s - 1.0).abs()) * (s * air[i] + (1.0 - s) * water[i]),
+            None => *c,
+        })
+        .collect();
     let paint_grid = Grid::of(width, height, P);
     let step = P / grid.cell;
     let pool = |values: &dyn Fn(usize) -> f32| -> Vec<f32> {
@@ -398,9 +464,9 @@ pub fn fixed(input: &Sampled, options: &Options, materials: &Materials, u: f32, 
     let pooled: Vec<Vec<f32>> = (0..3).map(|k| pool(&|i| lab[i][k])).collect();
     let coarse = shape::whole(&paint_grid);
     let far = (paint_grid.w + paint_grid.h) as f32 * P as f32;
-    let subject = chamfer(&paint_grid, coarse, far, |p| inside(p).any(|i| input.saliency[i] >= SALIENT));
+    let subject = chamfer(&paint_grid, coarse, far, &|p| inside(p).any(|i| input.saliency[i] >= SALIENT));
     let backdrop: Vec<Vec<f32>> = pooled.iter().map(|c| blurred(c, &paint_grid, BACKDROP * cell / P as f32)).collect();
-    let solid = chamfer(&paint_grid, coarse, far, |p| inside(p).any(|i| input.saliency[i] >= SALIENT && (0..3).map(|k| (lab[i][k] - backdrop[k][p]).powi(2)).sum::<f32>().sqrt() > APART));
+    let solid = chamfer(&paint_grid, coarse, far, &|p| inside(p).any(|i| input.saliency[i] >= SALIENT && (0..3).map(|k| (lab[i][k] - backdrop[k][p]).powi(2)).sum::<f32>().sqrt() > APART));
     let luminance = pool(&|i| 0.2126 * input.small[i][0] + 0.7152 * input.small[i][1] + 0.0722 * input.small[i][2]);
     let half = |x0: usize, x1: usize, y0: usize, y1: usize| (y0..y1).map(|y| (x0..x1).map(|x| luminance[y * paint_grid.w + x]).sum::<f32>()).sum::<f32>();
     let (mw, mh) = (paint_grid.w / 2, paint_grid.h / 2);
@@ -456,6 +522,8 @@ pub fn fixed(input: &Sampled, options: &Options, materials: &Materials, u: f32, 
             }
             paints[at + 3] = byte(*alpha);
         }
+        let clear = (GUARD_CLEAR.0 * P as f32).max(GUARD_CLEAR.1 * u);
+        paints[paint::GUARD * plane + i * 4 + 3] = byte(1.0 - smoothstep(clear, clear + GUARD_FADE * u, solid[i]));
     }
     Fixed { sky, belong, paints, paint_grid, grid, u, subject, solid, light, blend }
 }

@@ -203,6 +203,11 @@ pub fn frame(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
 }
 
 #[doc(hidden)]
+pub fn solid_cells(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Vec<bool>, u32, u32) {
+    bundle::solid_cells(image, analysis, placement, scene, options, &paint::materials(analysis))
+}
+
+#[doc(hidden)]
 pub fn frame_through(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
     bundle::frame_through(a, b, s)
 }

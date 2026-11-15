@@ -108,7 +108,7 @@ Parts parts(int which, vec2 p, float d, float own, vec3 picture, float grain) {
     shallow = over(shallow, min(picture * gain.rgb * 4.0, vec3(1.0)), ramp(which, 0.0, own).r * gain.a);
     vec4 land = vec4(0.0);
     land = over(land, layer(which, p, 1).rgb, first.g * mark);
-    land = over(land, min(mix(sand.rgb, layer(which, p, 3).rgb, first.a) * grain, vec3(1.0)), first.b);
+    land = over(land, min(mix(sand.rgb, layer(which, p, 3).rgb, first.a) * grain * (1.0 - 0.2 * broad), vec3(1.0)), first.b);
     vec4 shaded = layer(which, p, 4);
     vec3 lit = layer(which, p, 5).rgb;
     vec3 deep = layer(which, p, 6).rgb;
@@ -203,5 +203,9 @@ void main() {
         }
         land = mix(faded, moved, clamp(tide, 0.0, 1.0));
     }
+    float guard_a = layer(0, p, 7).a;
+    float guard_b = layer(1, p, 7).a;
+    float block = max(guard_a * min(4.0 * (1.0 - s), 1.0), guard_b * min(4.0 * s, 1.0));
+    land = land * (1.0 - block);
     color = vec4(over_picture(picture, land), 1.0);
 }

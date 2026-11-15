@@ -1,7 +1,7 @@
 use crate::area;
 use crate::look::{self, Sampled, P};
 use crate::pads::{self, Lookup};
-use crate::paint::{self, Materials, CLOUD, DEEP, FOAM, GAIN, LAYERS, LIT, SAND, SHALLOW, WET};
+use crate::paint::{self, Materials, CLOUD, DEEP, FOAM, GAIN, GUARD, LAYERS, LIT, SAND, SHALLOW, WET};
 use crate::render;
 use crate::shape::{self, smoothstep, Grid, Q};
 use crate::table::{self, Curve};
@@ -25,6 +25,7 @@ const GRAIN_DOUBLE: f32 = 0.6;
 const GRAIN_MIX: [u32; 3] = [0x8da6_b343, 0xd816_3841, 0x5bd1_e995];
 const GRAIN_SHIFT: [u32; 3] = [13, 15, 8];
 const GLIDE_REACH: f32 = 1.8;
+const LABEL_DEEPEN: f32 = 0.2;
 const GLIDE_BLEND: f32 = 0.1;
 const GLIDE_EDGE: f32 = 4.0;
 const GLIDE_KEEP: f32 = 0.3;
@@ -412,6 +413,14 @@ pub fn regions(image: &RgbImage, found: &Analysis, placement: &Placement, scene:
     (cells, grid.w as u32, grid.h as u32)
 }
 
+pub fn solid_cells(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> (Vec<bool>, u32, u32) {
+    let parts = parts(image.dimensions(), canvas(image, scene.width, scene.height).into_owned(), found, placement, scene, options, materials);
+    match &parts.fixed {
+        Some(f) => (f.solid_cells(), f.paint_grid.w as u32, f.paint_grid.h as u32),
+        None => (Vec::new(), 0, 0),
+    }
+}
+
 pub fn compatible(a: &Bundle, b: &Bundle) -> bool {
     a.width == b.width
         && a.height == b.height
@@ -591,7 +600,8 @@ fn pieces<L: Fn(usize) -> [f32; 4]>(c: &Constants, ramps: &[[f32; 8]], (d, own):
         let mut land = Paint::default();
         land.over(rgb(layer(FOAM)), here.at(1) * mark);
         let body = mix3(rgb(sand), rgb(layer(WET)), here.at(3));
-        land.over(body.map(|v| (v * grain).min(1.0)), here.at(2));
+        let deeper = 1.0 - LABEL_DEEPEN * broad;
+        land.over(body.map(|v| (v * grain * deeper).min(1.0)), here.at(2));
         rest = land.scaled(keep);
     }
     if kind > 0.0 && here.at(4) > 0.0 {
@@ -911,6 +921,9 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
             } else {
                 faded().scaled(1.0 - tide).plus(moved().scaled(tide))
             };
+            let guard = |k: usize| lerp4(&tint_lines[k][GUARD], tint_column)[3];
+            let block = if planes.len() == 1 { guard(0) } else { (guard(0) * (GLIDE_EDGE * (1.0 - s)).min(1.0)).max(guard(1) * (GLIDE_EDGE * s).min(1.0)) };
+            let total = total.scaled(1.0 - block);
             if total.a <= 1e-4 {
                 continue;
             }
@@ -935,6 +948,7 @@ mod tests {
         let both = [
             (format!("> {:?} && both < {:?}", GLIDE_FELT.0, GLIDE_FELT.1), 1),
             (format!("{:?} * (grain_hash(", GRAIN_DOUBLE), 1),
+            (format!("* grain * (1.0 - {:?} * broad)", LABEL_DEEPEN), 1),
             (format!("(x * {:#x}u) ^ (y * {:#x}u)", GRAIN_MIX[0], GRAIN_MIX[1]), 1),
             (format!("h * {:#x}u", GRAIN_MIX[2]), 1),
             (format!("h ^ (h >> {}u)", GRAIN_SHIFT[0]), 1),
@@ -946,7 +960,9 @@ mod tests {
             assert_eq!(glsl.matches(text.as_str()).count(), *count, "glsl {text}");
         }
         let edge = format!("min({:?} * ", GLIDE_EDGE);
-        assert_eq!((wgsl.matches(edge.as_str()).count(), glsl.matches(edge.as_str()).count()), (2, 2), "{edge}");
+        assert_eq!((wgsl.matches(edge.as_str()).count(), glsl.matches(edge.as_str()).count()), (4, 4), "{edge}");
+        let guard = format!(", {GUARD})");
+        assert_eq!((wgsl.matches(guard.as_str()).count(), glsl.matches(guard.as_str()).count()), (2, 2), "{guard}");
         assert_eq!(wgsl.matches(&format!("let side = {:?} * frame.unit * {side:?};", GLIDE_SPAN)).count(), 1);
         assert_eq!(glsl.matches(&format!("float side = {:?} * unit * {side:?};", GLIDE_SPAN)).count(), 1);
     }

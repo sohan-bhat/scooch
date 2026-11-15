@@ -261,9 +261,9 @@ fn rebuild(fixed: &Fixed, live: &mut Live, areas: &[Area]) -> (Vec<Area>, Vec<Ar
     let mut closed_changed = Vec::new();
     for a in area::merge(solid_changed.iter().map(|a| area::grow(*a, 2 * r_close, w, h)).collect()) {
         let wide = area::grow(a, r_close, w, h);
-        let near = chamfer(&grid, wide, close, |i| live.solid[i] > 0);
+        let near = chamfer(&grid, wide, close, &|i| live.solid[i] > 0);
         let ww = wide[2] - wide[0];
-        let filled = chamfer(&grid, a, close, |i| {
+        let filled = chamfer(&grid, a, close, &|i| {
             let (x, y) = (i % w, i / w);
             x < wide[0] || x >= wide[2] || y < wide[1] || y >= wide[3] || near[(y - wide[1]) * ww + x - wide[0]] >= close
         });
@@ -284,7 +284,7 @@ fn rebuild(fixed: &Fixed, live: &mut Live, areas: &[Area]) -> (Vec<Area>, Vec<Ar
     let mut deep_changed = Vec::new();
     for a in area::merge(closed_changed.iter().map(|a| area::grow(*a, r_depth + r_blur, w, h)).collect()) {
         let crop = area::grow(a, r_blur, w, h);
-        let fresh = chamfer(&grid, crop, cap, |i| live.closed[i] == 0);
+        let fresh = chamfer(&grid, crop, cap, &|i| live.closed[i] == 0);
         put(&mut scratch, w, crop, &fresh);
         let before = area::take(&live.deep, w, a);
         blur::fixed_into(&scratch, &mut live.deep, w, h, DEPTH_BLUR, a);
@@ -426,7 +426,7 @@ fn look_cell(run: &Run, live: &Live, piles: &Buckets, i: usize) -> [u8; 4] {
         0.0
     };
     let facing = if facing > 0.0 { facing * (1.0 - hold) } else { facing };
-    [byte(kind), byte(kind * pile + (1.0 - kind) * foam), byte(broad), byte(0.5 + 0.5 * facing)]
+    [byte(kind), byte(kind * pile + (1.0 - kind) * foam), byte(kind * broad + (1.0 - kind) * hold), byte(0.5 + 0.5 * facing)]
 }
 
 pub fn relive(fixed: &Fixed, live: &mut Live, g: &Ground, moved: &[[f32; 4]]) -> Option<(Vec<Area>, Vec<Area>)> {
@@ -461,7 +461,7 @@ pub fn relive(fixed: &Fixed, live: &mut Live, g: &Ground, moved: &[[f32; 4]]) ->
     let (new_bare, old_bare) = (marks(&bare), marks(&Shape::new(fixed, old_icons.clone(), cell).cores().bare));
     let (bare_gone, bare_came) = (only_in(&old_bare, &new_bare), only_in(&new_bare, &old_bare));
     let pad = BARE.1 * cell + PUSH * cell;
-    let bare_boxes: Vec<[f32; 4]> = old_bare.iter().filter(|m| bare_gone.contains(&bits(m))).chain(new_bare.iter().filter(|m| bare_came.contains(&bits(m)))).map(|m| [m[0] - pad, m[1] - pad, m[2] + pad, m[3] + pad]).collect();
+    let bare_boxes: Vec<[f32; 4]> = old_bare.iter().filter(|m| bare_gone.contains(&bits(&m[..]))).chain(new_bare.iter().filter(|m| bare_came.contains(&bits(&m[..])))).map(|m| [m[0] - pad, m[1] - pad, m[2] + pad, m[3] + pad]).collect();
     let mut isle_points: Vec<usize> = boxes.iter().chain(&bare_boxes).flat_map(|b| live.lattice.within([b[0] - PUSH * cell, b[1] - PUSH * cell, b[2] + PUSH * cell, b[3] + PUSH * cell])).collect();
     isle_points.sort_unstable();
     isle_points.dedup();
@@ -521,16 +521,27 @@ pub fn relive(fixed: &Fixed, live: &mut Live, g: &Ground, moved: &[[f32; 4]]) ->
     Some(rebuild(fixed, live, &areas))
 }
 
-fn bits<const N: usize>(v: &[f32; N]) -> [u32; N] {
-    v.map(f32::to_bits)
+fn bits(v: &[f32]) -> Key {
+    std::array::from_fn(|k| v.get(k).map_or(0, |x| x.to_bits()))
 }
 
-fn only_in<const N: usize>(a: &[[f32; N]], b: &[[f32; N]]) -> std::collections::HashSet<[u32; N]> {
-    let there: std::collections::HashSet<[u32; N]> = b.iter().map(bits).collect();
-    a.iter().map(bits).filter(|k| !there.contains(k)).collect()
+struct Keys(Vec<Key>);
+
+impl Keys {
+    fn contains(&self, k: &Key) -> bool {
+        self.0.binary_search(k).is_ok()
+    }
+}
+
+fn only_in<const N: usize>(a: &[[f32; N]], b: &[[f32; N]]) -> Keys {
+    let mut there: Vec<Key> = b.iter().map(|v| bits(v)).collect();
+    there.sort_unstable();
+    let mut out: Vec<Key> = a.iter().map(|v| bits(v)).filter(|k| there.binary_search(k).is_err()).collect();
+    out.sort_unstable();
+    Keys(out)
 }
 
 fn moved_puffs(old: &[[f32; 3]], new: &[[f32; 3]]) -> Vec<[f32; 3]> {
     let (gone, came) = (only_in(old, new), only_in(new, old));
-    old.iter().filter(|p| gone.contains(&bits(p))).chain(new.iter().filter(|p| came.contains(&bits(p)))).filter(|p| p[2] > 0.0).copied().collect()
+    old.iter().filter(|p| gone.contains(&bits(&p[..]))).chain(new.iter().filter(|p| came.contains(&bits(&p[..])))).filter(|p| p[2] > 0.0).copied().collect()
 }
