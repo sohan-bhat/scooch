@@ -461,7 +461,7 @@ pub fn relive(fixed: &Fixed, live: &mut Live, g: &Ground, moved: &[[f32; 4]]) ->
     let (new_bare, old_bare) = (marks(&bare), marks(&Shape::new(fixed, old_icons.clone(), cell).cores().bare));
     let (bare_gone, bare_came) = (only_in(&old_bare, &new_bare), only_in(&new_bare, &old_bare));
     let pad = BARE.1 * cell + PUSH * cell;
-    let bare_boxes: Vec<[f32; 4]> = old_bare.iter().filter(|m| bare_gone.contains(&bits(*m))).chain(new_bare.iter().filter(|m| bare_came.contains(&bits(*m)))).map(|m| [m[0] - pad, m[1] - pad, m[2] + pad, m[3] + pad]).collect();
+    let bare_boxes: Vec<[f32; 4]> = old_bare.iter().filter(|m| bare_gone.contains(&bits(m))).chain(new_bare.iter().filter(|m| bare_came.contains(&bits(m)))).map(|m| [m[0] - pad, m[1] - pad, m[2] + pad, m[3] + pad]).collect();
     let mut isle_points: Vec<usize> = boxes.iter().chain(&bare_boxes).flat_map(|b| live.lattice.within([b[0] - PUSH * cell, b[1] - PUSH * cell, b[2] + PUSH * cell, b[3] + PUSH * cell])).collect();
     isle_points.sort_unstable();
     isle_points.dedup();
@@ -532,5 +532,5 @@ fn only_in<const N: usize>(a: &[[f32; N]], b: &[[f32; N]]) -> std::collections::
 
 fn moved_puffs(old: &[[f32; 3]], new: &[[f32; 3]]) -> Vec<[f32; 3]> {
     let (gone, came) = (only_in(old, new), only_in(new, old));
-    old.iter().filter(|p| gone.contains(&bits(*p))).chain(new.iter().filter(|p| came.contains(&bits(*p)))).filter(|p| p[2] > 0.0).copied().collect()
+    old.iter().filter(|p| gone.contains(&bits(p))).chain(new.iter().filter(|p| came.contains(&bits(p)))).filter(|p| p[2] > 0.0).copied().collect()
 }

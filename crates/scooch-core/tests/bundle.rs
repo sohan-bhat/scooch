@@ -76,7 +76,6 @@ fn the_still_is_the_frame_of_its_own_bundle() {
 
 const END_MEAN: f64 = 0.01;
 const END_WORST: u8 = 5;
-const THROUGH_WORST: u8 = 0;
 
 #[test]
 fn a_glide_starts_and_ends_on_the_stills() {
@@ -95,7 +94,7 @@ fn a_glide_starts_and_ends_on_the_stills() {
         for (s, still) in [(0.0f32, &first), (1.0, &last)] {
             let (mean, worst) = difference(&scooch_core::frame_through(&a, &b, s), still);
             println!("{} through {s}: mean {mean:.4} worst {worst}", photo.name);
-            assert!(mean <= END_MEAN && worst <= THROUGH_WORST, "{} through s {s} mean {mean:.4} worst {worst}", photo.name);
+            assert!(mean == 0.0 && worst == 0, "{} through s {s} mean {mean:.4} worst {worst}", photo.name);
         }
     }
 }
