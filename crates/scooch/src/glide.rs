@@ -18,7 +18,7 @@ pub const BARE: u32 = 2;
 pub const EARLY_EVERY: Duration = Duration::from_secs(10);
 pub const EARLY_LIFE: Duration = Duration::from_millis(1500);
 const COLD_SAMPLES: usize = 3;
-const COLD_WITHIN: Duration = Duration::from_secs(3);
+const COLD_WITHIN: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Heard {
@@ -812,7 +812,7 @@ impl Glider {
         let opened = opened_at.unwrap_or(open_at);
         let warm = self.ready_at.is_some_and(|ready| ready <= opened);
         let drawn = trace.drawn;
-        let fresh = launched.filter(|launched| waits_for_ready && started.saturating_duration_since(*launched) <= COLD_WITHIN);
+        let fresh = launched.filter(|launched| started.saturating_duration_since(*launched) <= COLD_WITHIN);
         let canvas = trace.device.zip(trace.ready).map(|(device, ready)| ready.saturating_sub(device));
         if let Some(adapter) = self.adapter.clone() {
             self.learn(&adapter, |start| {
