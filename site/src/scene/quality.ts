@@ -84,6 +84,7 @@ const GRAIN = 0.05;
 const UP_SHARE = 0.6;
 const DOWN_SHARE = 1;
 const FULL_PASSES = 1.6;
+const FIXED = 0.5;
 const WINDOW = { motion: 60, rest: 20 };
 
 export type Chain = 'sharp' | 'fast';
@@ -152,7 +153,7 @@ class Quality {
     const chosen = settings[level];
     const sharp = this.native ? Math.min(chosen.sharp, this.nativeDpr * 0.9) : this.sharpDpr;
     const scale = kind === 'rest' ? sharp : Math.min(sharp, chosen.fast);
-    return scale * scale * (chosen.ao ? FULL_PASSES : 1);
+    return FIXED + (1 - FIXED) * scale * scale * (chosen.ao ? FULL_PASSES : 1);
   }
 
   decide(): GpuClass | null {
