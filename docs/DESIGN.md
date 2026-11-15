@@ -130,9 +130,9 @@ A restore ends one of three ways, and the closing line counts each. The original
 
 **With the glide on.** A tick does this instead of a plain set:
 
-1. At the wake, before the snapshot, the daemon may launch the helper with only its GPU device. It does so at most once in 10 s and never while a helper runs. After two such launches in a row that ended with nothing moved, it does not do so again until a real move. An early helper is quit if no snapshot shows a move within 1.5 s of its launch.
+1. At the wake, before the snapshot, the daemon may launch the helper with only its GPU device. The daemon launches the helper early at most once in 10 s and never while a helper runs. After two such launches in a row that ended with nothing moved, the daemon launches no early helper until a real move. An early helper is quit if no snapshot shows a move within 1.5 s of its launch.
 2. When the snapshot shows icons moved on a screen that shows Scooch's picture and has its tables, the daemon has the helper load the picture and open the layer over that screen, then renders and encodes the new picture as for a plain set.
-3. A helper that has not answered hello means a plain set at once. A ready helper gets up to 150 ms to show its layer. A helper that is still starting gets up to 150 ms only when the prediction below says it will show within that time, and otherwise the set is plain at once.
+3. When the helper has not sent hello, the set is plain at once. When the helper is ready, the daemon holds the set for up to 150 ms until the layer shows. When the helper is still starting, the daemon holds the set for up to 150 ms only when the prediction below puts the show within that time, and otherwise the set is plain at once.
 4. On a glide the daemon writes the new tables, starts the 450 ms glide, sets the new wallpaper under the layer and has the layer settle on the new still picture. After the set it stores the tables under the new output's name and writes the canvas file if none exists.
 5. The layer closes once it has settled and at least 300 ms on macOS or 700 ms on Windows after the set. If it has not settled within 2 s, it closes anyway over the new wallpaper.
 
@@ -148,13 +148,13 @@ Measured on Linux, a quiet minute uses 0 to 10 ms of CPU and about 20 MB residen
 
 ## Live glide
 
-On macOS and Windows a move can slide the picture into its new place. A layer over the wallpaper and below the icons draws the old picture warping into the new one, and the wallpaper changes underneath it. Linux keeps the plain swap.
+On macOS and Windows a move can slide the picture into its new place. A layer over the wallpaper and below the icons draws the old picture warping into the new one, and the wallpaper changes underneath it. On Linux the swap stays plain.
 
-**A separate helper.** A window and a GPU device in the daemon would break rule 1, so the layer lives in a helper. The helper is the same program started with the hidden argument `--live-helper`, which is `scoochw.exe` on Windows. The two talk in JSON lines over the helper's standard input and output. The helper holds one GPU device, up to four loaded pictures and one layer per screen. It starts at a wake or a move and exits 30 s after its last command. If it crashes, the daemon keeps running and the move is a plain swap.
+**A separate helper.** A window and a GPU device in the daemon would break rule 1, and on Windows a GPU device on the software renderer kept about 200 MB that did not come back when the device was dropped, so the layer lives in a helper. The helper is the same program started with the hidden argument `--live-helper`, which is `scoochw.exe` on Windows. The daemon and the helper exchange JSON lines over the helper's standard input and output. The helper holds one GPU device, up to four loaded pictures and one layer per screen. It starts at a wake or a move and exits 30 s after its last command. If it crashes, the daemon keeps running and the move is a plain swap.
 
-On macOS the layer is a borderless window at the desktop window level, above the wallpaper and below Finder's icons, that ignores the mouse. It opens only when a wallpaper window and Finder's icon window are both on that screen and no window covers the whole desktop. On Windows the layer is a child window of Explorer's desktop below the icon view, under Progman or under the wallpaper WorkerW, depending on how the shell is laid out.
+On macOS the layer is a borderless window at the desktop window level, above the wallpaper and below Finder's icons, that takes no mouse input. It opens only when a wallpaper window and Finder's icon window are both on that screen and no window covers the whole desktop. On Windows the layer is a child window of Explorer's desktop below the icon view, under Progman or under the wallpaper WorkerW, depending on how the shell is laid out.
 
-**Tables.** For each output the daemon writes `<output>.<key>.tables` in the cache, where the key is a hash of the picture and the flip setting. Tables of version 1 start with `SCBT` and hold the screen and canvas sizes, the warp maps, the field, look, pad, paint and ramp grids, the canvas fingerprint and a checksum. A glide hands the helper the tables of the picture on screen and of the new one.
+**Tables.** For each output the daemon writes `<output>.<key>.tables` in the cache, where the key is a hash of the picture and the flip setting. Tables of version 1 start with `SCBT` and hold the screen and canvas sizes, the warp maps, the field, look, pad, paint and ramp grids, the canvas fingerprint and a checksum. For a glide the daemon hands the helper the tables of the picture on screen and of the new one.
 
 **The canvas file.** One per screen, `<screen>.<key>.canvas` beside the tables. Its 36 byte header is `SCCV`, then version 2, width, height, 4 channels, colour 1 for sRGB and the number of mip levels as 32 bit numbers, then the canvas fingerprint that the tables also hold. Every mip level follows as RGBA. A 2880 by 1800 canvas makes a file of 27,647,488 bytes. The daemon writes the file after a set when none exists for that picture and those options, and deletes the screen's older canvas files. The helper reads it while it makes the device, uploads the stored levels and checks the fingerprint. When the file is missing or does not match, the helper decodes the picture instead.
 
@@ -172,7 +172,7 @@ The first glide runs at the scale remembered for that GPU and screen size, or at
 
 **Prediction.** While the helper is still starting, the daemon predicts when the layer will show. It takes the latest milestone it has received and adds the remembered times of only the steps that remain, the canvas after the device and the window, draw and reveal after the open. Each step is timed by the thread that does it, so no step includes time spent waiting in a queue. The daemon keeps the last three of each step per GPU in `state.json` and uses their median, so a single slow or fast sample does not decide a drag. When no milestone past hello has arrived, it uses the median of the last three cold starts, each measured from the moment the drag's open was sent until the layer showed.
 
-**Off switches.** `scooch glide` turns the glide off or on, and it starts on. The glide is also off while the system asks for reduced motion, through Reduce motion on macOS and animation effects on Windows. A machine with only a software renderer keeps the plain swap, and so does one where two glides in a row stutter, until Scooch starts again.
+**Off switches.** `scooch glide` turns the glide off or on, and it starts on. The glide is also off while reduced motion is on, through Reduce motion on macOS and animation effects on Windows. On a machine with only a software renderer the swap stays plain, and after two glides in a row stutter it stays plain until Scooch starts again.
 
 ### What the live glide cannot do
 
@@ -187,11 +187,11 @@ Runner numbers come from GitHub's hosted virtual machines. Their GPUs are virtua
 
 | What | Result | Where, commit |
 |---|---|---|
-| Helper launch to ready and to hello, median of ten | Ready 1730 ms before and 186 ms after, hello 238 ms before and 25 ms after | Owner's Mac, Intel UHD Graphics 630, one minute load 26 and 32, f06c3fa and a873bd2 |
+| Helper launch to ready and to hello, median of ten | Ready 186 ms, hello 25 ms | Owner's Mac, Intel UHD Graphics 630, one minute load 32, a873bd2 |
 | An early launch quit unused | 72 ms of helper CPU after 70 ms, 100 ms after 300 ms | Owner's Mac, a873bd2 |
 | Ten cold drags, each after 35 s of rest | 10 of 10 glided, waits 34 to 143 ms, drop to set median 471 ms against 304 ms with the glide off | macOS arm64 runner, 83f485e |
 | Ten cold drags, each after 35 s of rest | 10 of 10 glided, no wait, drop to set median 633 ms against 495 ms with the glide off | macOS Intel runner, 83f485e |
-| Ten drags with a helper that answers hello 1 s late | All plain at once, drop to set median 7 ms and minus 17 ms from the glide off drags | macOS arm64 and Intel runners, 83f485e |
+| Ten drags with a helper that sends hello 1 s late | All plain at once, drop to set median 7 ms and minus 17 ms from the glide off drags | macOS arm64 and Intel runners, 83f485e |
 | Drags where the daemon waited the full 150 ms and then swapped plainly | 0 | Every runner, 83f485e |
 | A quiet minute 35 s after the last glide | 0 ms of CPU and 0 wakeups on macOS, 0 ms of CPU on Windows | Every runner, 83f485e |
 | Thirty wakes with nothing moved, after the helper left | 1 early launch on each macOS runner and 2 on each Windows runner, each quit 1.5 s after launch, nothing left running | Every runner, 83f485e |
