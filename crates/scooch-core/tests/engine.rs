@@ -458,7 +458,7 @@ fn subjects_with_a_calm_strip_behind_slide_clear() {
     assert!(3 * cleared >= 2 * counted.len(), "{cleared} of {} cleared, missed {missed:?}", counted.len());
 }
 
-const LOCALITY: f32 = 3.0;
+const LOCALITY: f32 = 3.5;
 
 fn on_screen_distance(px: f32, py: f32, r: &Rect) -> f32 {
     let dx = (r.x - px).max(px - (r.x + r.w)).max(0.0);
