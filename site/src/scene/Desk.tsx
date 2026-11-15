@@ -39,24 +39,26 @@ const sharpExtras = ['clock', 'cassette', 'plant', 'stapler', 'glasses', 'gamepa
 const sharpUrls = Object.values(pick(sharpExtras, 'models/sharp'));
 const heroUrls = heroes.map((name) => full[name]);
 
-const support = gpuClass();
 const ktx2 = new KTX2Loader().setTranscoderPath(asset('basis/'));
-ktx2.detectSupport({
-  extensions: {
-    has: (name: string) => support.extensions.has(name),
-    get: () => ({ getSupportedProfiles: () => (support.extensions.has('astc-hdr') ? ['ldr', 'hdr'] : ['ldr']) }),
-  },
-} as never);
 
-MeshoptDecoder.useWorkers(2);
+if (!runtime.abandoned) {
+  const support = gpuClass();
+  ktx2.detectSupport({
+    extensions: {
+      has: (name: string) => support.extensions.has(name),
+      get: () => ({ getSupportedProfiles: () => (support.extensions.has('astc-hdr') ? ['ldr', 'hdr'] : ['ldr']) }),
+    },
+  } as never);
+  MeshoptDecoder.useWorkers(2);
+}
 
 function extend(loader: { setKTX2Loader: (value: never) => unknown; setMeshoptDecoder: (value: never) => unknown }) {
   loader.setKTX2Loader(ktx2 as never);
   loader.setMeshoptDecoder(MeshoptDecoder as never);
 }
 
-for (const name of heroes) useGLTF.preload(urls[name], false, true, extend as never);
-if (still) for (const name of extras) useGLTF.preload(extraUrls[name], false, true, extend as never);
+if (!runtime.abandoned) for (const name of heroes) useGLTF.preload(urls[name], false, true, extend as never);
+if (still && !runtime.abandoned) for (const name of extras) useGLTF.preload(extraUrls[name], false, true, extend as never);
 
 const slots = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap'] as const;
 

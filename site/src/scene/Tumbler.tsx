@@ -15,7 +15,7 @@ const TOP = 0.082;
 const query = new URLSearchParams(window.location.search);
 const emptyStill = query.has('hero') && !query.has('juice');
 
-useGLTF.preload(url, false, true);
+if (!runtime.abandoned) useGLTF.preload(url, false, true);
 
 const wrapped = ShaderChunk.lights_physical_pars_fragment.replace(
   'reflectedLight.directDiffuse += irradiance * diffuseBRDF * ( 1.0 - F );',
