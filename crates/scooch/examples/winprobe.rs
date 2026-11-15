@@ -4067,12 +4067,13 @@ mod probe {
         let said = toggle(&p.home);
         quiet_log(trace, Duration::from_millis(1500), Duration::from_secs(10));
         let (now, showing) = (held(&p.home), desktop.wallpaper(screen).ok().flatten());
-        let sets = new_lines(trace, read).iter().filter(|line| line.contains(" set ")).count();
+        let window: Vec<String> = new_lines(trace, read).into_iter().filter(|line| line.contains(" tick ") || line.contains(" set ")).map(|line| line.chars().take(200).collect()).collect();
+        let sets = window.iter().filter(|line| line.contains(" set ")).count();
         let back = toggle(&p.home);
         quiet_log(trace, Duration::from_millis(1500), Duration::from_secs(10));
         let _ = new_lines(trace, read);
         let same = kept.as_ref().zip(now.as_ref()).is_some_and(|(a, b)| a.0 == b.0 && a.1 == b.1);
-        p.line(format!("- navy picture with the icon on the subject, scenery auto then off, scooch scenery said {said:?} then {back:?}, the daemon's answer belongs {:?}, same placement and file {same}, wallpaper unchanged {}, wallpapers set {sets}", kept.as_ref().map(|held| held.2.clone()), shown == showing));
+        p.line(format!("- navy picture with the icon on the subject, scenery auto then off, scooch scenery said {said:?} then {back:?}, the daemon's answer belongs {:?}, same placement and file {same}, wallpaper unchanged {}, wallpapers set {sets}, daemon lines {window:?}", kept.as_ref().map(|held| held.2.clone()), shown == showing));
         if !same || shown != showing || sets > 0 {
             p.failed.push("switching scenery off moved the navy picture or changed the screen".into());
         }
