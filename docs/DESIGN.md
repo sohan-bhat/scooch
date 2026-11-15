@@ -84,7 +84,7 @@ Measured on a six core laptop from 2018, a 2880 by 1800 render takes about 95 ms
 
 With scenery on, the still can also carry clouds or sand islands that gather around the icons and give their labels a calm ground.
 
-**Where it is drawn.** Clouds go only where the picture is sky blue at mid brightness or above, in a calm region that reaches the top edge. Islands go only where the picture is coloured like water, green cyan to cyan at mid lightness, in a calm region. Each colour test runs on the picture blurred by 0.2 icon units, is opened by 1.35 units so strips and small patches drop out, and is blurred by 0.45 units so scenery fades out where belonging ends. Whether a place belongs depends only on the picture and the icon size, so a pan or an icon move never switches it. Everything else gets no scenery, and the pads still work there.
+**Where it is drawn.** Clouds go only where the picture is sky blue at mid brightness or above and at least 0.08 darker than the shaded cloud tone, so a cloud always reads lighter than its sky, in a calm region that reaches the top edge. From those places the sky grows through smoothly joined blue down to a lightness of 0.3, so a sky that darkens toward the top keeps its clouds there. Islands go only where the picture is coloured like water, green cyan to cyan at mid lightness, in a calm region. Each colour test runs on the picture blurred by 0.2 icon units, is opened by 1.35 units so strips and small patches drop out, and is blurred by 0.45 units so scenery fades out where belonging ends. Whether a place belongs depends only on the picture and the icon size, so a pan or an icon move never switches it. Everything else gets no scenery, and the pads still work there.
 
 **Subject guard.** Scenery is cleared from every 16 pixel cell that holds solid subject, which is saliency of at least 0.35 in a colour at least 0.1 apart from the blurred backdrop, and from every cell within 24 pixels or 0.2 units of one, whichever is larger. Past that it fades back in over half a unit. The guard travels in the paint table, so the still, the CPU frame and both shaders apply it, and a glide applies the guard of both states.
 
@@ -113,7 +113,7 @@ A subject that touches the screen edge under the icons cannot slide clear on a s
 
 ### What scenery cannot do
 
-- Clouds need a sky blue region that reaches the top of the picture. Overcast, pale, foggy, night and sunset skies get none, and so does sky blue that sits lower in the frame.
+- Clouds need a sky blue region that reaches the top of the picture and is darker than the cloud. Overcast, pale, foggy, night and sunset skies get none, and so does sky blue that sits lower in the frame.
 - Islands need water from green cyan to cyan at mid lightness. A deep blue sea, a pale lake and a dark lake get none.
 - In a glide that also moves the picture, the guard clears the subject's place in both states, not every place the subject passes between them.
 - White label text reaches about 1.8 to 1 contrast on cloud and 2.3 to 1 on sand at worst.

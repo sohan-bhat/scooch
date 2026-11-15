@@ -62,6 +62,8 @@ fn made(name: &str) -> RgbImage {
             "plain-gradient" => mix([240.0, 140.0, 70.0], [110.0, 60.0, 150.0], 0.6 * v + 0.4 * u).map(|c| c + 2.0 * grain),
             "sky-gradient" => mix([70.0, 128.0, 206.0], [168.0, 206.0, 238.0], v).map(|c| c + 2.0 * grain),
             "flat-water" => [19.0, 90.0, 48.0].map(|c| c + 3.0 * grain),
+            "deep-sky" => mix([20.0, 45.0, 110.0], [85.0, 145.0, 220.0], v).map(|c| c + 2.0 * grain),
+            "dark-blue" => [25.0, 45.0, 105.0].map(|c| c + 2.0 * grain),
             _ => [0.0; 3],
         };
         image::Rgb(c.map(|v| v.round().clamp(0.0, 255.0) as u8))
@@ -76,12 +78,12 @@ enum Expect {
 }
 use Expect::{Keep, Nothing, Pin};
 
-const MADE: [&str; 14] = ["near-black", "dark-gradient", "mid-grey", "white-wall", "star-field", "grass", "snow", "sand", "road", "night-sky", "fog", "plain-gradient", "sky-gradient", "flat-water"];
+const MADE: [&str; 16] = ["deep-sky", "dark-blue", "near-black", "dark-gradient", "mid-grey", "white-wall", "star-field", "grass", "snow", "sand", "road", "night-sky", "fog", "plain-gradient", "sky-gradient", "flat-water"];
 
 fn verdict(name: &str) -> (Expect, Expect) {
     match name {
-        "balloon-sky" | "sky-gradient" => (Keep, Nothing),
-        "moon-sky" | "seagull-sky" | "tree-field" => (Pin, Nothing),
+        "balloon-sky" | "deep-sky" => (Keep, Nothing),
+        "moon-sky" | "sky-gradient" => (Pin, Nothing),
         "two-swans" => (Nothing, Keep),
         "flat-water" => (Nothing, Keep),
         _ => (Nothing, Nothing),
@@ -119,18 +121,16 @@ const TODAY: [(&str, &str, f64, f64); 8] = [
     ("balloon-sky", "scattered", 1.0, 0.0),
     ("two-swans", "column", 0.0, 1.0),
     ("two-swans", "scattered", 0.0, 0.9167),
-    ("sky-gradient", "column", 1.0, 0.0),
-    ("sky-gradient", "scattered", 1.0, 0.0),
     ("flat-water", "column", 0.0, 1.0),
     ("flat-water", "scattered", 0.0, 1.0),
+    ("deep-sky", "column", 1.0, 0.0),
+    ("deep-sky", "scattered", 1.0, 0.0),
 ];
-const PINNED: [(&str, &str, f64); 6] = [
-    ("moon-sky", "column", 0.5482),
-    ("moon-sky", "scattered", 0.7555),
-    ("seagull-sky", "column", 0.9081),
-    ("seagull-sky", "scattered", 0.9741),
-    ("tree-field", "column", 0.5387),
-    ("tree-field", "scattered", 0.0),
+const PINNED: [(&str, &str, f64); 4] = [
+    ("moon-sky", "column", 0.7232),
+    ("moon-sky", "scattered", 0.8333),
+    ("sky-gradient", "column", 0.6103),
+    ("sky-gradient", "scattered", 0.75),
 ];
 const KEEP_SHARE: f64 = 0.95;
 const PIN_BAND: f64 = 0.15;
