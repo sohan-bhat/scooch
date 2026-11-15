@@ -31,6 +31,7 @@ export function App() {
     const fallback = () => {
       runtime.abandoned = true;
       runtime.resume?.();
+      setMode((current) => ({ ...current, live: false }));
     };
     window.addEventListener('scooch:stills', fallback);
     return () => window.removeEventListener('scooch:stills', fallback);
