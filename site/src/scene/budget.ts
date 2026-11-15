@@ -51,6 +51,7 @@ export function level(): Level {
 }
 
 const HEADROOM = 600;
+const PATIENCE = 4000;
 
 export async function calm() {
   for (;;) {
@@ -60,7 +61,10 @@ export async function calm() {
       continue;
     }
     await quiet();
-    if (!quality.moving && quality.chain === 'sharp' && performance.now() - quality.slowAt > HEADROOM) return;
+    const now = performance.now();
+    const resting = !quality.moving && quality.chain === 'sharp';
+    if (resting && now - quality.slowAt > HEADROOM) return;
+    if (resting && now - still.inputAt > PATIENCE) return;
     await new Promise((resolve) => window.setTimeout(resolve, 300));
   }
 }

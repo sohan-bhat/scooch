@@ -8,9 +8,26 @@ export function idle(timeout = 400) {
   });
 }
 
+const holds = new Set<() => boolean>();
+const HOLD_LIMIT = 1000;
+
+export function holdQuiet(test: () => boolean) {
+  holds.add(test);
+  return () => {
+    holds.delete(test);
+  };
+}
+
+function held() {
+  for (const test of holds) if (test()) return true;
+  return false;
+}
+
 export async function quiet(budget = 6, timeout = 400) {
   for (let attempt = 0; attempt < 8; attempt++) {
     const left = await idle(timeout);
-    if (left >= budget) return;
+    if (left >= budget) break;
   }
+  const until = performance.now() + HOLD_LIMIT;
+  while (held() && performance.now() < until) await new Promise((resolve) => window.setTimeout(resolve, 16));
 }

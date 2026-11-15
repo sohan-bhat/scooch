@@ -4,8 +4,10 @@ import { BlendFunction, CopyPass, ToneMappingMode } from 'postprocessing';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinusConstantAlphaFactor, SRGBColorSpace, Vector2, WebGLRenderTarget, type Texture } from 'three';
 import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass } from 'postprocessing';
-import { quiet } from '@/lib/idle';
-import { runtime, story, wallClock } from '@/story/state';
+import { holdQuiet, quiet } from '@/lib/idle';
+import { release as releaseLoader } from '@/lib/load';
+import { changed, runtime, story, wallClock } from '@/story/state';
+import { beats, TOTAL } from '@/story/timeline';
 import { quality, type Toggle } from './quality';
 import { allocate, freeze, inView, nativeAllowed, nativeOff, screenBox, still, thaw } from './still';
 import { budget, grant, release } from './budget';
@@ -15,6 +17,34 @@ import { precompile } from './warm';
 type Target = { isWebGLMultipleRenderTargets?: boolean; textures?: Texture[] & { mipmaps?: unknown[] } };
 
 const SHARP_AFTER = 250;
+const COALESCE = 2000;
+const YIELD = 300;
+const BUILDING = new Set(['capture', 'screen', 'bands', 'post']);
+
+function loading() {
+  return !(runtime.props && runtime.gallery && runtime.painted && runtime.inside);
+}
+
+const arrived = { mark: '' };
+
+function arrival() {
+  const mark = `${runtime.props}${runtime.gallery}${runtime.painted}${runtime.inside}`;
+  if (mark === arrived.mark) return;
+  arrived.mark = mark;
+  still.arrived = true;
+  changed();
+}
+const LOST_FOR = 4000;
+
+function giveUp() {
+  const at = story.progress * TOTAL;
+  const found = beats.findIndex((beat) => at < beat.end);
+  const index = found < 0 ? beats.length - 1 : found;
+  runtime.abandoned = true;
+  document.documentElement.classList.add('stills-mode');
+  releaseLoader(false);
+  requestAnimationFrame(() => document.querySelectorAll('.stills li')[index]?.scrollIntoView({ block: 'start' }));
+}
 const BLEND = 150;
 const STILL_AFTER = 400;
 const JITTER = [
@@ -84,7 +114,7 @@ function grab(pass: Pass, run: () => void) {
   pass.renderToScreen = false;
   pass.render = function grabbed(this: Pass, renderer, inputBuffer, outputBuffer, delta, stencil) {
     render.call(this, renderer, inputBuffer, outputBuffer, delta, stencil);
-    texture = outputBuffer ? outputBuffer.texture : null;
+    texture = renderer.getRenderTarget()?.texture ?? null;
   };
   try {
     run();
@@ -93,6 +123,16 @@ function grab(pass: Pass, run: () => void) {
     pass.renderToScreen = toScreen;
   }
   return texture as Texture | null;
+}
+
+function kept(pass: Pass, run: () => void) {
+  const render = pass.render;
+  pass.render = () => undefined;
+  try {
+    run();
+  } finally {
+    pass.render = render;
+  }
 }
 
 function capture(pass: CopyPass) {
@@ -195,21 +235,32 @@ export function Post({ phone }: { phone: boolean }) {
     };
   }, [copy, overlay, present, accumulate, totals]);
 
+  useEffect(() => holdQuiet(() => loading() && (BUILDING.has(still.phase) || performance.now() - still.inputAt < YIELD)), []);
+
   useEffect(() => {
     const input = () => {
       still.inputAt = performance.now();
     };
     const events = ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'] as const;
     for (const name of events) window.addEventListener(name, input, { passive: true });
+    let watchdog = 0;
     const lost = () => {
       nativeOff();
       switchWanted.current = false;
       release();
+      window.clearTimeout(watchdog);
+      watchdog = window.setTimeout(() => {
+        if (gl.getContext().isContextLost()) giveUp();
+      }, LOST_FOR);
     };
+    const restored = () => window.clearTimeout(watchdog);
     gl.domElement.addEventListener('webglcontextlost', lost);
+    gl.domElement.addEventListener('webglcontextrestored', restored);
     return () => {
       for (const name of events) window.removeEventListener(name, input);
       gl.domElement.removeEventListener('webglcontextlost', lost);
+      gl.domElement.removeEventListener('webglcontextrestored', restored);
+      window.clearTimeout(watchdog);
     };
   }, [gl]);
 
@@ -220,7 +271,7 @@ export function Post({ phone }: { phone: boolean }) {
     const wait = () => {
       if (stopped) return;
       const intro = performance.getEntriesByName('scooch:intro')[0]?.startTime;
-      if (!runtime.painted || intro === undefined || performance.now() - intro < 1000) {
+      if (intro === undefined || performance.now() - intro < 1000) {
         timer = window.setTimeout(wait, 500);
         return;
       }
@@ -417,10 +468,7 @@ export function Post({ phone }: { phone: boolean }) {
       return;
     }
     if (step === 2) {
-      const first = composer.passes[0];
-      first.enabled = false;
-      grab(composer.passes[composer.passes.length - 1], () => render(0));
-      first.enabled = true;
+      grab(composer.passes[composer.passes.length - 1], () => kept(composer.passes[0], () => render(0)));
       return;
     }
     runtime.muted = true;
@@ -457,6 +505,7 @@ export function Post({ phone }: { phone: boolean }) {
 
   const settle = useCallback(
     (now: number, moving: boolean, time: number) => {
+      arrival();
       if (!introAt.current) introAt.current = performance.getEntriesByName('scooch:intro')[0]?.startTime ?? 0;
       const calm =
         still.ready &&
@@ -465,16 +514,13 @@ export function Post({ phone }: { phone: boolean }) {
         !live.pressing &&
         !live.tape &&
         runtime.settled &&
-        runtime.props &&
-        runtime.gallery &&
-        runtime.inside &&
         !document.hidden &&
         introAt.current > 0 &&
         now - introAt.current > 2500 &&
         quality.chain === 'sharp' &&
         now - quality.blendAt > BLEND &&
         now - still.inputAt > STILL_AFTER &&
-        (still.showing || still.phase === 'still' || still.refresh || now - runtime.changedAt > STILL_AFTER);
+        (still.showing || still.phase === 'still' || still.refresh || loading() || now - runtime.changedAt > STILL_AFTER);
       if (still.phase !== 'live' && !calm) {
         still.phase = 'live';
         still.showing = false;
@@ -490,6 +536,7 @@ export function Post({ phone }: { phone: boolean }) {
         if (!calm) return;
         freeze(time);
         still.phase = 'capture';
+        still.startedAt = now;
         quality.hold = true;
         return;
       }
@@ -538,10 +585,7 @@ export function Post({ phone }: { phone: boolean }) {
           still.phase = 'live';
           return;
         }
-        const first = composer.passes[0];
-        first.enabled = false;
-        const image = grab(composer.passes[composer.passes.length - 1], () => render(0));
-        first.enabled = true;
+        const image = grab(composer.passes[composer.passes.length - 1], () => kept(composer.passes[0], () => render(0)));
         if (!image) {
           still.phase = 'live';
           still.showing = false;
@@ -623,8 +667,11 @@ export function Post({ phone }: { phone: boolean }) {
           still.phase = 'bands';
           return;
         }
-        if (still.stale && (!budget.busy || now - budget.lastStepAt > 1000)) {
+        if (still.stale && (still.arrived || !budget.busy || now - budget.lastStepAt > 1000) && (!loading() || now - still.builtAt > COALESCE)) {
           still.stale = false;
+          still.arrived = false;
+          still.rebuilds += 1;
+          still.startedAt = now;
           still.refresh = true;
           still.row = 0;
           still.band = 0;
@@ -653,7 +700,7 @@ export function Post({ phone }: { phone: boolean }) {
         still.target = 1 - still.target;
         still.refresh = false;
       }
-      still.builtAt = performance.now();
+      if (!still.tick) still.builtAt = still.startedAt;
       still.from = null;
       still.phase = 'still';
       still.tick = false;
