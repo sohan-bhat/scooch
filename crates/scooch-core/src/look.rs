@@ -36,6 +36,8 @@ pub(crate) const SKY_PALE: f32 = 0.66;
 pub(crate) const SKY_LIGHT: (f32, f32, f32, f32) = (0.62, 0.48, 0.025, 0.05);
 pub(crate) const SKY_UNDER: (f32, f32) = (0.08, 0.02);
 pub(crate) const SKY_GROW: (f32, f32, f32) = (0.015, 0.3, 0.01);
+pub(crate) const SKY_SIDE: f32 = 0.003;
+pub(crate) const SKY_DRIFT: f32 = 0.3;
 pub(crate) const HOME_MOST: f64 = 4.0;
 pub(crate) const WATER_WINDOW: (f32, f32, f32) = (150.0, 205.0, 10.0);
 pub(crate) const WATER_CHROMA: (f32, f32) = (0.04, 0.06);
@@ -238,6 +240,10 @@ fn under_cloud(l: f32) -> f32 {
     1.0 - smoothstep(top - SKY_UNDER.1, top + SKY_UNDER.1, l)
 }
 
+fn apart(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (0..3).map(|k| (a[k] - b[k]).powi(2)).sum::<f32>().sqrt()
+}
+
 fn grown(seed: &[f32], colour: &[[f32; 3]], grid: &Grid) -> Vec<f32> {
     let open: Vec<bool> = colour
         .iter()
@@ -246,19 +252,33 @@ fn grown(seed: &[f32], colour: &[[f32; 3]], grid: &Grid) -> Vec<f32> {
             window(hue, SKY_WINDOW) >= 0.5 && chroma >= SKY_GROW.0 && l >= SKY_GROW.1 && under_cloud(l) >= 0.5
         })
         .collect();
-    let mut reached: Vec<bool> = seed.iter().map(|v| *v >= 0.5).collect();
-    let mut queue: VecDeque<usize> = (0..seed.len()).filter(|i| reached[*i]).collect();
+    let none = usize::MAX;
+    let mut origin: Vec<usize> = (0..seed.len()).map(|i| if seed[i] >= 0.5 { i } else { none }).collect();
+    let mut queue: VecDeque<usize> = (0..seed.len()).filter(|i| origin[*i] != none).collect();
     while let Some(i) = queue.pop_front() {
         let (x, y) = (i % grid.w, i / grid.w);
-        let next = [(x > 0).then(|| i - 1), (x + 1 < grid.w).then(|| i + 1), (y > 0).then(|| i - grid.w), (y + 1 < grid.h).then(|| i + grid.w)];
-        for n in next.into_iter().flatten() {
-            if !reached[n] && open[n] && (0..3).map(|k| (colour[n][k] - colour[i][k]).powi(2)).sum::<f32>().sqrt() < SKY_GROW.2 {
-                reached[n] = true;
+        let next = [((x > 0).then(|| i - 1), SKY_SIDE), ((x + 1 < grid.w).then(|| i + 1), SKY_SIDE), ((y > 0).then(|| i - grid.w), SKY_GROW.2)];
+        for (n, step) in next.into_iter().filter_map(|(n, step)| n.map(|n| (n, step))) {
+            if origin[n] == none && open[n] && apart(colour[n], colour[i]) < step && apart(colour[n], colour[origin[i]]) <= SKY_DRIFT {
+                origin[n] = origin[i];
                 queue.push_back(n);
             }
         }
     }
-    reached.into_iter().map(|r| if r { 1.0 } else { 0.0 }).collect()
+    let reached: Vec<bool> = origin.iter().map(|o| *o != none).collect();
+    let mut kept: Vec<bool> = (0..reached.len()).map(|i| i < grid.w && reached[i]).collect();
+    let mut queue: VecDeque<usize> = (0..grid.w.min(reached.len())).filter(|i| kept[*i]).collect();
+    while let Some(i) = queue.pop_front() {
+        let (x, y) = (i % grid.w, i / grid.w);
+        let next = [(x > 0).then(|| i - 1), (x + 1 < grid.w).then(|| i + 1), (y > 0).then(|| i - grid.w), (y + 1 < grid.h).then(|| i + grid.w)];
+        for n in next.into_iter().flatten() {
+            if reached[n] && !kept[n] {
+                kept[n] = true;
+                queue.push_back(n);
+            }
+        }
+    }
+    kept.into_iter().map(|r| if r { 1.0 } else { 0.0 }).collect()
 }
 
 pub(crate) fn water_colour(c: [f32; 3]) -> f32 {
