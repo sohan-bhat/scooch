@@ -116,6 +116,8 @@ export function Post({ phone }: { phone: boolean }) {
   const setDpr = useThree((state) => state.setDpr);
   const switchWanted = useRef(false);
   const warming = useRef(0);
+  const bufferSize = useRef<[number, number] | null>(null);
+  const viewSize = useMemo(() => new Vector2(), []);
   const measured = useMemo(() => ({ css: new Vector2(), buffer: new Vector2() }), []);
   const turnNative = useCallback(() => {
     switchWanted.current = false;
@@ -301,9 +303,12 @@ export function Post({ phone }: { phone: boolean }) {
       void (async () => {
         await quiet();
         await precompile(gl, scene, camera, [value, { passes: [present, overlay, accumulate] }]);
-        gl.getDrawingBufferSize(size);
+        const buffer = gl.getDrawingBufferSize(new Vector2());
+        const wide = buffer.x;
+        const tall = buffer.y;
+        bufferSize.current = [wide, tall];
         for (const target of totals) {
-          target.setSize(size.x, size.y);
+          target.setSize(wide, tall);
           await quiet();
           gl.initRenderTarget(target);
         }
@@ -380,6 +385,13 @@ export function Post({ phone }: { phone: boolean }) {
     return true;
   }, [gl, scene, camera]);
 
+  const fit = useCallback((target: WebGLRenderTarget) => {
+    const input = quality.nativeComposer?.inputBuffer;
+    if (!input || (target.width === input.width && target.height === input.height)) return true;
+    target.setSize(input.width, input.height);
+    return false;
+  }, []);
+
   const warm = useCallback(() => {
     const composer = quality.nativeComposer;
     const render = nativeRender.current;
@@ -415,6 +427,7 @@ export function Post({ phone }: { phone: boolean }) {
     hooks.frame?.renderRows(gl, story.place, 0, 1);
     runtime.muted = false;
     const into = totals[1 - still.target];
+    fit(into);
     accumulate.renderTarget = into;
     accumulate.fullscreenMaterial.blendAlpha = 1;
     into.scissor.set(0, 0, 1, 1);
@@ -425,14 +438,14 @@ export function Post({ phone }: { phone: boolean }) {
     gl.autoClear = clear;
     into.scissorTest = false;
     still.ready = true;
-  }, [gl, scene, camera, totals, accumulate]);
+  }, [gl, scene, camera, totals, accumulate, fit]);
 
   const place = useCallback(
     (full: boolean) => {
       if (quality.liveScale >= 0.999) return;
-      gl.getSize(size);
+      gl.getSize(viewSize);
       const r = full ? 1 : quality.liveScale;
-      gl.setViewport(0, size.y * (1 - r), size.x * r, size.y * r);
+      gl.setViewport(0, viewSize.y * (1 - r), viewSize.x * r, viewSize.y * r);
       const scale = full ? 'none' : `scale(${1 / r})`;
       if (corner.scale === scale) return;
       corner.scale = scale;
@@ -535,6 +548,15 @@ export function Post({ phone }: { phone: boolean }) {
           return;
         }
         const into = totals[still.refresh ? 1 - still.target : still.target];
+        if (!fit(into)) {
+          still.box = null;
+          still.tick = false;
+          still.pass = 0;
+          still.band = 0;
+          if (still.showing) still.refresh = true;
+          still.phase = 'bands';
+          return;
+        }
         accumulate.renderTarget = into;
         accumulate.fullscreenMaterial.blendAlpha = 1 / (still.pass + 1);
         const clear = gl.autoClear;
@@ -602,7 +624,7 @@ export function Post({ phone }: { phone: boolean }) {
         }
       }
     },
-    [band, camera, accumulate, gl, totals],
+    [band, camera, accumulate, gl, totals, fit],
   );
 
   const show = useCallback(
@@ -645,6 +667,15 @@ export function Post({ phone }: { phone: boolean }) {
       if (want === 'sharp') quality.blendAt = now;
       quality.switchAt = now;
       quality.chain = want;
+    }
+    const known = bufferSize.current;
+    if (known && still.ready) {
+      gl.getDrawingBufferSize(measured.buffer);
+      if (measured.buffer.x !== known[0] || measured.buffer.y !== known[1]) {
+        bufferSize.current = [measured.buffer.x, measured.buffer.y];
+        for (const target of totals) target.setSize(measured.buffer.x, measured.buffer.y);
+        if (still.phase !== 'live') still.inputAt = now;
+      }
     }
     if (switchWanted.current && !moving && !live.pressing && still.phase === 'live') turnNative();
     else if (warming.current > 0 && !moving && still.phase === 'live') warm();
