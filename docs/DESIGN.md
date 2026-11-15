@@ -232,7 +232,8 @@ The first glide runs at the scale remembered for that GPU and screen size, or at
 - Linux has no live layer, so every swap there is plain.
 - Several monitors gliding at once, a display at scale 2 with wide gamut on a real machine, and 60 frames a second in a window on real hardware are not proven yet.
 - On a machine where the helper starts slower than the daemon ticks, the first drag after a rest swaps plainly and the next one glides.
-- The layer is never open at rest. On the first drag after a rest the daemon holds the new wallpaper for up to 150 ms while the helper starts, so it lands later than with the glide off.
+- The layer is never open at rest. On the first drag after a rest the daemon holds the new wallpaper for up to 150 ms while the helper starts, so that drag lands up to 150 ms later than with the glide off.
+- A cold drag on a machine with no cold start remembered swaps plainly unless the helper is already ready. Only a helper that was still making its device when the drag opened teaches a cold start, so where every helper starts early at a wake, as on the Windows runners, the first drag after the helper left keeps swapping plainly.
 
 ### Measured
 
@@ -242,14 +243,17 @@ Runner numbers come from GitHub's hosted virtual machines. Their GPUs are virtua
 |---|---|---|
 | Helper launch to ready and to hello, median of ten | Ready 186 ms, hello 25 ms | Owner's Mac, Intel UHD Graphics 630, one minute load 32, a873bd2 |
 | An early launch quit unused | 72 ms of helper CPU after 70 ms, 100 ms after 300 ms | Owner's Mac, a873bd2 |
-| Ten cold drags, each after 35 s of rest | 10 of 10 glided, waits 34 to 143 ms, drop to set median 471 ms against 304 ms with the glide off | macOS arm64 runner, 83f485e |
-| Ten cold drags, each after 35 s of rest | 10 of 10 glided, no wait, drop to set median 633 ms against 495 ms with the glide off | macOS Intel runner, 83f485e |
-| Ten drags with a helper that sends hello 1 s late | All plain at once, drop to set median 7 ms and minus 17 ms from the glide off drags | macOS arm64 and Intel runners, 83f485e |
-| Drags where the daemon waited the full 150 ms and then swapped plainly | 0 | Every runner, 83f485e |
-| A quiet minute 35 s after the last glide | 0 ms of CPU and 0 wakeups on macOS, 0 ms of CPU on Windows | Every runner, 83f485e |
-| Thirty wakes with nothing moved, after the helper left | 1 early launch on each macOS runner and 2 on each Windows runner, each quit 1.5 s after launch, nothing left running | Every runner, 83f485e |
-| Change outside the dropped icon between the settled layer and one second after close | 0 of 255 | macOS arm64 and Intel runners, 83f485e |
-| The drag after the helper is killed mid glide, and the first drag after the helper left | Both glide | Windows Server 2022 and 2025 runners, 83f485e |
+| Ten cold drags, each after 35 s of rest | 10 of 10 glided, waits 52 to 142 ms, drop to set median 471 ms against 281 ms with the glide off | macOS arm64 runner, 8b2666c |
+| Ten cold drags, each after 35 s of rest | 10 of 10 glided, waits 0 to 11 ms, drop to set median 488 ms against 422 ms with the glide off | macOS Intel runner, 8b2666c |
+| Ten drags with a helper that sends hello 1 s late | All plain at once, drop to set median 18 ms over the glide off drags on arm64 and 34 ms on Intel | macOS arm64 and Intel runners, 8b2666c |
+| Drags where the daemon waited the full 150 ms and then swapped plainly | 0 | Every runner, 8b2666c |
+| A drag whose tables on screen come from another version | Plain at once with no layer, and the next drag glides | macOS arm64 and Intel runners, 8b2666c |
+| A move while a window covers the whole desktop | Glide skipped as hidden, plain at once | macOS and Windows runners, 8b2666c |
+| A quiet minute 35 s after the last glide | 0 ms of CPU and 0 wakeups on macOS, 0 ms of CPU on Windows | Every runner, 8b2666c |
+| Thirty wakes with nothing moved, after the helper left | 1 early launch on each macOS runner and 2 on each Windows runner, each quit 1.5 s after launch, nothing left running | Every runner, 8b2666c |
+| Change outside the dropped icon between the settled layer and one second after close | 0 of 255 | macOS arm64 and Intel runners, 8b2666c |
+| The drag after the helper is killed mid glide | Glides | macOS and Windows runners, 8b2666c |
+| The first drag after the helper left | Plain at once, since no cold start is remembered there | Windows Server 2022 and 2025 runners, 8b2666c |
 
 ## Command
 
