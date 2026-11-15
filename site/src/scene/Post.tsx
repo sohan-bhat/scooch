@@ -30,6 +30,7 @@ function arrival() {
   const mark = `${runtime.props}${runtime.gallery}${runtime.painted}${runtime.inside}`;
   if (mark === arrived.mark) return;
   arrived.mark = mark;
+  still.arrived = true;
   changed();
 }
 const LOST_FOR = 4000;
@@ -660,8 +661,9 @@ export function Post({ phone }: { phone: boolean }) {
           still.phase = 'bands';
           return;
         }
-        if (still.stale && (!budget.busy || now - budget.lastStepAt > 1000) && (!loading() || now - still.builtAt > COALESCE)) {
+        if (still.stale && (still.arrived || !budget.busy || now - budget.lastStepAt > 1000) && (!loading() || now - still.builtAt > COALESCE)) {
           still.stale = false;
+          still.arrived = false;
           still.rebuilds += 1;
           still.refresh = true;
           still.row = 0;
