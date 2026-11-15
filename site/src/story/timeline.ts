@@ -102,7 +102,7 @@ export function buildTimeline(elements: Elements, manifest: DemoManifest): Built
   to(timeline, s, { grab: 1 }, { grab: 0 }, 94.5, 0.7, EASE.out);
   to(timeline, s, { place: 3 }, { place: 2 }, 94.9, 3.8, EASE.camera);
 
-  to(timeline, s, { relief: 0.3 }, { relief: 0 }, 104, 3, EASE.camera);
+  to(timeline, s, { relief: 0.3 }, { relief: 0 }, 75.2, 2.6, EASE.camera);
   to(timeline, s, { wall: 0 }, { wall: 1 }, 108.6, 4, EASE.camera);
   to(timeline, s, { shape: 0 }, { shape: 1 }, 113.4, 3.6, EASE.camera);
   to(timeline, s, { shape: 1 }, { shape: 2 }, 119.2, 3.8, EASE.camera);
