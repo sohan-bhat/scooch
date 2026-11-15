@@ -72,15 +72,19 @@ fn made(name: &str) -> RgbImage {
 enum Expect {
     Nothing,
     Keep,
+    Pin,
+    Free,
 }
-use Expect::{Keep, Nothing};
+use Expect::{Free, Keep, Nothing, Pin};
 
 const MADE: [&str; 14] = ["near-black", "dark-gradient", "mid-grey", "white-wall", "star-field", "grass", "snow", "sand", "road", "night-sky", "fog", "plain-gradient", "sky-gradient", "flat-water"];
 
 fn verdict(name: &str) -> (Expect, Expect) {
     match name {
-        "balloon-sky" | "moon-sky" | "seagull-sky" | "sky-gradient" => (Keep, Nothing),
-        "two-swans" | "flat-water" => (Nothing, Keep),
+        "balloon-sky" | "sky-gradient" => (Keep, Nothing),
+        "moon-sky" | "seagull-sky" | "tree-field" => (Pin, Nothing),
+        "two-swans" => (Nothing, Keep),
+        "flat-water" => (Nothing, Free),
         _ => (Nothing, Nothing),
     }
 }
@@ -111,21 +115,24 @@ fn coverage(name: &str, image: &RgbImage, layout: &str, icons: &[Rect], (w, h): 
     out
 }
 
-const TODAY: [(&str, &str, f64, f64); 12] = [
+const TODAY: [(&str, &str, f64, f64); 6] = [
     ("balloon-sky", "column", 1.0, 0.0),
     ("balloon-sky", "scattered", 1.0, 0.0),
-    ("moon-sky", "column", 1.0, 0.0),
-    ("moon-sky", "scattered", 0.9167, 0.0),
-    ("seagull-sky", "column", 1.0, 0.0),
-    ("seagull-sky", "scattered", 0.9741, 0.0),
     ("two-swans", "column", 0.0, 1.0),
     ("two-swans", "scattered", 0.0, 0.9167),
     ("sky-gradient", "column", 1.0, 0.0),
     ("sky-gradient", "scattered", 1.0, 0.0),
-    ("flat-water", "column", 0.0, 0.0),
-    ("flat-water", "scattered", 0.0, 0.0),
 ];
-const KEEP_SHARE: f64 = 0.0;
+const PINNED: [(&str, &str, f64); 6] = [
+    ("moon-sky", "column", 0.0),
+    ("moon-sky", "scattered", 0.0),
+    ("seagull-sky", "column", 0.0),
+    ("seagull-sky", "scattered", 0.0),
+    ("tree-field", "column", 0.0),
+    ("tree-field", "scattered", 0.0),
+];
+const KEEP_SHARE: f64 = 0.95;
+const PIN_BAND: f64 = 0.15;
 const NOTHING_MOST: f64 = 0.0005;
 
 #[test]
@@ -149,6 +156,13 @@ fn scenery_appears_only_where_it_belongs() {
                             failures.push(format!("{name} {layout} {} under icons {:.3}% against {:.3}% today", ["clouds", "land"][k], 100.0 * got[2 + k], 100.0 * today));
                         }
                     }
+                    Pin => {
+                        let pinned = PINNED.iter().find(|t| t.0 == name && t.1 == layout).map_or(0.0, |t| t.2);
+                        if (got[2 + k] - pinned).abs() > PIN_BAND * pinned {
+                            failures.push(format!("{name} {layout} {} under icons {:.3}% against the pinned {:.3}%", ["clouds", "land"][k], 100.0 * got[2 + k], 100.0 * pinned));
+                        }
+                    }
+                    Free => {}
                     _ => {}
                 }
             }

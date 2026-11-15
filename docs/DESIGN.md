@@ -99,6 +99,8 @@ With scenery on, the still can also carry clouds or sand islands that gather aro
 | paints | 16 pixels, 8 layers | Shallows gain, foam, sand, wet sand, cloud, lit cloud, deep cloud, and the subject guard in alpha |
 | ramps | 2 rows of 512 | Shallows, foam line, sand cover, wet band, cloud cover, lit band and under shade, over the field from minus 0.6 to 1.15 |
 
+Once a release has shipped tables, any change in what a table holds must raise the version.
+
 **Label hold.** Under the bottom third of each icon, fading out over 0.7 cell, cloud drops its broad light, lit arcs and lit rim, and sand is drawn 20% darker.
 
 **Grain.** Sand grain comes from one integer hash written in Rust, WGSL and GLSL. A test reads both shader files and checks their numbers against the Rust constants, together with the glide numbers below.
