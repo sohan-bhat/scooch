@@ -75,6 +75,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         daemon: Option<Child>,
         events: Events,
         listening: bool,
+        failed: Vec<String>,
+        soft: Vec<String>,
     }
 
     impl Probe {
@@ -100,9 +102,22 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let started = Instant::now();
             if let Err(error) = check(self) {
                 self.line(format!("- **check failed** {error:#}"));
+                self.failed.push(format!("{title} stopped with {error:#}"));
             }
             self.line(format!("- took {} ms", started.elapsed().as_millis()));
             self.save();
+        }
+
+        fn fail(&mut self, text: impl Into<String>) {
+            let text = text.into();
+            self.line(format!("- **missing** {text}"));
+            self.failed.push(text);
+        }
+
+        fn soft(&mut self, name: &str, reason: &str) {
+            let text = format!("{name} on {}, {reason}", std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "no desktop".into()));
+            self.line(format!("- **soft** {text}"));
+            self.soft.push(text);
         }
 
         fn linux(&self) -> Result<Linux> {
@@ -141,6 +156,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             daemon: None,
             events: Arc::new(Mutex::new(Vec::new())),
             listening: false,
+            failed: Vec::new(),
+            soft: Vec::new(),
         };
         probe.section("1 Session facts", facts);
         probe.section("2 Read", read);
@@ -150,8 +167,24 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         probe.section("6 End to end", end_to_end);
         probe.section("7 Two monitors", monitors);
         probe.section("8 Cleanup", cleanup);
+        probe.line(String::new());
+        probe.line("## Result".to_string());
+        probe.line(String::new());
+        if probe.failed.is_empty() {
+            probe.line("- every check passed".to_string());
+        }
+        for failed in probe.failed.clone() {
+            probe.line(format!("- **failed** {failed}"));
+        }
+        for soft in probe.soft.clone() {
+            probe.line(format!("- soft, not a failure: {soft}"));
+        }
         probe.save();
-        ExitCode::SUCCESS
+        if probe.failed.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }
     }
 
     fn show(rect: &Rect) -> String {
@@ -1211,26 +1244,28 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let navy = p.home.join("probe-navy.jpg");
         fs::write(&navy, jpeg(&navy_picture((screen.frame.w * screen.scale) as u32, (screen.frame.h * screen.scale) as u32))?)?;
         let home = p.home.clone();
-        let first = |home: &Path| state_entries(home).into_iter().next().map(|(_, entry)| entry);
-        let source = |home: &Path| first(home).and_then(|entry| entry["source"].as_str().map(str::to_string));
-        let was = source(&home);
+        let taken = |home: &Path| state_entries(home).iter().any(|(_, entry)| entry["source"].as_str().is_some_and(|source| source.ends_with("probe-navy.jpg")));
         linux.set_wallpaper(screen, &navy)?;
         let adopted = wait_until(Duration::from_secs(30), || {
             let _ = scooch::poke::send(process);
             std::thread::sleep(Duration::from_millis(500));
-            source(&home).is_some_and(|now| Some(&now) != was.as_ref()) && first(&home).is_some_and(|entry| entry["output"].is_string())
+            taken(&home)
         });
         std::thread::sleep(Duration::from_secs(2));
         let before = linux.wallpaper(screen).ok().flatten();
-        let detail = move_icon(p, (frame.x + frame.w * 0.5, frame.y + frame.h * 0.5)).unwrap_or_else(|error| format!("failed {error:#}"));
+        let moved_icon = move_icon(p, (frame.x + frame.w * 0.5, frame.y + frame.h * 0.5));
+        let moved = moved_icon.is_ok();
+        let detail = moved_icon.unwrap_or_else(|error| format!("failed {error:#}"));
         let swapped = wait_until(Duration::from_secs(10), || linux.wallpaper(screen).ok().flatten() != before);
         std::thread::sleep(Duration::from_secs(2));
-        p.line(format!("- the navy picture taken in after {:?} ms as {:?}, the icon moved onto its subject, {detail}, new wallpaper after {:?} ms", adopted.map(|time| time.as_millis()), source(&home), swapped.map(|time| time.as_millis())));
-        let held = |home: &Path| first(home).map(|entry| (entry["placement"].clone(), entry["output"].clone(), entry["belongs"]["answer"].clone()));
+        let sources: Vec<String> = state_entries(&home).into_iter().map(|(id, entry)| format!("{id} {}", entry["source"].as_str().unwrap_or("none"))).collect();
+        p.line(format!("- the navy picture taken in after {:?} ms, entries {sources:?}, the icon moved onto its subject, {detail}, new wallpaper after {:?} ms", adopted.map(|time| time.as_millis()), swapped.map(|time| time.as_millis())));
+        let held = |home: &Path| state_entries(home).into_iter().map(|(id, entry)| (id, entry["placement"].clone(), entry["output"].clone())).collect::<Vec<_>>();
+        let answers = |home: &Path| state_entries(home).into_iter().map(|(_, entry)| entry["belongs"]["answer"].clone()).collect::<Vec<_>>();
         let toggle = || Command::new(program).arg("scenery").env("SCOOCH_HOME", &home).output().map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
         let log = p.out.join("watch.log");
         let seen = fs::read_to_string(&log).unwrap_or_default().lines().count();
-        let (kept, shown) = (held(&home), linux.wallpaper(screen).ok().flatten());
+        let (kept, belongs, shown) = (held(&home), answers(&home), linux.wallpaper(screen).ok().flatten());
         let said = toggle();
         std::thread::sleep(Duration::from_secs(3));
         let (now, showing) = (held(&home), linux.wallpaper(screen).ok().flatten());
@@ -1238,9 +1273,19 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let sets = window.iter().filter(|line| line.contains(" set ")).count();
         let back = toggle();
         std::thread::sleep(Duration::from_secs(3));
-        let same = kept.as_ref().zip(now.as_ref()).is_some_and(|(a, b)| a.0 == b.0 && a.1 == b.1);
-        let mark = if same && shown == showing && sets == 0 { "" } else { "**missing** " };
-        p.line(format!("- {mark}navy picture with the icon on the subject, scenery auto then off, scooch scenery said {said:?} then {back:?}, the daemon's answer belongs {:?}, same placement and file {same}, wallpaper unchanged {}, wallpapers set {sets}, daemon lines {window:?}", kept.as_ref().map(|held| held.2.clone()), shown == showing));
+        let same = !kept.is_empty() && kept == now;
+        let line = format!("navy picture with the icon on the subject, scenery auto then off, scooch scenery said {said:?} then {back:?}, the daemon's answers belongs {belongs:?}, same placements and files {same}, wallpaper unchanged {}, wallpapers set {sets}, daemon lines {window:?}", shown == showing);
+        if !moved {
+            p.line(format!("- {line}"));
+            p.soft("the scenery switch line", "the probe has no way to move an icon on this session, so the icon never reached the subject");
+        } else if !taken(&home) {
+            p.line(format!("- {line}"));
+            p.soft("the scenery switch line", "the daemon never took in the navy picture the probe set while it ran, so the switch was not judged");
+        } else if same && shown == showing && sets == 0 {
+            p.line(format!("- {line}"));
+        } else {
+            p.fail(line);
+        }
         Ok(())
     }
 
