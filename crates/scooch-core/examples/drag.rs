@@ -102,6 +102,7 @@ fn main() {
         let mut scene = Scene { width: w, height: h, icons: icons.clone() };
         let mut placement = scooch_core::solve(&analysis, &scene, &options, None);
         let mut session = Session::new();
+        let still_placement = placement.clone();
         let (first_bundle, first_still) = session.still_shared(&image, &analysis, &placement, &scene, &options);
         let first_layers = scooch_core::frame_layers(&first_bundle, &first_bundle, 0.0);
         let (mut last_still, mut last_layer) = ((*first_still).clone(), first_layers.scenery);
@@ -131,7 +132,7 @@ fn main() {
         }
         println!("{label} walk worst over the {} steps that kept the wallpaper still: scenery alpha {} color {} farthest {:.2} cells changed {:.2}% picture largest {}", STEPS - shifted, worst.0, worst.1, worst.2, worst.3, worst.4);
         let end = scene.icons[held];
-        let (last_bundle, _) = session.still_shared(&image, &analysis, &placement, &scene, &options);
+        let (last_bundle, _) = session.still_shared(&image, &analysis, &still_placement, &scene, &options);
         let (mut first_bundle, mut last_bundle) = ((*first_bundle).clone(), (*last_bundle).clone());
         if let Some(keep) = std::env::var("KEEP").ok().and_then(|v| v.parse::<f32>().ok()) {
             first_bundle.constants.shadow[0] = keep;
