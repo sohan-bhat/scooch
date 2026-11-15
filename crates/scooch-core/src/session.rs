@@ -163,11 +163,11 @@ impl Session {
                 if h.analysis == key.1 && h.placement == *placement && h.options == *options {
                     shift(h, image, analysis, scene, key)
                 } else {
-                    let canvas = reuse(&mut h);
-                    build(image, analysis, placement, scene, options, key, canvas)
+                    let kept = (reuse(&mut h), h.parts.belonging.take().filter(|_| h.analysis == key.1));
+                    build(image, analysis, placement, scene, options, key, kept)
                 }
             }
-            _ => build(image, analysis, placement, scene, options, key, None),
+            _ => build(image, analysis, placement, scene, options, key, (None, None)),
         };
         let mut held = held;
         if !draw {
@@ -191,7 +191,7 @@ fn reuse(h: &mut Held) -> Option<RgbImage> {
     RgbImage::from_raw(h.bundle.canvas_width, h.bundle.canvas_height, raw)
 }
 
-fn build(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options, (image_key, analysis_key): (u64, u64), canvas: Option<RgbImage>) -> Held {
+fn build(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options, (image_key, analysis_key): (u64, u64), (canvas, kept): (Option<RgbImage>, Option<Arc<look::Belonging>>)) -> Held {
     let materials = paint::materials(analysis);
     let (canvas, shrunk) = match canvas {
         Some(canvas) => (canvas, true),
@@ -200,7 +200,7 @@ fn build(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &S
             Cow::Borrowed(image) => (image.clone(), false),
         },
     };
-    let mut parts = bundle::parts(image.dimensions(), canvas, analysis, placement, scene, options, &materials);
+    let mut parts = bundle::parts(image.dimensions(), (canvas, kept), analysis, placement, scene, options, &materials);
     let mut out = parts.tables(&materials);
     let canvas = std::mem::replace(&mut parts.framed.canvas, RgbImage::new(0, 0)).into_raw();
     out.canvas = if shrunk { canvas } else { Vec::new() };
@@ -255,8 +255,8 @@ fn shift(mut h: Held, image: &RgbImage, analysis: &Analysis, scene: &Scene, key:
         Some(moved) if lean(&mut h, analysis, scene, &moved) => h,
         _ => {
             let placement = h.placement.clone();
-            let canvas = reuse(&mut h);
-            build(image, analysis, &placement, scene, &options, key, canvas)
+            let kept = (reuse(&mut h), h.parts.belonging.take());
+            build(image, analysis, &placement, scene, &options, key, kept)
         }
     }
 }

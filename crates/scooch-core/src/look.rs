@@ -36,6 +36,7 @@ pub(crate) const SKY_PALE: f32 = 0.66;
 pub(crate) const SKY_LIGHT: (f32, f32, f32, f32) = (0.62, 0.48, 0.025, 0.05);
 pub(crate) const SKY_UNDER: (f32, f32) = (0.08, 0.02);
 pub(crate) const SKY_GROW: (f32, f32, f32) = (0.015, 0.3, 0.01);
+pub(crate) const HOME_MOST: f64 = 4.0;
 pub(crate) const WATER_WINDOW: (f32, f32, f32) = (150.0, 205.0, 10.0);
 pub(crate) const WATER_CHROMA: (f32, f32) = (0.04, 0.06);
 pub(crate) const WATER_LIGHT: (f32, f32, f32, f32) = (0.22, 0.28, 0.52, 0.58);
@@ -133,6 +134,44 @@ pub struct Sampled<'a> {
     pub small: &'a [[f32; 3]],
     pub saliency: &'a [f32],
     pub busy: &'a [f32],
+    pub columns: &'a [f64],
+    pub rows: &'a [f64],
+}
+
+pub struct Belonging {
+    pub grid: Grid,
+    pub size: [f64; 2],
+    pub sky: Vec<f32>,
+    pub belong: Vec<f32>,
+    source: (u32, u32),
+    screen: (u32, u32),
+    u: f32,
+    scenery: Scenery,
+}
+
+impl Belonging {
+    pub fn bytes(&self) -> usize {
+        (self.sky.len() + self.belong.len()) * 4
+    }
+
+    pub fn fits(&self, source: (u32, u32), screen: (u32, u32), u: f32, options: &Options) -> bool {
+        self.source == source && self.screen == screen && self.u.to_bits() == u.to_bits() && self.scenery == options.scenery
+    }
+
+    pub fn at(&self, values: &[f32], fx: f64, fy: f64) -> f32 {
+        let cell = self.grid.cell as f64;
+        self.grid.linear(values, (fx * self.size[0] / cell - 0.5) as f32, (fy * self.size[1] / cell - 0.5) as f32)
+    }
+}
+
+pub fn home_grid(source: (u32, u32), screen: (u32, u32)) -> (Grid, [f64; 2]) {
+    let (sw, sh) = (source.0.max(1) as f64, source.1.max(1) as f64);
+    let scale = (screen.0.max(1) as f64 / sw).max(screen.1.max(1) as f64 / sh);
+    let size = [sw * scale, sh * scale];
+    let screen_cells = (screen.0.max(1) as f64 / shape::Q as f64).ceil() * (screen.1.max(1) as f64 / shape::Q as f64).ceil();
+    let home_cells = (size[0] / shape::Q as f64).ceil() * (size[1] / shape::Q as f64).ceil();
+    let coarse = (home_cells / (HOME_MOST * screen_cells)).sqrt().ceil().max(1.0) as usize;
+    (Grid::of(size[0].ceil() as usize, size[1].ceil() as usize, shape::Q * coarse), size)
 }
 
 pub struct Scenic {
@@ -444,30 +483,37 @@ impl Fixed {
     }
 }
 
-pub fn fixed(input: &Sampled, options: &Options, materials: &Materials, u: f32, width: usize, height: usize) -> Fixed {
+pub fn belonging_map(input: &Sampled, source: (u32, u32), screen: (u32, u32), options: &Options, u: f32) -> Belonging {
+    let grid = input.grid;
+    let cells = grid.w * grid.h;
+    let size = home_grid(source, screen).1;
+    let spread = |k: f32| k * u / grid.cell as f32;
+    let raw: Vec<f32> = input.saliency.iter().zip(input.busy).map(|(s, b)| belonging(*s, *b)).collect();
+    let calm = blurred(&raw, &grid, spread(BELONG_SPREAD));
+    let lab = || -> Vec<[f32; 3]> { input.small.par_iter().map(|c| color::oklab(c[0], c[1], c[2])).collect() };
+    let (sky, belong) = match options.scenery {
+        Scenery::Clouds => (vec![1.0; cells], calm),
+        Scenery::Islands | Scenery::Off => (vec![0.0; cells], calm),
+        Scenery::Auto => {
+            let lab = lab();
+            let sky: Vec<f32> = blurred(&sky_region(&lab, input.busy, &grid), &grid, spread(SKY_SPREAD)).into_iter().map(|v| smoothstep(SKY_EDGE.0, SKY_EDGE.1, v)).collect();
+            let (air, water) = allowances(&lab, &grid, u);
+            let belong = (0..cells).map(|i| calm[i] * smoothstep(SEAM.0, SEAM.1, (2.0 * sky[i] - 1.0).abs()) * (sky[i] * air[i] + (1.0 - sky[i]) * water[i])).collect();
+            (sky, belong)
+        }
+    };
+    Belonging { grid, size, sky, belong, source, screen, u, scenery: options.scenery }
+}
+
+pub fn fixed(input: &Sampled, belonging: &Belonging, materials: &Materials, u: f32, (width, height): (usize, usize)) -> Fixed {
     let grid = input.grid;
     let cells = grid.w * grid.h;
     let cell = CELL * u;
     let encode = color::encode_table();
     let lab: Vec<[f32; 3]> = input.small.par_iter().map(|c| color::oklab(c[0], c[1], c[2])).collect();
-    let raw: Vec<f32> = input.saliency.iter().zip(input.busy).map(|(s, b)| belonging(*s, *b)).collect();
     let spread = |k: f32| k * u / grid.cell as f32;
-    let calm = blurred(&raw, &grid, spread(BELONG_SPREAD));
-    let sky: Vec<f32> = match options.scenery {
-        Scenery::Clouds => vec![1.0; cells],
-        Scenery::Islands => vec![0.0; cells],
-        _ => blurred(&sky_region(&lab, input.busy, &grid), &grid, spread(SKY_SPREAD)).into_iter().map(|v| smoothstep(SKY_EDGE.0, SKY_EDGE.1, v)).collect(),
-    };
-    let allow = (options.scenery == Scenery::Auto).then(|| allowances(&lab, &grid, u));
-    let belong: Vec<f32> = calm
-        .iter()
-        .zip(&sky)
-        .enumerate()
-        .map(|(i, (c, s))| match &allow {
-            Some((air, water)) => c * smoothstep(SEAM.0, SEAM.1, (2.0 * s - 1.0).abs()) * (s * air[i] + (1.0 - s) * water[i]),
-            None => *c,
-        })
-        .collect();
+    let mapped = |values: &[f32]| -> Vec<f32> { (0..cells).into_par_iter().map(|c| belonging.at(values, input.columns[c % grid.w], input.rows[c / grid.w])).collect() };
+    let (sky, belong) = (mapped(&belonging.sky), mapped(&belonging.belong));
     let paint_grid = Grid::of(width, height, P);
     let step = P / grid.cell;
     let pool = |values: &dyn Fn(usize) -> f32| -> Vec<f32> {
