@@ -81,10 +81,13 @@ const COMFORT = 0.6;
 const REFRESH = [1000 / 240, 1000 / 165, 1000 / 144, 1000 / 120, 1000 / 100, 1000 / 90, 1000 / 75, 1000 / 60];
 const MAX_BOKEH = 3.2;
 const GRAIN = 0.05;
-const GPU_SAMPLES = 90;
-const HEADROOM_SHARE = 0.6;
+const UP_SHARE = 0.6;
+const DOWN_SHARE = 1;
+const FULL_PASSES = 1.6;
+const WINDOW = { motion: 60, rest: 20 };
 
 export type Chain = 'sharp' | 'fast';
+export type Sample = 'motion' | 'rest';
 
 class Quality {
   dofs: DepthOfFieldEffect[] = [];
@@ -126,19 +129,40 @@ class Quality {
   failed = new Map<GpuClass, number>();
   changes = 0;
   onLevel: ((level: GpuClass) => void) | null = null;
-  gpuSamples: number[] = [];
-  gpuRest: number[] = [];
+  timed = false;
+  measuring = false;
+  samples = { motion: [] as number[], rest: [] as number[] };
+  verdicts = { motion: [] as number[], rest: [] as number[] };
+  fresh = false;
 
-  noteGpu(ms: number, moving: boolean) {
-    const list = moving ? this.gpuSamples : this.gpuRest;
-    list.push(ms);
-    if (list.length > GPU_SAMPLES) list.shift();
+  note(ms: number, kind: Sample) {
+    if (!this.measuring) return;
+    const list = this.samples[kind];
+    list.push(ms / this.period);
+    if (list.length < WINDOW[kind]) return;
+    const sorted = [...list].sort((a, b) => a - b);
+    list.length = 0;
+    const verdicts = this.verdicts[kind];
+    verdicts.push(sorted[Math.floor(sorted.length / 2)]);
+    if (verdicts.length > 2) verdicts.shift();
+    this.fresh = true;
   }
 
-  headroom() {
-    if (this.gpuSamples.length < GPU_SAMPLES / 2) return true;
-    const sorted = [...this.gpuSamples].sort((a, b) => a - b);
-    return sorted[Math.floor(sorted.length / 2)] <= this.period * HEADROOM_SHARE;
+  cost(level: GpuClass, kind: Sample) {
+    const chosen = settings[level];
+    const sharp = this.native ? Math.min(chosen.sharp, this.nativeDpr * 0.9) : this.sharpDpr;
+    const scale = kind === 'rest' ? sharp : Math.min(sharp, chosen.fast);
+    return scale * scale * (chosen.ao ? FULL_PASSES : 1);
+  }
+
+  decide(): GpuClass | null {
+    const { motion, rest } = this.verdicts;
+    const over = (list: number[]) => list.length === 2 && list.every((share) => share > DOWN_SHARE);
+    if (over(motion) || over(rest)) return this.step(-1);
+    const up = this.step(1);
+    if (!up || motion.length < 2 || rest.length < 2) return null;
+    const fits = (list: number[], kind: Sample) => list.every((share) => (share * this.cost(up, kind)) / this.cost(this.gpu, kind) <= UP_SHARE);
+    return fits(motion, 'motion') && fits(rest, 'rest') ? up : null;
   }
 
   configure(phone: boolean, deviceDpr: number, gpu: GpuClass) {
@@ -187,8 +211,8 @@ class Quality {
     }
     this.fastScale = Math.min(1, (FAST ?? chosen.fast) / this.sharpDpr);
     this.changes += 1;
-    this.gpuSamples = [];
-    this.gpuRest = [];
+    this.samples = { motion: [], rest: [] };
+    this.verdicts = { motion: [], rest: [] };
     this.composer?.setSize(0, 0);
     this.fastComposer?.setSize(0, 0);
     this.onLevel?.(level);

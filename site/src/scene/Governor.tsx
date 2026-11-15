@@ -85,6 +85,7 @@ export function Governor() {
     const now = performance.now();
     const ms = delta * 1000;
     state.ms = ms;
+    quality.timed = !!state.timer;
     if (ms > 24) quality.slowAt = now;
     if (ms > 0 && ms < 120) state.frames.push(now, ms);
     if (now - state.checked > 1000) {
@@ -100,7 +101,7 @@ export function Governor() {
       const tag = state.tags.get(query);
       if (tag && !context.getParameter(timer.GPU_DISJOINT_EXT)) {
         const gpu = context.getQueryParameter(query, context.QUERY_RESULT) / 1e6;
-        if (tag.settled && !tag.held) quality.noteGpu(gpu, tag.moving);
+        if (tag.settled && !tag.held && (tag.moving || tag.chain === 'sharp')) quality.note(gpu, tag.moving ? 'motion' : 'rest');
         if (tag.moving && tag.settled && tag.chain === 'fast') quality.earn(gpu, tag.frame);
         if (tag.moving && tag.settled && tag.chain === 'sharp' && quality.motionSharp && gpu > quality.period) quality.miss();
       }
