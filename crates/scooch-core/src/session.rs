@@ -110,6 +110,11 @@ impl Session {
         }
     }
 
+    #[doc(hidden)]
+    pub fn sites(&self) -> usize {
+        self.held.as_ref().and_then(|h| h.parts.live.as_ref()).map_or(0, |live| live.sites())
+    }
+
     pub fn bytes(&self) -> usize {
         self.held.as_ref().map_or(0, |h| h.parts.bytes() + h.bundle.canvas.len() + h.bundle.table_bytes() + h.still.as_ref().map_or(0, |s| s.as_raw().len()) + h.picture.as_ref().map_or(0, |p| p.as_raw().len()))
     }
