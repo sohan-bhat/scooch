@@ -73,9 +73,8 @@ enum Expect {
     Nothing,
     Keep,
     Pin,
-    Free,
 }
-use Expect::{Free, Keep, Nothing, Pin};
+use Expect::{Keep, Nothing, Pin};
 
 const MADE: [&str; 14] = ["near-black", "dark-gradient", "mid-grey", "white-wall", "star-field", "grass", "snow", "sand", "road", "night-sky", "fog", "plain-gradient", "sky-gradient", "flat-water"];
 
@@ -84,7 +83,7 @@ fn verdict(name: &str) -> (Expect, Expect) {
         "balloon-sky" | "sky-gradient" => (Keep, Nothing),
         "moon-sky" | "seagull-sky" | "tree-field" => (Pin, Nothing),
         "two-swans" => (Nothing, Keep),
-        "flat-water" => (Nothing, Free),
+        "flat-water" => (Nothing, Keep),
         _ => (Nothing, Nothing),
     }
 }
@@ -115,20 +114,22 @@ fn coverage(name: &str, image: &RgbImage, layout: &str, icons: &[Rect], (w, h): 
     out
 }
 
-const TODAY: [(&str, &str, f64, f64); 6] = [
+const TODAY: [(&str, &str, f64, f64); 8] = [
     ("balloon-sky", "column", 1.0, 0.0),
     ("balloon-sky", "scattered", 1.0, 0.0),
     ("two-swans", "column", 0.0, 1.0),
     ("two-swans", "scattered", 0.0, 0.9167),
     ("sky-gradient", "column", 1.0, 0.0),
     ("sky-gradient", "scattered", 1.0, 0.0),
+    ("flat-water", "column", 0.0, 1.0),
+    ("flat-water", "scattered", 0.0, 1.0),
 ];
 const PINNED: [(&str, &str, f64); 6] = [
-    ("moon-sky", "column", 0.0),
-    ("moon-sky", "scattered", 0.0),
-    ("seagull-sky", "column", 0.0),
-    ("seagull-sky", "scattered", 0.0),
-    ("tree-field", "column", 0.0),
+    ("moon-sky", "column", 0.5482),
+    ("moon-sky", "scattered", 0.7555),
+    ("seagull-sky", "column", 0.9081),
+    ("seagull-sky", "scattered", 0.9741),
+    ("tree-field", "column", 0.5387),
     ("tree-field", "scattered", 0.0),
 ];
 const KEEP_SHARE: f64 = 0.95;
@@ -162,7 +163,6 @@ fn scenery_appears_only_where_it_belongs() {
                             failures.push(format!("{name} {layout} {} under icons {:.3}% against the pinned {:.3}%", ["clouds", "land"][k], 100.0 * got[2 + k], 100.0 * pinned));
                         }
                     }
-                    Free => {}
                     _ => {}
                 }
             }

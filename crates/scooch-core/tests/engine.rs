@@ -467,7 +467,7 @@ fn on_screen_distance(px: f32, py: f32, r: &Rect) -> f32 {
 }
 
 const CLOUD_LABEL_MARGIN: f32 = 0.01;
-const LAND_LABEL: f32 = 0.88;
+const LAND_LABEL: f32 = 0.76;
 
 fn lightness(p: [u8; 3]) -> f32 {
     let lin = p.map(|v| {
