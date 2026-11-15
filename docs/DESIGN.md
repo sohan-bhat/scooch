@@ -116,7 +116,7 @@ A subject that touches the screen edge under the icons cannot slide clear on a s
 - Clouds need a sky blue region that reaches the top of the picture. Overcast, pale, foggy, night and sunset skies get none, and so does sky blue that sits lower in the frame.
 - Islands need water from green cyan to cyan at mid lightness. A deep blue sea, a pale lake and a dark lake get none.
 - In a glide that also moves the picture, the guard clears the subject's place in both states, not every place the subject passes between them.
-- White label text on scenery reaches about 1.7 to 1 contrast at worst.
+- White label text reaches about 1.8 to 1 contrast on cloud and 2.3 to 1 on sand at worst.
 - Icons smaller than 16 pixels get scenery sized for 16 pixel icons.
 - Past 250,000 sites the puffs spread apart, which starts near a 7680 by 4320 screen with 16 pixel icons.
 - Mid glide, land near a change shrinks by up to 0.3 u before it grows back.
@@ -129,6 +129,10 @@ A subject that touches the screen edge under the icons cannot slide clear on a s
 | First still and one move, instructions on one thread, fox at 2880 by 1800 | Mac column 4,677M and 657M, scattered 5,423M and 734M | Owner's Mac, 7bc00dc |
 | 300 icons at 5120 by 2880 | First still 24,973M, move 479M | Owner's Mac, 7bc00dc |
 | A 1 pixel icon at 1920 by 1080, and 120 icons of 16 pixels at 7680 by 4320 | 63,794 sites in 0.45 s, and 233,324 sites in 1.82 s | Owner's Mac, 7bc00dc |
+| Solid subject pixels under scenery, 17 photos on two layouts at 960 by 600 | 0 of 2,775,424 in the stills, and 0 in glide frames at s 0.25, 0.5 and 0.75 | Owner's Mac, 997217e |
+| Label ground lightness under white labels, 17 photos on four layouts at 960 by 600 | Cloud at most 0.812, which is 1.8 to 1, and sand at most 0.745, which is 2.3 to 1 | Owner's Mac, 997217e |
+| Pictures that get scenery, 17 photos and 14 made pictures on two layouts at 2880 by 1800 | balloon-sky, moon-sky, seagull-sky, tree-field, two-swans, a sky blue gradient and a flat water colour. Every other picture under 0.05% of the screen | Owner's Mac, 997217e |
+| Web package | 195,785 bytes gzipped | Owner's Mac, 997217e |
 
 ## Desktop adapter
 
