@@ -6,7 +6,7 @@ import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinu
 import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass } from 'postprocessing';
 import { holdQuiet, quiet } from '@/lib/idle';
 import { release as releaseLoader } from '@/lib/load';
-import { runtime, story, wallClock } from '@/story/state';
+import { changed, runtime, story, wallClock } from '@/story/state';
 import { beats, TOTAL } from '@/story/timeline';
 import { quality, type Toggle } from './quality';
 import { allocate, freeze, inView, nativeAllowed, nativeOff, screenBox, still, thaw } from './still';
@@ -22,6 +22,15 @@ const BUILDING = new Set(['capture', 'screen', 'bands', 'post']);
 
 function loading() {
   return !(runtime.props && runtime.gallery && runtime.painted && runtime.inside);
+}
+
+const arrived = { mark: '' };
+
+function arrival() {
+  const mark = `${runtime.props}${runtime.gallery}${runtime.painted}${runtime.inside}`;
+  if (mark === arrived.mark) return;
+  arrived.mark = mark;
+  changed();
 }
 const LOST_FOR = 4000;
 
@@ -487,6 +496,7 @@ export function Post({ phone }: { phone: boolean }) {
 
   const settle = useCallback(
     (now: number, moving: boolean, time: number) => {
+      arrival();
       if (!introAt.current) introAt.current = performance.getEntriesByName('scooch:intro')[0]?.startTime ?? 0;
       const calm =
         still.ready &&
