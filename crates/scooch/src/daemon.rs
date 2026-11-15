@@ -2851,7 +2851,7 @@ pub mod tests {
             fake.place(vec![subject()]);
             daemon.tick();
             let mut state = daemon.store.load();
-            state.starts.insert("Fake GPU".into(), crate::state::Start { ready, draw: 5, at: 1, ..Default::default() });
+            state.starts.insert("Fake GPU".into(), crate::state::Start { colds: vec![ready + 5], at: 1, ..Default::default() });
             daemon.store.save(&state).unwrap();
             script.lock().unwrap().ready_after = Duration::from_millis(ready.into());
             daemon.glider.lock().unwrap().reset_for_test();
@@ -2878,7 +2878,7 @@ pub mod tests {
         fake.place(vec![subject()]);
         daemon.tick();
         let mut state = daemon.store.load();
-        state.starts.insert("Fake GPU".into(), crate::state::Start { ready: 60_000, cold: 60_000, colds: vec![60_000], draw: 5, window: 5, canvas: 5, at: 1, ..Default::default() });
+        state.starts.insert("Fake GPU".into(), crate::state::Start { colds: vec![60_000], canvases: vec![5], windows: vec![5], draws: vec![5], reveals: vec![5], at: 1, ..Default::default() });
         daemon.store.save(&state).unwrap();
         {
             let mut script = script.lock().unwrap();
@@ -2894,6 +2894,26 @@ pub mod tests {
         let said = daemon.glider.lock().unwrap().said.clone();
         assert!(seen.iter().any(|event| event.starts_with("glide ")), "{seen:?} {said:?}");
         assert!(waits.lock().unwrap().iter().all(|(_, wait)| *wait <= crate::glide::PATIENCE), "{:?}", waits.lock().unwrap());
+    }
+
+    #[test]
+    fn an_early_launch_a_second_before_the_move_keeps_the_cold_time() {
+        let (daemon, fake, script, _) = glide_rig("glide-early-cold", true);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let mut state = daemon.store.load();
+        state.starts.insert("Fake GPU".into(), crate::state::Start { colds: vec![100, 100, 100], at: 1, ..Default::default() });
+        daemon.store.save(&state).unwrap();
+        script.lock().unwrap().ready_after = Duration::from_millis(1100);
+        daemon.glider.lock().unwrap().reset_for_test();
+        assert!(daemon.wake_early());
+        std::thread::sleep(Duration::from_millis(1000));
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let said = daemon.glider.lock().unwrap().said.clone();
+        let start = daemon.store.load().starts.get("Fake GPU").cloned().unwrap_or_default();
+        assert_eq!(start.colds.len(), 3, "{start:?} {said:?}");
+        assert!(start.colds.iter().all(|cold| *cold < 600), "{start:?} {said:?}");
     }
 
     #[test]

@@ -17,8 +17,7 @@ pub const PATIENCE: Duration = Duration::from_millis(150);
 pub const BARE: u32 = 2;
 pub const EARLY_EVERY: Duration = Duration::from_secs(10);
 pub const EARLY_LIFE: Duration = Duration::from_millis(1500);
-const COLD_SAMPLES: usize = 3;
-const COLD_WITHIN: Duration = Duration::from_secs(2);
+const SAMPLES: usize = 3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Heard {
@@ -44,6 +43,7 @@ pub trait Link: Send {
     fn broke(&mut self) -> bool;
     fn greeted(&mut self) -> Option<Duration>;
     fn device_ready(&mut self) -> Option<Duration>;
+    fn canvas_ready(&mut self) -> Option<Duration>;
     fn ready_after(&mut self) -> Option<Adapter>;
 }
 
@@ -89,11 +89,12 @@ struct Real {
     hello: Option<Duration>,
     drawn: Vec<(u32, [u32; 3])>,
     device_after: Option<Duration>,
+    canvas_after: Option<Duration>,
 }
 
 impl Real {
     fn new(helper: Helper) -> Self {
-        Self { helper, shown: Vec::new(), gone: Vec::new(), failed: Vec::new(), heard: Vec::new(), readies: Vec::new(), warm_id: None, answered: None, hello: None, drawn: Vec::new(), device_after: None }
+        Self { helper, shown: Vec::new(), gone: Vec::new(), failed: Vec::new(), heard: Vec::new(), readies: Vec::new(), warm_id: None, answered: None, hello: None, drawn: Vec::new(), device_after: None, canvas_after: None }
     }
 
     fn pump(&mut self, timeout: Duration) -> Result<bool> {
@@ -109,6 +110,8 @@ impl Real {
             Reply::Shown { id, .. } => self.shown.push((id, self.helper.arrived().unwrap_or_else(Instant::now))),
             Reply::Closed { .. } => {}
             Reply::Device { .. } => self.device_after = self.device_after.or(self.helper.since_launch()),
+            Reply::Canvas { warm_id, .. } if warm_id.is_some() && warm_id == self.warm_id => self.canvas_after = self.canvas_after.or(self.helper.since_launch()),
+            Reply::Canvas { .. } => {}
             Reply::Drawn { id, window, first, reveal } => {
                 if self.drawn.len() >= 8 {
                     self.drawn.remove(0);
@@ -165,9 +168,15 @@ impl Link for Real {
         self.device_after
     }
 
+    fn canvas_ready(&mut self) -> Option<Duration> {
+        while self.canvas_after.is_none() && matches!(self.pump(Duration::ZERO), Ok(true)) {}
+        self.canvas_after
+    }
+
     fn warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>, scales: &BTreeMap<String, f32>) -> Result<()> {
         self.warm_id = Some(self.helper.ask_warm_with(Hints::default(), Some(picture), Some(size), canvas, scales.clone())?);
         self.answered = None;
+        self.canvas_after = None;
         Ok(())
     }
 
@@ -409,6 +418,7 @@ pub struct Glider {
 struct Trace {
     hello: Option<Duration>,
     device: Option<Duration>,
+    canvas: Option<Duration>,
     ready: Option<Duration>,
     shown: Option<Duration>,
     predicted: Option<Duration>,
@@ -418,6 +428,24 @@ struct Trace {
 
 fn ms(duration: Duration) -> u32 {
     u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
+}
+
+fn keep_last(list: &mut Vec<u32>, value: u32) {
+    list.push(value);
+    let extra = list.len().saturating_sub(SAMPLES);
+    list.drain(..extra);
+}
+
+fn median(list: &[u32]) -> Option<Duration> {
+    let mut sorted = list.to_vec();
+    sorted.sort_unstable();
+    let middle = sorted.len() / 2;
+    let value = match sorted.len() {
+        0 => return None,
+        count if count % 2 == 0 => (sorted[middle - 1] + sorted[middle]) / 2,
+        _ => sorted[middle],
+    };
+    Some(Duration::from_millis(value.into()))
 }
 
 fn shown_ms(value: Option<Duration>) -> String {
@@ -724,10 +752,11 @@ impl Glider {
         note(
             &mut self.said,
             format!(
-                "decision at the set, helper launched {} ms before it, after launch hello {}, device {}, ready {}, shown {}, predicted shown {}, waited {} ms, {}, the helper made its window in {} ms, drew in {} ms and revealed in {} ms",
+                "decision at the set, helper launched {} ms before it, after launch hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, waited {} ms, {}, the helper made its window in {} ms, drew in {} ms and revealed in {} ms",
                 shown_ms(launched),
                 shown_ms(trace.hello),
                 shown_ms(trace.device),
+                shown_ms(trace.canvas),
                 shown_ms(trace.ready),
                 shown_ms(trace.shown),
                 shown_ms(trace.predicted),
@@ -756,7 +785,6 @@ impl Glider {
         let launched = self.launched;
         let since = |at: Instant| launched.map(|launched| at.saturating_duration_since(launched));
         let remembered = self.remembered().cloned().unwrap_or_default();
-        let known = |ms: u32| (ms > 0).then(|| Duration::from_millis(ms.into()));
         let link = self.link.as_mut().ok_or_else(|| anyhow!("no helper"))?;
         let cold = !self.ready;
         if cold {
@@ -773,14 +801,18 @@ impl Glider {
             }
         }
         trace.device = self.link.as_mut().and_then(|link| link.device_ready());
+        trace.canvas = self.link.as_mut().and_then(|link| link.canvas_ready());
         let waits_for_ready = !self.ready;
         let predicted = if waits_for_ready {
-            let window_done = |device: Duration| launched.zip(opened_at).zip(known(remembered.window)).map_or(device, |((launched, opened), window)| opened.saturating_duration_since(launched) + window);
-            let from_device = trace.device.zip(known(remembered.draw)).map(|(device, draw)| (device.max(window_done(device)) + draw).max(device + known(remembered.canvas).unwrap_or_default()));
-            let from_launch = from_device.or_else(|| known(remembered.cold)).or_else(|| known(remembered.ready).zip(known(remembered.draw)).map(|(ready, draw)| ready + draw));
-            match (from_launch, launched) {
-                (Some(after), Some(launched)) => Some(launched + after),
-                _ => return Err(anyhow!("no cold start is remembered for this adapter yet, so this move swaps plainly")),
+            let open = opened_at.unwrap_or(started);
+            let device = launched.zip(trace.device).map(|(launched, device)| launched + device);
+            let canvas = launched.zip(trace.canvas).map(|(launched, canvas)| launched + canvas);
+            let show = device.and_then(|device| Some(device.max(open + median(&remembered.windows)?) + median(&remembered.draws)? + median(&remembered.reveals)?));
+            let ready = canvas.or_else(|| device.zip(median(&remembered.canvases)).map(|(device, canvas)| device + canvas));
+            match (show, median(&remembered.colds)) {
+                (Some(show), _) => Some(ready.map_or(show, |ready| show.max(ready))),
+                (None, Some(cold)) => Some(open + cold),
+                (None, None) => return Err(anyhow!("no cold start is remembered for this adapter yet, so this move swaps plainly")),
             }
         } else {
             None
@@ -807,27 +839,21 @@ impl Glider {
         trace.drawn = link.drawn(id);
         trace.shown = since(shown_at);
         let opened = opened_at.unwrap_or(open_at);
-        let warm = self.ready_at.is_some_and(|ready| ready <= opened);
+        let cold = self.ready_at.is_some_and(|ready| ready > opened);
+        let canvas = trace.device.zip(trace.canvas).map(|(device, canvas)| canvas.saturating_sub(device));
         let drawn = trace.drawn;
-        let fresh = launched.filter(|launched| started.saturating_duration_since(*launched) <= COLD_WITHIN);
-        let canvas = trace.device.zip(trace.ready).map(|(device, ready)| ready.saturating_sub(device));
         if let Some(adapter) = self.adapter.clone() {
             self.learn(&adapter, |start| {
-                if let Some(launched) = fresh {
-                    start.colds.push(ms(shown_at.saturating_duration_since(launched)));
-                    let extra = start.colds.len().saturating_sub(COLD_SAMPLES);
-                    start.colds.drain(..extra);
-                    start.cold = start.colds.iter().copied().min().unwrap_or(0);
-                }
-                if warm {
-                    start.shown = ms(shown_at.saturating_duration_since(opened));
+                if cold {
+                    keep_last(&mut start.colds, ms(shown_at.saturating_duration_since(opened)));
                 }
                 if let Some(canvas) = canvas {
-                    start.canvas = ms(canvas);
+                    keep_last(&mut start.canvases, ms(canvas));
                 }
-                if let Some([window, first, reveal]) = drawn {
-                    start.window = window;
-                    start.draw = first.saturating_add(reveal);
+                if let Some([window, draw, reveal]) = drawn {
+                    keep_last(&mut start.windows, window);
+                    keep_last(&mut start.draws, draw);
+                    keep_last(&mut start.reveals, reveal);
                 }
             });
         }
@@ -1067,6 +1093,7 @@ pub mod tests {
         pub slow_hello: Duration,
         pub ready_after: Duration,
         pub device_after: Option<Duration>,
+        pub canvas_after: Option<Duration>,
     }
 
     pub type Waits = Arc<Mutex<Vec<(&'static str, Duration)>>>;
@@ -1267,6 +1294,10 @@ pub mod tests {
 
         fn device_ready(&mut self) -> Option<Duration> {
             self.script().device_after.filter(|after| self.born.elapsed() >= *after)
+        }
+
+        fn canvas_ready(&mut self) -> Option<Duration> {
+            self.script().canvas_after.filter(|after| self.born.elapsed() >= *after)
         }
 
         fn ready_after(&mut self) -> Option<Adapter> {
