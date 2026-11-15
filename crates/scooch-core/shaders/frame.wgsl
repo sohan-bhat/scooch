@@ -47,10 +47,8 @@ fn change(p: vec2<f32>) -> f32 {
 }
 
 fn gap(p: vec2<f32>, here: f32) -> f32 {
-    let r = 0.3 * frame.unit;
-    let across = max(change(p + vec2<f32>(r, 0.0)), change(p - vec2<f32>(r, 0.0)));
-    let down = max(change(p + vec2<f32>(0.0, r)), change(p - vec2<f32>(0.0, r)));
-    return max(here, max(across, down));
+    let side = 0.3 * frame.unit * 0.70710677;
+    return max(here, max(change(p + vec2<f32>(side, side)), change(p + vec2<f32>(side, -side))));
 }
 
 fn coarse(p: vec2<f32>) -> vec2<f32> {
@@ -186,7 +184,14 @@ fn draw(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
             let ta = d_a + frame.s * frame.grain_scale;
             let tb = d_b + (1.0 - frame.s) * frame.grain_scale;
             let bump = 4.0 * frame.s * (1.0 - frame.s);
-            let kept = max(d_a, d_b) + frame.shadow.x * bump * bump * smoothstep(0.0, frame.shadow.y, gap(p, abs(d_a - d_b)));
+            let both = max(d_a, d_b);
+            let near = min(ta, tb);
+            let most = frame.shadow.x * bump * bump;
+            var differ = 0.0;
+            if (near > both && min(near, both + most) > -0.4 && both < 0.06) {
+                differ = gap(p, abs(d_a - d_b));
+            }
+            let kept = both + most * smoothstep(0.0, frame.shadow.y, differ);
             let d = min(kept, min(ta, tb));
             var w = smoothstep(-frame.grain_floor, frame.grain_floor, ta - tb);
             w = w * min(4.0 * frame.s, 1.0);

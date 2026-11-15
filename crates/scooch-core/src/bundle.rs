@@ -28,6 +28,7 @@ const GLIDE_EDGE: f32 = 4.0;
 const GLIDE_KEEP: f32 = 0.3;
 const GLIDE_GATE: f32 = 0.2;
 const GLIDE_SPAN: f32 = 0.3;
+const GLIDE_FELT: (f32, f32) = (-0.4, 0.06);
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Constants {
@@ -487,7 +488,8 @@ fn field_at(field: &[f32], grid: &Grid, x: f32, y: f32) -> f32 {
 
 fn gap(a: &[f32], b: &[f32], grid: &Grid, (x, y): (f32, f32), here: f32, reach: f32) -> f32 {
     let change = |dx: f32, dy: f32| (field_at(a, grid, x + dx, y + dy) - field_at(b, grid, x + dx, y + dy)).abs();
-    here.max(change(reach, 0.0)).max(change(-reach, 0.0)).max(change(0.0, reach)).max(change(0.0, -reach))
+    let side = reach * std::f32::consts::FRAC_1_SQRT_2;
+    here.max(change(side, side)).max(change(side, -side))
 }
 
 struct Plane {
@@ -853,9 +855,11 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
             let moved = || {
                 let (da, db) = (ds[0], ds[1]);
                 let (ta, tb) = (da + s * c.grain_scale, db + (1.0 - s) * c.grain_scale);
-                let change = gap(fields[0], fields[1], &grid, (x as f32 + 0.5, y as f32 + 0.5), (da - db).abs(), GLIDE_SPAN * c.unit);
                 let bump = 4.0 * s * (1.0 - s);
-                let kept = da.max(db) + c.shadow[0] * bump * bump * smoothstep(0.0, c.shadow[1], change);
+                let (shared, near, most) = (da.max(db), ta.min(tb), c.shadow[0] * bump * bump);
+                let felt = near > shared && near.min(shared + most) > GLIDE_FELT.0 && shared < GLIDE_FELT.1;
+                let change = if felt { gap(fields[0], fields[1], &grid, (x as f32 + 0.5, y as f32 + 0.5), (da - db).abs(), GLIDE_SPAN * c.unit) } else { 0.0 };
+                let kept = shared + most * smoothstep(0.0, c.shadow[1], change);
                 let d = kept.min(ta.min(tb));
                 let mut w = smoothstep(-c.grain_floor, c.grain_floor, ta - tb);
                 w *= (GLIDE_EDGE * s).min(1.0);
@@ -890,6 +894,20 @@ fn finish_with(a: &Bundle, b: &Bundle, s: f32, mut picture: RgbImage, scope: Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_glide_gate_is_skipped_only_where_the_ramps_are_flat() {
+        for u in [24.0f32, 60.0, 110.0, 240.0] {
+            let table = ramps(u);
+            let entry = |k: usize| [table[k * 4 + 1], table[k * 4 + 2], table[k * 4 + 3], table[(RAMP + k) * 4], table[(RAMP + k) * 4 + 1], table[(RAMP + k) * 4 + 2]];
+            let at = |k: usize| RAMP_RANGE.0 + (RAMP_RANGE.1 - RAMP_RANGE.0) * k as f32 / (RAMP - 1) as f32;
+            let step = (RAMP_RANGE.1 - RAMP_RANGE.0) / (RAMP - 1) as f32;
+            let low: Vec<usize> = (0..RAMP).filter(|k| at(*k) <= GLIDE_FELT.0 + step).collect();
+            let high: Vec<usize> = (0..RAMP).filter(|k| at(*k) >= GLIDE_FELT.1 - step).collect();
+            assert!(low.iter().all(|k| entry(*k) == entry(0)), "u {u} the ramps still change below {}", GLIDE_FELT.0);
+            assert!(high.iter().all(|k| entry(*k) == entry(RAMP - 1)), "u {u} the ramps still change above {}", GLIDE_FELT.1);
+        }
+    }
 
     #[test]
     fn half_rounds_to_the_nearest_half_float() {

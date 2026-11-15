@@ -50,10 +50,8 @@ float change(vec2 p) {
 }
 
 float gap(vec2 p, float here) {
-    float r = 0.3 * unit;
-    float across = max(change(p + vec2(r, 0.0)), change(p - vec2(r, 0.0)));
-    float down = max(change(p + vec2(0.0, r)), change(p - vec2(0.0, r)));
-    return max(here, max(across, down));
+    float side = 0.3 * unit * 0.70710677;
+    return max(here, max(change(p + vec2(side, side)), change(p + vec2(side, -side))));
 }
 
 vec2 coarse(vec2 p) {
@@ -185,7 +183,14 @@ void main() {
             float ta = d_a + s * grain_scale;
             float tb = d_b + (1.0 - s) * grain_scale;
             float bump = 4.0 * s * (1.0 - s);
-            float kept = max(d_a, d_b) + shadow_at.x * bump * bump * smoothstep(0.0, shadow_at.y, gap(p, abs(d_a - d_b)));
+            float both = max(d_a, d_b);
+            float near = min(ta, tb);
+            float most = shadow_at.x * bump * bump;
+            float differ = 0.0;
+            if (near > both && min(near, both + most) > -0.4 && both < 0.06) {
+                differ = gap(p, abs(d_a - d_b));
+            }
+            float kept = both + most * smoothstep(0.0, shadow_at.y, differ);
             float d = min(kept, min(ta, tb));
             float w = smoothstep(-grain_floor, grain_floor, ta - tb);
             w = w * min(4.0 * s, 1.0);
