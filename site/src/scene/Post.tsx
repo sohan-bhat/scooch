@@ -550,10 +550,19 @@ export function Post({ phone }: { phone: boolean }) {
         const into = totals[still.refresh ? 1 - still.target : still.target];
         if (!fit(into)) {
           still.box = null;
+          if (still.showing && !still.refresh) {
+            still.phase = 'live';
+            still.showing = false;
+            still.full = false;
+            still.refresh = false;
+            still.from = null;
+            quality.hold = false;
+            thaw();
+            return;
+          }
           still.tick = false;
           still.pass = 0;
           still.band = 0;
-          if (still.showing) still.refresh = true;
           still.phase = 'bands';
           return;
         }
