@@ -1,7 +1,8 @@
 #[path = "support/layouts.rs"]
 mod layouts;
 
-use scooch_core::{Analysis, Bundle, Options, Rect, RgbImage, Scene, Scenery, TablesError};
+use scooch_core::{Analysis, Bundle, Options, Rect, RgbImage, Scene, Scenery, Session, TablesError};
+use std::time::{Duration, Instant};
 use std::sync::OnceLock;
 
 struct Photo {
@@ -73,6 +74,10 @@ fn the_still_is_the_frame_of_its_own_bundle() {
     }
 }
 
+const END_MEAN: f64 = 0.01;
+const END_WORST: u8 = 5;
+const THROUGH_WORST: u8 = 0;
+
 #[test]
 fn a_glide_starts_and_ends_on_the_stills() {
     let (w, h) = (960, 600);
@@ -81,14 +86,21 @@ fn a_glide_starts_and_ends_on_the_stills() {
         let scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &photo.analysis, w, h) };
         let next = moved(&scene, 3, 2.0);
         let (a, b) = (state(photo, &scene, &options), state(photo, &next, &options));
-        for (s, still) in [(0.0, scooch_core::frame(&a, &a, 0.0)), (1.0, scooch_core::frame(&b, &b, 0.0))] {
-            let (mean, worst) = difference(&scooch_core::frame(&a, &b, s), &still);
-            assert!(mean <= 1.0 && worst <= 6, "{} s {s} mean {mean:.3} worst {worst}", photo.name);
+        let (first, last) = (scooch_core::frame(&a, &a, 0.0), scooch_core::frame(&b, &b, 0.0));
+        for (s, still) in [(1e-6f32, &first), (1.0 - 1e-6, &last)] {
+            let (mean, worst) = difference(&scooch_core::frame(&a, &b, s), still);
+            println!("{} near {s}: mean {mean:.4} worst {worst}", photo.name);
+            assert!(mean <= END_MEAN && worst <= END_WORST, "{} s {s} mean {mean:.4} worst {worst}", photo.name);
+        }
+        for (s, still) in [(0.0f32, &first), (1.0, &last)] {
+            let (mean, worst) = difference(&scooch_core::frame_through(&a, &b, s), still);
+            println!("{} through {s}: mean {mean:.4} worst {worst}", photo.name);
+            assert!(mean <= END_MEAN && worst <= THROUGH_WORST, "{} through s {s} mean {mean:.4} worst {worst}", photo.name);
         }
     }
 }
 
-const STEP_MEAN: f64 = 0.3;
+const STEP_MEAN: f64 = 0.28;
 
 #[test]
 fn a_glide_moves_in_small_even_steps() {
@@ -161,8 +173,11 @@ fn tables_travel_without_the_canvas() {
         assert_eq!((canvas.width, canvas.height), (bundle.canvas_width, bundle.canvas_height));
         assert_eq!(canvas.pixels, bundle.canvas);
         let back = Bundle::tables_from_bytes(&bytes, canvas.clone()).expect("round trip");
+        let (there, here) = (scooch_core::frame_layers(&bundle, &bundle, 0.0), scooch_core::frame_layers(&back, &back, 0.0));
+        let (_, picture) = difference(&here.picture, &there.picture);
         let (_, worst) = difference(&scooch_core::frame(&back, &back, 0.0), &scooch_core::frame(&bundle, &bundle, 0.0));
-        assert!(worst <= 2, "{} worst {worst}", photo.name);
+        println!("{} round trip picture worst {picture} frame worst {worst}", photo.name);
+        assert!(picture <= 1 && worst <= 2, "{} picture worst {picture} frame worst {worst}", photo.name);
         let mut touched = canvas.clone();
         touched.pixels[17] ^= 1;
         assert_eq!(Bundle::tables_from_bytes(&bytes, touched), Err(TablesError::Canvas));
@@ -232,4 +247,105 @@ fn scenery_active_never_misses_a_painted_pixel() {
     let placement = scooch_core::solve(&busy, &scene, &on(), None);
     assert!(!scooch_core::scenery_active(&busy, &placement, &scene, &on()));
     assert!(scooch_core::render_layers(&photo.image, &busy, &placement, &scene, &on()).scenery.pixels().all(|p| p[3] == 0));
+}
+
+fn mirror(b: &Bundle) -> Bundle {
+    let flip = |v: &[u8], w: usize| v.chunks(w * 4).flat_map(|row| row.chunks(4).rev().flatten().copied().collect::<Vec<u8>>()).collect::<Vec<u8>>();
+    let (gw, pw) = (b.grid_width as usize, b.paint_width as usize);
+    let mut out = b.clone();
+    out.field = b.field.chunks(gw).flat_map(|row| row.iter().rev().copied()).collect();
+    out.look = flip(&b.look, gw);
+    out.pad = flip(&b.pad, gw);
+    out.paints = flip(&b.paints, pw);
+    out.xmap = b.xmap.iter().rev().copied().collect();
+    out
+}
+
+#[test]
+fn a_mirrored_pair_glides_as_the_mirror() {
+    let (w, h) = (640, 400);
+    for name in ["two-swans", "balloon-sky"] {
+        let photo = photos().iter().find(|p| p.name == name).expect("photo");
+        let scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &photo.analysis, w, h) };
+        let (mut a, mut b) = (state(photo, &scene, &on()), state(photo, &moved(&scene, 6, 2.0), &on()));
+        a.constants.grain = 0.0;
+        b.constants.grain = 0.0;
+        let (ma, mb) = (mirror(&a), mirror(&b));
+        for s in [0.2f32, 0.5, 0.8] {
+            let flipped = image::imageops::flip_horizontal(&scooch_core::frame(&a, &b, s));
+            let (mean, worst) = difference(&scooch_core::frame(&ma, &mb, s), &flipped);
+            println!("{name} mirrored at {s}: mean {mean:.4} worst {worst}");
+            assert!(mean <= 0.01 && worst <= 1, "{name} s {s} mean {mean:.4} worst {worst}");
+        }
+    }
+}
+
+#[test]
+fn icon_order_does_not_change_the_scenery() {
+    let (w, h) = (960, 600);
+    for name in ["balloon-sky", "two-swans", "fox"] {
+        let photo = photos().iter().find(|p| p.name == name).expect("photo");
+        let scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &photo.analysis, w, h) };
+        let placement = scooch_core::solve(&photo.analysis, &scene, &on(), None);
+        let mut shuffled = scene.clone();
+        shuffled.icons.reverse();
+        shuffled.icons.rotate_left(3);
+        let a = scooch_core::bundle(&photo.image, &photo.analysis, &placement, &scene, &on());
+        let b = scooch_core::bundle(&photo.image, &photo.analysis, &placement, &shuffled, &on());
+        assert!(a.field.iter().zip(&b.field).all(|(p, q)| p.to_bits() == q.to_bits()), "{name} field");
+        assert_eq!(a.look, b.look, "{name} look");
+        assert_eq!(a.paints, b.paints, "{name} paints");
+        assert_eq!(a.pad, b.pad, "{name} pad");
+    }
+}
+
+#[test]
+fn a_new_icon_leaves_far_scenery_alone() {
+    let (w, h) = (2880, 1800);
+    for name in ["balloon-sky", "two-swans"] {
+        let photo = photos().iter().find(|p| p.name == name).expect("photo");
+        let icons: Vec<Rect> = (0..10).map(|k| Rect { x: 40.0 + 130.0 * (k % 2) as f32, y: 60.0 + 170.0 * (k / 2) as f32, w: 100.0, h: 100.0 }).collect();
+        let scene = Scene { width: w, height: h, icons };
+        let mut more = scene.clone();
+        more.icons.insert(0, Rect { x: 2700.0, y: 1600.0, w: 100.0, h: 100.0 });
+        let placement = scooch_core::solve(&photo.analysis, &scene, &on(), None);
+        let a = scooch_core::bundle(&photo.image, &photo.analysis, &placement, &scene, &on());
+        let b = scooch_core::bundle(&photo.image, &photo.analysis, &placement, &more, &on());
+        let reach = 1300.0;
+        let gw = a.grid_width as usize;
+        let (mut far, mut same) = (0usize, 0usize);
+        for (i, (p, q)) in a.field.iter().zip(&b.field).enumerate() {
+            let (x, y) = ((i % gw) as f32 * 4.0 + 2.0, (i / gw) as f32 * 4.0 + 2.0);
+            if x > 2700.0 - reach && y > 1600.0 - reach {
+                continue;
+            }
+            far += 1;
+            same += (p.to_bits() == q.to_bits() && a.look[i * 4..i * 4 + 4] == b.look[i * 4..i * 4 + 4]) as usize;
+        }
+        assert!(a.field.iter().any(|v| *v < 0.0), "{name} has no scenery to compare");
+        assert_eq!(same, far, "{name} {} of {far} far cells changed", far - same);
+    }
+}
+
+#[test]
+fn the_lattice_stays_bounded_for_odd_icons() {
+    let photo = photos().iter().find(|p| p.name == "balloon-sky").expect("photo");
+    let small: Vec<Rect> = (0..120).map(|k| Rect { x: 7600.0 - 40.0 * (k / 30) as f32, y: 20.0 + 36.0 * (k % 30) as f32, w: 16.0, h: 16.0 }).collect();
+    let cases = [
+        ("a one pixel icon", 1920, 1080, vec![Rect { x: 900.0, y: 500.0, w: 1.0, h: 1.0 }], Duration::from_secs(4)),
+        ("a sliver at the edge", 1920, 1080, vec![Rect { x: 1918.0, y: 500.0, w: 100.0, h: 100.0 }], Duration::from_secs(4)),
+        ("16 px icons on 7680x4320", 7680, 4320, small, Duration::from_secs(20)),
+    ];
+    for (label, w, h, icons, limit) in cases {
+        let scene = Scene { width: w, height: h, icons };
+        let placement = scooch_core::solve(&photo.analysis, &scene, &on(), None);
+        let mut session = Session::new();
+        let started = Instant::now();
+        let _ = session.still(&photo.image, &photo.analysis, &placement, &scene, &on());
+        let took = started.elapsed();
+        let (sites, bytes) = (session.sites(), session.bytes());
+        println!("{label}: {sites} sites, session {:.1} MB, {:.2} s", bytes as f64 / 1048576.0, took.as_secs_f64());
+        assert!(sites <= scooch_core::SITES_MOST, "{label} {sites} sites");
+        assert!(took <= limit, "{label} took {took:?}");
+    }
 }
