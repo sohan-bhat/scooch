@@ -84,7 +84,7 @@ function grab(pass: Pass, run: () => void) {
   pass.renderToScreen = false;
   pass.render = function grabbed(this: Pass, renderer, inputBuffer, outputBuffer, delta, stencil) {
     render.call(this, renderer, inputBuffer, outputBuffer, delta, stencil);
-    texture = outputBuffer ? outputBuffer.texture : null;
+    texture = renderer.getRenderTarget()?.texture ?? null;
   };
   try {
     run();
