@@ -114,6 +114,10 @@ fn made(name: &str) -> RgbImage {
                 let a = mix(sky, haze, ((v - 0.35) / 0.05).clamp(0.0, 1.0));
                 mix(a, [61.0, 106.0, 127.0], ((v - 0.55) / 0.2).clamp(0.0, 1.0)).map(|c| c + 2.0 * grain)
             }
+            "sea-soft-horizon" => {
+                let sky = mix([70.0, 130.0, 200.0], [110.0, 158.0, 212.0], (v / 0.47).min(1.0));
+                mix(sky, [52.0, 108.0, 150.0], ((v - 0.47) / 0.06).clamp(0.0, 1.0)).map(|c| c + 2.0 * grain)
+            }
             "sea-210-216" => oklch(0.55, 0.09, 210.0 + 6.0 * u).map(|c| c + 2.0 * grain),
             "mixed-top" => {
                 let (blue, white, cream) = (oklch(0.62, 0.09, 245.0), oklch(0.9, 0.01, 100.0), oklch(0.88, 0.03, 85.0));
@@ -442,15 +446,17 @@ fn cloud_belonging_below(image: &RgbImage, (w, h): (u32, u32), below: f32) -> us
 #[test]
 fn the_sky_ends_at_the_horizon() {
     let (w, h) = (1440u32, 900u32);
-    for name in ["lake-under-blue-haze", "lake-under-haze", "sea-under-sky"] {
-        let below = cloud_belonging_below(&made(name), (w, h), 0.76);
+    for (name, ramp) in [("lake-under-blue-haze", 0.76), ("lake-under-haze", 0.76), ("sea-under-sky", 0.76), ("sea-soft-horizon", 0.6)] {
+        let below = cloud_belonging_below(&made(name), (w, h), ramp);
         println!("{name}: {below} cells below the ramp where clouds belong");
         assert_eq!(below, 0, "{name} clouds belong below the ramp");
     }
-    let (water, sky) = clouds_where(&made("lake-under-blue-haze"), &grid(w, h, 8, 5), (w, h), |_, y| y > 0.76);
-    println!("lake-under-blue-haze: {water} cloud pixels on the lake, {sky} in the sky");
-    assert_eq!(water, 0);
-    assert!(sky > 20_000, "the sky lost its clouds: {sky}");
+    for (name, ramp) in [("lake-under-blue-haze", 0.76), ("sea-soft-horizon", 0.6)] {
+        let (water, sky) = clouds_where(&made(name), &grid(w, h, 8, 5), (w, h), |_, y| y > ramp);
+        println!("{name}: {water} cloud pixels on the water, {sky} in the sky");
+        assert_eq!(water, 0, "{name} has clouds on the water");
+        assert!(sky > 20_000, "{name} lost the clouds in its sky: {sky}");
+    }
 }
 
 fn kinds(image: &RgbImage, (w, h): (u32, u32)) -> (f64, f64) {
