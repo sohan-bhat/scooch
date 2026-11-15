@@ -238,8 +238,7 @@ fn shift<const DRAW: bool>(mut h: Held, image: &RgbImage, analysis: &Analysis, s
         return h;
     }
     let options = h.options;
-    let bare = h.parts.fixed.is_none() && h.parts.belonging.as_ref().is_some_and(|b| b.empty && shape::ground(scene).is_some_and(|g| b.fits(h.source, (scene.width, scene.height), g.u, &options)));
-    let (was, now) = (scenery::active(&h.scene, &options) && !bare, scenery::active(scene, &options) && !bare);
+    let (was, now) = (scenery::active(&h.scene, &options), scenery::active(scene, &options));
     if !was && !now {
         h.parts.repad(analysis, scene, &options);
         let grid = h.parts.framed.grid;
@@ -264,45 +263,53 @@ fn shift<const DRAW: bool>(mut h: Held, image: &RgbImage, analysis: &Analysis, s
 
 fn lean<const DRAW: bool>(h: &mut Held, analysis: &Analysis, scene: &Scene, moved: &[[f64; 4]]) -> bool {
     let Some(g) = shape::ground(scene) else { return false };
+    let options = h.options;
     let parts = &mut h.parts;
-    let (Some(fixed), Some(live), Some(grounded)) = (parts.fixed.as_ref(), parts.live.as_mut(), parts.grounded.as_ref()) else { return false };
-    if g.u.to_bits() != fixed.u().to_bits() || parts.pads.as_ref().is_some_and(|p| p.feather().to_bits() != pads::feather(scene).to_bits()) {
+    let bare = parts.fixed.is_none() && parts.belonging.as_ref().is_some_and(|b| b.empty && b.fits(h.source, (scene.width, scene.height), g.u, &options));
+    let Some(grounded) = parts.grounded.as_ref() else { return false };
+    if parts.pads.as_ref().is_some_and(|p| p.feather().to_bits() != pads::feather(scene).to_bits()) {
         return false;
     }
     let _ = analysis;
     let grid = parts.framed.grid;
     let (w, hh) = (grid.w, grid.h);
-    let icons: Vec<[f32; 4]> = moved.iter().map(|r| r.map(|v| v as f32)).collect();
-    let Some((field, look)) = look::relive(fixed, live, &g, &icons) else { return false };
     let cells = w * hh;
     let (mut far, mut halves) = (vec![false; cells], Vec::new());
-    for a in area::merge(field) {
-        let before = area::take(&h.bundle.field, w, a);
-        let fresh: Vec<f32> = live.field_in(w, a).into_iter().map(bundle::half).collect();
-        if before.iter().zip(&fresh).all(|(p, q)| area::bits(p, q)) {
-            continue;
-        }
-        let out = Arc::make_mut(&mut h.bundle);
-        for y in a[1]..a[3] {
-            out.field[y * w + a[0]..y * w + a[2]].copy_from_slice(&fresh[(y - a[1]) * (a[2] - a[0])..(y - a[1] + 1) * (a[2] - a[0])]);
-        }
-        halves.extend(area::mark(&before, &out.field, w, a, area::bits, &mut far));
-    }
     let (mut near, mut boxes) = (vec![false; cells], Vec::new());
-    for a in area::merge(look) {
-        let before = area::take(h.bundle.look.as_chunks::<4>().0, w, a);
-        if before == area::take(live.look.as_chunks::<4>().0, w, a) {
-            continue;
+    if !bare {
+        let (Some(fixed), Some(live)) = (parts.fixed.as_ref(), parts.live.as_mut()) else { return false };
+        if g.u.to_bits() != fixed.u().to_bits() {
+            return false;
         }
-        let out = Arc::make_mut(&mut h.bundle);
-        for y in a[1]..a[3] {
-            out.look[(y * w + a[0]) * 4..(y * w + a[2]) * 4].copy_from_slice(&live.look[(y * w + a[0]) * 4..(y * w + a[2]) * 4]);
+        let icons: Vec<[f32; 4]> = moved.iter().map(|r| r.map(|v| v as f32)).collect();
+        let Some((field, look)) = look::relive(fixed, live, &g, &icons) else { return false };
+        for a in area::merge(field) {
+            let before = area::take(&h.bundle.field, w, a);
+            let fresh: Vec<f32> = live.field_in(w, a).into_iter().map(bundle::half).collect();
+            if before.iter().zip(&fresh).all(|(p, q)| area::bits(p, q)) {
+                continue;
+            }
+            let out = Arc::make_mut(&mut h.bundle);
+            for y in a[1]..a[3] {
+                out.field[y * w + a[0]..y * w + a[2]].copy_from_slice(&fresh[(y - a[1]) * (a[2] - a[0])..(y - a[1] + 1) * (a[2] - a[0])]);
+            }
+            halves.extend(area::mark(&before, &out.field, w, a, area::bits, &mut far));
         }
-        boxes.extend(area::mark(&before, out.look.as_chunks::<4>().0, w, a, area::equal, &mut near));
+        for a in area::merge(look) {
+            let before = area::take(h.bundle.look.as_chunks::<4>().0, w, a);
+            if before == area::take(live.look.as_chunks::<4>().0, w, a) {
+                continue;
+            }
+            let out = Arc::make_mut(&mut h.bundle);
+            for y in a[1]..a[3] {
+                out.look[(y * w + a[0]) * 4..(y * w + a[2]) * 4].copy_from_slice(&live.look[(y * w + a[0]) * 4..(y * w + a[2]) * 4]);
+            }
+            boxes.extend(area::mark(&before, out.look.as_chunks::<4>().0, w, a, area::equal, &mut near));
+        }
     }
     if let (Some(pads), Some(calm)) = (parts.pads.as_mut(), parts.calm.as_ref()) {
         let was = pads.any();
-        let touched = area::merge(pads.update(calm, &grid, &grounded.lookup, scene, Some(&fixed.belong), moved));
+        let touched = area::merge(pads.update(calm, &grid, &grounded.lookup, scene, parts.fixed.as_ref().map(|f| &f.belong[..]), moved));
         let before: Vec<Vec<[u8; 4]>> = touched.iter().map(|a| area::take(h.bundle.pad.as_chunks::<4>().0, w, *a)).collect();
         if was != pads.any() {
             Arc::make_mut(&mut h.bundle).pad = pads.table(calm).unwrap_or_else(|| vec![0; cells * 4]);
