@@ -155,9 +155,75 @@ pub struct Belonging {
     stamp: u64,
 }
 
+const MAP_MAGIC: [u8; 8] = *b"SCOOCHBM";
+const MAP_HEADER: usize = 56;
+const MAP_LEAD: usize = 28;
+
+fn fnv(parts: &[&[u8]]) -> u64 {
+    parts.iter().flat_map(|p| p.iter()).fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
 impl Belonging {
+    pub(crate) fn file(&self, picture: u64, source: (u32, u32)) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(MAP_LEAD + 8 * self.sky.len());
+        for v in [self.grid.w, self.grid.h, self.grid.cell] {
+            payload.extend_from_slice(&(v as u32).to_le_bytes());
+        }
+        for v in self.size {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in self.sky.iter().chain(&self.belong) {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut out = Vec::with_capacity(MAP_HEADER + payload.len());
+        out.extend_from_slice(&MAP_MAGIC);
+        out.extend_from_slice(&crate::BELONGING_MAP_FORMAT.to_le_bytes());
+        out.extend_from_slice(&crate::BELONGING_VERSION.to_le_bytes());
+        out.extend_from_slice(&picture.to_le_bytes());
+        out.extend_from_slice(&source.0.to_le_bytes());
+        out.extend_from_slice(&source.1.to_le_bytes());
+        out.extend_from_slice(&self.stamp.to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        let sum = fnv(&[&out, &payload]);
+        out.extend_from_slice(&sum.to_le_bytes());
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    pub(crate) fn from_file(bytes: &[u8]) -> Option<(u64, (u32, u32), Belonging)> {
+        let (head, payload) = (bytes.get(..MAP_HEADER)?, bytes.get(MAP_HEADER..)?);
+        let half = |from: &[u8], at: usize| -> Option<u32> { Some(u32::from_le_bytes(from.get(at..at + 4)?.try_into().ok()?)) };
+        let word = |from: &[u8], at: usize| -> Option<u64> { Some(u64::from_le_bytes(from.get(at..at + 8)?.try_into().ok()?)) };
+        let trusted = head.get(..8)? == MAP_MAGIC.as_slice()
+            && half(head, 8)? == crate::BELONGING_MAP_FORMAT
+            && half(head, 12)? == crate::BELONGING_VERSION
+            && word(head, 40)? == payload.len() as u64
+            && word(head, 48)? == fnv(&[head.get(..48)?, payload]);
+        if !trusted {
+            return None;
+        }
+        let (picture, source, stamp) = (word(head, 16)?, (half(head, 24)?, half(head, 28)?), word(head, 32)?);
+        let (w, h, cell) = (half(payload, 0)? as usize, half(payload, 4)? as usize, half(payload, 8)? as usize);
+        let size = [f64::from_bits(word(payload, 12)?), f64::from_bits(word(payload, 20)?)];
+        let cells = w.checked_mul(h)?;
+        if w == 0 || h == 0 || cell == 0 || size.iter().any(|s| !s.is_finite() || *s <= 0.0) || cells.checked_mul(8)?.checked_add(MAP_LEAD)? != payload.len() {
+            return None;
+        }
+        let values: Vec<f32> = payload.get(MAP_LEAD..)?.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+        if values.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        let (sky, belong) = values.split_at(cells);
+        let empty = belong.iter().all(|b| *b <= 0.0);
+        Some((picture, source, Belonging { grid: Grid { w, h, cell }, size, sky: sky.to_vec(), belong: belong.to_vec(), empty, source, stamp }))
+    }
+
     pub fn bytes(&self) -> usize {
         (self.sky.len() + self.belong.len()) * 4
+    }
+
+    pub(crate) fn stamp(&self) -> u64 {
+        self.stamp
     }
 
     pub fn fits(&self, source: (u32, u32), stamp: u64) -> bool {

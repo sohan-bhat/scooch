@@ -157,6 +157,9 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
 /// The version of the rules that decide where scenery belongs. It is part of `belonging_stamp`, so an answer kept from a build with other rules never matches. A rule change that moves any answer raises it.
 pub const BELONGING_VERSION: u32 = 2;
 
+/// The layout of the file `Map::to_bytes` writes. A change to that layout raises it.
+pub const BELONGING_MAP_FORMAT: u32 = 1;
+
 /// Each belonging version with the digest of the answers it gives over the test set. A test checks the last entry against the rules as they are.
 #[doc(hidden)]
 pub const BELONGING_ANSWERS: &[(u32, u64)] = &[(1, 0x44fb_d8cd_2af2_5f5f), (2, 0xfc36_2b43_6890_42ea)];
