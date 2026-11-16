@@ -1197,6 +1197,9 @@ mod probe {
         let ran = p.scooch(&["use", &bare.to_string_lossy()], Duration::from_secs(60));
         let switched = wait_render(p, Duration::from_secs(45), Some(&bare), false);
         p.line(format!("- scooch use on a {label} picture with scenery `{}` exit {:?}, rendered after {:?} ms", state(p)["options"]["scenery"].as_str().unwrap_or("missing"), ran.code, switched.map(|time| time.as_millis())));
+        if !ran.ok() || switched.is_none() {
+            p.fail(format!("scooch use on the {label} picture did not render it"));
+        }
         away(p, name, onto);
         quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
         let held = |p: &Probe| state(p)["screens"].as_object().and_then(|screens| screens.values().next().map(|entry| (entry["placement"].clone(), entry["output"].clone(), entry["belongs"]["answer"].clone())));
@@ -1482,6 +1485,9 @@ mod probe {
         }
         let ran = p.scooch(&["off"], Duration::from_secs(60));
         p.line(format!("- scooch off exit {:?} after {} ms: {}", ran.code, ran.took.as_millis(), ran.text()));
+        if !ran.ok() {
+            p.fail("the second scooch off did not end cleanly");
+        }
         std::thread::sleep(Duration::from_millis(1500));
         gone(p, "the second off");
         p.finder = dismiss_prompt(p).is_some();
@@ -1778,6 +1784,9 @@ mod probe {
         p.line(format!("- open to visible {}, open to first frame {}", stats(&shown), stats(&opens)));
         p.line(format!("- references still held on the window, view and Metal layer in the first cycle, beyond the probe's own {first:?}"));
         p.line(format!("- of twenty windows, still alive after the layer dropped {}, after the run loop spun {}", stages[0], stages[1]));
+        if stages[1] > 0 {
+            p.fail("layer windows stayed alive after the run loop spun");
+        }
         Ok(())
     }
 
@@ -2042,6 +2051,9 @@ mod probe {
             let lines: Vec<(u128, String)> = std::io::BufReader::new(child.stdout.take().context("no helper output")?).lines().map_while(|line| line.ok()).map(|line| (spawned.elapsed().as_millis(), line)).collect();
             let status = child.wait()?;
             p.line(format!("- {round} helper process {pid} exited {:?} after {} ms", status.code(), spawned.elapsed().as_millis()));
+            if !status.success() {
+                p.fail(format!("the {round} launch measurement helper did not end cleanly"));
+            }
             for (at, line) in &lines {
                 p.line(format!("  - +{at} ms from spawn: {line}"));
             }
@@ -3217,6 +3229,9 @@ mod probe {
         let away = if (back.0 - subject.0).abs() < 5.0 { aside } else { subject };
         let (off, off_log) = wallpaper_after(p, &screen, |_| drag(back, away));
         p.line(format!("- glide off, the same drag back: new wallpaper after {off:?} ms, log {off_log:?}"));
+        if off.is_none() || off_log.iter().any(|line| line.contains(" glide open")) {
+            p.fail("with the glide off the drag back did not swap plainly");
+        }
         let ran = p.scooch(&["glide"], LIMIT);
         p.line(format!("- scooch glide said {:?}", ran.text()));
         let wrote = set_motion(p, true);
