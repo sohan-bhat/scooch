@@ -14,6 +14,7 @@ pub const GLIDE_MS: u32 = 450;
 pub const SETTLE_WAIT: Duration = Duration::from_secs(2);
 pub const CHECK: Duration = Duration::from_millis(50);
 pub const PATIENCE: Duration = Duration::from_millis(150);
+pub const SHOWN_AFTER_WAKE: Duration = Duration::from_millis(450);
 pub const BARE: u32 = 2;
 pub const EARLY_EVERY: Duration = Duration::from_secs(10);
 pub const EARLY_LIFE: Duration = Duration::from_millis(1500);
@@ -310,6 +311,11 @@ pub fn software(adapter: &Adapter) -> bool {
     SOFTWARE.iter().any(|known| name.contains(known))
 }
 
+pub fn hold_until(started: Instant, woke: Option<Instant>, predicted: Option<Instant>) -> Option<Instant> {
+    let deadline = woke.map_or(started + PATIENCE, |woke| (started + PATIENCE).max(woke + SHOWN_AFTER_WAKE));
+    predicted.filter(|predicted| *predicted <= deadline).map(|_| deadline)
+}
+
 pub fn skipped(reason: &str, detail: &str) {
     static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
     let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -411,6 +417,7 @@ pub struct Glider {
     moved_now: bool,
     thrown: u32,
     last_early: Option<Instant>,
+    woke: Option<Instant>,
     pub said: Vec<String>,
 }
 
@@ -475,7 +482,7 @@ fn keep(said: &mut Vec<String>, line: String) {
 impl Glider {
     pub fn new(spawner: Box<dyn Spawn>) -> Self {
         let forced = std::env::var_os(FORCE).is_some_and(|value| !value.is_empty() && value != "0");
-        Self { forced, software: false, strikes: 0, stalled: false, spawner, link: None, warmed: None, last_warm: None, ready: false, next: 0, late: 0, flights: Vec::new(), early: Vec::new(), doomed: false, huge: std::collections::HashMap::new(), adapter: None, scales: BTreeMap::new(), learned: Vec::new(), prepared: None, noted: false, revived: false, starts: BTreeMap::new(), fresh_starts: Vec::new(), launched: None, ready_at: None, early_launch: false, early_generation: 0, moved_now: false, thrown: 0, last_early: None, said: Vec::new() }
+        Self { forced, software: false, strikes: 0, stalled: false, spawner, link: None, warmed: None, last_warm: None, ready: false, next: 0, late: 0, flights: Vec::new(), early: Vec::new(), doomed: false, huge: std::collections::HashMap::new(), adapter: None, scales: BTreeMap::new(), learned: Vec::new(), prepared: None, noted: false, revived: false, starts: BTreeMap::new(), fresh_starts: Vec::new(), launched: None, ready_at: None, early_launch: false, early_generation: 0, moved_now: false, thrown: 0, last_early: None, woke: None, said: Vec::new() }
     }
 
     #[cfg(test)]
@@ -532,6 +539,10 @@ impl Glider {
         self.launched = None;
         self.ready_at = None;
         self.early_launch = false;
+    }
+
+    pub fn woke(&mut self, at: Instant) {
+        self.woke = Some(at);
     }
 
     pub fn wake(&mut self) -> Option<u64> {
@@ -803,27 +814,30 @@ impl Glider {
         trace.device = self.link.as_mut().and_then(|link| link.device_ready());
         trace.canvas = self.link.as_mut().and_then(|link| link.canvas_ready());
         let waits_for_ready = !self.ready;
-        let predicted = if waits_for_ready {
+        let woke = self.woke;
+        let deadline = if waits_for_ready {
             let open = opened_at.unwrap_or(started);
             let device = launched.zip(trace.device).map(|(launched, device)| launched + device);
             let canvas = launched.zip(trace.canvas).map(|(launched, canvas)| launched + canvas);
             let show = device.and_then(|device| Some(device.max(open + median(&remembered.windows)?) + median(&remembered.draws)? + median(&remembered.reveals)?));
             let ready = canvas.or_else(|| device.zip(median(&remembered.canvases)).map(|(device, canvas)| device.max(open) + canvas));
-            match (show, median(&remembered.colds)) {
+            let predicted = match (show, median(&remembered.colds)) {
                 (Some(show), _) => Some(ready.map_or(show, |ready| show.max(ready))),
                 (None, Some(cold)) => Some(open + cold),
+                (None, None) => None,
+            };
+            trace.predicted = predicted.and_then(since);
+            match (hold_until(started, woke, predicted), predicted) {
+                (Some(deadline), _) => deadline,
                 (None, None) => return Err(anyhow!("no cold start is remembered for this adapter yet, so this move swaps plainly")),
+                (None, Some(predicted)) => {
+                    let allowed = hold_until(started, woke, Some(started)).map_or(PATIENCE, |deadline| deadline.saturating_duration_since(started));
+                    return Err(anyhow!("the helper would be shown {} ms after the plain swap was ready, past the {} ms it may wait, so this move swaps plainly", predicted.saturating_duration_since(started).as_millis(), allowed.as_millis()));
+                }
             }
         } else {
-            None
+            hold_until(started, woke, Some(started)).unwrap_or(started + PATIENCE)
         };
-        if let Some(predicted) = predicted {
-            trace.predicted = since(predicted);
-            if predicted > started + PATIENCE {
-                return Err(anyhow!("the helper would be shown {} ms after the plain swap was ready, past the {} ms it may wait, so this move swaps plainly", predicted.saturating_duration_since(started).as_millis(), PATIENCE.as_millis()));
-            }
-        }
-        let deadline = started + PATIENCE;
         if waits_for_ready {
             let adapter = self.link.as_mut().ok_or_else(|| anyhow!("no helper"))?.ready(Self::left(deadline))?;
             self.heard_ready(adapter)?;
@@ -1077,6 +1091,35 @@ impl Glider {
 pub mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    fn after(base: Instant, ms: u64) -> Instant {
+        base + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn a_decision_200_ms_after_the_wake_waits_for_a_helper_shown_at_370_ms() {
+        let woke = Instant::now();
+        assert_eq!(hold_until(after(woke, 200), Some(woke), Some(after(woke, 370))), Some(after(woke, 450)));
+    }
+
+    #[test]
+    fn the_same_decision_swaps_plainly_at_once_for_a_helper_shown_at_470_ms() {
+        let woke = Instant::now();
+        assert_eq!(hold_until(after(woke, 200), Some(woke), Some(after(woke, 470))), None);
+    }
+
+    #[test]
+    fn a_decision_400_ms_after_the_wake_waits_for_a_helper_shown_at_540_ms() {
+        let woke = Instant::now();
+        assert_eq!(hold_until(after(woke, 400), Some(woke), Some(after(woke, 540))), Some(after(woke, 550)));
+    }
+
+    #[test]
+    fn no_prediction_swaps_plainly_at_once() {
+        let woke = Instant::now();
+        assert_eq!(hold_until(after(woke, 200), Some(woke), None), None);
+        assert_eq!(hold_until(after(woke, 200), None, None), None);
+    }
 
     #[derive(Clone, Default)]
     pub struct Script {

@@ -434,6 +434,7 @@ impl Daemon {
     }
 
     pub fn gather(&self, worker: &Signal) {
+        self.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).woke(Instant::now());
         self.wake_early();
         if self.quick_look() {
             worker.take();
