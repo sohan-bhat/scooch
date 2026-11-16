@@ -365,6 +365,7 @@ pub struct Daemon {
     prints: Mutex<HashMap<String, u64>>,
     moved: Mutex<Vec<String>>,
     handed: Mutex<Option<(Instant, Snapshot)>>,
+    mapped: Mutex<HashMap<String, (u64, (u32, u32), u64)>>,
 }
 
 #[derive(Default)]
@@ -408,7 +409,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), mapped: Mutex::new(HashMap::new()) }
     }
 
     pub fn quick_look(&self) -> bool {
@@ -535,6 +536,45 @@ impl Daemon {
         Ok(!answer)
     }
 
+    fn adopt_kept(&self, screen: &str, key: u64) -> bool {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let slot = sessions.entry(screen.to_string()).or_insert_with(|| (key, scooch_core::Session::new()));
+        if slot.0 != key {
+            slot.1.forget();
+            slot.0 = key;
+        }
+        if slot.1.map().is_some() {
+            return false;
+        }
+        let mut mapped = self.mapped.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match cache::kept_map(&self.store, screen, key) {
+            Some(map) => {
+                mapped.insert(screen.to_string(), map.key());
+                slot.1.adopt(map);
+            }
+            None => {
+                mapped.remove(screen);
+            }
+        }
+        true
+    }
+
+    fn keep_maps(&self) {
+        let held: Vec<(String, u64, scooch_core::Map)> = self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().filter_map(|(screen, (key, session))| Some((screen.clone(), *key, session.map()?))).collect();
+        let mut mapped = self.mapped.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (screen, key, map) in held {
+            if mapped.get(&screen) == Some(&map.key()) && cache::map_file(&self.store, &screen, key).is_file() {
+                continue;
+            }
+            match cache::keep_map(&self.store, &screen, key, &map) {
+                Ok(()) => {
+                    mapped.insert(screen, map.key());
+                }
+                Err(error) => eprintln!("{} map not kept for {screen}, {error:#}", stamp()),
+            }
+        }
+    }
+
     fn forget_session(&self, screen: &str) {
         if let Some((_, mut session)) = self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(screen) {
             session.forget();
@@ -650,6 +690,7 @@ impl Daemon {
                     state.starts.insert(adapter, start);
                 }
             }
+            self.keep_maps();
             self.reap_later();
         }
         state.problem = report.problem.clone();
@@ -888,6 +929,9 @@ impl Daemon {
         lap("decode", &mut clock);
         let format = self.desktop.format();
         let (picture, bundle) = if glider.is_some() {
+            if self.adopt_kept(&screen.id, key) {
+                lap("map", &mut clock);
+            }
             let (bundle, picture) = self.session_still(&screen.id, key, (&decoded, &analysis, &placement, scene, options));
             lap("render", &mut clock);
             (picture, Some(bundle))
@@ -895,6 +939,9 @@ impl Daemon {
             crate::glide::skipped(blocked.unwrap_or("not live"), "");
             let held = entry.placement.as_ref() == Some(&placement);
             let picture = if wanted || held {
+                if self.adopt_kept(&screen.id, key) {
+                    lap("map", &mut clock);
+                }
                 self.session_still(&screen.id, key, (&decoded, &analysis, &placement, scene, options)).1
             } else {
                 self.forget_session(&screen.id);
@@ -3458,6 +3505,105 @@ pub mod tests {
         let before = fake.snapshots.load(Ordering::SeqCst);
         assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
         assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
+    }
+
+    fn map_rig(name: &str) -> (Daemon, Arc<Fake>, PathBuf) {
+        let (mut daemon, fake, original) = rig(name, vec![screen("main", 0.0, 2.0)]);
+        *fake.live.lock().unwrap() = true;
+        daemon.glider = Arc::new(Mutex::new(Glider::new(Box::new(crate::glide::tests::FakeSpawner::new(fake.events.clone())))));
+        set_scenery(&daemon, true);
+        (daemon, fake, original)
+    }
+
+    fn map_of(daemon: &Daemon, screen: &str) -> PathBuf {
+        cache::map_file(&daemon.store, screen, cache::key(&daemon.store.load().screens[screen].source).unwrap())
+    }
+
+    fn cold_drag_out(daemon: &Daemon, fake: &Fake, kept: impl FnOnce(&Path)) -> (Vec<u8>, Vec<u8>) {
+        fake.place(vec![subject(), calm()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        daemon.sessions.lock().unwrap().clear();
+        kept(map_of(daemon, "main").as_path());
+        fake.place(vec![subject(), calm_moved()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let state = daemon.store.load();
+        let output = state.screens["main"].output.clone().unwrap();
+        let tables = daemon.store.tables_for(&output, tables_key(&state.screens["main"].source, &state.options).unwrap());
+        (std::fs::read(&output).unwrap(), std::fs::read(tables).unwrap())
+    }
+
+    #[test]
+    fn a_cold_drag_with_a_kept_map_draws_the_same_picture_and_tables() {
+        let (daemon, fake, _) = map_rig("map-kept");
+        let kept = cold_drag_out(&daemon, &fake, |file| assert!(file.is_file(), "no map was kept after the first tick"));
+        let (cold, cold_fake, _) = map_rig("map-none");
+        let none = cold_drag_out(&cold, &cold_fake, |file| std::fs::remove_file(file).unwrap());
+        assert!(kept == none, "a kept map drew another picture or other tables");
+    }
+
+    #[test]
+    fn a_cold_drag_with_a_kept_map_does_not_work_the_map_out_again() {
+        let (daemon, fake, _) = map_rig("map-reuse");
+        cold_drag_out(&daemon, &fake, |_| {});
+        let (adopted, drawn) = daemon.sessions.lock().unwrap()["main"].1.map_ids();
+        assert!(adopted.is_some() && adopted == drawn, "the cold drag worked the map out again, adopted {adopted:?} drawn {drawn:?}");
+    }
+
+    #[test]
+    fn a_kept_map_it_cannot_use_is_drawn_over_and_replaced() {
+        let (good, good_fake, _) = map_rig("map-trusted");
+        let expected = cold_drag_out(&good, &good_fake, |_| {});
+        let file = std::fs::read(map_of(&good, "main")).unwrap();
+        let mut version = file.clone();
+        version[12..16].copy_from_slice(&(scooch_core::BELONGING_VERSION + 1).to_le_bytes());
+        let sum = version[..48].iter().chain(&version[56..]).fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3));
+        version[48..56].copy_from_slice(&sum.to_le_bytes());
+        let other = {
+            let image = sky_image(480, 100);
+            let mut session = scooch_core::Session::new();
+            session.belongs(&image, &scooch_core::analyze(&image), &scene::scene(&screen("main", 0.0, 2.0), &[subject(), calm()]), &with_scenery(Options::default(), true));
+            session.map().unwrap().to_bytes()
+        };
+        for (why, bad) in [("cut-short", file[..file.len() / 2].to_vec()), ("another-picture", other), ("another-version", version)] {
+            let (daemon, fake, _) = map_rig(&format!("map-{why}"));
+            let got = cold_drag_out(&daemon, &fake, |path| std::fs::write(path, &bad).unwrap());
+            assert!(got == expected, "{why}: the cold drag drew another picture or other tables");
+            assert!(std::fs::read(map_of(&daemon, "main")).unwrap() == file, "{why}: the bad file was not replaced by a good one");
+        }
+    }
+
+    #[test]
+    fn a_second_screen_never_reads_the_first_screens_map() {
+        let (daemon, fake, _) = two_screen_rig("map-two");
+        set_scenery(&daemon, true);
+        fake.place(vec![subject(), calm(), right(subject()), right(calm())]);
+        assert!(daemon.tick().problem.is_none());
+        let (left, other) = (map_of(&daemon, "left"), map_of(&daemon, "right"));
+        assert!(left != other && left.is_file() && other.is_file(), "{left:?} {other:?}");
+        daemon.sessions.lock().unwrap().clear();
+        std::fs::remove_file(&other).unwrap();
+        fake.place(vec![subject(), calm_moved(), right(subject()), right(calm_moved())]);
+        assert!(daemon.tick().problem.is_none());
+        let sessions = daemon.sessions.lock().unwrap();
+        assert!(sessions["left"].1.map_ids().0.is_some(), "the first screen did not read its own map");
+        assert!(sessions["right"].1.map_ids().0.is_none(), "the second screen read a map that was not its own");
+    }
+
+    #[test]
+    fn a_picture_change_removes_the_old_map_of_that_screen() {
+        let (daemon, fake, original) = map_rig("map-change");
+        fake.place(vec![subject(), calm()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let old = map_of(&daemon, "main");
+        assert!(old.is_file());
+        let mut image = scene::sample(480, 100);
+        image.put_pixel(0, 0, [1, 2, 3].into());
+        let chosen = original.parent().unwrap().join("chosen.png");
+        std::fs::write(&chosen, scooch_core::encode_png(&image).unwrap()).unwrap();
+        fake.show("main", &chosen);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let new = map_of(&daemon, "main");
+        assert!(new != old && new.is_file() && !old.exists(), "{old:?} {new:?}");
     }
 
     fn two_screen_rig(name: &str) -> (Daemon, Arc<Fake>, Arc<Mutex<crate::glide::tests::Script>>) {
