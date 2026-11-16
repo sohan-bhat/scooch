@@ -25,12 +25,12 @@ export const held = {
 export function begin(frame: Frame, place: number) {
   if (held.active && held.frame === frame) return;
   end();
-  const { to } = frame.select(place);
+  const { from, to, s } = frame.select(place);
   held.active = true;
   held.frame = frame;
-  held.a = frame.states[to];
-  held.b = null;
-  held.s = 1;
+  held.a = frame.states[from];
+  held.b = s > 0 ? frame.states[to] : null;
+  held.s = s > 0 ? s : 1;
   held.next = null;
   held.lastAt = 0;
 }
