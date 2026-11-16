@@ -116,6 +116,7 @@ fn main() {
     let start_scene = scene(&start);
     let fill = scooch_core::fill(photo.width(), photo.height(), &start_scene);
     let before = scooch_core::hidden_share(&analysis, &start_scene, &fill);
+    let options = scooch_core::Session::new().options(&photo, &analysis, &start_scene, &options);
     let fixed = scooch_core::solve(&analysis, &start_scene, &options, None);
     let fixed_hidden = scooch_core::hidden_share(&analysis, &start_scene, &fixed);
     let (look_before, look_fixed) = (seen(&subject, &fill), seen(&subject, &fixed));

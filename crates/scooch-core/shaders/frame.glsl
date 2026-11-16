@@ -60,6 +60,34 @@ vec2 coarse(vec2 p) {
     return p / 16.0 / paint_grid;
 }
 
+float map_at(int which, ivec2 at) {
+    return which == 0 ? texelFetch(map_a, at, 0).r : texelFetch(map_b, at, 0).r;
+}
+
+float seek(int which, int row, int count, float want, float start) {
+    float q = start;
+    for (int k = 0; k < 2; k++) {
+        float g = clamp(q - 0.5, 0.0, float(count - 1));
+        int i = min(int(g), max(count - 2, 0));
+        float a = map_at(which, ivec2(i, row));
+        float slope = map_at(which, ivec2(min(i + 1, count - 1), row)) - a;
+        if (slope != 0.0) {
+            q = q + (want - (a + slope * (g - float(i)))) / slope;
+        }
+    }
+    return q;
+}
+
+vec2 follow(int which, ivec2 pixel, vec2 seen, vec2 uv, vec2 p) {
+    ivec2 count = ivec2(size);
+    ivec2 lo = max(pixel - ivec2(1), ivec2(0));
+    ivec2 hi = min(pixel + ivec2(1), count - ivec2(1));
+    vec2 rise = vec2(map_at(which, ivec2(hi.x, 0)) - map_at(which, ivec2(lo.x, 0)), map_at(which, ivec2(hi.y, 1)) - map_at(which, ivec2(lo.y, 1)));
+    vec2 slope = rise / vec2(max(hi - lo, ivec2(1)));
+    vec2 start = p + vec2(slope.x != 0.0 ? (uv.x - seen.x) / slope.x : 0.0, slope.y != 0.0 ? (uv.y - seen.y) / slope.y : 0.0);
+    return vec2(seek(which, 0, count.x, uv.x, start.x), seek(which, 1, count.y, uv.y, start.y));
+}
+
 vec4 ramp(int which, float row, float d) {
     float x = clamp((d - ramp_low) / (ramp_high - ramp_low), 0.0, 1.0);
     vec2 at = vec2((x * 511.0 + 0.5) / 512.0, (row + 0.5) / 2.0);
@@ -108,7 +136,9 @@ Parts parts(int which, vec2 p, float d, float own, vec3 picture, float grain) {
     shallow = over(shallow, min(picture * gain.rgb * 4.0, vec3(1.0)), ramp(which, 0.0, own).r * gain.a);
     vec4 land = vec4(0.0);
     land = over(land, layer(which, p, 1).rgb, first.g * mark);
-    land = over(land, min(mix(sand.rgb, layer(which, p, 3).rgb, first.a) * grain, vec3(1.0)), first.b);
+    vec3 body = mix(sand.rgb, layer(which, p, 3).rgb, first.a) * grain;
+    float deeper = 1.0 - broad * max(0.0, 1.0 - 0.373 / max(dot(body, vec3(0.2126, 0.7152, 0.0722)), 0.0001));
+    land = over(land, min(body * deeper, vec3(1.0)), first.b);
     vec4 shaded = layer(which, p, 4);
     vec3 lit = layer(which, p, 5).rgb;
     vec3 deep = layer(which, p, 6).rgb;
@@ -203,5 +233,9 @@ void main() {
         }
         land = mix(faded, moved, clamp(tide, 0.0, 1.0));
     }
+    float guard_a = layer(0, follow(0, pixel, from_a, uv, p), 7).a;
+    float guard_b = layer(1, follow(1, pixel, from_b, uv, p), 7).a;
+    float block = max(guard_a * min(4.0 * (1.0 - s), 1.0), guard_b * min(4.0 * s, 1.0));
+    land = land * (1.0 - block);
     color = vec4(over_picture(picture, land), 1.0);
 }

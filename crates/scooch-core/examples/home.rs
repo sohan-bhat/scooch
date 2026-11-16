@@ -88,6 +88,7 @@ fn main() {
         for (name, image, analysis) in &photos {
             let scene = Scene { width: w, height: h, icons: layouts::mac(w, h, 6) };
             let file = dir.join(format!("{name}-{w}x{h}.json"));
+            let options = scooch_core::Session::new().options(image, analysis, &scene, &options);
             let now = scooch_core::solve(analysis, &scene, &options, None);
             if mode == "save" {
                 std::fs::write(&file, serde_json::to_string(&now).unwrap()).expect("save");

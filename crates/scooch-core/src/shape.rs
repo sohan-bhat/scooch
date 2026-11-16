@@ -43,11 +43,13 @@ pub fn ground(scene: &Scene) -> Option<Ground> {
     if scene.width == 0 || scene.height == 0 {
         return None;
     }
-    let mut icons: Vec<[f32; 4]> = solver::screen_rects(scene).into_iter().map(|r| r.map(|v| v as f32)).collect();
+    let icons: Vec<[f32; 4]> = solver::screen_rects(scene).into_iter().map(|r| r.map(|v| v as f32)).collect();
     if icons.is_empty() {
         return None;
     }
-    icons.sort_by(|a, b| a.iter().zip(b).map(|(p, q)| p.total_cmp(q)).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal));
+    let mut order: Vec<[u32; 5]> = icons.iter().enumerate().map(|(k, r)| [r[0].to_bits(), r[1].to_bits(), r[2].to_bits(), r[3].to_bits(), k as u32]).collect();
+    order.sort_unstable();
+    let icons: Vec<[f32; 4]> = order.iter().map(|k| icons[k[4] as usize]).collect();
     let mut heights = solver::screen_heights(scene);
     heights.sort_by(f32::total_cmp);
     let u = heights[heights.len() / 2];

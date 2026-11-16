@@ -10,6 +10,7 @@ pub const WET: usize = 3;
 pub const CLOUD: usize = 4;
 pub const LIT: usize = 5;
 pub const DEEP: usize = 6;
+pub const GUARD: usize = 7;
 pub const GAIN: f32 = 4.0;
 
 const GRAIN: f32 = 0.16;
@@ -18,16 +19,13 @@ const WARM_DEFAULT: [f32; 3] = [0.8, 0.01, 0.05];
 const WARM_PICK: f32 = 0.3;
 const SAND_TONE: [f32; 3] = [0.87, 0.016, 0.064];
 const SAND_PULL: (f32, f32) = (0.8, 0.85);
-const WET_DROP: f32 = 0.09;
-const WET_WARM: f32 = 1.15;
-const SHALLOW_RISE: f32 = 0.24;
-const SHALLOW_TOP: f32 = 0.96;
-const SHALLOW_CHROMA: f32 = 1.65;
+pub(crate) const INSIDE: (f32, f32, f32) = (0.12, 0.70, 1.15);
+pub(crate) const SHALLOW_MOVE: (f32, f32) = (0.5, 0.12);
 const GAIN_MOST: f32 = 3.98;
 const FOAM_LIGHT: f32 = 0.96;
 const FOAM_TINT: f32 = 0.2;
-const LAND_FADE: (f32, f32) = (0.66, 0.72);
-const SHADED: (f32, f32) = (0.81, 0.25);
+pub(crate) const UNDER_SAND: (f32, f32) = (0.1, 0.02);
+pub(crate) const SHADED: (f32, f32) = (0.81, 0.25);
 const BRIGHT: (f32, f32) = (0.97, 0.07);
 const WARM_LIT: f32 = 0.35;
 const UNDERSIDE: (f32, f32) = (0.75, 0.28);
@@ -70,16 +68,19 @@ pub fn tones(local: [f32; 3], sand: [f32; 3], mottle: f32) -> Tones {
     let bright = tint(BRIGHT.0, BRIGHT.1 + WARM_LIT * warmth);
     let contrast = (0..3).map(|k| (bright[k] - local[k]).powi(2)).sum::<f32>().sqrt();
     let water = to_linear(local);
-    let shallow = to_linear([(local[0] + SHALLOW_RISE).min(SHALLOW_TOP), local[1] * SHALLOW_CHROMA, local[2] * SHALLOW_CHROMA]);
+    let toward: [f32; 3] = std::array::from_fn(|k| local[k] + (sand[k] - local[k]) * SHALLOW_MOVE.0);
+    let held = (chroma(&local[..]) / chroma(&toward[..]).max(1e-6)).min(1.0);
+    let shallow = to_linear([toward[0].min(local[0] + SHALLOW_MOVE.1), toward[1] * held, toward[2] * held]);
     let gain: [f32; 3] = std::array::from_fn(|k| (shallow[k] / water[k].max(1e-3)).min(GAIN_MOST) / GAIN);
-    let land = 1.0 - smoothstep(LAND_FADE.0, LAND_FADE.1, local[0]);
+    let top = sand[0] - UNDER_SAND.0;
+    let land = 1.0 - smoothstep(top - UNDER_SAND.1, top + UNDER_SAND.1, local[0]);
     let cloud = smoothstep(CONTRAST.0, CONTRAST.1, contrast);
     Tones {
         colors: [
             gain,
             to_linear([FOAM_LIGHT, sand[1] * FOAM_TINT, sand[2] * FOAM_TINT]),
             to_linear([sand[0] + mottle, sand[1], sand[2]]),
-            to_linear([sand[0] + mottle - WET_DROP, sand[1], sand[2] * WET_WARM]),
+            to_linear([(sand[0] - INSIDE.0).min(INSIDE.1) + mottle, sand[1], sand[2] * INSIDE.2]),
             to_linear(tint(SHADED.0, SHADED.1)),
             to_linear(bright),
             to_linear(tint(UNDERSIDE.0, UNDERSIDE.1)),
@@ -149,8 +150,13 @@ mod tests {
         assert!(body[0] > 0.75 && body[0] < 0.95 && body[2] > 0.0, "{body:?}");
         assert!(lab_of(t.colors[WET])[0] < body[0]);
         assert!(t.alphas[CLOUD] > 0.99);
-        let water = tones([0.45, -0.08, 0.03], sand(&from_palette(&[])), 0.0);
-        assert!(water.colors[SHALLOW].iter().all(|g| *g * GAIN > 1.0), "{:?}", water.colors[SHALLOW]);
+        for local in [[0.45, -0.08, 0.03], [0.72, -0.07, -0.03], [0.4, -0.02, -0.08]] {
+            let water = tones(local, sand(&from_palette(&[])), 0.0);
+            let lin = to_linear(local);
+            let shallow = lab_of(std::array::from_fn(|k| lin[k] * water.colors[SHALLOW][k] * GAIN));
+            assert!(shallow[0] > local[0] && shallow[0] <= local[0] + SHALLOW_MOVE.1 + 0.005, "{local:?} {shallow:?}");
+            assert!(chroma(&shallow[..]) <= chroma(&local[..]) + 0.005, "{local:?} {shallow:?}");
+        }
         assert!(tones([0.95, 0.0, 0.0], [0.87, 0.016, 0.064], 0.0).alphas[CLOUD] < 0.01);
         assert!(tones([0.9, 0.0, 0.0], [0.87, 0.016, 0.064], 0.0).alphas[SAND] < 0.01);
     }

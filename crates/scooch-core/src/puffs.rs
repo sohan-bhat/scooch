@@ -298,7 +298,7 @@ pub(crate) fn pile_flags(lattice: &Lattice) -> Vec<bool> {
     let n = lattice.len();
     let mut flags = vec![false; n];
     let size = PILE_CELL / SPACING;
-    let mut best: std::collections::HashMap<(i32, i32), (f32, usize)> = std::collections::HashMap::new();
+    let mut picks: Vec<Key> = Vec::new();
     for k in 0..n {
         let (i, j) = lattice.ij(k);
         if unit_hash(i, j, 13) >= BIG {
@@ -308,15 +308,14 @@ pub(crate) fn pile_flags(lattice: &Lattice) -> Vec<bool> {
         if unit_hash(ci, cj, 17) < PILE_SKIP {
             continue;
         }
-        let score = unit_hash(i, j, 16);
-        let entry = best.entry((ci, cj)).or_insert((f32::MAX, usize::MAX));
-        if score < entry.0 {
-            *entry = (score, k);
-        }
+        picks.push([ci as u32 ^ 0x8000_0000, cj as u32 ^ 0x8000_0000, unit_hash(i, j, 16).to_bits(), k as u32, 0]);
     }
-    for (_, (_, k)) in best {
-        if k != usize::MAX {
-            flags[k] = true;
+    picks.sort_unstable();
+    let mut last = None;
+    for pick in picks {
+        if last != Some((pick[0], pick[1])) {
+            flags[pick[3] as usize] = true;
+            last = Some((pick[0], pick[1]));
         }
     }
     flags

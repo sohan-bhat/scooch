@@ -124,6 +124,17 @@ pub struct Entry {
     pub absent_since: Option<u64>,
     #[serde(skip_serializing_if = "is_zero")]
     pub absent_ticks: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub belongs: Option<Belongs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawn: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Belongs {
+    pub key: u64,
+    pub stamp: u64,
+    pub answer: bool,
 }
 
 fn is_zero(count: &u32) -> bool {

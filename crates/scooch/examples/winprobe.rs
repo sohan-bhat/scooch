@@ -3838,7 +3838,7 @@ mod probe {
             setup = Some(watched);
         }
         let setup = setup.context("no setup drag")?;
-        let wrote_tables = setup.log.iter().any(|line| line.contains(" tick ") && line.rsplit("] ").next().is_some_and(|laps| laps.split(", ").any(|lap| lap.starts_with("tables "))));
+        let wrote_tables = setup.log.iter().any(|line| line.contains(" tick ") && line.rsplit("] ").next().is_some_and(|laps| laps.split(", ").any(|lap| lap.starts_with("tables ") || lap.starts_with("later "))));
         let ticks: Vec<String> = setup.log.iter().filter(|line| line.contains(" tick ")).map(|line| line.chars().take(300).collect()).collect();
         p.line(format!("- the last setup drag's tick lines {ticks:?}"));
         p.line(format!("- the last setup drag rendered with a tables entry {wrote_tables}"));
@@ -4058,6 +4058,28 @@ mod probe {
         Ok(())
     }
 
+    fn switch_check(p: &mut Probe, desktop: &dyn platform::Desktop, screen: &Screen, trace: &Path, read: &mut u64) -> Result<()> {
+        let held = |home: &Path| fs::read(home.join("state.json")).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok()).and_then(|state| state["screens"].as_object().and_then(|screens| screens.values().next().map(|entry| (entry["placement"].clone(), entry["output"].clone(), entry["belongs"]["answer"].clone()))));
+        let scooch = twin()?.with_file_name("scooch.exe");
+        let toggle = |home: &Path| Command::new(&scooch).arg("scenery").env("SCOOCH_HOME", home).output().map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
+        let _ = new_lines(trace, read);
+        let (kept, shown) = (held(&p.home), desktop.wallpaper(screen).ok().flatten());
+        let said = toggle(&p.home);
+        quiet_log(trace, Duration::from_millis(1500), Duration::from_secs(10));
+        let (now, showing) = (held(&p.home), desktop.wallpaper(screen).ok().flatten());
+        let window: Vec<String> = new_lines(trace, read).into_iter().filter(|line| line.contains(" tick ") || line.contains(" set ")).map(|line| line.chars().take(200).collect()).collect();
+        let sets = window.iter().filter(|line| line.contains(" set ")).count();
+        let back = toggle(&p.home);
+        quiet_log(trace, Duration::from_millis(1500), Duration::from_secs(10));
+        let _ = new_lines(trace, read);
+        let same = kept.as_ref().zip(now.as_ref()).is_some_and(|(a, b)| a.0 == b.0 && a.1 == b.1);
+        p.line(format!("- navy picture with the icon on the subject, scenery auto then off, scooch scenery said {said:?} then {back:?}, the daemon's answer belongs {:?}, same placement and file {same}, wallpaper unchanged {}, wallpapers set {sets}, daemon lines {window:?}", kept.as_ref().map(|held| held.2.clone()), shown == showing));
+        if !same || shown != showing || sets > 0 {
+            p.failed.push("switching scenery off moved the navy picture or changed the screen".into());
+        }
+        Ok(())
+    }
+
     fn new_lines(path: &Path, read: &mut u64) -> Vec<String> {
         let Ok(bytes) = fs::read(path) else { return Vec::new() };
         let start = (*read as usize).min(bytes.len());
@@ -4175,6 +4197,15 @@ mod probe {
         }
         times.sort_unstable();
         p.line(format!("- median move to new wallpaper {:?} ms", times.get(times.len() / 2)));
+        if let Some(rect) = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect) {
+            let before = desktop.wallpaper(&screen)?.unwrap_or_default();
+            let sent = drag_to(POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + cell.icon / 2.0) as i32 }, subject);
+            let swapped = wait_until(Duration::from_secs(10), || desktop.wallpaper(&screen).ok().flatten().is_some_and(|now| now != before));
+            park_cursor();
+            pump(Duration::from_millis(1500));
+            p.line(format!("- the icon dragged onto the subject again sent {sent}, new wallpaper after {:?} ms", swapped.map(|time| time.as_millis())));
+            switch_check(p, desktop.as_ref(), &screen, &trace, &mut read)?;
+        }
         park_cursor();
         pump(Duration::from_secs(3));
         let Some(child) = p.daemon.as_ref() else { bail!("the daemon handle is gone") };

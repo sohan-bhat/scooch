@@ -94,14 +94,15 @@ fn main() {
     let mut clouds = column.clone();
     clouds.push(Rect { x: 2300.0, y: 500.0, w: 100.0, h: 100.0 });
     let islands = layouts::scattered(w, h, 12, 2027).into_iter().map(|r| Rect { w: 100.0, h: 100.0, ..r }).collect::<Vec<Rect>>();
-    let cases = [("clouds", "balloon-sky", clouds, 16usize, (14.0f32, 9.0f32)), ("islands", "two-swans", islands, 3usize, (-12.0, 10.0))];
+    let cases = [("clouds", "balloon-sky", clouds, 16usize, (14.0f32, 9.0f32)), ("islands", "lone-canoe", islands, 3usize, (-12.0, 10.0))];
     for (label, photo_name, icons, held, (dx, dy)) in cases {
         let path = layouts::photos().into_iter().find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy() == photo_name)).expect("photo");
         let image = scooch_core::open(&path).expect("open");
         let analysis = scooch_core::analyze(&image);
         let mut scene = Scene { width: w, height: h, icons: icons.clone() };
-        let mut placement = scooch_core::solve(&analysis, &scene, &options, None);
         let mut session = Session::new();
+        let options = session.options(&image, &analysis, &scene, &options);
+        let mut placement = scooch_core::solve(&analysis, &scene, &options, None);
         let still_placement = placement.clone();
         let (first_bundle, first_still) = session.still_shared(&image, &analysis, &placement, &scene, &options);
         let first_layers = scooch_core::frame_layers(&first_bundle, &first_bundle, 0.0);

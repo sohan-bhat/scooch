@@ -3,7 +3,7 @@ use crate::paint::LAYERS;
 use crate::{Analysis, Rect};
 
 const MAGIC: [u8; 4] = *b"SCBT";
-const VERSION: u32 = 2;
+pub const TABLES_VERSION: u32 = 3;
 const GRID: u32 = 4;
 const PAINT: u32 = 16;
 
@@ -87,7 +87,7 @@ impl Bundle {
     pub fn tables_to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.table_bytes() + 256);
         out.extend_from_slice(&MAGIC);
-        let words = [VERSION, self.width, self.height, self.canvas_width, self.canvas_height, self.grid_width, self.grid_height, self.paint_width, self.paint_height];
+        let words = [TABLES_VERSION, self.width, self.height, self.canvas_width, self.canvas_height, self.grid_width, self.grid_height, self.paint_width, self.paint_height];
         words.iter().for_each(|w| out.extend_from_slice(&w.to_le_bytes()));
         out.extend_from_slice(&fingerprint(self.canvas_width, self.canvas_height, &self.canvas).to_le_bytes());
         out.extend_from_slice(&self.ratio.to_le_bytes());
@@ -114,7 +114,7 @@ impl Bundle {
             return Err(TablesError::Checksum);
         }
         let mut reader = Reader { bytes: &bytes[..body], at: 4 };
-        if reader.u32()? != VERSION {
+        if reader.u32()? != TABLES_VERSION {
             return Err(TablesError::Version);
         }
         let [width, height, canvas_width, canvas_height, grid_width, grid_height, paint_width, paint_height] = std::array::from_fn(|_| reader.u32().unwrap_or(u32::MAX));
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn tables_from_version_one_are_refused() {
+    fn tables_from_older_versions_are_refused() {
         let canvas = Canvas { width: 2, height: 2, pixels: vec![9; 12] };
         let constants = Constants { unit: 10.0, ramp_low: -0.6, ramp_high: 1.15, reach: 1.12, shadow: [0.0; 2], rim: [0.0; 2], belly: [0.0; 2], grain: 0.1, grain_scale: 1.0, grain_floor: 0.0, core_lift: 0.17, core_drop: 0.05, volume_lit: 0.9, volume_dark: 0.9 };
         let bundle = Bundle {
@@ -320,12 +320,15 @@ mod tests {
             constants,
         };
         let bytes = bundle.tables_to_bytes();
+        assert_eq!(&bytes[..8], b"SCBT\x03\x00\x00\x00");
         assert_eq!(Bundle::tables_from_bytes(&bytes, canvas.clone()), Ok(bundle));
-        let mut old = bytes[..bytes.len() - 8].to_vec();
-        old[4..8].copy_from_slice(&1u32.to_le_bytes());
-        let sum = fingerprint(0, 0, &old);
-        old.extend_from_slice(&sum.to_le_bytes());
-        assert_eq!(Bundle::tables_from_bytes(&old, canvas), Err(TablesError::Version));
+        for version in 1..TABLES_VERSION {
+            let mut old = bytes[..bytes.len() - 8].to_vec();
+            old[4..8].copy_from_slice(&version.to_le_bytes());
+            let sum = fingerprint(0, 0, &old);
+            old.extend_from_slice(&sum.to_le_bytes());
+            assert_eq!(Bundle::tables_from_bytes(&old, canvas.clone()), Err(TablesError::Version), "version {version}");
+        }
     }
 
     #[test]

@@ -48,9 +48,11 @@ fn main() {
         let picture = if scale < 1.0 { imageops::resize(&full, (full.width() as f32 * scale) as u32, (full.height() as f32 * scale) as u32, imageops::FilterType::Triangle) } else { full };
         let analysis = scooch_core::analyze(&picture);
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        let mut session = scooch_core::Session::new();
         for layout in ["mac", "windows", "scattered", "cluster"] {
             let icons = layouts::layout(layout, &analysis, w, h);
             let scene = Scene { width: w, height: h, icons: icons.clone() };
+            let options = session.options(&picture, &analysis, &scene, &options);
             let placement = scooch_core::solve(&analysis, &scene, &options, None);
             let layers = scooch_core::render_layers(&picture, &analysis, &placement, &scene, &options);
             let bundle = scooch_core::bundle(&picture, &analysis, &placement, &scene, &options);

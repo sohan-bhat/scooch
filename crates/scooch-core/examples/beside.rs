@@ -50,8 +50,8 @@ fn main() {
         ("balloon-scattered", "balloon-sky", w, h, &scattered),
         ("balloon-column", "balloon-sky", w, h, &column),
         ("moon-column", "moon-sky", w, h, &column),
-        ("swans-column", "two-swans", w, h, &column),
-        ("swans-scattered", "two-swans", w, h, &scattered),
+        ("canoe-column", "lone-canoe", w, h, &column),
+        ("canoe-scattered", "lone-canoe", w, h, &scattered),
         ("main-a", "balloon-sky", 1280, 960, &site),
     ];
     let only = args.get(3);
@@ -64,6 +64,7 @@ fn main() {
         let analysis = scooch_core::analyze(&image);
         let scene = Scene { width: sw, height: sh, icons: icons.clone() };
         let options = Options { scenery: Scenery::Auto, pads: 0.0, ..Options::default() };
+        let options = scooch_core::Session::new().options(&image, &analysis, &scene, &options);
         let placement = scooch_core::solve(&analysis, &scene, &options, None);
         let mut product = scooch_core::render_with(&image, &analysis, &placement, &scene, &options);
         marks(&mut product, icons);

@@ -209,6 +209,8 @@ mod probe {
         gpu: Option<Gpu>,
         finder: bool,
         motion: Option<Option<String>>,
+        scanned: usize,
+        struck: bool,
     }
 
     impl Probe {
@@ -250,6 +252,7 @@ mod probe {
                 self.line(format!("- **check failed** {error:#}"));
                 self.failed.push(format!("{title} stopped with {error:#}"));
             }
+            stutters(self);
             self.line(format!("- took {} ms", started.elapsed().as_millis()));
             self.save();
         }
@@ -350,6 +353,8 @@ mod probe {
             gpu: None,
             finder: true,
             motion: None,
+            scanned: 0,
+            struck: false,
         };
         probe.section("1 Session facts", facts);
         if !probe.runner {
@@ -549,6 +554,26 @@ mod probe {
     }
 
     fn subject_picture(width: u32, height: u32, at: (f32, f32)) -> RgbImage {
+        disc_picture(width, height, at, scooch_core::ISLAND_WATER)
+    }
+
+    fn green_picture(width: u32, height: u32, at: (f32, f32)) -> RgbImage {
+        disc_picture(width, height, at, [19, 90, 48])
+    }
+
+    fn disc_picture(width: u32, height: u32, at: (f32, f32), water: [u8; 3]) -> RgbImage {
+        let mut image = filled(width, height, water);
+        let (cx, cy) = (at.0 * width as f32, at.1 * height as f32);
+        let radius = height as f32 / 7.0;
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            if ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt() < radius {
+                pixel.0 = [245, 196, 92];
+            }
+        }
+        image
+    }
+
+    fn navy_picture(width: u32, height: u32, at: (f32, f32)) -> RgbImage {
         let mut image = filled(width, height, [24, 34, 58]);
         let (cx, cy) = (at.0 * width as f32, at.1 * height as f32);
         let radius = height as f32 / 7.0;
@@ -714,6 +739,26 @@ mod probe {
         fs::read_to_string(p.home.join("watch.log")).unwrap_or_default()
     }
 
+    fn stutters(p: &mut Probe) -> bool {
+        let log = daemon_log(p);
+        let fresh = new_lines(&log, p.scanned);
+        p.scanned = log.lines().count();
+        for line in fresh {
+            if let Some(rest) = line.split(" glide glided ").nth(1) {
+                let words: Vec<&str> = rest.split_whitespace().collect();
+                let number = |at: usize| words.get(at).and_then(|word| word.trim_end_matches(',').parse::<f64>().ok());
+                if let Some((frames, slow)) = number(2).zip(number(4)).filter(|(frames, slow)| slow * 2.0 > *frames) {
+                    p.line(format!("- glide {} stuttered, {slow} of {frames} frames slow at scale {}", words.first().unwrap_or(&"?"), words.get(8).map_or("unknown", |scale| scale.trim_end_matches(','))));
+                }
+            }
+            if line.contains("glides in a row stuttered") {
+                p.struck = true;
+                p.fail("the strike rule fired, two glides in a row stuttered, so the daemon turned the glide off until it starts again");
+            }
+        }
+        p.struck
+    }
+
     fn scooch_pid(p: &Probe) -> Option<i32> {
         let pid: i32 = fs::read_to_string(p.home.join("watch.pid")).ok()?.trim().parse().ok()?;
         (unsafe { libc::kill(pid, 0) } == 0).then_some(pid)
@@ -854,7 +899,7 @@ mod probe {
         p.line(format!("- {} sits on the subject and the other probe items sit in a calm column", PROBES[0].0));
         std::thread::sleep(Duration::from_millis(1500));
         let kind = format!("{:?}", store::describe(&screen.id));
-        p.line(format!("- wallpaper set to a plain test JPEG with one bright subject in the middle {}, store kind {kind}", subject.display()));
+        p.line(format!("- wallpaper set to a teal water test JPEG with one bright subject in the middle {}, store kind {kind}", subject.display()));
         p.kind_before = Some(kind);
         let started = Instant::now();
         let ran = p.scooch(&[], Duration::from_secs(60));
@@ -1027,6 +1072,10 @@ mod probe {
         new_lines(&daemon_log(p), from).iter().filter(|line| line.contains(" tick ") && line.contains("Rendered")).filter_map(|line| line.split(", ").find_map(|lap| lap.trim().strip_prefix("render ")).and_then(|millis| millis.trim().parse().ok())).collect()
     }
 
+    fn named_laps(p: &Probe, from: usize, name: &str) -> Vec<u64> {
+        new_lines(&daemon_log(p), from).iter().filter(|line| line.contains(" tick ") && line.contains("Rendered")).map(|line| line.split(", ").filter_map(|lap| lap.trim().strip_prefix(name)).filter_map(|millis| millis.trim().parse::<u64>().ok()).sum()).collect()
+    }
+
     fn icon_rect(name: &str) -> Option<Rect> {
         finder::named(&finder::view()).ok()?.into_iter().find(|(found, _)| found == name).map(|(_, rect)| rect)
     }
@@ -1135,6 +1184,78 @@ mod probe {
         }
         if matched.is_none_or(|share| share < 0.9) {
             p.fail("the scenery off capture does not match the scenery off render");
+        }
+        bare_check(p, &screen, display, (to, subject), "navy", navy_picture)?;
+        bare_check(p, &screen, display, (to, subject), "green", green_picture)
+    }
+
+    fn bare_check(p: &mut Probe, screen: &Screen, display: u32, (calm, onto): ((f32, f32), (f32, f32)), label: &str, picture: fn(u32, u32, (f32, f32)) -> RgbImage) -> Result<()> {
+        let desktop = platform::current()?;
+        let name = PROBES[0].0;
+        let (width, height) = pixels(screen);
+        let bare = picture_file(p, &format!("probe-{label}.jpg"), &picture(width, height, (0.5, 0.5)))?;
+        let ran = p.scooch(&["use", &bare.to_string_lossy()], Duration::from_secs(60));
+        let switched = wait_render(p, Duration::from_secs(45), Some(&bare), false);
+        p.line(format!("- scooch use on a {label} picture with scenery `{}` exit {:?}, rendered after {:?} ms", state(p)["options"]["scenery"].as_str().unwrap_or("missing"), ran.code, switched.map(|time| time.as_millis())));
+        away(p, name, onto);
+        quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
+        let held = |p: &Probe| state(p)["screens"].as_object().and_then(|screens| screens.values().next().map(|entry| (entry["placement"].clone(), entry["output"].clone(), entry["belongs"]["answer"].clone())));
+        let (kept, shot, seen) = (held(p), grab(display), daemon_log(p).lines().count());
+        let _ = p.scooch(&["scenery"], LIMIT);
+        quiet_log(p, Duration::from_millis(1500), Duration::from_secs(10));
+        let (now, later) = (held(p), grab(display));
+        let sets = new_lines(&daemon_log(p), seen).iter().filter(|line| line.contains(" set ")).count();
+        let moved = shot.as_ref().zip(later.as_ref()).zip(icon_rect(name)).map(|((a, b), icon)| ring(a, b, &icon, screen));
+        let _ = p.scooch(&["scenery"], LIMIT);
+        quiet_log(p, Duration::from_millis(1500), Duration::from_secs(10));
+        let same = kept.as_ref().zip(now.as_ref()).is_some_and(|(a, b)| a.0 == b.0 && a.1 == b.1);
+        p.line(format!("- {label} picture with the icon on the subject, scenery auto then off, the daemon's answer belongs {:?}, same placement and file {same}, wallpapers set {sets}, pixels changed around the icon {moved:?}", kept.as_ref().map(|held| held.2.clone())));
+        if !same || sets > 0 || moved.is_none_or(|count| count >= 200) {
+            p.fail(format!("switching scenery off moved the {label} picture or changed the screen"));
+        }
+        let start = position(p, name).unwrap_or(onto);
+        let shown = || desktop.wallpaper(screen).ok().flatten();
+        let before = shown();
+        let seen = daemon_log(p).lines().count();
+        drag(start, calm);
+        let dropped = Instant::now();
+        let swapped = wait_until(Duration::from_secs(12), || shown() != before).map(|_| dropped.elapsed().as_millis());
+        std::thread::sleep(Duration::from_millis(1200));
+        let icon = icon_rect(name);
+        let on_shot = grab(display).with_context(|| format!("the screen could not be captured on the {label} picture"))?;
+        p.line(format!("- {label} picture, scenery on, drag from the subject to calm ground at {:.0},{:.0}: new wallpaper after {swapped:?} ms, daemon ticks {:?}", calm.0, calm.1, tick_lines(p, seen)));
+        let _ = p.scooch(&["scenery"], LIMIT);
+        std::thread::sleep(Duration::from_millis(1500));
+        let off_shot = grab(display).with_context(|| format!("the screen could not be captured on the {label} picture with scenery off"))?;
+        let _ = p.scooch(&["scenery"], LIMIT);
+        let painted = icon.as_ref().map(|icon| ring(&on_shot, &off_shot, icon, screen));
+        p.line(format!("- pixels within 40 points around the dragged item that differ between scenery on and off on the {label} picture {painted:?}"));
+        let seen = daemon_log(p).lines().count();
+        let mut swaps = 0;
+        for _ in 0..5 {
+            away(p, name, calm);
+            let before = shown();
+            let _ = place(p, name, onto);
+            poke(p);
+            if wait_until(Duration::from_secs(12), || shown() != before).is_some() {
+                swaps += 1;
+            }
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        let decodes = named_laps(p, seen, "decode ");
+        let mut laps = render_laps(p, seen);
+        laps.sort_unstable();
+        p.line(format!("- {label} picture, scenery `{}`, Apple Event moves from calm ground onto the subject that brought a new wallpaper {swaps} of 5, render laps {laps:?} ms, median {:?}, decode laps in tick order {decodes:?} ms, to set beside section 5 on a build where section 5 used this picture", state(p)["options"]["scenery"].as_str().unwrap_or("missing"), laps.get(laps.len() / 2)));
+        if let Some(subject) = p.subject.clone() {
+            let ran = p.scooch(&["use", &subject.to_string_lossy()], Duration::from_secs(60));
+            let back = wait_render(p, Duration::from_secs(45), Some(&subject), false);
+            p.line(format!("- back to the teal water picture exit {:?}, rendered after {:?} ms", ran.code, back.map(|time| time.as_millis())));
+        }
+        if swapped.is_none() {
+            p.fail(format!("a drag on the {label} picture with scenery on brought no new wallpaper"));
+        }
+        if painted.is_none_or(|count| count >= 200) {
+            p.fail(format!("scenery showed on a {label} picture, where it does not belong"));
         }
         Ok(())
     }
@@ -2717,6 +2838,8 @@ mod probe {
         let Some(mut child) = p.stand.take() else { return Ok(false) };
         let _ = child.kill();
         let _ = child.wait();
+        stutters(p);
+        p.struck = false;
         let _ = fs::remove_file(p.home.join("watch.pid"));
         let log = fs::OpenOptions::new().create(true).append(true).open(p.home.join("watch.log"))?;
         let mut command = Command::new(&p.bin);
@@ -2739,6 +2862,10 @@ mod probe {
     }
 
     fn cold_drags_check(p: &mut Probe) -> Result<()> {
+        if restart_daemon(p, false)? {
+            let calm = quiet_log(p, Duration::from_millis(1500), Duration::from_secs(15));
+            p.line(format!("- the daemon restarted before the cold drags so they start with no strikes, its log quiet after {calm}"));
+        }
         let result = cold_drags(p);
         put_motion_back(p);
         if p.stand.is_some() {
@@ -2825,7 +2952,9 @@ mod probe {
         let rewritten = file.as_ref().and_then(|file| {
             let mut bytes = fs::read(file).ok()?;
             let body = bytes.len().checked_sub(8).filter(|body| *body > 8)?;
-            bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+            let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+            let back = scooch_core::TABLES_VERSION.checked_sub(1).filter(|_| version == scooch_core::TABLES_VERSION)?;
+            bytes[4..8].copy_from_slice(&back.to_le_bytes());
             let sum = scooch::live::canvas::fingerprint(0, 0, &bytes[..body]);
             bytes[body..].copy_from_slice(&sum.to_le_bytes());
             fs::write(file, &bytes).ok()
@@ -2844,7 +2973,7 @@ mod probe {
                 break;
             }
         }
-        p.line(format!("- tables rewritten as version 1 {:?}, then a drag: logged another version {named}, new wallpaper {:?} ms, glided {}, a layer opened {opened}, skip {:?}, the drags after it glided {again:?}", rewritten.is_some(), first.set, first.glided, first.skip));
+        p.line(format!("- tables rewritten from version {} to {} {:?}, then a drag: logged another version {named}, new wallpaper {:?} ms, glided {}, a layer opened {opened}, skip {:?}, the drags after it glided {again:?}", scooch_core::TABLES_VERSION, scooch_core::TABLES_VERSION - 1, rewritten.is_some(), first.set, first.glided, first.skip));
         if rewritten.is_none() || !named || first.set.is_none() || first.glided || opened || !again.contains(&true) {
             p.fail("tables from another version did not give one plain swap at once and then a glide");
         }
@@ -3107,6 +3236,10 @@ mod probe {
         let (_, warm_log) = wallpaper_after(p, &screen, |_| drag(from, to));
         p.line(format!("- a drag with reduce motion off again, so the next move has tables, log {warm_log:?}"));
         quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
+        let struck = stutters(p);
+        if struck {
+            p.line("- the strike rule turned the glide off for this daemon, so the covered move, the kill and the drag after it are judged only as plain swaps".to_string());
+        }
         let window = cover(marker, &screen)?;
         let target = if position(p, name).is_some_and(|at| (at.0 - subject.0).abs() < 5.0) { aside } else { subject };
         let (covered, covered_log) = wallpaper_after(p, &screen, |p| {
@@ -3125,7 +3258,7 @@ mod probe {
         let at_once = !covered_log.iter().any(|line| line.contains("shown and gliding")) && covered_waited == Some(0);
         let delay = laps(&covered_log, &["early", "tables", "open"]);
         p.line(format!("- a move while a window covers the whole desktop: new wallpaper after {covered:?} ms, the daemon answered hidden {hidden}, the decision waited {covered_waited:?} ms, a plain swap at once {at_once}, time the glide added to the tick {delay:?} ms, tick {:?} ms against {:?} ms for the glide off move, log {covered_log:?}", tick(&covered_log), tick(&off_log)));
-        if covered.is_none() || !(hidden || at_once) || delay.is_none_or(|delay| delay > 400) {
+        if covered.is_none() || (!struck && (!(hidden || at_once) || delay.is_none_or(|delay| delay > 400))) {
             p.fail("a covered desktop delayed the plain swap");
         }
         std::thread::sleep(Duration::from_millis(1500));
@@ -3156,7 +3289,7 @@ mod probe {
         let again = watch_drag(p, display, &screen, from, to, &masks).context("the drag after the kill could not be watched")?;
         let glided_again = logged(&again, " glide settled").is_some();
         p.line(format!("- the next drag glides again {glided_again}, log {:?}", again.log.iter().map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()));
-        if killed.is_empty() || now_shown != recorded || !matches.is_some_and(|share| share >= 0.9) || !alive || !glided_again {
+        if !alive || now_shown != recorded || !matches.is_some_and(|share| share >= 0.9) || (!struck && (killed.is_empty() || !glided_again)) {
             p.fail("killing the helper mid glide was not handled cleanly");
         }
         let last = Instant::now();

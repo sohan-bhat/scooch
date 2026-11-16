@@ -13,9 +13,11 @@ fn main() {
     for path in layouts::photos() {
         let photo = scooch_core::open(&path).expect("photo");
         let analysis = scooch_core::analyze(&photo);
+        let mut session = scooch_core::Session::new();
         for layout in ["mac", "scattered", "cluster"] {
             let icons = layouts::layout(layout, &analysis, w, h);
             let scene = Scene { width: w, height: h, icons: icons.clone() };
+            let options = session.options(&photo, &analysis, &scene, &options);
             let previous = scooch_core::solve(&analysis, &scene, &options, None);
             for k in [0, icons.len() / 3, 2 * icons.len() / 3] {
                 let mut moved = icons.clone();

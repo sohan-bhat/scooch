@@ -54,7 +54,7 @@ mod table;
 mod warp;
 
 pub use bundle::{Bundle, Constants, RAMP};
-pub use pack::{half_bits, Canvas, TablesError};
+pub use pack::{half_bits, Canvas, TablesError, TABLES_VERSION};
 pub use session::Session;
 #[doc(hidden)]
 pub use puffs::SITES_MOST;
@@ -64,6 +64,9 @@ pub use shape::FIELD_STEP as SCENERY_FIELD_STEP;
 use serde::{Deserialize, Serialize};
 
 pub const TABLE: usize = 257;
+
+#[doc(hidden)]
+pub const ISLAND_WATER: [u8; 3] = [20, 110, 120];
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
@@ -151,6 +154,11 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
     solver::solve(analysis, scene, options, previous)
 }
 
+/// A hash of everything the belonging map depends on apart from the picture's pixels: the analysis, the screen size, the icon unit and the scenery setting. It is the key a `Session` compares before it reuses a map, so a caller that keeps the answer of `Session::belongs` beside its own picture key and this stamp knows when the answer still holds.
+pub fn belonging_stamp(analysis: &Analysis, scene: &Scene, options: &Options) -> u64 {
+    look::stamp(look::print(analysis), scene, options)
+}
+
 /// A quick placement near the previous one, only for while an icon is held. It searches nearby pans only and can hide more of the subject than `solve`, so the caller follows it with a full `solve` when the icon is dropped.
 pub fn solve_near(analysis: &Analysis, scene: &Scene, options: &Options, previous: &Placement, budget: std::time::Duration) -> Placement {
     let started = std::time::Instant::now();
@@ -200,6 +208,16 @@ pub fn canvas(image: &RgbImage, width: u32, height: u32) -> Canvas {
 
 pub fn frame(a: &Bundle, b: &Bundle, s: f32) -> RgbImage {
     bundle::frame(a, b, s)
+}
+
+#[doc(hidden)]
+pub fn solid_cells(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Vec<bool>, u32, u32) {
+    bundle::solid_cells(image, analysis, placement, scene, options, &paint::materials(analysis))
+}
+
+#[doc(hidden)]
+pub fn belonging_map(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Vec<[f32; 2]>, u32, u32) {
+    bundle::belonging_map(image, analysis, placement, scene, options, &paint::materials(analysis))
 }
 
 #[doc(hidden)]

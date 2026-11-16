@@ -489,6 +489,39 @@ impl Daemon {
         made
     }
 
+    fn bare(&self, entry: &mut Entry, screen: &str, (source, key): (&Path, u64), (image, analysis, scene, options): (&mut Option<RgbImage>, &Analysis, &Scene, &Options), clock: &mut Instant) -> Result<bool> {
+        if !crate::state::scenery_on(options) || scene.icons.is_empty() {
+            entry.belongs = None;
+            return Ok(false);
+        }
+        let stamp = scooch_core::belonging_stamp(analysis, scene, options);
+        if let Some(known) = entry.belongs.filter(|known| known.key == key && known.stamp == stamp) {
+            return Ok(!known.answer);
+        }
+        let decoded = match image.take() {
+            Some(decoded) => decoded,
+            None => {
+                let decoded = self.pixels(source, key)?;
+                lap("decode", clock);
+                decoded
+            }
+        };
+        let answer = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let slot = sessions.entry(screen.to_string()).or_insert_with(|| (key, scooch_core::Session::new()));
+            if slot.0 != key {
+                slot.1.forget();
+                slot.0 = key;
+            }
+            slot.1.options(&decoded, analysis, scene, options).scenery == options.scenery
+        };
+        *self.used.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+        lap("belongs", clock);
+        *image = Some(decoded);
+        entry.belongs = Some(crate::state::Belongs { key, stamp, answer });
+        Ok(!answer)
+    }
+
     fn forget_session(&self, screen: &str) {
         if let Some((_, mut session)) = self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(screen) {
             session.forget();
@@ -787,6 +820,13 @@ impl Daemon {
             Ok(made)
         })?;
         lap("analysis", &mut clock);
+        let bare_off;
+        let options = if self.bare(entry, &screen.id, (&source, key), (&mut image, &analysis, scene, options), &mut clock)? {
+            bare_off = Options { scenery: scooch_core::Scenery::Off, ..*options };
+            &bare_off
+        } else {
+            options
+        };
         let wanted = crate::state::scenery_on(options) && !scene.icons.is_empty();
         let previous = entry.placement.as_ref().filter(|_| wanted || !entry.painted);
         let placement = scooch_core::solve(&analysis, scene, options, previous);
@@ -812,9 +852,12 @@ impl Daemon {
                 }
             }
             entry.painted = false;
+            entry.drawn = None;
             return Ok(Outcome::Plain);
         }
-        if options.pads <= 0.0 && !wanted && !entry.painted && showing_output && entry.placement.as_ref() == Some(&placement) {
+        let drawn = scene::fingerprint(&source, scene, options);
+        let ours = showing_output || (output.is_some() && current.is_none() && self.settling(&screen.id));
+        if !wanted && !entry.painted && ours && entry.placement.as_ref() == Some(&placement) && (options.pads <= 0.0 || entry.drawn.as_deref() == Some(drawn.as_str())) {
             if let Some(glider) = glider.as_deref_mut() {
                 glider.close_early_for(&screen.id);
             }
@@ -863,6 +906,7 @@ impl Daemon {
                     glider.close_early_for(&screen.id);
                 }
                 entry.placement = Some(placement);
+                entry.drawn = Some(drawn);
                 return Ok(Outcome::Kept);
             }
         }
@@ -920,6 +964,7 @@ impl Daemon {
         }
         let set = Instant::now();
         entry.placement = Some(placement);
+        entry.drawn = Some(drawn);
         lap("set", &mut clock);
         if let (Some(bundle), Some(output), Some(tables_key)) = (bundle, entry.output.clone(), tables_key) {
             let wanted = self.store.tables_for(&output, tables_key);
@@ -2702,6 +2747,251 @@ pub mod tests {
         assert_eq!(fake.showing("main"), original);
     }
 
+    fn navy_image(width: u32, height: u32) -> RgbImage {
+        RgbImage::from_fn(width, height, |x, y| {
+            let (dx, dy) = (x as f32 / width as f32 - 0.5, y as f32 / height as f32 - 0.5);
+            if dx * dx * 9.0 + dy * dy < 0.02 { [250, 240, 220].into() } else { [24, 34, 58].into() }
+        })
+    }
+
+    fn sky_image(width: u32, height: u32) -> RgbImage {
+        let (w, h) = (width as f32, height as f32);
+        RgbImage::from_fn(width, height, |x, y| {
+            let (fx, fy) = (x as f32, y as f32);
+            let sky = [30.0 + 50.0 * fy / h, 60.0 + 70.0 * fy / h, 140.0 - 60.0 * fy / h + 20.0 * fx / w];
+            let glow = (1.0 - ((fx - 0.6 * w).powi(2) + (fy - 0.65 * h).powi(2)).sqrt() / (0.12 * h)).clamp(0.0, 1.0).powf(0.6);
+            let lit = [250.0, 196.0, 110.0];
+            std::array::from_fn::<u8, 3, _>(|i| (sky[i] + (lit[i] - sky[i]) * glow).round().clamp(0.0, 255.0) as u8).into()
+        })
+    }
+
+    fn navy_picture(folder: &Path) -> PathBuf {
+        let path = folder.join("navy.png");
+        std::fs::write(&path, scooch_core::encode_png(&navy_image(480, 100)).unwrap()).unwrap();
+        path
+    }
+
+    fn navy_rig(name: &str, on: bool) -> (Daemon, Arc<Fake>, PathBuf) {
+        let (daemon, fake, original) = scenery_rig(name, on);
+        let navy = navy_picture(original.parent().unwrap());
+        fake.show("main", &navy);
+        (daemon, fake, navy)
+    }
+
+    fn bare_layout() -> Vec<Rect> {
+        vec![Rect { x: 60.0, y: 30.0, w: 20.0, h: 20.0 }, Rect { x: 4.0, y: 4.0, w: 20.0, h: 20.0 }, Rect { x: 84.0, y: 24.0, w: 20.0, h: 20.0 }]
+    }
+
+    fn with_scenery(options: Options, on: bool) -> Options {
+        Options { scenery: if on { scooch_core::Scenery::Auto } else { scooch_core::Scenery::Off }, ..options }
+    }
+
+    #[test]
+    fn a_bare_picture_with_scenery_on_sits_where_scenery_off_puts_it() {
+        let (on, on_fake, navy) = navy_rig("bare-on", true);
+        let (off, off_fake, _) = navy_rig("bare-off", false);
+        for fake in [&on_fake, &off_fake] {
+            fake.place(bare_layout());
+        }
+        assert_eq!(outcome(&on.tick()), Outcome::Rendered);
+        assert_eq!(outcome(&off.tick()), Outcome::Rendered);
+        let image = scooch_core::open(&navy).unwrap();
+        let analysis = scooch_core::analyze(&image);
+        let scene = scene::scene(&screen("main", 0.0, 2.0), &bare_layout());
+        let options = on.store.load().options;
+        assert_ne!(scooch_core::solve(&analysis, &scene, &with_scenery(options, true), None), scooch_core::solve(&analysis, &scene, &with_scenery(options, false), None));
+        let (a, b) = (on.store.load().screens["main"].clone(), off.store.load().screens["main"].clone());
+        assert_eq!(a.source, navy);
+        assert_eq!(a.placement, b.placement);
+        assert_eq!(a.flip_helps, b.flip_helps);
+        assert_eq!(std::fs::read(on_fake.showing("main")).unwrap(), std::fs::read(off_fake.showing("main")).unwrap());
+        assert!(!a.painted);
+        assert_eq!(a.belongs.map(|known| known.answer), Some(false));
+    }
+
+    #[test]
+    fn switching_scenery_off_on_a_bare_picture_keeps_placement_and_file() {
+        let (daemon, fake, _) = navy_rig("bare-switch", true);
+        fake.place(bare_layout());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let before = daemon.store.load().screens["main"].clone();
+        let (shown, sets, decodes) = (fake.showing("main"), fake.sets.load(Ordering::SeqCst), fake.decodes.load(Ordering::SeqCst));
+        set_scenery(&daemon, false);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
+        let after = daemon.store.load().screens["main"].clone();
+        assert_eq!((after.placement, after.output), (before.placement, before.output));
+        assert_eq!(fake.showing("main"), shown);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
+        assert_eq!(fake.decodes.load(Ordering::SeqCst), decodes);
+    }
+
+    #[test]
+    fn with_pads_switching_scenery_off_after_a_move_on_a_bare_picture_keeps_the_file() {
+        let (daemon, fake, _) = navy_rig("bare-pads", true);
+        let mut state = daemon.store.load();
+        state.options.pads = 0.7;
+        daemon.store.save(&state).unwrap();
+        fake.place(vec![calm(), calm_moved()]);
+        daemon.tick();
+        fake.place(bare_layout());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let before = daemon.store.load().screens["main"].clone();
+        let (shown, sets) = (fake.showing("main"), fake.sets.load(Ordering::SeqCst));
+        set_scenery(&daemon, false);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
+        let after = daemon.store.load().screens["main"].clone();
+        assert_eq!((after.placement, after.output), (before.placement, before.output));
+        assert_eq!(fake.showing("main"), shown);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
+    }
+
+    #[test]
+    fn switching_scenery_off_on_a_bare_picture_right_after_a_set_keeps_the_file() {
+        let (mut daemon, fake, _) = navy_rig("bare-settling", true);
+        daemon.grace = Duration::from_secs(30);
+        let mut state = daemon.store.load();
+        state.options.pads = 0.7;
+        daemon.store.save(&state).unwrap();
+        fake.place(bare_layout());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let before = daemon.store.load().screens["main"].clone();
+        let (shown, sets) = (fake.showing("main"), fake.sets.load(Ordering::SeqCst));
+        set_scenery(&daemon, false);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
+        let after = daemon.store.load().screens["main"].clone();
+        assert_eq!((after.placement, after.output), (before.placement, before.output));
+        assert_eq!(fake.showing("main"), shown);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
+    }
+
+    #[test]
+    fn a_foreign_wallpaper_inside_the_settle_window_is_taken_once_the_window_ends() {
+        let (mut daemon, fake, navy) = navy_rig("bare-foreign", true);
+        daemon.grace = Duration::from_millis(400);
+        fake.place(bare_layout());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let ours = daemon.store.load().screens["main"].output.clone();
+        let sets = fake.sets.load(Ordering::SeqCst);
+        let foreign = picture(navy.parent().unwrap(), "foreign.png");
+        fake.show("main", &foreign);
+        set_scenery(&daemon, false);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
+        assert_eq!(fake.showing("main"), foreign);
+        assert_eq!(daemon.store.load().screens["main"].output, ours);
+        std::thread::sleep(Duration::from_millis(500));
+        let after = outcome(&daemon.tick());
+        assert!(matches!(after, Outcome::Rendered | Outcome::Plain), "{after:?}");
+        let entry = daemon.store.load().screens["main"].clone();
+        assert_eq!((entry.source, entry.original), (foreign.clone(), foreign));
+    }
+
+    #[test]
+    fn the_belonging_answer_holds_until_what_it_rests_on_changes() {
+        let (daemon, fake, navy) = navy_rig("bare-answer", true);
+        let entry = |daemon: &Daemon| daemon.store.load().screens["main"].clone();
+        fake.place(vec![subject(), calm()]);
+        daemon.tick();
+        let first = entry(&daemon).belongs.unwrap();
+        assert!(!first.answer);
+        let decodes = fake.decodes.load(Ordering::SeqCst);
+        fake.place(vec![subject(), calm_moved()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
+        assert_eq!(entry(&daemon).belongs, Some(first));
+        assert_eq!(fake.decodes.load(Ordering::SeqCst), decodes);
+        fake.place(vec![Rect { w: 50.0, h: 50.0, ..subject() }, Rect { w: 30.0, h: 30.0, ..calm_moved() }]);
+        daemon.tick();
+        let sized = entry(&daemon).belongs.unwrap();
+        assert_ne!(sized.stamp, first.stamp);
+        fake.connect(vec![screen("main", 0.0, 1.0)]);
+        daemon.tick();
+        let screened = entry(&daemon).belongs.unwrap();
+        assert_ne!(screened.stamp, sized.stamp);
+        set_scenery(&daemon, false);
+        daemon.tick();
+        assert_eq!(entry(&daemon).belongs, None);
+        set_scenery(&daemon, true);
+        daemon.tick();
+        assert_eq!(entry(&daemon).belongs.map(|known| (known.key, known.answer)), Some((screened.key, false)));
+        let teal = picture(navy.parent().unwrap(), "teal.png");
+        fake.show("main", &teal);
+        daemon.tick();
+        let changed = entry(&daemon).belongs.unwrap();
+        assert_ne!(changed.key, first.key);
+        assert!(changed.answer);
+    }
+
+    #[test]
+    fn a_picture_with_scenery_paints_and_places_as_before() {
+        let (daemon, fake, original) = scenery_rig("scenery-belongs", true);
+        fake.place(bare_layout());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let entry = daemon.store.load().screens["main"].clone();
+        assert_eq!(entry.belongs.map(|known| known.answer), Some(true));
+        assert!(entry.painted);
+        let image = scooch_core::open(&original).unwrap();
+        let scene = scene::scene(&screen("main", 0.0, 2.0), &bare_layout());
+        assert_eq!(entry.placement, Some(scooch_core::solve(&scooch_core::analyze(&image), &scene, &daemon.store.load().options, None)));
+    }
+
+    #[test]
+    fn every_step_of_a_live_drag_on_a_bare_picture_places_like_scenery_off() {
+        let rigs: Vec<(Daemon, Arc<Fake>)> = [true, false]
+            .into_iter()
+            .map(|on| {
+                let (daemon, fake, _, _) = glide_rig(&format!("bare-drag-{on}"), true);
+                set_scenery(&daemon, on);
+                let navy = navy_picture(&scratch(&format!("bare-drag-picture-{on}")));
+                fake.show("main", &navy);
+                (daemon, fake)
+            })
+            .collect();
+        let held = bare_layout();
+        for (step, x) in [8.0, 24.0, 40.0, 60.0, 72.0, 88.0].into_iter().enumerate() {
+            let mut icons = held.clone();
+            icons[0] = Rect { x, ..held[0] };
+            for (daemon, fake) in &rigs {
+                fake.place(icons.clone());
+                daemon.tick();
+            }
+            let placements: Vec<Option<Placement>> = rigs.iter().map(|(daemon, _)| daemon.store.load().screens["main"].placement.clone()).collect();
+            assert!(placements[0].is_some(), "step {step}");
+            assert_eq!(placements[0], placements[1], "step {step}");
+        }
+    }
+
+    #[test]
+    fn the_stored_answer_gives_the_options_the_session_gives() {
+        for (name, make) in [("navy", navy_image as fn(u32, u32) -> RgbImage), ("sky", sky_image)] {
+            let (daemon, fake, original) = scenery_rig(&format!("agree-{name}"), true);
+            let path = original.parent().unwrap().join(format!("{name}.png"));
+            std::fs::write(&path, scooch_core::encode_png(&make(480, 100)).unwrap()).unwrap();
+            fake.show("main", &path);
+            fake.place(bare_layout());
+            daemon.tick();
+            let state = daemon.store.load();
+            let entry = state.screens["main"].clone();
+            let image = scooch_core::open(&path).unwrap();
+            let analysis = scooch_core::analyze(&image);
+            let scene = scene::scene(&screen("main", 0.0, 2.0), &bare_layout());
+            let chosen = scooch_core::Session::new().options(&image, &analysis, &scene, &state.options);
+            let stored = if entry.belongs.unwrap().answer { state.options } else { with_scenery(state.options, false) };
+            assert_eq!(stored, chosen, "{name}");
+            assert_eq!(entry.placement, Some(scooch_core::solve(&analysis, &scene, &chosen, None)), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_render_command_places_a_bare_picture_like_the_daemon() {
+        let (daemon, fake, navy) = navy_rig("bare-cli", true);
+        fake.place(bare_layout());
+        daemon.tick();
+        let scene = scene::scene(&screen("main", 0.0, 2.0), &bare_layout());
+        let made = crate::commands::rendered(&scooch_core::open(&navy).unwrap(), &scene, false);
+        let placement: Placement = serde_json::from_value(made.report["placement"].clone()).unwrap();
+        assert_eq!(Some(placement), daemon.store.load().screens["main"].placement);
+    }
+
     type Rigged = (Daemon, Arc<Fake>, Arc<Mutex<crate::glide::tests::Script>>, Arc<Mutex<usize>>);
     type Breaker = fn(&mut crate::glide::tests::Script);
 
@@ -2949,7 +3239,8 @@ pub mod tests {
         let name = output.file_name().unwrap().to_string_lossy().into_owned();
         let file = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.path()).find(|path| path.file_name().is_some_and(|file| file.to_string_lossy().starts_with(&name)) && path.extension().is_some_and(|ext| ext == "tables")).unwrap();
         let mut bytes = std::fs::read(&file).unwrap();
-        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(bytes[4..8], scooch_core::TABLES_VERSION.to_le_bytes());
+        bytes[4..8].copy_from_slice(&(scooch_core::TABLES_VERSION - 1).to_le_bytes());
         let body = bytes.len() - 8;
         let sum = crate::live::canvas::fingerprint(0, 0, &bytes[..body]);
         bytes[body..].copy_from_slice(&sum.to_le_bytes());
