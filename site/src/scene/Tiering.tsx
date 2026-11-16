@@ -1,5 +1,6 @@
 import { useFrame } from '@react-three/fiber';
 import { runtime } from '@/story/state';
+import { budget } from './budget';
 import { quality, type GpuClass } from './quality';
 import { still } from './still';
 
@@ -15,7 +16,7 @@ function resting() {
 export function Tiering() {
   useFrame((_, delta) => {
     const now = performance.now();
-    const loaded = runtime.props && runtime.gallery && runtime.painted && runtime.inside;
+    const loaded = runtime.props && runtime.gallery && runtime.painted && runtime.inside && !budget.busy;
     quality.measuring = runtime.shown && loaded && !document.hidden && quality.changes < MAX_CHANGES && plan.next === null && now - plan.lastAt > GAP;
     if (quality.measuring && !quality.timed) {
       if (quality.moving) quality.note(delta * 1000, 'motion');
