@@ -156,7 +156,7 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
 
 /// A hash of everything the belonging map depends on apart from the picture's pixels: the analysis, the screen size, the icon unit and the scenery setting. It is the key a `Session` compares before it reuses a map, so a caller that keeps the answer of `Session::belongs` beside its own picture key and this stamp knows when the answer still holds.
 pub fn belonging_stamp(analysis: &Analysis, scene: &Scene, options: &Options) -> u64 {
-    look::stamp(analysis, scene, options)
+    look::stamp(look::print(analysis), scene, options)
 }
 
 /// A quick placement near the previous one, only for while an icon is held. It searches nearby pans only and can hide more of the subject than `solve`, so the caller follows it with a full `solve` when the icon is dropped.

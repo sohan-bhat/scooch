@@ -11,6 +11,7 @@ use crate::{look, pads, render, scenery, shape, solver, Analysis, Options, Place
 pub struct Session {
     held: Option<Held>,
     kept: Option<(u64, (u32, u32), Arc<look::Belonging>)>,
+    seen: Option<(Analysis, u64)>,
 }
 
 struct Held {
@@ -88,6 +89,7 @@ impl Session {
     pub fn forget(&mut self) {
         self.held = None;
         self.kept = None;
+        self.seen = None;
     }
 
     /// Whether scenery belongs anywhere on this picture for this screen, these icons and this setting. False when scenery is off, when there are no icons to size it by, or when the belonging map is zero everywhere, which is when a still draws no scenery at all. The map is worked out here or taken from an earlier call, and a later `still`, `still_shared` or `tables_shared` with the same picture reuses it.
@@ -97,16 +99,33 @@ impl Session {
         if source.0 == 0 || source.1 == 0 {
             return false;
         }
-        let (picture, stamp) = (glance(source.0, source.1, image.as_raw()), look::stamp(analysis, scene, options));
+        let stamp = self.stamp(analysis, scene, options);
+        let picture = glance(source.0, source.1, image.as_raw());
         let held = self.held.as_ref().filter(|h| h.image == picture && h.source == source).and_then(|h| h.parts.belonging.clone());
         let kept = self.kept.as_ref().filter(|k| k.0 == picture && k.1 == source).map(|k| Arc::clone(&k.2));
         let map = match held.into_iter().chain(kept).find(|b| b.fits(source, stamp)) {
             Some(map) => map,
-            None => Arc::new(bundle::map_of(&bundle::canvas(image, scene.width, scene.height), analysis, source, scene, options, &paint::materials(analysis), g.u)),
+            None => Arc::new(bundle::map_of(&bundle::canvas(image, scene.width, scene.height), analysis, source, scene, options, &paint::materials(analysis), (g.u, stamp))),
         };
         let empty = map.empty;
         self.kept = Some((picture, source, map));
         !empty
+    }
+
+    /// `belonging_stamp` for this analysis, scene and setting. The session prints an analysis once and keeps a copy of it, and while a later call passes an analysis equal to that copy bit for bit it reuses the print, so a move never hashes the analysis again.
+    pub fn stamp(&mut self, analysis: &Analysis, scene: &Scene, options: &Options) -> u64 {
+        look::stamp(self.print(analysis), scene, options)
+    }
+
+    fn print(&mut self, analysis: &Analysis) -> u64 {
+        match &self.seen {
+            Some((copy, print)) if look::same(copy, analysis) => *print,
+            _ => {
+                let print = look::print(analysis);
+                self.seen = Some((analysis.clone(), print));
+                print
+            }
+        }
     }
 
     /// The options to use for every later call on this picture and scene: every solve, `solve`, `solve_near` and `solve_near_timed`, and every draw. They are the given options, with the scenery setting off where nothing belongs anywhere on the picture, so a bare picture is placed and drawn exactly as with scenery off. It asks `belongs`, so the map is worked out once.
@@ -148,7 +167,8 @@ impl Session {
     pub fn bytes(&self) -> usize {
         let held = self.held.as_ref().map_or(0, |h| h.parts.bytes() + h.bundle.canvas.len() + h.bundle.table_bytes() + h.still.as_ref().map_or(0, |s| s.as_raw().len()) + h.picture.as_ref().map_or(0, |p| p.as_raw().len()));
         let shared = |k: &Arc<look::Belonging>| self.held.as_ref().and_then(|h| h.parts.belonging.as_ref()).is_some_and(|b| Arc::ptr_eq(b, k));
-        held + self.kept.as_ref().filter(|k| !shared(&k.2)).map_or(0, |k| k.2.bytes())
+        let seen = self.seen.as_ref().map_or(0, |(a, _)| (a.saliency.len() + a.busy.len() + a.palette.len() * 4) * 4);
+        held + seen + self.kept.as_ref().filter(|k| !shared(&k.2)).map_or(0, |k| k.2.bytes())
     }
 
     pub fn still(&mut self, image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &Scene, options: &Options) -> (Bundle, RgbImage) {
@@ -189,19 +209,19 @@ impl Session {
             self.held = None;
             return None;
         }
-        let key = (glance(sw, sh, image.as_raw()), look::print(analysis));
+        let key = (glance(sw, sh, image.as_raw()), self.print(analysis));
         let spare = self.kept.as_ref().filter(|k| k.0 == key.0 && k.1 == (sw, sh)).map(|k| Arc::clone(&k.2));
-        let stamp = look::stamp(analysis, scene, options);
+        let stamp = || look::stamp(key.1, scene, options);
         let held = match self.held.take() {
             Some(mut h) if h.image == key.0 && h.source == (sw, sh) && h.scene.width == scene.width && h.scene.height == scene.height => {
                 if h.analysis == key.1 && h.placement == *placement && h.options == *options {
                     shift::<DRAW>(h, image, analysis, scene, key, spare)
                 } else {
-                    let kept = (reuse(&mut h), fitting(h.parts.belonging.take().filter(|_| h.analysis == key.1), spare, (sw, sh), stamp));
+                    let kept = (reuse(&mut h), fitting(h.parts.belonging.take().filter(|_| h.analysis == key.1), spare, (sw, sh), stamp()));
                     build(image, analysis, placement, scene, options, key, kept)
                 }
             }
-            _ => build(image, analysis, placement, scene, options, key, (None, fitting(None, spare, (sw, sh), stamp))),
+            _ => build(image, analysis, placement, scene, options, key, (None, fitting(None, spare, (sw, sh), stamp()))),
         };
         let mut held = held;
         if !DRAW {
@@ -234,7 +254,7 @@ fn build(image: &RgbImage, analysis: &Analysis, placement: &Placement, scene: &S
             Cow::Borrowed(image) => (image.clone(), false),
         },
     };
-    let mut parts = bundle::parts(image.dimensions(), (canvas, kept), analysis, placement, scene, options, &materials);
+    let mut parts = bundle::parts(image.dimensions(), (canvas, kept, Some(analysis_key)), analysis, placement, scene, options, &materials);
     let mut out = parts.tables(&materials);
     let canvas = std::mem::replace(&mut parts.framed.canvas, RgbImage::new(0, 0)).into_raw();
     out.canvas = if shrunk { canvas } else { Vec::new() };
@@ -300,8 +320,7 @@ fn shift<const DRAW: bool>(mut h: Held, image: &RgbImage, analysis: &Analysis, s
         Some(moved) if lean::<DRAW>(&mut h, analysis, scene, &moved) => h,
         _ => {
             let placement = h.placement.clone();
-            let stamp = look::stamp(analysis, scene, &options);
-            let kept = (reuse(&mut h), fitting(h.parts.belonging.take(), spare, h.source, stamp));
+            let kept = (reuse(&mut h), fitting(h.parts.belonging.take(), spare, h.source, look::stamp(key.1, scene, &options)));
             build(image, analysis, &placement, scene, &options, key, kept)
         }
     }
@@ -311,7 +330,7 @@ fn lean<const DRAW: bool>(h: &mut Held, analysis: &Analysis, scene: &Scene, move
     let Some(g) = shape::ground(scene) else { return false };
     let options = h.options;
     let parts = &mut h.parts;
-    let bare = parts.fixed.is_none() && parts.belonging.as_ref().is_some_and(|b| b.empty && b.fits(h.source, look::stamp(analysis, scene, &options)));
+    let bare = parts.fixed.is_none() && parts.belonging.as_ref().is_some_and(|b| b.empty && b.fits(h.source, look::stamp(h.analysis, scene, &options)));
     let Some(grounded) = parts.grounded.as_ref() else { return false };
     if parts.pads.as_ref().is_some_and(|p| p.feather().to_bits() != pads::feather(scene).to_bits()) {
         return false;

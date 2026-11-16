@@ -397,4 +397,8 @@ fn the_belonging_stamp_follows_what_the_map_depends_on() {
     for (what, other) in [("screen", scooch_core::belonging_stamp(&analysis, &wider, &options)), ("icon height", scooch_core::belonging_stamp(&analysis, &taller, &options)), ("setting", scooch_core::belonging_stamp(&analysis, &scene, &islands)), ("analysis", scooch_core::belonging_stamp(&elsewhere, &scene, &options))] {
         assert_ne!(other, stamp, "the {what} did not change the stamp");
     }
+    let mut session = scooch_core::Session::new();
+    for (what, a, want) in [("first", &analysis, stamp), ("another analysis", &elsewhere, scooch_core::belonging_stamp(&elsewhere, &scene, &options)), ("back to the first", &analysis, stamp)] {
+        assert_eq!(session.stamp(a, &scene, &options), want, "the session stamp for the {what} differs from belonging_stamp");
+    }
 }

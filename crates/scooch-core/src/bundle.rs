@@ -429,12 +429,12 @@ impl Parts {
     }
 }
 
-pub fn map_of(canvas: &RgbImage, found: &Analysis, source: (u32, u32), scene: &Scene, options: &Options, materials: &Materials, u: f32) -> look::Belonging {
+pub fn map_of(canvas: &RgbImage, found: &Analysis, source: (u32, u32), scene: &Scene, options: &Options, materials: &Materials, (u, stamp): (f32, u64)) -> look::Belonging {
     let screen = (scene.width, scene.height);
-    look::belonging_map(&home(canvas, found, source, screen).sampled(), source, screen, options, u, paint::sand(materials)[0], look::stamp(found, scene, options))
+    look::belonging_map(&home(canvas, found, source, screen).sampled(), source, screen, options, u, paint::sand(materials)[0], stamp)
 }
 
-pub fn parts(source: (u32, u32), (canvas, kept): (RgbImage, Option<Arc<look::Belonging>>), found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> Parts {
+pub fn parts(source: (u32, u32), (canvas, kept, print): (RgbImage, Option<Arc<look::Belonging>>, Option<u64>), found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> Parts {
     let (width, height) = (scene.width, scene.height);
     let framed = framed(source, canvas, placement, width, height);
     let unit = shape::ground(scene).map_or(1.0, |g| g.u);
@@ -444,10 +444,12 @@ pub fn parts(source: (u32, u32), (canvas, kept): (RgbImage, Option<Arc<look::Bel
     }
     let grounded = grounded(&out.framed, found);
     let ground = scenery::active(scene, options).then(|| shape::ground(scene)).flatten();
-    let stamp = look::stamp(found, scene, options);
-    out.belonging = ground.as_ref().map(|g| match kept.filter(|b| b.fits(source, stamp)) {
-        Some(b) => b,
-        None => Arc::new(map_of(&out.framed.canvas, found, source, scene, options, materials, g.u)),
+    out.belonging = ground.as_ref().map(|g| {
+        let stamp = look::stamp(print.unwrap_or_else(|| look::print(found)), scene, options);
+        match kept.filter(|b| b.fits(source, stamp)) {
+            Some(b) => b,
+            None => Arc::new(map_of(&out.framed.canvas, found, source, scene, options, materials, (g.u, stamp))),
+        }
     });
     out.fixed = ground.as_ref().zip(out.belonging.as_deref().filter(|b| !b.empty)).map(|(g, b)| look::fixed(&grounded.sampled(&out.framed), b, materials, g.u, (width as usize, height as usize)));
     out.live = ground.as_ref().zip(out.fixed.as_ref()).map(|(g, f)| look::live(f, g));
@@ -457,14 +459,14 @@ pub fn parts(source: (u32, u32), (canvas, kept): (RgbImage, Option<Arc<look::Bel
 }
 
 pub fn still(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> Bundle {
-    let parts = parts(image.dimensions(), (canvas(image, scene.width, scene.height).into_owned(), None), found, placement, scene, options, materials);
+    let parts = parts(image.dimensions(), (canvas(image, scene.width, scene.height).into_owned(), None, None), found, placement, scene, options, materials);
     let mut out = parts.tables(materials);
     out.canvas = parts.framed.canvas.into_raw();
     out
 }
 
 pub fn regions(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> (Vec<[u8; 4]>, u32, u32) {
-    let parts = parts(image.dimensions(), (canvas(image, scene.width, scene.height).into_owned(), None), found, placement, scene, options, materials);
+    let parts = parts(image.dimensions(), (canvas(image, scene.width, scene.height).into_owned(), None, None), found, placement, scene, options, materials);
     let grid = &parts.framed.grid;
     let cells = match &parts.fixed {
         Some(f) => f.sky.iter().zip(&f.belong).map(|(s, b)| [look::byte(*s), look::byte(*b), 0, 0]).collect(),
@@ -474,7 +476,7 @@ pub fn regions(image: &RgbImage, found: &Analysis, placement: &Placement, scene:
 }
 
 pub fn solid_cells(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> (Vec<bool>, u32, u32) {
-    let parts = parts(image.dimensions(), (canvas(image, scene.width, scene.height).into_owned(), None), found, placement, scene, options, materials);
+    let parts = parts(image.dimensions(), (canvas(image, scene.width, scene.height).into_owned(), None, None), found, placement, scene, options, materials);
     match &parts.fixed {
         Some(f) => (f.solid_cells(), f.paint_grid.w as u32, f.paint_grid.h as u32),
         None => (Vec::new(), 0, 0),
@@ -482,7 +484,7 @@ pub fn solid_cells(image: &RgbImage, found: &Analysis, placement: &Placement, sc
 }
 
 pub fn belonging_map(image: &RgbImage, found: &Analysis, placement: &Placement, scene: &Scene, options: &Options, materials: &Materials) -> (Vec<[f32; 2]>, u32, u32) {
-    let parts = parts(image.dimensions(), (canvas(image, scene.width, scene.height).into_owned(), None), found, placement, scene, options, materials);
+    let parts = parts(image.dimensions(), (canvas(image, scene.width, scene.height).into_owned(), None, None), found, placement, scene, options, materials);
     match &parts.belonging {
         Some(b) => (b.sky.iter().zip(&b.belong).map(|(s, k)| [*s, *k]).collect(), b.grid.w as u32, b.grid.h as u32),
         None => (Vec::new(), 0, 0),
