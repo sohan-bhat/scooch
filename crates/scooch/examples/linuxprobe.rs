@@ -1097,8 +1097,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let set = linux.set_wallpaper(&screen, &path);
             p.line(format!("- set the {kind} picture {:?} in {} ms", set.as_ref().map_err(|error| error.to_string()), started.elapsed().as_millis()));
             if p.kind == Some(Kind::Cinnamon) {
-                let uri = record::Settings::get(&Gsettings, "org.cinnamon.desktop.background picture-uri").ok().flatten();
-                p.line(format!("  - Cinnamon `picture-uri` right after the adapter's set, before any write back {uri:?}"));
+                let key = "org.cinnamon.desktop.background picture-uri";
+                let uri = record::Settings::get(&Gsettings, key).ok().flatten();
+                let recorded = p.recorded.iter().find(|(seen, _)| seen == key).map(|(_, value)| value.clone());
+                let listed = cinnamon::background_list().is_some();
+                p.line(format!("  - Cinnamon `picture-uri` right after the adapter's set, before any write back {uri:?}, a picture list {listed}, equal to the recorded value {}", recorded.as_ref() == Some(&uri)));
+                if listed && recorded.as_ref().is_some_and(|recorded| *recorded != uri) {
+                    p.fail(format!("Cinnamon `picture-uri` changed under the adapter's set of the {kind} picture"));
+                }
             }
             std::thread::sleep(Duration::from_secs(2));
             let back = linux.wallpaper(&screen);
@@ -1153,12 +1159,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             if now_value == value {
                 continue;
             }
-            let empty = now_value.as_deref().is_none_or(|text| text.trim_matches('\'').is_empty());
-            if listed && key.ends_with(" picture-uri") && empty {
-                p.soft("`picture-uri` after the restore", "Cinnamon empties picture-uri when the picture list is written, and the list and the mode went back to their recorded values");
-            } else {
-                p.fail(format!("`{key}` did not go back to the value recorded at the start"));
-            }
+            p.fail(format!("`{key}` did not go back to the value recorded at the start"));
         }
     }
 
