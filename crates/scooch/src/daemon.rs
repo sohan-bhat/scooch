@@ -364,7 +364,7 @@ pub struct Daemon {
     seen: Mutex<Option<u64>>,
     prints: Mutex<HashMap<String, u64>>,
     moved: Mutex<Vec<String>>,
-    handed: Mutex<Option<Snapshot>>,
+    handed: Mutex<Option<(Instant, Snapshot)>>,
 }
 
 #[derive(Default)]
@@ -416,6 +416,7 @@ impl Daemon {
             return false;
         }
         std::thread::sleep(QUICK);
+        let taken = Instant::now();
         let Ok(snapshot) = self.desktop.snapshot() else { return false };
         let now = icon_print(&snapshot);
         let before = *self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -424,7 +425,7 @@ impl Daemon {
             eprintln!("{} quick look after {} ms, icons {now:016x} moved {moved}", stamp(), QUICK.as_millis());
         }
         if moved {
-            *self.handed.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(snapshot);
+            *self.handed.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((taken, snapshot));
         }
         moved
     }
@@ -614,8 +615,8 @@ impl Daemon {
             if let Some(glider) = gliding.as_deref_mut() {
                 glider.know(&state.scales, &state.starts);
             }
-            let snapshot = match handed {
-                Some(snapshot) => Ok(snapshot),
+            let snapshot = match handed.filter(|(taken, _)| taken.elapsed() < QUIET) {
+                Some((_, snapshot)) => Ok(snapshot),
                 None => self.desktop.snapshot(),
             };
             lap("snapshot", &mut clock);
@@ -3440,7 +3441,22 @@ pub mod tests {
         assert!(!daemon.quick_look());
         fake.place(vec![corner()]);
         let before = fake.snapshots.load(Ordering::SeqCst);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
+    }
+
+    #[test]
+    fn a_handed_snapshot_older_than_the_bound_is_not_used() {
+        let (daemon, fake, _) = rig("quick-old", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        *fake.drop_seen.lock().unwrap() = true;
+        fake.place(vec![moved_subject()]);
+        assert!(daemon.quick_look());
+        std::thread::sleep(QUIET + Duration::from_millis(50));
+        fake.place(vec![corner()]);
+        let before = fake.snapshots.load(Ordering::SeqCst);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
         assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
     }
 
