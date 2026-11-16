@@ -378,6 +378,35 @@ fn belongs_says_what_the_bundle_carries() {
 }
 
 #[test]
+fn a_handed_map_is_used_only_where_it_fits() {
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let (image, other) = (made("deep-sky"), made("flat-water"));
+    let (analysis, elsewhere) = (scooch_core::analyze(&image), scooch_core::analyze(&other));
+    let at = |w: u32, h: u32, grow: f32| {
+        let mut scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &analysis, w, h) };
+        scene.icons.iter_mut().for_each(|r| r.h *= grow);
+        scene
+    };
+    let scene = at(2880, 1800, 1.0);
+    let mut first = Session::new();
+    assert!(first.belongs(&image, &analysis, &scene, &options));
+    let map = first.map().expect("a map to hand on");
+    let mut wide = Session::new();
+    assert!(wide.belongs(&image, &analysis, &at(5120, 2880, 1.0), &options));
+    println!("the map holds {} bytes at 2880 by 1800 and {} at 5120 by 2880", map.bytes(), wide.map().expect("map").bytes());
+    let mut next = Session::new();
+    next.adopt(map.clone());
+    assert!(next.belongs(&image, &analysis, &scene, &options));
+    assert_eq!(next.map_ids().0, first.map_ids().0, "the new session worked the handed map out again");
+    for (what, picture, found, there) in [("picture", &other, &elsewhere, at(2880, 1800, 1.0)), ("screen", &image, &analysis, at(2560, 1600, 1.0)), ("icon unit", &image, &analysis, at(2880, 1800, 1.25))] {
+        let mut later = Session::new();
+        later.adopt(map.clone());
+        later.belongs(picture, found, &there, &options);
+        assert_ne!(later.map_ids().0, first.map_ids().0, "a map from another {what} was taken");
+    }
+}
+
+#[test]
 fn the_belonging_stamp_follows_what_the_map_depends_on() {
     let (w, h) = (960u32, 600u32);
     let options = Options { scenery: Scenery::Auto, ..Options::default() };
