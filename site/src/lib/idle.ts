@@ -4,6 +4,7 @@ type IdleWindow = Window & { requestIdleCallback?: (callback: (deadline: Deadlin
 export const WAIT = 250;
 const FRAME = 1000 / 60;
 const HIDDEN = 200;
+const STEP_BUDGET = 6;
 
 const starve = { calmAt: performance.now() };
 
@@ -39,12 +40,29 @@ export function afterFrame() {
 const slots: ((left: number) => void)[] = [];
 let pumping = false;
 
+function nextTask() {
+  return new Promise<void>((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      channel.port1.close();
+      resolve();
+    };
+    channel.port2.postMessage(0);
+  });
+}
+
 async function pump() {
   if (pumping) return;
   pumping = true;
   while (slots.length > 0) {
     const left = await afterFrame();
+    const start = performance.now();
     slots.shift()?.(left);
+    await nextTask();
+    while (slots.length > 0 && performance.now() - start < STEP_BUDGET) {
+      slots.shift()?.(Math.max(0, left - (performance.now() - start)));
+      await nextTask();
+    }
   }
   pumping = false;
 }
