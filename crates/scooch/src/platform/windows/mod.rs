@@ -52,6 +52,10 @@ mod system {
     }
 
     impl Desktop for Win {
+        fn reads_at_once(&self) -> bool {
+            true
+        }
+
         fn name(&self) -> String {
             match startup::build() {
                 Some(build) if build >= 22000 => format!("Windows 11 build {build}"),

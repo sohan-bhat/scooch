@@ -94,6 +94,9 @@ pub trait Desktop: Send + Sync {
     fn dropped(&self) -> bool {
         false
     }
+    fn reads_at_once(&self) -> bool {
+        false
+    }
 }
 
 pub const AGREE: Duration = Duration::from_millis(500);

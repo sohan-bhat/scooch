@@ -367,6 +367,8 @@ pub struct Daemon {
     prints: Mutex<HashMap<String, u64>>,
     moved: Mutex<Vec<String>>,
     handed: Mutex<Option<(Instant, Snapshot)>>,
+    icons: Mutex<Option<Vec<Rect>>>,
+    quick_at: Mutex<Option<Instant>>,
     mapped: Mutex<HashMap<String, MapKey>>,
 }
 
@@ -411,26 +413,31 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), mapped: Mutex::new(HashMap::new()) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_at: Mutex::new(None), mapped: Mutex::new(HashMap::new()) }
     }
 
     pub fn quick_look(&self) -> bool {
-        if !self.desktop.dropped() {
-            return false;
-        }
         let started = Instant::now();
-        self.look(started) || {
-            std::thread::sleep(QUICK);
-            self.look(started)
+        if self.desktop.dropped() {
+            return self.look(started, false) || {
+                std::thread::sleep(QUICK);
+                self.look(started, false)
+            };
         }
+        let lately = self.quick_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_some_and(|at| at.elapsed() < QUIET);
+        let quick = self.desktop.reads_at_once() && !lately && self.look(started, true);
+        if quick {
+            *self.quick_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+        }
+        quick
     }
 
-    fn look(&self, started: Instant) -> bool {
+    fn look(&self, started: Instant, pure: bool) -> bool {
         let taken = Instant::now();
         let Ok(snapshot) = self.desktop.snapshot() else { return false };
         let now = icon_print(&snapshot);
         let before = *self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let moved = before.is_some_and(|before| before != now);
+        let moved = before.is_some_and(|before| before != now) && (!pure || self.icons.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_deref().is_some_and(|known| pure_move(known, &snapshot.icons)));
         if trace() {
             eprintln!("{} quick look after {} ms, icons {now:016x} moved {moved}", stamp(), taken.saturating_duration_since(started).as_millis());
         }
@@ -674,6 +681,7 @@ impl Daemon {
             if let Ok(snapshot) = &snapshot {
                 let print = icon_print(snapshot);
                 *self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(print);
+                *self.icons.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(snapshot.icons.clone());
                 if trace() {
                     eprintln!("{} snapshot icons {print:016x}", stamp());
                 }
@@ -1238,6 +1246,15 @@ pub fn merge(mine: &State, before: &State, fresh: &State) -> State {
 
 pub const QUICK: Duration = Duration::from_millis(60);
 
+pub fn pure_move(before: &[Rect], after: &[Rect]) -> bool {
+    let sizes = |icons: &[Rect]| {
+        let mut sizes: Vec<[i64; 2]> = icons.iter().map(|icon| [icon.w.round() as i64, icon.h.round() as i64]).collect();
+        sizes.sort_unstable();
+        sizes
+    };
+    before.len() == after.len() && sizes(before) == sizes(after)
+}
+
 pub fn icon_print(snapshot: &Snapshot) -> u64 {
     print_of(snapshot.icons.iter())
 }
@@ -1535,13 +1552,14 @@ pub mod tests {
         pub live: Mutex<bool>,
         pub reduce: Mutex<bool>,
         pub drop_seen: Mutex<bool>,
+        pub at_once: Mutex<bool>,
         pub events: crate::glide::tests::Events,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), events: Arc::new(Mutex::new(Vec::new())) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), events: Arc::new(Mutex::new(Vec::new())) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -1694,6 +1712,10 @@ pub mod tests {
 
         fn dropped(&self) -> bool {
             std::mem::take(&mut *self.drop_seen.lock().unwrap())
+        }
+
+        fn reads_at_once(&self) -> bool {
+            *self.at_once.lock().unwrap()
         }
 
         fn decode(&self, path: &Path) -> Result<RgbImage> {
@@ -3607,6 +3629,82 @@ pub mod tests {
         assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 2);
         assert!(daemon.handed.lock().unwrap().is_none());
         assert!(signal.pending.lock().unwrap().last.is_none());
+    }
+
+    fn on_subject() -> Rect {
+        Rect { x: 70.0, y: 40.0, w: 20.0, h: 20.0 }
+    }
+
+    fn at_once_rig(name: &str) -> (Daemon, Arc<Fake>) {
+        let (daemon, fake, _) = rig(name, vec![screen("main", 0.0, 1.0)]);
+        *fake.at_once.lock().unwrap() = true;
+        fake.place(vec![corner()]);
+        assert!(daemon.tick().problem.is_none());
+        (daemon, fake)
+    }
+
+    #[test]
+    fn a_pure_move_is_taken_at_once_with_one_read() {
+        let (daemon, fake) = at_once_rig("pure-once");
+        fake.place(vec![on_subject()]);
+        let before = fake.snapshots.load(Ordering::SeqCst);
+        let started = Instant::now();
+        assert!(daemon.quick_look());
+        assert!(started.elapsed() < QUICK, "the quick look took {:?}", started.elapsed());
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
+    }
+
+    #[test]
+    fn a_new_icon_settles() {
+        let (daemon, fake) = at_once_rig("pure-new");
+        fake.place(vec![corner(), on_subject()]);
+        let signal = Signal::default();
+        signal.wake();
+        let started = Instant::now();
+        daemon.gather(&signal);
+        assert!(started.elapsed() >= Duration::from_millis(200), "a new icon did not settle, {:?}", started.elapsed());
+        assert!(daemon.handed.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_burst_of_ten_wakes_with_one_pure_move_makes_one_render() {
+        let (daemon, fake) = at_once_rig("pure-burst");
+        let sets = fake.sets.load(Ordering::SeqCst);
+        fake.place(vec![on_subject()]);
+        let signal = Signal::default();
+        for _ in 0..5 {
+            signal.wake();
+        }
+        daemon.gather(&signal);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        for _ in 0..5 {
+            signal.wake();
+        }
+        daemon.gather(&signal);
+        assert!(daemon.tick().problem.is_none());
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets + 1);
+    }
+
+    #[test]
+    fn a_pure_move_while_wakes_keep_coming_renders_once_then_follows_after_the_settle() {
+        let (daemon, fake) = at_once_rig("pure-then-more");
+        let sets = fake.sets.load(Ordering::SeqCst);
+        fake.place(vec![on_subject()]);
+        let signal = Signal::default();
+        signal.wake();
+        daemon.gather(&signal);
+        assert!(daemon.handed.lock().unwrap().is_some(), "the pure move was not taken at once");
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets + 1);
+        fake.place(vec![corner()]);
+        signal.wake();
+        let started = Instant::now();
+        daemon.gather(&signal);
+        assert!(started.elapsed() >= Duration::from_millis(200), "the later change did not settle, {:?}", started.elapsed());
+        assert!(daemon.handed.lock().unwrap().is_none());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
     }
 
     #[test]
