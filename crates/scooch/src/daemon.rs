@@ -2781,6 +2781,10 @@ pub mod tests {
         vec![Rect { x: 60.0, y: 30.0, w: 20.0, h: 20.0 }, Rect { x: 4.0, y: 4.0, w: 20.0, h: 20.0 }, Rect { x: 84.0, y: 24.0, w: 20.0, h: 20.0 }]
     }
 
+    fn forget_pixels(daemon: &Daemon, picture: &Path) {
+        std::fs::remove_file(cache::pixel_file(&daemon.store, cache::key(picture).unwrap())).unwrap();
+    }
+
     fn with_scenery(options: Options, on: bool) -> Options {
         Options { scenery: if on { scooch_core::Scenery::Auto } else { scooch_core::Scenery::Off }, ..options }
     }
@@ -2810,9 +2814,10 @@ pub mod tests {
 
     #[test]
     fn switching_scenery_off_on_a_bare_picture_keeps_placement_and_file() {
-        let (daemon, fake, _) = navy_rig("bare-switch", true);
+        let (daemon, fake, navy) = navy_rig("bare-switch", true);
         fake.place(bare_layout());
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        forget_pixels(&daemon, &navy);
         let before = daemon.store.load().screens["main"].clone();
         let (shown, sets, decodes) = (fake.showing("main"), fake.sets.load(Ordering::SeqCst), fake.decodes.load(Ordering::SeqCst));
         set_scenery(&daemon, false);
@@ -2866,7 +2871,7 @@ pub mod tests {
     #[test]
     fn a_foreign_wallpaper_inside_the_settle_window_is_taken_once_the_window_ends() {
         let (mut daemon, fake, navy) = navy_rig("bare-foreign", true);
-        daemon.grace = Duration::from_millis(400);
+        daemon.grace = Duration::from_secs(3600);
         fake.place(bare_layout());
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
         let ours = daemon.store.load().screens["main"].output.clone();
@@ -2878,7 +2883,7 @@ pub mod tests {
         assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
         assert_eq!(fake.showing("main"), foreign);
         assert_eq!(daemon.store.load().screens["main"].output, ours);
-        std::thread::sleep(Duration::from_millis(500));
+        daemon.grace = Duration::ZERO;
         let after = outcome(&daemon.tick());
         assert!(matches!(after, Outcome::Rendered | Outcome::Plain), "{after:?}");
         let entry = daemon.store.load().screens["main"].clone();
@@ -2893,6 +2898,7 @@ pub mod tests {
         daemon.tick();
         let first = entry(&daemon).belongs.unwrap();
         assert!(!first.answer);
+        forget_pixels(&daemon, &navy);
         let decodes = fake.decodes.load(Ordering::SeqCst);
         fake.place(vec![subject(), calm_moved()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
