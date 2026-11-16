@@ -28,7 +28,7 @@ mod probe {
     use std::time::{Duration, Instant};
     use x11rb::connection::Connection as _;
     use x11rb::wrapper::ConnectionExt as _;
-    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, MOTION_NOTIFY_EVENT};
+    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT};
     use x11rb::protocol::xtest::ConnectionExt as _;
     use zbus::zvariant;
 
@@ -174,6 +174,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         probe.section("5 Wallpaper", wallpaper);
         probe.section("6 End to end", end_to_end);
         probe.section("7 Two monitors", monitors);
+        probe.section("7b Desktop after the drop", after_drop);
         probe.section("8 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -843,6 +844,132 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         conn.xtest_fake_input(BUTTON_RELEASE_EVENT, 1, 0, root, 0, 0, 0)?;
         conn.flush()?;
         conn.sync()?;
+        Ok(())
+    }
+
+    fn control_code(conn: &x11rb::rust_connection::RustConnection) -> Option<u8> {
+        let (min, max) = (conn.setup().min_keycode, conn.setup().max_keycode);
+        let map = conn.get_keyboard_mapping(min, max - min + 1).ok()?.reply().ok()?;
+        let per = usize::from(map.keysyms_per_keycode).max(1);
+        map.keysyms.chunks(per).position(|syms| syms.contains(&0xffe3)).and_then(|index| u8::try_from(usize::from(min) + index).ok())
+    }
+
+    fn clicks(points: &[(i16, i16)]) -> Result<bool> {
+        let (conn, number) = x11rb::connect(None)?;
+        let root = conn.setup().roots.get(number).context("no root")?.root;
+        let Some(control) = control_code(&conn) else { return Ok(false) };
+        let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
+        for (index, point) in points.iter().enumerate() {
+            if index == 1 {
+                conn.xtest_fake_input(KEY_PRESS_EVENT, control, 0, root, 0, 0, 0)?;
+                conn.flush()?;
+                pause(80);
+            }
+            conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, point.0, point.1, 0)?;
+            conn.flush()?;
+            pause(120);
+            conn.xtest_fake_input(BUTTON_PRESS_EVENT, 1, 0, root, 0, 0, 0)?;
+            conn.flush()?;
+            pause(60);
+            conn.xtest_fake_input(BUTTON_RELEASE_EVENT, 1, 0, root, 0, 0, 0)?;
+            conn.flush()?;
+            pause(200);
+        }
+        if points.len() > 1 {
+            conn.xtest_fake_input(KEY_RELEASE_EVENT, control, 0, root, 0, 0, 0)?;
+            conn.flush()?;
+        }
+        conn.sync()?;
+        pause(200);
+        Ok(true)
+    }
+
+    fn after_drop(p: &mut Probe) -> Result<()> {
+        if p.session != Session::X11 {
+            p.line("- the probe drags with XTest, which a Wayland session does not take, so this section reads nothing here".to_string());
+            return Ok(());
+        }
+        let linux = p.linux()?;
+        if let Some(mut child) = p.daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let program = scooch_program()?;
+        let process = start_daemon(p, &program, "drop.log")?;
+        let home = p.home.clone();
+        let first = wait_until(Duration::from_secs(60), || rendered(&home));
+        p.line(format!("- the daemon {process} rendered after {:?} ms, its wakes are read from drop.log, and the probe reads the places itself through the adapter", first.map(|time| time.as_millis())));
+        let log = p.out.join("drop.log");
+        let log_lines = || fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_string).collect::<Vec<String>>();
+        let scale = factor(p);
+        let screen = linux.screens()?.first().cloned().context("no screen")?;
+        let frame = physical(&screen.frame, scale);
+        let at = |x: f32, y: f32| ((frame.x + frame.w * x) as i16, (frame.y + frame.h * y) as i16);
+        let read = || {
+            let started = Instant::now();
+            let mut rects: Vec<[i64; 4]> = icons(&linux).iter().map(|rect| [rect.x.round() as i64, rect.y.round() as i64, rect.w.round() as i64, rect.h.round() as i64]).collect();
+            rects.sort_unstable();
+            (rects, started.elapsed())
+        };
+        let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |since| since.as_secs_f64());
+        let offsets = [0u64, 20, 40, 60, 80];
+        p.line("- ten drags of the probe icon, then five drags of a group of three icons selected by a click and two control clicks, each by XTest, with reads at 0, 20, 40, 60 and 80 ms after the drop against the places read 2.5 s later".to_string());
+        let mut whole = (0usize, 0usize);
+        for (kind, count) in [("single", 10usize), ("group", 5)] {
+            for index in 0..count {
+                let (before, _) = read();
+                let from = if kind == "single" {
+                    let grab = grab_point(&probe_icon(p, &linux)?);
+                    (grab.0 as i16, grab.1 as i16)
+                } else {
+                    let mut chosen: Vec<Rect> = icons(&linux).iter().map(|rect| physical(rect, scale)).collect();
+                    chosen.sort_by(|a, b| (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap_or(std::cmp::Ordering::Equal));
+                    let points: Vec<(i16, i16)> = chosen.iter().take(3).map(|rect| {
+                        let grab = grab_point(rect);
+                        (grab.0 as i16, grab.1 as i16)
+                    }).collect();
+                    if points.len() < 3 || !clicks(&points).unwrap_or(false) {
+                        p.line(format!("  - group drag {}: three icons could not be selected", index + 1));
+                        continue;
+                    }
+                    points[0]
+                };
+                let to = if index % 2 == 0 { at(0.5, 0.5) } else { at(0.35, 0.55) };
+                let lines = log_lines().len();
+                let sent = drag(from, to).is_ok();
+                let dropped = Instant::now();
+                let dropped_at = now();
+                let mut reads = Vec::new();
+                for offset in offsets {
+                    std::thread::sleep(Duration::from_millis(offset).saturating_sub(dropped.elapsed()));
+                    let began = dropped.elapsed();
+                    let (rects, took) = read();
+                    reads.push((offset, began, took, rects));
+                }
+                std::thread::sleep(Duration::from_millis(2500));
+                let (last, _) = read();
+                let changed: Vec<[i64; 4]> = last.iter().filter(|rect| !before.contains(rect)).copied().collect();
+                let finals: Vec<usize> = reads.iter().map(|(_, _, _, rects)| changed.iter().filter(|rect| rects.contains(rect)).count()).collect();
+                let wakes: Vec<f64> = log_lines().into_iter().skip(lines).filter(|line| line.contains(" wake ")).filter_map(|line| line.split_whitespace().next().and_then(|stamp| stamp.parse::<f64>().ok())).map(|stamp| ((stamp - dropped_at) * 1000.0).round()).collect();
+                if !changed.is_empty() && finals.first() == Some(&changed.len()) {
+                    if kind == "single" {
+                        whole.0 += 1;
+                    } else {
+                        whole.1 += 1;
+                    }
+                }
+                let said: Vec<String> = reads.iter().zip(&finals).map(|((offset, began, took, _), shown)| format!("{offset} ms read at {} ms took {} ms {shown} of {} final", began.as_millis(), took.as_millis(), changed.len())).collect();
+                p.line(format!("  - {kind} drag {}: sent {sent}, icons that moved {}, wakes after the drop at {wakes:?} ms, reads {}", index + 1, changed.len(), said.join(", ")));
+                if kind == "group" {
+                    let _ = clicks(&[at(0.92, 0.92)]);
+                }
+            }
+        }
+        p.line(format!("- the first read after the drop showed the whole move in {} of 10 single drags and in {} of 5 group drags", whole.0, whole.1));
+        if let Some(mut child) = p.daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         Ok(())
     }
 
