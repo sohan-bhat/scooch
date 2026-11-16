@@ -26,6 +26,7 @@ export function Tiering() {
       quality.fresh = false;
       plan.next = quality.decide();
     }
+    if (quality.lostAt) plan.next = null;
     if (plan.next && resting()) {
       quality.setLevel(plan.next);
       plan.next = null;
