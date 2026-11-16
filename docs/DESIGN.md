@@ -273,6 +273,12 @@ Runner numbers come from GitHub's hosted virtual machines. Their GPUs are virtua
 | `scooch render` | Renders one image from a picture and a list of rectangles, for tests and the website |
 | `scooch watch` | Runs the daemon in the foreground. The login item runs this |
 
+## Website
+
+The page picks its post chain by measurement. detect-gpu gives the first guess from the GPU name, and a name it cannot match starts on the mid chain. After that the page moves between chains by the share of a frame the GPU spends on the fast chain in motion and on the sharp chain at rest, at rest only and at most three times a visit.
+
+drei's PerformanceMonitor is not used for this, for two reasons. It counts frames per window, so it cannot see how much GPU time a frame that already holds 60 fps leaves free. It also needs an unbroken run of frames, and the sharp chain at rest only draws in short bursts between an input and the still.
+
 ## Code rules
 
 - No comments in code. Names and small functions carry the meaning.
