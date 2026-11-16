@@ -20,7 +20,13 @@ export const held = {
   spent: [] as number[],
   lastAt: 0,
   rate: 80,
+  base: null as { from: Look; to: Look; s: number } | null,
+  opening: 0,
+  from: 0,
+  span: 0,
 };
+
+const OPENING = 300;
 
 export function begin(frame: Frame, place: number) {
   if (held.active && held.frame === frame) return;
@@ -28,9 +34,7 @@ export function begin(frame: Frame, place: number) {
   const { from, to, s } = frame.select(place);
   held.active = true;
   held.frame = frame;
-  held.a = frame.states[from];
-  held.b = s > 0 ? frame.states[to] : null;
-  held.s = s > 0 ? s : 1;
+  held.base = { from: frame.states[s >= 1 ? to : from], to: frame.states[to], s: from === to || s >= 1 ? 0 : s };
   held.next = null;
   held.lastAt = 0;
 }
@@ -69,6 +73,29 @@ export async function ask(rects: Float32Array, index: number, final: boolean) {
 
 export function step(delta: number) {
   if (!held.active) return;
+  const now = performance.now();
+  if (held.base && held.next) {
+    const { from, to, s } = held.base;
+    held.base = null;
+    held.a = from;
+    held.from = s;
+    if (s > 0) held.b = to;
+    else {
+      held.b = lookFromTables(held.next);
+      held.owned.add(held.b);
+      held.constants = held.next.constants;
+      held.next = null;
+    }
+    held.s = s;
+    held.span = OPENING * (1 - s);
+    held.opening = now;
+  }
+  if (held.opening) {
+    const t = Math.min((now - held.opening) / held.span, 1);
+    held.s = held.from + (1 - held.from) * t * t * (3 - 2 * t);
+    if (t < 1) return;
+    held.opening = 0;
+  }
   if (held.s < 1) {
     held.s += (1 - held.s) * (1 - Math.exp(-delta * held.rate));
     if (held.s > 0.985) held.s = 1;
@@ -104,5 +131,7 @@ export function end() {
   held.b = null;
   held.next = null;
   held.queued = null;
+  held.base = null;
+  held.opening = 0;
   held.s = 1;
 }
