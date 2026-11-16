@@ -112,7 +112,7 @@ void main() {
   float lineWidth = fwidth(line);
   float scanAmount = 1.0 - smoothstep(0.3, 0.75, lineWidth);
   float profile = 0.5 + 0.5 * cos(2.0 * PI * line);
-  float scan = mix(1.0, 0.62 + 0.62 * profile, scanAmount * 0.85);
+  float scan = 0.9405 + 0.527 * scanAmount * (profile - 0.5);
 
   float column = pv.x * uLines.x * 3.0;
   float columnWidth = fwidth(column);
@@ -123,7 +123,7 @@ void main() {
     smoothstep(0.85, 1.0, phase) * (1.0 - smoothstep(1.85, 2.0, phase)),
     smoothstep(1.85, 2.0, phase) * (1.0 - smoothstep(2.85, 3.0, phase))
   );
-  vec3 phosphor = mix(vec3(1.0), grille * 2.2 + 0.18, maskAmount * 0.55);
+  vec3 phosphor = vec3(0.9523) + 0.55 * maskAmount * (grille * 2.2 - 0.7333);
 
   float flicker = 1.0 + 0.012 * sin(uTime * 61.0) + 0.006 * sin(uTime * 7.3 + pv.y * 3.0);
   float roll = 1.0 + 0.025 * smoothstep(0.0, 0.08, fract(pv.y * 0.6 - uTime * 0.11)) * (1.0 - smoothstep(0.08, 0.2, fract(pv.y * 0.6 - uTime * 0.11)));
