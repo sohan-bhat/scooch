@@ -134,6 +134,8 @@ export function Surroundings() {
   return null;
 }
 
+const desktop = () => layoutFor(window.innerWidth, window.innerHeight) !== 'phone';
+
 export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: () => void }) {
   const { camera, size, scene, gl } = useThree();
   const screens = useScreens(manifest);
@@ -274,7 +276,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         finished();
         return;
       }
-      await wait(() => native.off || !stillsPlanned() || (native.ready && (amount === 'main' || budget.stage >= 1)));
+      await wait(() => native.off || !stillsPlanned() || (native.ready && (amount === 'main' || budget.stage >= 1 || !desktop())));
       if (stopped) return;
       if (native.off || !stillsPlanned()) {
         finished();
@@ -287,11 +289,11 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         finished();
         return;
       }
-      await wait(() => budget.stage >= 3 || native.off);
+      await wait(() => budget.stage >= 3 || native.off || !stillsPlanned() || !desktop());
       for (const frame of Object.values(gallery.current)) {
         await calm();
         if (stopped) return;
-        if (native.off) break;
+        if (native.off || !stillsPlanned()) break;
         await frame.sharpen(gl, calm).catch(() => false);
       }
       finished();
