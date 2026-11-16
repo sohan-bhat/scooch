@@ -33,7 +33,7 @@ import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
 import { still as native } from './still';
-import { advance, budget, calm, finished, level, memory, prefetch, upgrades } from './budget';
+import { advance, budget, calm, finished, level, memory, prefetch, stillsPlanned, upgrades } from './budget';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
 import { stripUpload } from './upload';
@@ -274,8 +274,12 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         finished();
         return;
       }
-      await wait(() => native.ready && (amount === 'main' || budget.stage >= 1));
-      if (stopped || native.off) return;
+      await wait(() => native.off || !stillsPlanned() || (native.ready && (amount === 'main' || budget.stage >= 1)));
+      if (stopped) return;
+      if (native.off || !stillsPlanned()) {
+        finished();
+        return;
+      }
       await calm();
       await screens.main.sharpen(gl, calm).catch(() => false);
       advance(2);
@@ -283,10 +287,11 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         finished();
         return;
       }
-      await wait(() => budget.stage >= 3);
+      await wait(() => budget.stage >= 3 || native.off);
       for (const frame of Object.values(gallery.current)) {
         await calm();
-        if (stopped || native.off) return;
+        if (stopped) return;
+        if (native.off) break;
         await frame.sharpen(gl, calm).catch(() => false);
       }
       finished();
