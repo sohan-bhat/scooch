@@ -932,13 +932,13 @@ impl Daemon {
                                     flight = Some(id);
                                 }
                                 made = Some(target);
+                                lap("tables", &mut clock);
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 glider.abort(id);
-                                crate::glide::skipped("tables not written", "");
+                                crate::glide::skipped("tables not written", &format!("{} {error:#}", target.display()));
                             }
                         }
-                        lap("tables", &mut clock);
                     }
                 }
                 (_, None) => crate::glide::skipped("output not shown", ""),
@@ -968,18 +968,17 @@ impl Daemon {
         lap("set", &mut clock);
         if let (Some(bundle), Some(output), Some(tables_key)) = (bundle, entry.output.clone(), tables_key) {
             let wanted = self.store.tables_for(&output, tables_key);
-            match &made {
-                Some(made) if *made != wanted => {
-                    let _ = std::fs::rename(made, &wanted);
-                }
-                Some(_) => {}
-                None => {
-                    let _ = std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| write_atomic(&wanted, &bundle.tables_to_bytes()));
-                }
-            }
+            let written = match &made {
+                Some(made) if *made != wanted => std::fs::rename(made, &wanted).map_err(anyhow::Error::from),
+                Some(_) => Ok(()),
+                None => std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| write_atomic(&wanted, &bundle.tables_to_bytes())),
+            };
             self.keep_canvas(&screen.id, tables_key, &bundle);
             drop(bundle);
-            lap("later", &mut clock);
+            match written {
+                Ok(()) => lap("later", &mut clock),
+                Err(error) => eprintln!("{} tables not written to {}, {error:#}", stamp(), wanted.display()),
+            }
         }
         if let (Some(glider), Some(id), Some(output)) = (glider, flight, entry.output.as_ref()) {
             glider.settle(id, output, set);
