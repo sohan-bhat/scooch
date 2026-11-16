@@ -1096,6 +1096,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let started = Instant::now();
             let set = linux.set_wallpaper(&screen, &path);
             p.line(format!("- set the {kind} picture {:?} in {} ms", set.as_ref().map_err(|error| error.to_string()), started.elapsed().as_millis()));
+            if p.kind == Some(Kind::Cinnamon) {
+                let uri = record::Settings::get(&Gsettings, "org.cinnamon.desktop.background picture-uri").ok().flatten();
+                p.line(format!("  - Cinnamon `picture-uri` right after the adapter's set, before any write back {uri:?}"));
+            }
             std::thread::sleep(Duration::from_secs(2));
             let back = linux.wallpaper(&screen);
             let same = back.as_ref().is_ok_and(|back| back.as_deref() == Some(path.as_path()));
@@ -1132,7 +1136,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             p.line(format!("- no setting was recorded for `{}` at the start, so its original picture {:?} was set the way a person would {:?}", screen.id, original, result.map(|result| result.map_err(|error| error.to_string()))));
             return;
         }
+        let listed = p.kind == Some(Kind::Cinnamon) && recorded.iter().any(|(_, key, _)| key.ends_with(" picture-uri-list"));
         for (store, key, value) in &recorded {
+            if listed && key.ends_with(" picture-uri") {
+                p.line(format!("- `{key}` not written back, since Scooch never writes it on a Cinnamon with a picture list"));
+                continue;
+            }
             let result = store.set(key, value.as_deref());
             p.line(format!("- `{key}` written back to the recorded value {:?}", result.map_err(|error| error.to_string())));
         }
@@ -1141,7 +1150,13 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         for (store, key, value) in recorded {
             let now_value = store.get(&key).ok().flatten();
             p.line(format!("- `{key}` now {now_value:?}, equal to the recorded value {}", now_value == value));
-            if now_value != value {
+            if now_value == value {
+                continue;
+            }
+            let empty = now_value.as_deref().is_none_or(|text| text.trim_matches('\'').is_empty());
+            if listed && key.ends_with(" picture-uri") && empty {
+                p.soft("`picture-uri` after the restore", "Cinnamon empties picture-uri when the picture list is written, and the list and the mode went back to their recorded values");
+            } else {
                 p.fail(format!("`{key}` did not go back to the value recorded at the start"));
             }
         }
