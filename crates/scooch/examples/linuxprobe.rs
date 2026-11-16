@@ -1245,7 +1245,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         fs::write(&navy, jpeg(&navy_picture((screen.frame.w * screen.scale) as u32, (screen.frame.h * screen.scale) as u32))?)?;
         let home = p.home.clone();
         let taken = |home: &Path| state_entries(home).iter().any(|(_, entry)| entry["source"].as_str().is_some_and(|source| source.ends_with("probe-navy.jpg")));
-        linux.set_wallpaper(screen, &navy)?;
+        let person = p.home.join("person");
+        fs::create_dir_all(&person)?;
+        std::env::set_var("SCOOCH_HOME", &person);
+        let set = linux.set_wallpaper(screen, &navy);
+        std::env::set_var("SCOOCH_HOME", &home);
+        p.line(format!("- the navy picture set the way another program would, with a store of its own so Scooch's record of the original plays no part, {:?}, the desktop now reads {:?}", set.map_err(|error| error.to_string()), linux.wallpaper(screen).map_err(|error| error.to_string())));
         let adopted = wait_until(Duration::from_secs(30), || {
             let _ = scooch::poke::send(process);
             std::thread::sleep(Duration::from_millis(500));
@@ -1280,7 +1285,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             p.soft("the scenery switch line", "the probe has no way to move an icon on this session, so the icon never reached the subject");
         } else if !taken(&home) {
             p.line(format!("- {line}"));
-            p.soft("the scenery switch line", "the daemon never took in the navy picture the probe set while it ran, so the switch was not judged");
+            p.fail("the daemon never took in a wallpaper another program set while it ran");
         } else if same && shown == showing && sets == 0 {
             p.line(format!("- {line}"));
         } else {
