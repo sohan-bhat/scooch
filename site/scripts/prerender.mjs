@@ -20,7 +20,9 @@ try {
   const preload = fonts.map((name) => `<link rel="preload" as="font" type="font/woff2" crossorigin href="/scooch/assets/${name}" />`).join('\n    ');
   const manifest = JSON.parse(await readFile(join(dist, 'demo', 'manifest.json'), 'utf8'));
   const stage = assets.find((name) => /^Stage-.*\.js$/.test(name));
+  const areaLights = assets.find((name) => /^RectAreaLightUniformsLib-.*\.js$/.test(name));
   const story = '(prefers-reduced-motion: no-preference)';
+  const desktop = '(min-width: 768px) and (prefers-reduced-motion: no-preference)';
   const wide = '(min-width: 768px) and (orientation: landscape) and (min-aspect-ratio: 1601/1000)';
   const square = '(min-width: 768px) and (orientation: landscape) and (max-aspect-ratio: 16/10)';
   const tall = '(max-width: 767px), (orientation: portrait)';
@@ -55,13 +57,14 @@ try {
     `<link rel="preload" as="image" href="/scooch/stills/hero-square.webp" media="${square}" fetchpriority="high" />`,
     `<link rel="preload" as="image" href="/scooch/stills/hero-phone.webp" media="${tall}" fetchpriority="high" />`,
     ...stageChunks.map((name) => `<link rel="modulepreload" crossorigin href="/scooch/assets/${name}" media="${story}" fetchpriority="high" />`),
+    areaLights && `<link rel="preload" as="script" crossorigin href="/scooch/assets/${areaLights}" media="${desktop}" fetchpriority="high" />`,
     `<script>if(!/[?&]stills/.test(location.search)&&matchMedia('${story}').matches){var e=window.__early=new Map(),g=window.__got={};${JSON.stringify(early)}.forEach(function(f){var u=new URL(f[0],location.href).href;e.set(u,fetch(u,{credentials:'same-origin',priority:f[1]}).then(function(r){if(!r.ok||!r.body)return r;var k=r.body.getReader(),c=[];g[f[0]]=0;return(function p(){return k.read().then(function(x){if(x.done)return new Response(new Blob(c),{status:r.status,statusText:r.statusText,headers:r.headers});c.push(x.value);g[f[0]]+=x.value.length;return p()})})()}).catch(function(){return null}))})}</script>`,
     ...images.map((file) => `<link rel="preload" as="image" crossorigin href="/scooch/demo/${file}" media="${story}" fetchpriority="low" />`),
   ]
     .filter(Boolean)
     .join('\n    ');
   const needed = [
-    ...[...entryChunks, ...stageChunks, ...sheets].map((name) => `/scooch/assets/${name}`),
+    ...[...entryChunks, ...stageChunks, ...sheets, ...(areaLights ? [areaLights] : [])].map((name) => `/scooch/assets/${name}`),
     ...early.map(([path]) => path),
     ...images.map((name) => `/scooch/demo/${name}`),
   ];
