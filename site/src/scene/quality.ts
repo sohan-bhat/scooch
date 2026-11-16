@@ -83,6 +83,7 @@ const MAX_BOKEH = 3.2;
 const GRAIN = 0.05;
 const UP_SHARE = 0.6;
 const DOWN_SHARE = 1;
+const DOWN_INTERVAL = 1.2;
 const FULL_PASSES = 1.6;
 const FIXED = 0.5;
 const WINDOW = { motion: 60, rest: 20 };
@@ -158,7 +159,8 @@ class Quality {
 
   decide(): GpuClass | null {
     const { motion, rest } = this.verdicts;
-    const over = (list: number[]) => list.length === 2 && list.every((share) => share > DOWN_SHARE);
+    const line = this.timed ? DOWN_SHARE : DOWN_INTERVAL;
+    const over = (list: number[]) => list.length === 2 && list.every((share) => share > line);
     if (over(motion) || over(rest)) return this.step(-1);
     const up = this.step(1);
     if (!up || motion.length < 2 || rest.length < 2) return null;
