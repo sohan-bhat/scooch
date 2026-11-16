@@ -2984,14 +2984,14 @@ mod probe {
 
     const SLOW_LIMIT: f64 = 60.0;
 
-    struct Judged {
+    struct Slowness {
         direct: Vec<Option<f64>>,
         glided: usize,
         pairs: Vec<f64>,
         clock: Option<f64>,
     }
 
-    impl Judged {
+    impl Slowness {
         fn largest(&self) -> Option<f64> {
             self.direct.iter().flatten().copied().reduce(f64::max)
         }
@@ -3045,13 +3045,13 @@ mod probe {
         Some(number_after(line, "waited ").unwrap_or(0.0) + lap("early") + lap("open") + launched.unwrap_or(0.0))
     }
 
-    fn judge_slow(slow: &[String], off: &[String]) -> Judged {
+    fn judge_slow(slow: &[String], off: &[String]) -> Slowness {
         let pairs: Vec<f64> = slow.iter().zip(off).filter_map(|(slow, off)| daemon_clock(slow).zip(daemon_clock(off)).map(|(a, b)| a - b)).collect();
         let mut sorted = pairs.clone();
         sorted.sort_by(f64::total_cmp);
         let inner = sorted.get(1..sorted.len().saturating_sub(1)).filter(|inner| !inner.is_empty());
         let clock = inner.map(|inner| inner.iter().sum::<f64>() / inner.len() as f64);
-        Judged { direct: slow.iter().map(|line| own_time(line)).collect(), glided: slow.iter().filter(|line| line.contains(", glided true,")).count(), pairs, clock }
+        Slowness { direct: slow.iter().map(|line| own_time(line)).collect(), glided: slow.iter().filter(|line| line.contains(", glided true,")).count(), pairs, clock }
     }
 
     fn slow_check(paths: Vec<String>) -> ExitCode {
