@@ -291,6 +291,7 @@ mod probe {
             "5c Glide" => 292_101,
             "5d Cold drags" => 1_421_507,
             "5e Bare wakes" => 600_083,
+            "5f Finder after the drop" => 60_000,
             "6 Idle" => 71_080,
             "7 Off" => 2_687,
             "8 Second cycle" => 277_539,
@@ -481,6 +482,7 @@ mod probe {
         probe.section("5c Glide", glide_check);
         probe.section("5d Cold drags", cold_drags_check);
         probe.section("5e Bare wakes", rest_wakes);
+        probe.section("5f Finder after the drop", finder_after_drop);
         probe.section("6 Idle", idle);
         probe.section("7 Off", off);
         probe.section("8 Second cycle", second_cycle);
@@ -3218,6 +3220,66 @@ mod probe {
         if launches > 2 || lived.len() != launches || lived.iter().any(|lived| *lived > 2000.0) || !sent.is_empty() || !left.is_empty() {
             p.fail("thirty bare wakes launched more than two helpers, kept one past two seconds, or sent it work");
         }
+    }
+
+    fn layout(view: &finder::View) -> (Option<Vec<(String, [i64; 4])>>, Duration) {
+        let started = Instant::now();
+        let icons = finder::named(view).ok().map(|icons| {
+            let mut icons: Vec<(String, [i64; 4])> = icons.into_iter().map(|(name, rect)| (name, [rect.x.round() as i64, rect.y.round() as i64, rect.w.round() as i64, rect.h.round() as i64])).collect();
+            icons.sort();
+            icons
+        });
+        (icons, started.elapsed())
+    }
+
+    fn finder_after_drop(p: &mut Probe) -> Result<()> {
+        let screen = main_screen(p)?;
+        let name = PROBES[0].0;
+        if dismiss_prompt(p).is_none() {
+            p.line("- the reads need Apple Events to Finder, which the open consent window blocks, so they were skipped".to_string());
+            return Ok(());
+        }
+        if scooch_pid(p).is_none() {
+            p.line("- no daemon runs, so the drags were skipped".to_string());
+            return Ok(());
+        }
+        if state(p)["glide"] != serde_json::json!(true) {
+            let _ = p.scooch(&["glide"], LIMIT);
+        }
+        let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
+        let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
+        let offsets = [0u64, 20, 40, 60, 80];
+        let view = finder::view();
+        p.line("- ten mouse drags of one icon by CGEvent, the daemon running with the glide on, and after each drop the probe's own Finder reads by Apple Event at 0, 20, 40, 60 and 80 ms after its drop stamp, each against the layout read 2.5 s later".to_string());
+        let mut hits = [0usize; 5];
+        let mut firsts = Vec::new();
+        for index in 0..10 {
+            let from = position(p, name).unwrap_or(subject);
+            let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
+            let (before, _) = layout(&view);
+            drag(from, to);
+            let dropped = Instant::now();
+            let mut reads = Vec::new();
+            for offset in offsets {
+                std::thread::sleep(Duration::from_millis(offset).saturating_sub(dropped.elapsed()));
+                let began = dropped.elapsed();
+                let (icons, took) = layout(&view);
+                reads.push((offset, began, took, icons));
+            }
+            std::thread::sleep(Duration::from_millis(2500));
+            let (last, _) = layout(&view);
+            let finals: Vec<bool> = reads.iter().map(|(_, _, _, icons)| icons.is_some() && *icons == last).collect();
+            for (hit, shown) in hits.iter_mut().zip(&finals) {
+                *hit += usize::from(*shown);
+            }
+            let first = reads.iter().zip(&finals).find(|(_, shown)| **shown).map(|((offset, ..), _)| *offset);
+            firsts.push(first);
+            let said: Vec<String> = reads.iter().zip(&finals).map(|((offset, began, took, icons), shown)| format!("{offset} ms read at {} ms took {} ms {}", began.as_millis(), took.as_millis(), if icons.is_none() { "unread" } else if *shown { "final" } else if *icons == before { "before" } else { "other" })).collect();
+            p.line(format!("  - drag {}: the layout moved {}, first read with the final layout {}, reads {}", index + 1, last.is_some() && last != before, first.map_or("none".to_string(), |first| format!("{first} ms")), said.join(", ")));
+        }
+        let earliest = offsets.iter().zip(&hits).find(|(_, hits)| **hits == 10).map(|(offset, _)| *offset);
+        p.line(format!("- the earliest read after the drop that showed the final layout in ten of ten {}, reads with the final layout per offset {}, first such read per drag {:?}", earliest.map_or("none".to_string(), |earliest| format!("{earliest} ms")), offsets.iter().zip(&hits).map(|(offset, hits)| format!("{offset} ms {hits} of 10")).collect::<Vec<_>>().join(", "), firsts));
+        Ok(())
     }
 
     fn rest_wakes(p: &mut Probe) -> Result<()> {
