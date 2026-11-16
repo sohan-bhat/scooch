@@ -92,7 +92,7 @@ impl Core {
     }
 
     fn options(&mut self, scene: &Scene) -> Options {
-        let stamp = scooch_core::belonging_stamp(&self.analysis, scene, &self.options);
+        let stamp = self.session.stamp(&self.analysis, scene, &self.options);
         if let Some((_, options)) = self.chosen.filter(|c| c.0 == stamp) {
             return options;
         }

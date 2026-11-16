@@ -579,9 +579,19 @@ pub(crate) fn print(found: &Analysis) -> u64 {
     fingerprint(0, 0, &bytes)
 }
 
-pub(crate) fn stamp(found: &Analysis, scene: &Scene, options: &Options) -> u64 {
+pub(crate) fn same(a: &Analysis, b: &Analysis) -> bool {
+    let bits = |x: &[f32], y: &[f32]| x.len() == y.len() && x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits());
+    let rect = |r: &crate::Rect| [r.x, r.y, r.w, r.h].map(f32::to_bits);
+    (a.width, a.height, a.source_width, a.source_height, a.flat) == (b.width, b.height, b.source_width, b.source_height, b.flat)
+        && rect(&a.subject) == rect(&b.subject)
+        && bits(&a.saliency, &b.saliency)
+        && bits(&a.busy, &b.busy)
+        && bits(a.palette.as_flattened(), b.palette.as_flattened())
+}
+
+pub(crate) fn stamp(print: u64, scene: &Scene, options: &Options) -> u64 {
     let u = scenery::active(scene, options).then(|| shape::ground(scene)).flatten().map_or(0.0, |g| g.u);
-    let words = [print(found), u.to_bits() as u64, options.scenery as u64];
+    let words = [print, u.to_bits() as u64, options.scenery as u64];
     fingerprint(scene.width, scene.height, &words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>())
 }
 
