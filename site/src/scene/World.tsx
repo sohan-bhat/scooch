@@ -315,7 +315,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   useEffect(() => {
     hooks.showing = () => {
       const busy: string[] = [];
-      if (second.current && screens.lcd.uniforms.uPower.value > 0.05) busy.push('swans');
+      if (second.current && screens.lcd.uniforms.uPower.value > 0.05) busy.push('canoe');
       if (consoleScreen.uniforms.uOn.value > 0.05) busy.push('moon');
       return busy;
     };
@@ -346,7 +346,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       await upload(screens.main.textures().filter((texture) => !ready.has(texture)));
       const buffer = quality.liveSize(gl, new Vector2());
       const limit = Math.round(Math.max(buffer.x, buffer.y) * 0.8);
-      const order = ['swans', 'wide', 'tall', 'city', 'moon'];
+      const order = ['canoe', 'wide', 'tall', 'city', 'moon'];
       const rank = (id: string) => (order.includes(id) ? order.indexOf(id) : order.length);
       for (const picture of [...manifest.pictures].sort((a, b) => rank(a.id) - rank(b.id))) {
         const { width, height } = picture.scenery;
@@ -362,7 +362,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         await frame.renderIdle(gl, 0);
         if (stopped) return;
         gallery.current[picture.id] = frame;
-        if (picture.id === 'swans') {
+        if (picture.id === 'canoe') {
           second.current = frame;
           screens.lcd.uniforms.uFrame.value = frame.texture;
           runtime.scenery = true;

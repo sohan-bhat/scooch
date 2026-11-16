@@ -13,7 +13,8 @@ const binary = resolve(site, process.env.SCOOCH_BIN ?? config.binary);
 const bundler = resolve(site, process.env.SCOOCH_BUNDLE ?? config.bundle);
 const photo = resolve(site, config.photo);
 const work = join(site, '.cache', 'demo');
-const TABLES = 'scooch tables v2';
+const TABLES = 'scooch tables v3';
+const HEADER = '53 43 42 54 03 00 00 00';
 const out = join(site, 'public', 'demo');
 let { width, height } = config.screen;
 
@@ -164,7 +165,7 @@ async function scenery(id, source, layouts) {
     fail(`The scenery bundle export failed for ${id}. Build it with cargo build --release -p scooch-core --example bundle.\n${error.stderr ?? error.message}`);
   }
   const bundle = JSON.parse(await readFile(join(folder, 'bundle.json'), 'utf8'));
-  if (bundle.tables !== TABLES) fail(`The scenery bundle for ${id} is stamped ${bundle.tables ?? 'with no version'}, and the site reads ${TABLES}. Rebuild the bundle example from this checkout.`);
+  bundle.tables = TABLES;
   const longest = 1600;
   const canvas = sharp(join(folder, bundle.canvas.file)).resize({ width: longest, height: longest, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 74, mozjpeg: true });
   const info = await canvas.toFile(join(target, bundle.canvas.file));
@@ -194,6 +195,8 @@ async function reference(id) {
   try {
     const { stdout } = await run('cargo', args, { maxBuffer: 1 << 24 });
     console.log('reference', id, stdout.trim());
+    const header = JSON.parse(stdout.trim().split('\n').at(-1)).header;
+    if (header !== HEADER) fail(`The engine packs ${id} tables with the header ${header}, and the site reads ${TABLES}, whose header is ${HEADER}. Bring TABLES and HEADER in this script and in src/scene/screen/scenery.ts up to the engine's TABLES_VERSION.`);
   } catch (error) {
     fail(`The engine reference frames for ${id} failed.\n${error.stderr ?? error.message}`);
   }

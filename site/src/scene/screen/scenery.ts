@@ -195,7 +195,7 @@ async function canvasTexture(base: string, info: SceneryInfo, longest = 0) {
   return canvas;
 }
 
-export const TABLES = 'scooch tables v2';
+export const TABLES = 'scooch tables v3';
 
 export async function loadScenery(info: SceneryInfo, plainStates: boolean, longest = 0): Promise<Scenery> {
   if (info.tables !== TABLES) throw new Error(`demo/${info.folder} holds ${info.tables ?? 'unstamped'} tables, the site draws ${TABLES}`);

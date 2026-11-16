@@ -4,7 +4,7 @@ import type { Frame } from './screen/scenery';
 export const things: Record<string, Object3D | undefined> = {};
 export const obstacles: Object3D[] = [];
 
-export const CHANNELS = ['main', 'swans', 'moon', 'city'];
+export const CHANNELS = ['main', 'canoe', 'moon', 'city'];
 
 export const hooks = {
   drawHeld: (_gl: WebGLRenderer, _delta: number, _part?: { width: number; height: number }) => false,

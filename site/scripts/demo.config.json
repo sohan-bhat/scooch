@@ -204,8 +204,8 @@
   },
   "pictures": [
     {
-      "id": "swans",
-      "photo": "../assets/photos/two-swans.jpg",
+      "id": "canoe",
+      "photo": "../assets/photos/lone-canoe.jpg",
       "layout": "left",
       "problem": false
     },

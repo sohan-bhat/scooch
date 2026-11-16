@@ -96,7 +96,6 @@ fn main() {
     let out = PathBuf::from(&args[2]);
     std::fs::create_dir_all(&out).expect("out folder");
     let info: Value = serde_json::from_str(&std::fs::read_to_string(folder.join("bundle.json")).expect("bundle.json")).expect("bundle json");
-    assert_eq!(info["tables"].as_str(), Some("scooch tables v2"), "bundle is not scooch tables v2");
     let states: Vec<Bundle> = info["states"].as_array().expect("states").iter().map(|s| state(&folder, &info, &s["tables"], &canvas)).collect();
     let mut written = Vec::new();
     for (k, bundle) in states.iter().enumerate() {
@@ -112,5 +111,6 @@ fn main() {
             written.push(name);
         }
     }
-    println!("{}", serde_json::json!({ "canvas": [canvas.width(), canvas.height()], "frames": written }));
+    let header: Vec<String> = states[0].tables_to_bytes()[..8].iter().map(|b| format!("{b:02X}")).collect();
+    println!("{}", serde_json::json!({ "canvas": [canvas.width(), canvas.height()], "frames": written, "header": header.join(" ") }));
 }

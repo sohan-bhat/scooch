@@ -301,7 +301,7 @@ export function useInside(
       const picture = manifest.pictures.find((candidate) => candidate.id === id);
       return picture ? ids.map((icon) => picture.icons[icon]) : null;
     };
-    return { ids, wide: of('wide'), tall: of('tall'), swans: of('swans'), moon: of('moon') };
+    return { ids, wide: of('wide'), tall: of('tall'), canoe: of('canoe'), moon: of('moon') };
   }, [manifest]);
 
   useFrame((state) => {
@@ -351,8 +351,8 @@ export function useInside(
     if (fly > 0.0005 && pads) {
       const leg = fly < 1 ? 0 : 1;
       k = ease(fly - leg);
-      first = leg === 0 ? 'main' : 'swans';
-      second = leg === 0 ? 'swans' : 'moon';
+      first = leg === 0 ? 'main' : 'canoe';
+      second = leg === 0 ? 'canoe' : 'moon';
       const from = leg === 0 ? sized('main', places.from) : padPlace(pads.laptop, places.from);
       const to = leg === 0 ? padPlace(pads.laptop, places.to) : pads.console ? padPlace(pads.console, places.to) : padPlace(pads.laptop, places.to);
       place = blendPlace(from, to, k, leg === 0 ? 0.16 : 0.24, places.now);
@@ -389,7 +389,7 @@ export function useInside(
 
     const rects = (id: string, index: number) => {
       if (id === 'main') return own(index);
-      const layout = layouts[id as 'wide' | 'tall' | 'swans' | 'moon'];
+      const layout = layouts[id as 'wide' | 'tall' | 'canoe' | 'moon'];
       return layout?.[index] ?? own(index);
     };
     const tileHeight = Math.min(Math.max((lift - 0.15) / 0.5, 0), 1) * 0.1 * raise;
