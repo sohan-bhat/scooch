@@ -3222,10 +3222,12 @@ mod probe {
         }
     }
 
-    fn layout(view: &finder::View) -> (Option<Vec<(String, [i64; 4])>>, Duration) {
+    type Layout = Vec<(String, [i64; 4])>;
+
+    fn layout(view: &finder::View) -> (Option<Layout>, Duration) {
         let started = Instant::now();
         let icons = finder::named(view).ok().map(|icons| {
-            let mut icons: Vec<(String, [i64; 4])> = icons.into_iter().map(|(name, rect)| (name, [rect.x.round() as i64, rect.y.round() as i64, rect.w.round() as i64, rect.h.round() as i64])).collect();
+            let mut icons: Layout = icons.into_iter().map(|(name, rect)| (name, [rect.x.round() as i64, rect.y.round() as i64, rect.w.round() as i64, rect.h.round() as i64])).collect();
             icons.sort();
             icons
         });

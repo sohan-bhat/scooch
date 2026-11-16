@@ -350,6 +350,8 @@ fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|since| since.as_secs()).unwrap_or(0)
 }
 
+type MapKey = (u64, (u32, u32), u64);
+
 pub struct Daemon {
     pub desktop: Arc<dyn Desktop>,
     pub store: Store,
@@ -365,7 +367,7 @@ pub struct Daemon {
     prints: Mutex<HashMap<String, u64>>,
     moved: Mutex<Vec<String>>,
     handed: Mutex<Option<(Instant, Snapshot)>>,
-    mapped: Mutex<HashMap<String, (u64, (u32, u32), u64)>>,
+    mapped: Mutex<HashMap<String, MapKey>>,
 }
 
 #[derive(Default)]
