@@ -55,7 +55,7 @@ mod warp;
 
 pub use bundle::{Bundle, Constants, RAMP};
 pub use pack::{half_bits, Canvas, TablesError, TABLES_VERSION};
-pub use session::Session;
+pub use session::{Map, Session};
 #[doc(hidden)]
 pub use puffs::SITES_MOST;
 pub use image::{GrayImage, RgbImage, RgbaImage};

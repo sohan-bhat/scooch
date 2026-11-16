@@ -14,6 +14,16 @@ pub struct Session {
     seen: Option<(Analysis, u64)>,
 }
 
+/// A belonging map handed from one session to another, with the picture it was worked out for.
+#[derive(Clone)]
+pub struct Map((u64, (u32, u32), Arc<look::Belonging>));
+
+impl Map {
+    pub fn bytes(&self) -> usize {
+        self.0 .2.bytes()
+    }
+}
+
 struct Held {
     image: u64,
     source: (u32, u32),
@@ -141,6 +151,17 @@ impl Session {
     pub fn solve(&mut self, image: &RgbImage, analysis: &Analysis, scene: &Scene, options: &Options, previous: Option<&Placement>) -> Placement {
         let options = self.options(image, analysis, scene, options);
         crate::solve(analysis, scene, &options, previous)
+    }
+
+    /// The belonging map this session holds, to hand to a later session for the same picture with `adopt`, so the map is not worked out again.
+    pub fn map(&self) -> Option<Map> {
+        let held = || self.held.as_ref().and_then(|h| h.parts.belonging.clone().map(|b| (h.image, h.source, b)));
+        self.kept.clone().or_else(held).map(Map)
+    }
+
+    /// Takes a map from `map`. A later call uses it only for the same picture and source size and when it fits the stamp, so a map from another picture, screen, icon unit, setting or belonging version is never used.
+    pub fn adopt(&mut self, map: Map) {
+        self.kept = Some(map.0);
     }
 
     #[doc(hidden)]
