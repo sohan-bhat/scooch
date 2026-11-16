@@ -491,7 +491,6 @@ impl Daemon {
 
     fn bare(&self, entry: &mut Entry, screen: &str, (source, key): (&Path, u64), (image, analysis, scene, options): (&mut Option<RgbImage>, &Analysis, &Scene, &Options), clock: &mut Instant) -> Result<bool> {
         if !crate::state::scenery_on(options) || scene.icons.is_empty() {
-            entry.belongs = None;
             return Ok(false);
         }
         let stamp = scooch_core::belonging_stamp(analysis, scene, options);
@@ -2914,16 +2913,48 @@ pub mod tests {
         assert_ne!(screened.stamp, sized.stamp);
         set_scenery(&daemon, false);
         daemon.tick();
-        assert_eq!(entry(&daemon).belongs, None);
+        assert_eq!(entry(&daemon).belongs, Some(screened));
         set_scenery(&daemon, true);
         daemon.tick();
-        assert_eq!(entry(&daemon).belongs.map(|known| (known.key, known.answer)), Some((screened.key, false)));
+        assert_eq!(entry(&daemon).belongs, Some(screened));
         let teal = picture(navy.parent().unwrap(), "teal.png");
         fake.show("main", &teal);
         daemon.tick();
         let changed = entry(&daemon).belongs.unwrap();
         assert_ne!(changed.key, first.key);
         assert!(changed.answer);
+    }
+
+    #[test]
+    fn scenery_off_then_on_again_on_a_bare_picture_decodes_nothing() {
+        let (daemon, fake, navy) = navy_rig("bare-off-on", true);
+        fake.place(bare_layout());
+        daemon.tick();
+        let first = daemon.store.load().screens["main"].belongs.unwrap();
+        forget_pixels(&daemon, &navy);
+        let decodes = fake.decodes.load(Ordering::SeqCst);
+        set_scenery(&daemon, false);
+        daemon.tick();
+        set_scenery(&daemon, true);
+        daemon.tick();
+        assert_eq!(daemon.store.load().screens["main"].belongs, Some(first));
+        assert_eq!(fake.decodes.load(Ordering::SeqCst), decodes);
+    }
+
+    #[test]
+    fn a_stored_answer_with_another_stamp_is_worked_out_again() {
+        let (daemon, fake, _) = navy_rig("bare-stamp", true);
+        fake.place(bare_layout());
+        daemon.tick();
+        let real = daemon.store.load().screens["main"].belongs.unwrap();
+        let mut state = daemon.store.load();
+        state.screens.get_mut("main").unwrap().belongs = Some(crate::state::Belongs { stamp: real.stamp ^ 1, answer: true, ..real });
+        daemon.store.save(&state).unwrap();
+        let mut moved = bare_layout();
+        moved[2].y += 8.0;
+        fake.place(moved);
+        daemon.tick();
+        assert_eq!(daemon.store.load().screens["main"].belongs, Some(real));
     }
 
     #[test]
