@@ -3203,7 +3203,7 @@ pub mod tests {
         assert!(waits.lock().unwrap().iter().all(|(_, wait)| *wait <= crate::glide::PATIENCE), "{:?}", waits.lock().unwrap());
     }
 
-    fn colds_after(name: &str, early: bool, device: Duration) -> Vec<u32> {
+    fn colds_after(name: &str, early: bool, device: Duration) -> (Vec<u32>, u128) {
         let (daemon, fake, script, _) = glide_rig(name, true);
         fake.place(vec![subject()]);
         daemon.tick();
@@ -3221,18 +3221,20 @@ pub mod tests {
             std::thread::sleep(Duration::from_millis(1000));
         }
         fake.place(vec![moved_subject()]);
+        let ticking = Instant::now();
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let took = ticking.elapsed().as_millis();
         let said = daemon.glider.lock().unwrap().said.clone();
         assert!(events(&fake).iter().any(|event| event.starts_with("glide ")), "{said:?}");
-        daemon.store.load().starts.get("Fake GPU").cloned().unwrap_or_default().colds
+        (daemon.store.load().starts.get("Fake GPU").cloned().unwrap_or_default().colds, took)
     }
 
     #[test]
     fn only_a_helper_without_its_device_at_the_open_feeds_the_cold_memory() {
-        assert_eq!(colds_after("glide-cold-early", true, Duration::ZERO), vec![120, 120]);
-        let late = colds_after("glide-cold-late", false, Duration::from_millis(30));
+        assert_eq!(colds_after("glide-cold-early", true, Duration::ZERO).0, vec![120, 120]);
+        let (late, took) = colds_after("glide-cold-late", false, Duration::from_millis(30));
         assert_eq!(late.len(), 3, "{late:?}");
-        assert!(late[2] < 600, "{late:?}");
+        assert!(u128::from(late[2]) <= took, "{late:?} from a tick of {took} ms");
     }
 
     #[test]
