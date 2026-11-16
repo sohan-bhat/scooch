@@ -154,7 +154,14 @@ pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Op
     solver::solve(analysis, scene, options, previous)
 }
 
-/// A hash of everything the belonging map depends on apart from the picture's pixels: the analysis, the screen size, the icon unit and the scenery setting. It is the key a `Session` compares before it reuses a map, so a caller that keeps the answer of `Session::belongs` beside its own picture key and this stamp knows when the answer still holds.
+/// The version of the rules that decide where scenery belongs. It is part of `belonging_stamp`, so an answer kept from a build with other rules never matches. A rule change that moves any answer raises it.
+pub const BELONGING_VERSION: u32 = 1;
+
+/// Each belonging version with the digest of the answers it gives over the test set. A test checks the last entry against the rules as they are.
+#[doc(hidden)]
+pub const BELONGING_ANSWERS: &[(u32, u64)] = &[(1, 0x44fb_d8cd_2af2_5f5f)];
+
+/// A hash of everything the belonging map depends on apart from the picture's pixels: the belonging version, the analysis, the screen size, the icon unit and the scenery setting. It is the key a `Session` compares before it reuses a map, so a caller that keeps the answer of `Session::belongs` beside its own picture key and this stamp knows when the answer still holds.
 pub fn belonging_stamp(analysis: &Analysis, scene: &Scene, options: &Options) -> u64 {
     look::stamp(look::print(analysis), scene, options)
 }

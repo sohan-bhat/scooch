@@ -273,6 +273,45 @@ fn column(w: u32) -> Vec<Rect> {
     (0..16).map(|k| Rect { x: w as f32 - 60.0, y: 10.0 + 55.0 * k as f32, w: 50.0, h: 50.0 }).collect()
 }
 
+fn digest(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+#[test]
+fn the_belonging_answers_match_their_version() {
+    let (w, h) = (2880u32, 1800u32);
+    let column: Vec<Rect> = (0..16).map(|k| Rect { x: w as f32 - 120.0, y: 20.0 + 110.0 * k as f32, w: 100.0, h: 100.0 }).collect();
+    let scattered: Vec<Rect> = layouts::scattered(w, h, 12, 2027).into_iter().map(|r| Rect { w: 100.0, h: 100.0, ..r }).collect();
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let mut pictures: Vec<(String, RgbImage)> = layouts::photos().into_iter().map(|p| (p.file_stem().unwrap().to_string_lossy().to_string(), scooch_core::open(&p).expect("open"))).collect();
+    let more = ["thin-sky", "sky-band", "sea-under-sky", "lake-under-haze", "lake-under-blue-haze", "sea-soft-horizon", "sea-210-216", "mixed-top", "pink-over-teal", "teal-blue-corner", "wall-window", "grey-over-teal-1", "grey-over-teal-2"];
+    pictures.extend(MADE.iter().chain(&more).map(|n| (format!("made-{n}"), made(n))));
+    let mut table = String::new();
+    for (name, image) in &pictures {
+        let analysis = scooch_core::analyze(image);
+        for (layout, icons) in [("column", &column), ("scattered", &scattered)] {
+            let scene = Scene { width: w, height: h, icons: icons.clone() };
+            let belongs = scooch_core::Session::new().belongs(image, &analysis, &scene, &options);
+            let placement = scooch_core::fill(analysis.source_width, analysis.source_height, &scene);
+            let (map, _, _) = scooch_core::belonging_map(image, &analysis, &placement, &scene, &options);
+            let clouds = map.iter().any(|v| v[0] >= 0.5 && v[1] >= 0.5);
+            let islands = map.iter().any(|v| v[0] < 0.5 && v[1] >= 0.5);
+            table.push_str(&format!("{name} {layout} belongs {belongs} clouds {clouds} islands {islands}\n"));
+        }
+    }
+    print!("{table}");
+    let got = digest(table.as_bytes());
+    let recorded = scooch_core::BELONGING_ANSWERS;
+    assert!(recorded.windows(2).all(|p| p[1].0 == p[0].0 + 1 && p[1].1 != p[0].1), "each entry of BELONGING_ANSWERS raises the version by one and records a new digest");
+    let (version, want) = recorded[recorded.len() - 1];
+    assert!(
+        version == scooch_core::BELONGING_VERSION && got == want,
+        "the belonging answers give digest {got:#018x}, but version {version} records {want:#018x}. A rule change moved an answer, so raise BELONGING_VERSION to {} and add ({}, {got:#018x}) to BELONGING_ANSWERS",
+        version + 1,
+        version + 1
+    );
+}
+
 fn grid(w: u32, h: u32, across: usize, down: usize) -> Vec<Rect> {
     (0..across * down).map(|k| Rect { x: ((k % across) as f32 + 0.5) * w as f32 / across as f32 - 25.0, y: ((k / across) as f32 + 0.5) * h as f32 / down as f32 - 25.0, w: 50.0, h: 50.0 }).collect()
 }

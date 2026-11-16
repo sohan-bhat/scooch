@@ -591,7 +591,7 @@ pub(crate) fn same(a: &Analysis, b: &Analysis) -> bool {
 
 pub(crate) fn stamp(print: u64, scene: &Scene, options: &Options) -> u64 {
     let u = scenery::active(scene, options).then(|| shape::ground(scene)).flatten().map_or(0.0, |g| g.u);
-    let words = [print, u.to_bits() as u64, options.scenery as u64];
+    let words = [print, u.to_bits() as u64, options.scenery as u64, crate::BELONGING_VERSION as u64];
     fingerprint(scene.width, scene.height, &words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>())
 }
 
