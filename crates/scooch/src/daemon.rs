@@ -3657,6 +3657,22 @@ pub mod tests {
     }
 
     #[test]
+    fn a_desktop_that_does_not_read_at_once_never_takes_the_quick_way() {
+        let (daemon, fake) = at_once_rig("pure-off");
+        *fake.at_once.lock().unwrap() = false;
+        fake.place(vec![on_subject()]);
+        let before = fake.snapshots.load(Ordering::SeqCst);
+        assert!(!daemon.quick_look());
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before);
+        let signal = Signal::default();
+        signal.wake();
+        let started = Instant::now();
+        daemon.gather(&signal);
+        assert!(started.elapsed() >= Duration::from_millis(200), "the move did not settle, {:?}", started.elapsed());
+        assert!(daemon.handed.lock().unwrap().is_none());
+    }
+
+    #[test]
     fn a_new_icon_settles() {
         let (daemon, fake) = at_once_rig("pure-new");
         fake.place(vec![corner(), on_subject()]);

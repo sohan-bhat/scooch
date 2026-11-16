@@ -10,6 +10,10 @@ pub enum Kind {
 pub const UNKNOWN: &str = "Scooch does not know this desktop yet, so it cannot see where your icons sit.";
 
 impl Kind {
+    pub fn reads_at_once(self) -> bool {
+        matches!(self, Kind::Kde | Kind::Xfce)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Kind::Gnome => "GNOME",
@@ -51,6 +55,12 @@ pub fn session(wayland_display: Option<&str>) -> Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_desktops_that_keep_every_place_in_one_file_read_at_once() {
+        assert!(Kind::Kde.reads_at_once() && Kind::Xfce.reads_at_once());
+        assert!(!Kind::Gnome.reads_at_once() && !Kind::Cinnamon.reads_at_once() && !Kind::Mate.reads_at_once());
+    }
 
     #[test]
     fn each_desktop_name_picks_its_backend() {

@@ -262,7 +262,7 @@ mod system {
 
     impl Desktop for Linux {
         fn reads_at_once(&self) -> bool {
-            true
+            self.kind.reads_at_once()
         }
 
         fn name(&self) -> String {
