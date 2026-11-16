@@ -1,4 +1,4 @@
-import { afterFrame, quiet, WAIT } from '@/lib/idle';
+import { calmNow, frameSlot, quiet, starved, WAIT } from '@/lib/idle';
 import { runtime } from '@/story/state';
 import { quality } from './quality';
 import { still } from './still';
@@ -69,15 +69,18 @@ function granted(within: number) {
 }
 
 export async function calm() {
-  const until = performance.now() + WAIT;
+  const start = performance.now();
   for (;;) {
-    const left = until - performance.now();
-    if (left <= 0) {
-      await afterFrame();
+    const left = WAIT - (performance.now() - start);
+    if (left <= 0 || starved()) {
+      await frameSlot();
       return;
     }
     if (stillsPlanned()) {
-      if ((await granted(left)) && stillsPlanned()) return;
+      if ((await granted(left)) && stillsPlanned()) {
+        calmNow();
+        return;
+      }
       continue;
     }
     const now = performance.now();
