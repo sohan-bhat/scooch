@@ -492,7 +492,10 @@ mod probe {
                     }
                 }
             }
-            Err(error) => p.line(format!("- adapter screens failed with {error:#}")),
+            Err(error) => {
+                p.line(format!("- adapter screens failed with {error:#}"));
+                p.failed.push("the adapter could not read the screens".into());
+            }
         }
         match shell::view() {
             Ok(view) => {
@@ -539,7 +542,10 @@ mod probe {
                     p.raw(format!("snapshot icon {}", show(icon)));
                 }
             }
-            Err(error) => p.line(format!("- adapter snapshot failed {error:#}")),
+            Err(error) => {
+                p.line(format!("- adapter snapshot failed {error:#}"));
+                p.failed.push("the adapter could not read the icons".into());
+            }
         }
         for (name, result) in desktop.check() {
             p.line(format!("- doctor {name} {}", result.map_or_else(|error| format!("fail {error}"), |detail| format!("ok {detail}"))));
@@ -559,6 +565,9 @@ mod probe {
         let read = startup::approval();
         let seen = read.as_deref().is_some_and(layout::startup_disabled);
         let cleared = startup::clear_approval();
+        if !seen {
+            p.failed.push("a disabled startup switch was not read back as disabled".into());
+        }
         p.line(format!("- wrote a disabled switch {written:?}, read back {read:?}, seen as disabled {seen}, cleared {:?}, left {:?}", cleared.map_err(|error| error.to_string()), startup::approval()));
     }
 
@@ -599,6 +608,9 @@ mod probe {
         let waited = wait_until(FILE_WAIT, || names(&view).is_ok_and(|found| PROBES.iter().all(|(name, folder)| present(&found, name, *folder))));
         let (_, notes, _) = since(before);
         p.line(format!("- all five items in the view after {:?} ms, waited at most {} ms", waited.map(|time| time.as_millis()), FILE_WAIT.as_millis()));
+        if waited.is_none() {
+            p.failed.push("the five probe items never all showed in the desktop view".into());
+        }
         for source in ["root", "folder"] {
             let kinds: Vec<String> = notes.iter().filter(|note| note.1 == source).map(|note| format!("{:#x} at +{} ms", note.2, note.0.saturating_sub(base))).collect();
             p.line(format!("- notifications on the desktop {source} {}", if kinds.is_empty() { "none".into() } else { kinds.join(" ") }));
@@ -1392,7 +1404,11 @@ mod probe {
             let echo: Vec<String> = action.settings.iter().map(|(at, value)| format!("{value:#x} at +{} ms", at.saturating_sub(base))).collect();
             p.line(format!("  - WM_SETTINGCHANGE {}", if echo.is_empty() { "none".into() } else { echo.join(", ") }));
             let back = desktop.wallpaper(&screen);
-            p.line(format!("  - read back {:?}, same path {}", back.as_ref().map_err(|error| error.to_string()), back.as_ref().is_ok_and(|back| back.as_deref() == Some(path.as_path()))));
+            let same = back.as_ref().is_ok_and(|back| back.as_deref() == Some(path.as_path()));
+            p.line(format!("  - read back {:?}, same path {same}", back.as_ref().map_err(|error| error.to_string())));
+            if !same {
+                p.failed.push(format!("setting {} and reading it back did not give the same path", path.display()));
+            }
             let bytes = fs::read(&path)?;
             for copy in themes_since(when) {
                 let copied = fs::read(&copy).unwrap_or_default();
@@ -1517,10 +1533,16 @@ mod probe {
             match shown {
                 Some(path) => {
                     let result = desktop.set_wallpaper(&screen, &path);
+                    if result.is_err() {
+                        p.failed.push(format!("the original wallpaper of `{}` could not be put back", screen.id));
+                    }
                     p.line(format!("- restored `{}` to {} {:?}", screen.id, path.display(), result.map_err(|error| error.to_string())));
                 }
                 None => {
                     let result = spi_wallpaper("");
+                    if result.is_err() {
+                        p.failed.push(format!("the solid color of `{}` could not be put back", screen.id));
+                    }
                     p.line(format!("- `{}` had no picture file, set back to a solid color {:?}", screen.id, result.map_err(|error| error.to_string())));
                 }
             }
@@ -3907,6 +3929,9 @@ mod probe {
         };
         let tick_of = |watched: &Watched| watched.log.iter().find(|line| line.contains(" tick ")).cloned().unwrap_or_default();
         let open_move = watch_change(&log, &screen, program_move(POINT { x: lower.x - 30, y: lower.y - 20 }), false);
+        if open_move.new == open_move.old {
+            p.failed.push("a program move of an uncovered icon brought no new wallpaper".into());
+        }
         p.line(format!("- a program move uncovered, then a wake: new wallpaper {}, glided {}, tick `{}`", open_move.new != open_move.old, open_move.log.iter().any(|line| gliding(line)), tick_of(&open_move)));
         quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
         let cover = cover_window(&screen)?;
@@ -4197,14 +4222,24 @@ mod probe {
         }
         times.sort_unstable();
         p.line(format!("- median move to new wallpaper {:?} ms", times.get(times.len() / 2)));
-        if let Some(rect) = automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect) {
-            let before = desktop.wallpaper(&screen)?.unwrap_or_default();
-            let sent = drag_to(POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + cell.icon / 2.0) as i32 }, subject);
-            let swapped = wait_until(Duration::from_secs(10), || desktop.wallpaper(&screen).ok().flatten().is_some_and(|now| now != before));
-            park_cursor();
-            pump(Duration::from_millis(1500));
-            p.line(format!("- the icon dragged onto the subject again sent {sent}, new wallpaper after {:?} ms", swapped.map(|time| time.as_millis())));
-            switch_check(p, desktop.as_ref(), &screen, &trace, &mut read)?;
+        match automation_rects(&automation, view.list)?.into_iter().find(|(seen, _)| *seen == shown).map(|(_, rect)| rect) {
+            Some(rect) => {
+                let before = desktop.wallpaper(&screen)?.unwrap_or_default();
+                let sent = drag_to(POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + cell.icon / 2.0) as i32 }, subject);
+                let swapped = wait_until(Duration::from_secs(10), || desktop.wallpaper(&screen).ok().flatten().is_some_and(|now| now != before));
+                park_cursor();
+                pump(Duration::from_millis(1500));
+                p.line(format!("- the icon dragged onto the subject again sent {sent}, new wallpaper after {:?} ms", swapped.map(|time| time.as_millis())));
+                if swapped.is_none() {
+                    p.failed.push("the icon dragged onto the navy subject brought no new wallpaper within 10 s, so the scenery switch was not judged".into());
+                } else {
+                    switch_check(p, desktop.as_ref(), &screen, &trace, &mut read)?;
+                }
+            }
+            None => {
+                p.line("- UI Automation gave no rect for the probe icon, so the scenery switch could not run".to_string());
+                p.failed.push("UI Automation gave no rect for the probe icon, so the scenery switch could not run".into());
+            }
         }
         park_cursor();
         pump(Duration::from_secs(3));
@@ -4234,6 +4269,9 @@ mod probe {
             }
         }
         p.line(format!("- stop event sent {stopped}, process ended {:?}", code));
+        if code.is_none() {
+            p.failed.push("the daemon did not end after the stop event".into());
+        }
         if code.is_some() {
             p.daemon = None;
         }

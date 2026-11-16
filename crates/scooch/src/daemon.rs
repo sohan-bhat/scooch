@@ -932,13 +932,13 @@ impl Daemon {
                                     flight = Some(id);
                                 }
                                 made = Some(target);
+                                lap("tables", &mut clock);
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 glider.abort(id);
-                                crate::glide::skipped("tables not written", "");
+                                crate::glide::skipped("tables not written", &format!("{} {error:#}", target.display()));
                             }
                         }
-                        lap("tables", &mut clock);
                     }
                 }
                 (_, None) => crate::glide::skipped("output not shown", ""),
@@ -968,18 +968,17 @@ impl Daemon {
         lap("set", &mut clock);
         if let (Some(bundle), Some(output), Some(tables_key)) = (bundle, entry.output.clone(), tables_key) {
             let wanted = self.store.tables_for(&output, tables_key);
-            match &made {
-                Some(made) if *made != wanted => {
-                    let _ = std::fs::rename(made, &wanted);
-                }
-                Some(_) => {}
-                None => {
-                    let _ = std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| write_atomic(&wanted, &bundle.tables_to_bytes()));
-                }
-            }
+            let written = match &made {
+                Some(made) if *made != wanted => std::fs::rename(made, &wanted).map_err(anyhow::Error::from),
+                Some(_) => Ok(()),
+                None => std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| write_atomic(&wanted, &bundle.tables_to_bytes())),
+            };
             self.keep_canvas(&screen.id, tables_key, &bundle);
             drop(bundle);
-            lap("later", &mut clock);
+            match written {
+                Ok(()) => lap("later", &mut clock),
+                Err(error) => eprintln!("{} tables not written to {}, {error:#}", stamp(), wanted.display()),
+            }
         }
         if let (Some(glider), Some(id), Some(output)) = (glider, flight, entry.output.as_ref()) {
             glider.settle(id, output, set);
@@ -2782,6 +2781,10 @@ pub mod tests {
         vec![Rect { x: 60.0, y: 30.0, w: 20.0, h: 20.0 }, Rect { x: 4.0, y: 4.0, w: 20.0, h: 20.0 }, Rect { x: 84.0, y: 24.0, w: 20.0, h: 20.0 }]
     }
 
+    fn forget_pixels(daemon: &Daemon, picture: &Path) {
+        std::fs::remove_file(cache::pixel_file(&daemon.store, cache::key(picture).unwrap())).unwrap();
+    }
+
     fn with_scenery(options: Options, on: bool) -> Options {
         Options { scenery: if on { scooch_core::Scenery::Auto } else { scooch_core::Scenery::Off }, ..options }
     }
@@ -2811,9 +2814,10 @@ pub mod tests {
 
     #[test]
     fn switching_scenery_off_on_a_bare_picture_keeps_placement_and_file() {
-        let (daemon, fake, _) = navy_rig("bare-switch", true);
+        let (daemon, fake, navy) = navy_rig("bare-switch", true);
         fake.place(bare_layout());
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        forget_pixels(&daemon, &navy);
         let before = daemon.store.load().screens["main"].clone();
         let (shown, sets, decodes) = (fake.showing("main"), fake.sets.load(Ordering::SeqCst), fake.decodes.load(Ordering::SeqCst));
         set_scenery(&daemon, false);
@@ -2867,7 +2871,7 @@ pub mod tests {
     #[test]
     fn a_foreign_wallpaper_inside_the_settle_window_is_taken_once_the_window_ends() {
         let (mut daemon, fake, navy) = navy_rig("bare-foreign", true);
-        daemon.grace = Duration::from_millis(400);
+        daemon.grace = Duration::from_secs(3600);
         fake.place(bare_layout());
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
         let ours = daemon.store.load().screens["main"].output.clone();
@@ -2879,7 +2883,7 @@ pub mod tests {
         assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
         assert_eq!(fake.showing("main"), foreign);
         assert_eq!(daemon.store.load().screens["main"].output, ours);
-        std::thread::sleep(Duration::from_millis(500));
+        daemon.grace = Duration::ZERO;
         let after = outcome(&daemon.tick());
         assert!(matches!(after, Outcome::Rendered | Outcome::Plain), "{after:?}");
         let entry = daemon.store.load().screens["main"].clone();
@@ -2894,6 +2898,7 @@ pub mod tests {
         daemon.tick();
         let first = entry(&daemon).belongs.unwrap();
         assert!(!first.answer);
+        forget_pixels(&daemon, &navy);
         let decodes = fake.decodes.load(Ordering::SeqCst);
         fake.place(vec![subject(), calm_moved()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
@@ -3198,7 +3203,7 @@ pub mod tests {
         assert!(waits.lock().unwrap().iter().all(|(_, wait)| *wait <= crate::glide::PATIENCE), "{:?}", waits.lock().unwrap());
     }
 
-    fn colds_after(name: &str, early: bool, device: Duration) -> Vec<u32> {
+    fn colds_after(name: &str, early: bool, device: Duration) -> (Vec<u32>, u128) {
         let (daemon, fake, script, _) = glide_rig(name, true);
         fake.place(vec![subject()]);
         daemon.tick();
@@ -3216,18 +3221,20 @@ pub mod tests {
             std::thread::sleep(Duration::from_millis(1000));
         }
         fake.place(vec![moved_subject()]);
+        let ticking = Instant::now();
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let took = ticking.elapsed().as_millis();
         let said = daemon.glider.lock().unwrap().said.clone();
         assert!(events(&fake).iter().any(|event| event.starts_with("glide ")), "{said:?}");
-        daemon.store.load().starts.get("Fake GPU").cloned().unwrap_or_default().colds
+        (daemon.store.load().starts.get("Fake GPU").cloned().unwrap_or_default().colds, took)
     }
 
     #[test]
     fn only_a_helper_without_its_device_at_the_open_feeds_the_cold_memory() {
-        assert_eq!(colds_after("glide-cold-early", true, Duration::ZERO), vec![120, 120]);
-        let late = colds_after("glide-cold-late", false, Duration::from_millis(30));
+        assert_eq!(colds_after("glide-cold-early", true, Duration::ZERO).0, vec![120, 120]);
+        let (late, took) = colds_after("glide-cold-late", false, Duration::from_millis(30));
         assert_eq!(late.len(), 3, "{late:?}");
-        assert!(late[2] < 600, "{late:?}");
+        assert!(u128::from(late[2]) <= took, "{late:?} from a tick of {took} ms");
     }
 
     #[test]
