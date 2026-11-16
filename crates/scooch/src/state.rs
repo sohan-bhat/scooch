@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const VERSION: u32 = 1;
+pub const UNREAD: &str = "Some saved settings did not read.";
+pub const NEWER: &str = "Saved settings came from a newer Scooch.";
 pub const BUSY: &str = "Another scooch command is still running, so try again in a moment.";
 pub const COMMAND_PATIENCE: Duration = Duration::from_secs(20);
 
@@ -259,15 +261,22 @@ impl Store {
         self.root.join("state.kept.json")
     }
 
+    fn keep(&self, bytes: &[u8], first: &str) {
+        if fs::read(self.kept_file()).ok().as_deref() != Some(bytes) && write_atomic(&self.kept_file(), bytes).is_ok() {
+            eprintln!("{first} Each screen's own picture is kept. The old file is at {}.", self.kept_file().display());
+        }
+    }
+
     pub fn read(&self) -> Option<Vec<u8>> {
         let bytes = fs::read(self.state_file()).ok()?;
-        if serde_json::from_slice::<State>(&bytes).is_ok() {
+        if let Ok(state) = serde_json::from_slice::<State>(&bytes) {
+            if state.version > VERSION {
+                self.keep(&bytes, NEWER);
+            }
             return Some(bytes);
         }
         if let Some(saved) = salvage(&bytes) {
-            if fs::read(self.kept_file()).ok().as_deref() != Some(bytes.as_slice()) && write_atomic(&self.kept_file(), &bytes).is_ok() {
-                eprintln!("Scooch could not read all of its saved settings, so it kept each screen's own picture and saved the file it read at {}.", self.kept_file().display());
-            }
+            self.keep(&bytes, UNREAD);
             return serde_json::to_vec_pretty(&saved).ok();
         }
         if fs::rename(self.state_file(), self.aside_file()).is_err() {
@@ -515,6 +524,26 @@ mod tests {
         store.save(&state).unwrap();
         assert_eq!(fs::read(store.kept_file()).unwrap(), bytes);
         assert!(store.load().screens.contains_key("main"));
+    }
+
+    #[test]
+    fn a_file_from_a_newer_version_is_kept_byte_for_byte_before_the_first_save() {
+        let (store, bytes) = written("newer", |value| {
+            value["version"] = serde_json::json!(VERSION + 1);
+            value["screens"]["main"]["later"] = serde_json::json!({"kind": "unknown here"});
+        });
+        let state = store.load();
+        store.save(&state).unwrap();
+        assert_eq!(fs::read(store.kept_file()).unwrap(), bytes);
+        assert_eq!(state.screens["main"].original, Path::new("/p/mine.jpg"));
+    }
+
+    #[test]
+    fn a_file_at_our_own_version_is_not_copied() {
+        let (store, _) = written("own-version", |value| value["screens"]["main"]["later"] = serde_json::json!(1));
+        let state = store.load();
+        store.save(&state).unwrap();
+        assert!(!store.kept_file().exists());
     }
 
     #[test]
