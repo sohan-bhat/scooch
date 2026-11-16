@@ -418,14 +418,21 @@ impl Daemon {
         if !self.desktop.dropped() {
             return false;
         }
-        std::thread::sleep(QUICK);
+        let started = Instant::now();
+        self.look(started) || {
+            std::thread::sleep(QUICK);
+            self.look(started)
+        }
+    }
+
+    fn look(&self, started: Instant) -> bool {
         let taken = Instant::now();
         let Ok(snapshot) = self.desktop.snapshot() else { return false };
         let now = icon_print(&snapshot);
         let before = *self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let moved = before.is_some_and(|before| before != now);
         if trace() {
-            eprintln!("{} quick look after {} ms, icons {now:016x} moved {moved}", stamp(), QUICK.as_millis());
+            eprintln!("{} quick look after {} ms, icons {now:016x} moved {moved}", stamp(), taken.saturating_duration_since(started).as_millis());
         }
         if moved {
             *self.handed.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((taken, snapshot));
@@ -1514,6 +1521,7 @@ pub mod tests {
         pub snapshots: AtomicUsize,
         pub hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         pub moving: Mutex<Option<PathBuf>>,
+        pub after_read: Mutex<Option<Vec<Rect>>>,
         pub lost: Mutex<Vec<PathBuf>>,
         pub gallery: Mutex<Vec<PathBuf>>,
         pub broken: Mutex<Option<String>>,
@@ -1533,7 +1541,7 @@ pub mod tests {
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), events: Arc::new(Mutex::new(Vec::new())) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), events: Arc::new(Mutex::new(Vec::new())) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -1580,7 +1588,12 @@ pub mod tests {
             if let Some(reason) = self.broken.lock().unwrap().clone() {
                 anyhow::bail!(reason);
             }
-            Ok(Snapshot { screens: self.screens()?, icons: self.icons.lock().unwrap().clone() })
+            let screens = self.screens()?;
+            let icons = self.icons.lock().unwrap().clone();
+            if let Some(later) = self.after_read.lock().unwrap().take() {
+                *self.icons.lock().unwrap() = later;
+            }
+            Ok(Snapshot { screens, icons })
         }
 
         fn screens(&self) -> Result<Vec<Screen>> {
@@ -3523,6 +3536,57 @@ pub mod tests {
         let before = fake.snapshots.load(Ordering::SeqCst);
         assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
         assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
+    }
+
+    #[test]
+    fn a_drop_seen_on_the_first_read_is_read_once_and_never_waits() {
+        let (daemon, fake, _, _) = glide_rig("quick-first", true);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        fake.place(vec![moved_subject()]);
+        *fake.drop_seen.lock().unwrap() = true;
+        fake.events.lock().unwrap().clear();
+        let before = fake.snapshots.load(Ordering::SeqCst);
+        let started = Instant::now();
+        assert!(daemon.quick_look());
+        assert!(started.elapsed() < QUICK, "the quick look waited {:?}", started.elapsed());
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let events = events(&fake);
+        assert_eq!(events[..at(&events, "glide")].iter().filter(|event| *event == "snapshot").count(), 1, "{events:?}");
+    }
+
+    #[test]
+    fn a_move_seen_only_on_the_second_read_is_still_taken() {
+        let (daemon, fake, _) = rig("quick-second", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        *fake.drop_seen.lock().unwrap() = true;
+        *fake.after_read.lock().unwrap() = Some(vec![moved_subject()]);
+        let before = fake.snapshots.load(Ordering::SeqCst);
+        let started = Instant::now();
+        assert!(daemon.quick_look());
+        assert!(started.elapsed() >= QUICK);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 2);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 2);
+    }
+
+    #[test]
+    fn a_drop_with_nothing_moved_reads_twice_and_then_settles() {
+        let (daemon, fake, _) = rig("quick-none", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        *fake.drop_seen.lock().unwrap() = true;
+        let before = fake.snapshots.load(Ordering::SeqCst);
+        let signal = Signal::default();
+        signal.wake();
+        let started = Instant::now();
+        daemon.gather(&signal);
+        assert!(started.elapsed() >= QUICK, "the gather took {:?}", started.elapsed());
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 2);
+        assert!(daemon.handed.lock().unwrap().is_none());
+        assert!(signal.pending.lock().unwrap().last.is_none());
     }
 
     #[test]
