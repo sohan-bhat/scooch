@@ -127,6 +127,7 @@ class Quality {
   earnFor = EARN;
   native = false;
   configured = false;
+  lostAt = 0;
   detected: Detected = null;
   failed = new Map<GpuClass, number>();
   changes = 0;

@@ -277,6 +277,7 @@ export function Post({ phone }: { phone: boolean }) {
     let watchdog = 0;
     const lost = () => {
       still.lost = true;
+      quality.lostAt = performance.now();
       if (still.held) still.image = null;
       nativeOff();
       switchWanted.current = false;

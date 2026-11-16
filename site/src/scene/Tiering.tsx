@@ -17,7 +17,7 @@ export function Tiering() {
   useFrame((_, delta) => {
     const now = performance.now();
     const loaded = runtime.props && runtime.gallery && runtime.painted && runtime.inside && !budget.busy;
-    quality.measuring = runtime.shown && loaded && !document.hidden && quality.changes < MAX_CHANGES && plan.next === null && now - plan.lastAt > GAP;
+    quality.measuring = runtime.shown && loaded && quality.lostAt === 0 && !document.hidden && quality.changes < MAX_CHANGES && plan.next === null && now - plan.lastAt > GAP;
     if (quality.measuring && !quality.timed) {
       if (quality.moving) quality.note(delta * 1000, 'motion');
       else if (still.phase === 'live' && quality.chain === 'sharp' && !quality.hold) quality.note(delta * 1000, 'rest');
