@@ -255,10 +255,20 @@ impl Store {
         self.root.join("state.unreadable.json")
     }
 
+    pub fn kept_file(&self) -> PathBuf {
+        self.root.join("state.kept.json")
+    }
+
     pub fn read(&self) -> Option<Vec<u8>> {
         let bytes = fs::read(self.state_file()).ok()?;
         if serde_json::from_slice::<State>(&bytes).is_ok() {
             return Some(bytes);
+        }
+        if let Some(saved) = salvage(&bytes) {
+            if fs::read(self.kept_file()).ok().as_deref() != Some(bytes.as_slice()) && write_atomic(&self.kept_file(), &bytes).is_ok() {
+                eprintln!("Scooch could not read all of its saved settings, so it kept each screen's own picture and saved the file it read at {}.", self.kept_file().display());
+            }
+            return serde_json::to_vec_pretty(&saved).ok();
         }
         if fs::rename(self.state_file(), self.aside_file()).is_err() {
             let _ = write_atomic(&self.aside_file(), &bytes);
@@ -341,6 +351,22 @@ impl Store {
     pub fn watcher(&self) -> Option<u32> {
         self.recorded_pid().filter(|process| crate::poke::alive(*process))
     }
+}
+
+fn salvage(bytes: &[u8]) -> Option<State> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let screens = value.get("screens")?.as_object()?;
+    let mut state = State::fresh();
+    if let Some(on) = value.get("on").and_then(serde_json::Value::as_bool) {
+        state.on = on;
+    }
+    for (id, entry) in screens {
+        let read = serde_json::from_value::<Entry>(entry.clone()).ok().or_else(|| entry.get("original").and_then(serde_json::Value::as_str).map(|original| Entry::new(Path::new(original))));
+        if let Some(read) = read {
+            state.screens.insert(id.clone(), read);
+        }
+    }
+    Some(state)
 }
 
 pub fn parse(bytes: Option<&[u8]>) -> State {
@@ -437,6 +463,58 @@ mod tests {
         assert!(kept(&state));
         assert_eq!(state.screens["main"].drawn, None);
         assert_eq!(state.screens["main"].belongs.map(|known| known.stamp), Some(2));
+    }
+
+    fn written(name: &str, edit: impl FnOnce(&mut serde_json::Value)) -> (Store, Vec<u8>) {
+        let store = Store::at(scratch(name));
+        let mut state = State { on: true, ..State::default() };
+        state.screens.insert("main".into(), Entry { output: Some("/d/out/main-3.jpg".into()), counter: 3, ..Entry::new(Path::new("/p/mine.jpg")) });
+        state.screens.insert("side".into(), Entry { output: Some("/d/out/side-5.jpg".into()), counter: 5, ..Entry::new(Path::new("/p/yours.jpg")) });
+        store.save(&state).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&fs::read(store.state_file()).unwrap()).unwrap();
+        edit(&mut value);
+        let bytes = serde_json::to_vec_pretty(&value).unwrap();
+        fs::write(store.state_file(), &bytes).unwrap();
+        (store, bytes)
+    }
+
+    #[test]
+    fn an_entry_that_does_not_read_keeps_its_original_and_the_others_whole() {
+        let (store, _) = written("salvage-entry", |value| value["screens"]["main"]["counter"] = serde_json::json!("x"));
+        let state = store.load();
+        assert!(state.on);
+        assert_eq!(state.screens["main"].original, Path::new("/p/mine.jpg"));
+        let side = &state.screens["side"];
+        assert_eq!((side.original.as_path(), side.output.as_deref(), side.counter), (Path::new("/p/yours.jpg"), Some(Path::new("/d/out/side-5.jpg")), 5));
+    }
+
+    #[test]
+    fn a_top_level_field_that_does_not_read_keeps_every_entry_whole() {
+        let (store, _) = written("salvage-tally", |value| value["tally"] = serde_json::json!("x"));
+        let state = store.load();
+        assert!(state.on);
+        assert_eq!((state.screens["main"].output.as_deref(), state.screens["main"].counter), (Some(Path::new("/d/out/main-3.jpg")), 3));
+        assert_eq!((state.screens["side"].output.as_deref(), state.screens["side"].counter), (Some(Path::new("/d/out/side-5.jpg")), 5));
+    }
+
+    #[test]
+    fn a_file_that_is_not_json_loads_fresh_and_goes_aside() {
+        let store = Store::at(scratch("salvage-none"));
+        fs::create_dir_all(&store.root).unwrap();
+        fs::write(store.state_file(), b"not json at all").unwrap();
+        let state = store.load();
+        assert!(!state.on && state.screens.is_empty());
+        assert_eq!(fs::read(store.aside_file()).unwrap(), b"not json at all");
+        assert!(!store.kept_file().exists());
+    }
+
+    #[test]
+    fn the_kept_copy_holds_the_bytes_that_were_read() {
+        let (store, bytes) = written("salvage-kept", |value| value["screens"]["main"]["counter"] = serde_json::json!("x"));
+        let state = store.load();
+        store.save(&state).unwrap();
+        assert_eq!(fs::read(store.kept_file()).unwrap(), bytes);
+        assert!(store.load().screens.contains_key("main"));
     }
 
     #[test]
