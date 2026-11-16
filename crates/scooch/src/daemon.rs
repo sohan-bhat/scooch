@@ -364,6 +364,7 @@ pub struct Daemon {
     seen: Mutex<Option<u64>>,
     prints: Mutex<HashMap<String, u64>>,
     moved: Mutex<Vec<String>>,
+    handed: Mutex<Option<Snapshot>>,
 }
 
 #[derive(Default)]
@@ -407,7 +408,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None) }
     }
 
     pub fn quick_look(&self) -> bool {
@@ -422,7 +423,19 @@ impl Daemon {
         if trace() {
             eprintln!("{} quick look after {} ms, icons {now:016x} moved {moved}", stamp(), QUICK.as_millis());
         }
+        if moved {
+            *self.handed.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(snapshot);
+        }
         moved
+    }
+
+    pub fn gather(&self, worker: &Signal) {
+        self.wake_early();
+        if self.quick_look() {
+            worker.take();
+        } else {
+            worker.settle(QUIET, LIMIT);
+        }
     }
 
     pub fn wake_early(&self) -> bool {
@@ -582,6 +595,7 @@ impl Daemon {
     }
 
     pub fn tick(&self) -> Report {
+        let handed = self.handed.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
         let before = self.store.read();
         *self.ledger.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Ledger { expected: before.clone(), external: false };
         let mut state = parse(before.as_deref());
@@ -600,7 +614,10 @@ impl Daemon {
             if let Some(glider) = gliding.as_deref_mut() {
                 glider.know(&state.scales, &state.starts);
             }
-            let snapshot = self.desktop.snapshot();
+            let snapshot = match handed {
+                Some(snapshot) => Ok(snapshot),
+                None => self.desktop.snapshot(),
+            };
             lap("snapshot", &mut clock);
             let mut moved = false;
             if let Ok(snapshot) = &snapshot {
@@ -1388,12 +1405,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
         loop {
             worker.first();
             let busy = daemon.desktop.busy();
-            daemon.wake_early();
-            if daemon.quick_look() {
-                worker.take();
-            } else {
-                worker.settle(QUIET, LIMIT);
-            }
+            daemon.gather(&worker);
             if !stop.begin() {
                 return;
             }
@@ -3400,6 +3412,36 @@ pub mod tests {
         let started = Instant::now();
         signal.first();
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_drop_the_quick_look_saw_reads_the_desktop_once_before_the_glide() {
+        let (daemon, fake, _, _) = glide_rig("one-read", true);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        fake.place(vec![moved_subject()]);
+        *fake.drop_seen.lock().unwrap() = true;
+        fake.events.lock().unwrap().clear();
+        let signal = Signal::default();
+        signal.wake();
+        daemon.gather(&signal);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let events = events(&fake);
+        let glide = at(&events, "glide");
+        assert_eq!(events[..glide].iter().filter(|event| *event == "snapshot").count(), 1, "{events:?}");
+    }
+
+    #[test]
+    fn a_quick_look_that_saw_nothing_hands_nothing_to_the_tick() {
+        let (daemon, fake, _) = rig("quick-nothing", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        *fake.drop_seen.lock().unwrap() = true;
+        assert!(!daemon.quick_look());
+        fake.place(vec![corner()]);
+        let before = fake.snapshots.load(Ordering::SeqCst);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
     }
 
     fn two_screen_rig(name: &str) -> (Daemon, Arc<Fake>, Arc<Mutex<crate::glide::tests::Script>>) {
