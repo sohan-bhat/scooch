@@ -2,7 +2,7 @@ import './early';
 import './lighting';
 import { Canvas, useThree } from '@react-three/fiber';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { setConsoleFunction } from 'three';
+import { setConsoleFunction, type WebGLRenderer } from 'three';
 import { suspend } from 'suspend-react';
 import { detectTier } from '@/lib/tier';
 import { loadManifest } from '@/story/demo';
@@ -24,6 +24,18 @@ setConsoleFunction((type: string, message: unknown, ...params: unknown[]) => {
   const write = (console as unknown as Record<string, (...input: unknown[]) => void>)[type] ?? console.log;
   write(message, ...params);
 });
+
+function lostContext(gl: WebGLRenderer) {
+  return new Promise<void>((resolve) => {
+    if (gl.getContext().isContextLost()) resolve();
+    else gl.domElement.addEventListener('webglcontextlost', () => resolve(), { once: true });
+  });
+}
+
+function boundCompiles(gl: WebGLRenderer) {
+  const compile = gl.compileAsync.bind(gl);
+  gl.compileAsync = ((...input: Parameters<typeof compile>) => Promise.race([compile(...input), lostContext(gl).then(() => input[0])])) as typeof gl.compileAsync;
+}
 
 function Pauser({ host }: { host: React.RefObject<HTMLDivElement | null> }) {
   const setFrameloop = useThree((state) => state.setFrameloop);
@@ -118,6 +130,7 @@ export default function Stage({ onReady }: { onReady: () => void }) {
         camera={{ fov: 30, near: 0.03, far: 9, position: [0, 1.3, 1.6] }}
         onCreated={({ gl }) => {
           gl.debug.checkShaderErrors = import.meta.env.DEV;
+          boundCompiles(gl);
         }}
         aria-hidden
         tabIndex={-1}
