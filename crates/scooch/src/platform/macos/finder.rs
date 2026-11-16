@@ -10,7 +10,8 @@ use objc2_foundation::{ns_string, NSAppleEventDescriptor, NSAppleEventSendOption
 use scooch_core::Rect;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const NOT_ALLOWED: i32 = -1743;
 const WOULD_ASK: i32 = -1744;
@@ -19,14 +20,17 @@ const NO_SUCH_OBJECT: i32 = -1728;
 const TIMED_OUT: i32 = -1712;
 const BUILD: i32 = 1;
 const TIMEOUT: f64 = 2.0;
+const PATIENCE: Duration = Duration::from_millis(500);
 
 pub const DENIED: &str = "Scooch cannot see your desktop icons, so turn on Finder for scooch in System Settings, Privacy and Security, Automation.";
 pub const ASKING: &str = "macOS is asking whether scooch may control Finder, so choose Allow in that window.";
 
 type Answered = Arc<dyn Fn() + Send + Sync>;
+type Check = Arc<dyn Fn(bool) -> Access + Send + Sync>;
 
 static ANSWERED: OnceLock<Answered> = OnceLock::new();
 static WAITING: AtomicBool = AtomicBool::new(false);
+static ALLOWED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Consent {
@@ -241,41 +245,85 @@ fn fetch(property_code: u32) -> Result<Option<Retained<NSAppleEventDescriptor>>>
         bail!("{ASKING}");
     }
     match send(property_code) {
-        Err(status @ (WOULD_ASK | TIMED_OUT)) => match consent() {
-            Consent::Granted => send(property_code).or_else(failure),
-            Consent::AskLater => Err(anyhow!("{ASKING}")),
-            _ => failure(status),
-        },
-        other => other.or_else(failure),
+        Ok(reply) => {
+            ALLOWED.store(true, Ordering::SeqCst);
+            Ok(reply)
+        }
+        Err(TIMED_OUT) if ALLOWED.load(Ordering::SeqCst) => failure(TIMED_OUT),
+        Err(status @ (WOULD_ASK | TIMED_OUT)) => {
+            ALLOWED.store(false, Ordering::SeqCst);
+            match consent() {
+                Consent::Granted => {
+                    ALLOWED.store(true, Ordering::SeqCst);
+                    send(property_code).or_else(failure)
+                }
+                Consent::AskLater => Err(anyhow!("{ASKING}")),
+                _ => failure(status),
+            }
+        }
+        Err(status) => failure(status),
     }
 }
 
 fn consent() -> Consent {
-    match consent_for(access(false), ANSWERED.get().is_some()) {
+    if let Some(answered) = ANSWERED.get().cloned() {
+        return consent_aside(Arc::new(access), answered, &WAITING, PATIENCE);
+    }
+    match consent_for(access(false), false) {
         Consent::AskNow if access(true) == Access::Allowed => Consent::Granted,
         Consent::AskNow => Consent::Refused,
-        Consent::AskLater => {
-            ask_later();
-            Consent::AskLater
-        }
         other => other,
     }
 }
 
-fn ask_later() {
-    let Some(answered) = ANSWERED.get().cloned() else { return };
-    if !start_asking(&WAITING) {
-        return;
+pub fn consent_aside(check: Check, answered: Answered, flag: &'static AtomicBool, patience: Duration) -> Consent {
+    if !start_asking(flag) {
+        return Consent::AskLater;
     }
+    let slot = Arc::new((Mutex::new((None::<Access>, false)), Condvar::new()));
+    let told = slot.clone();
     let spawned = std::thread::Builder::new().name("scooch-consent".into()).spawn(move || {
-        let answer = objc2::rc::autoreleasepool(|_| access(true));
-        WAITING.store(false, Ordering::SeqCst);
+        let first = objc2::rc::autoreleasepool(|_| check(false));
+        if first != Access::WouldAsk {
+            flag.store(false, Ordering::SeqCst);
+        }
+        let late = {
+            let mut held = told.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            held.0 = Some(first);
+            told.1.notify_all();
+            held.1
+        };
+        if first != Access::WouldAsk {
+            if late {
+                answered();
+            }
+            return;
+        }
+        let answer = objc2::rc::autoreleasepool(|_| check(true));
+        flag.store(false, Ordering::SeqCst);
         if answer == Access::Allowed {
             answered();
         }
     });
     if spawned.is_err() {
-        WAITING.store(false, Ordering::SeqCst);
+        flag.store(false, Ordering::SeqCst);
+        return Consent::AskLater;
+    }
+    let deadline = Instant::now() + patience;
+    let mut held = slot.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    while held.0.is_none() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        held = slot.1.wait_timeout(held, left).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+    }
+    match held.0 {
+        Some(first) => consent_for(first, true),
+        None => {
+            held.1 = true;
+            Consent::AskLater
+        }
     }
 }
 
@@ -429,6 +477,78 @@ mod tests {
         flag.store(false, Ordering::SeqCst);
         assert!(start_asking(&flag));
         assert!(!ASKING.contains(['\u{2014}', '\u{2013}', ';', '(', ')']) && !ASKING.contains(": "));
+    }
+
+    fn until(done: impl Fn() -> bool) -> bool {
+        let started = Instant::now();
+        while !done() && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        done()
+    }
+
+    fn settle(flag: &AtomicBool) -> bool {
+        until(|| !flag.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn a_consent_check_that_never_answers_leaves_the_tick_free() {
+        let flag: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let woke = Arc::new(AtomicBool::new(false));
+        let told = woke.clone();
+        let check: Check = Arc::new(|_| {
+            std::thread::sleep(Duration::from_secs(3));
+            Access::Allowed
+        });
+        let started = Instant::now();
+        assert_eq!(consent_aside(check, Arc::new(move || told.store(true, Ordering::SeqCst)), flag, Duration::from_millis(100)), Consent::AskLater);
+        assert!(started.elapsed() < Duration::from_secs(1), "the check held the tick for {:?}", started.elapsed());
+        assert!(flag.load(Ordering::SeqCst));
+        assert!(until(|| woke.load(Ordering::SeqCst)) && !flag.load(Ordering::SeqCst), "the late answer did not wake the daemon");
+    }
+
+    #[test]
+    fn a_second_tick_during_a_slow_check_starts_no_second_check() {
+        let flag: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let check: Check = Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(600));
+            Access::Allowed
+        });
+        let quiet: Answered = Arc::new(|| {});
+        assert_eq!(consent_aside(check.clone(), quiet.clone(), flag, Duration::from_millis(50)), Consent::AskLater);
+        assert_eq!(consent_aside(check, quiet, flag, Duration::from_millis(50)), Consent::AskLater);
+        assert!(settle(flag));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_late_refusal_wakes_the_daemon() {
+        let flag: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let woke = Arc::new(AtomicBool::new(false));
+        let told = woke.clone();
+        let check: Check = Arc::new(|_| {
+            std::thread::sleep(Duration::from_millis(300));
+            Access::Denied
+        });
+        assert_eq!(consent_aside(check, Arc::new(move || told.store(true, Ordering::SeqCst)), flag, Duration::from_millis(50)), Consent::AskLater);
+        assert!(until(|| woke.load(Ordering::SeqCst)) && !flag.load(Ordering::SeqCst), "a late refusal did not wake the daemon");
+    }
+
+    #[test]
+    fn a_quick_consent_answer_decides_at_once() {
+        for (first, asked, wanted, wakes) in [(Access::Allowed, Access::Allowed, Consent::Granted, false), (Access::Denied, Access::Allowed, Consent::Refused, false), (Access::WouldAsk, Access::Allowed, Consent::AskLater, true), (Access::WouldAsk, Access::Denied, Consent::AskLater, false)] {
+            let flag: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+            let woke = Arc::new(AtomicBool::new(false));
+            let told = woke.clone();
+            let check: Check = Arc::new(move |ask| if ask { asked } else { first });
+            assert_eq!(consent_aside(check, Arc::new(move || told.store(true, Ordering::SeqCst)), flag, Duration::from_secs(5)), wanted, "{first:?} then {asked:?}");
+            assert!(settle(flag), "{first:?} then {asked:?} left the flag up");
+            assert!(!wakes || until(|| woke.load(Ordering::SeqCst)), "{first:?} then {asked:?} did not wake the daemon");
+            assert_eq!(woke.load(Ordering::SeqCst), wakes, "{first:?} then {asked:?}");
+        }
     }
 
     #[test]

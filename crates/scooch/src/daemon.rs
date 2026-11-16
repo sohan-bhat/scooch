@@ -2578,6 +2578,36 @@ pub mod tests {
     }
 
     #[test]
+    fn after_a_late_allow_the_wallpaper_follows_what_use_wrote() {
+        let asking = "macOS is asking whether scooch may control Finder, so choose Allow in that window.";
+        let (daemon, fake, original) = rig("late-allow", vec![screen("main", 0.0, 1.0)]);
+        let signal = Arc::new(Signal::default());
+        prime(fake.as_ref(), &signal);
+        let wake = fake.watched.lock().unwrap().take().expect("the daemon handed the adapter a wake before ticking");
+        fake.place(vec![subject()]);
+        *fake.broken.lock().unwrap() = Some(asking.into());
+        assert_eq!(daemon.tick().problem.as_deref(), Some(asking));
+        let chosen = picture(original.parent().unwrap(), "chosen.png");
+        let mut state = daemon.store.load();
+        crate::commands::choose_picture(&mut state, fake.as_ref(), &daemon.store, &chosen).unwrap();
+        daemon.store.save(&state).unwrap();
+        assert_eq!(daemon.tick().problem.as_deref(), Some(asking));
+        *fake.broken.lock().unwrap() = None;
+        wake();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let waiting = signal.clone();
+        std::thread::spawn(move || {
+            waiting.first();
+            let _ = sender.send(());
+        });
+        assert!(receiver.recv_timeout(Duration::from_secs(2)).is_ok(), "the late answer did not wake the daemon");
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let entry = daemon.store.load().screens["main"].clone();
+        assert_eq!(entry.source, chosen);
+        assert_eq!(Some(fake.showing("main")), entry.output);
+    }
+
+    #[test]
     fn a_stop_waits_for_the_running_tick() {
         let stop = Arc::new(Stop::default());
         assert!(stop.begin());
