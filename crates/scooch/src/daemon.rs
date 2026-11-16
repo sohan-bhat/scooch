@@ -1000,7 +1000,7 @@ impl Daemon {
                     if let Some(id) = prepared {
                         let (_, next) = self.fresh_name(&screen.id, entry.counter, format.extension(), current);
                         let target = self.store.tables_for(&next, tables_key);
-                        match std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| write_atomic(&target, &bundle.tables_to_bytes())) {
+                        match std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| crate::state::write_unsynced(&target, &bundle.tables_to_bytes())) {
                             Ok(()) => {
                                 if glider.go(id, &from, &target) {
                                     flight = Some(id);
@@ -1045,7 +1045,7 @@ impl Daemon {
             let written = match &made {
                 Some(made) if *made != wanted => std::fs::rename(made, &wanted).map_err(anyhow::Error::from),
                 Some(_) => Ok(()),
-                None => std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| write_atomic(&wanted, &bundle.tables_to_bytes())),
+                None => std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| crate::state::write_unsynced(&wanted, &bundle.tables_to_bytes())),
             };
             self.keep_canvas(&screen.id, tables_key, &bundle);
             drop(bundle);
@@ -3220,6 +3220,26 @@ pub mod tests {
         }
         wanted.sort();
         assert_eq!(kept, wanted);
+    }
+
+    #[test]
+    fn a_torn_tables_file_ends_in_a_plain_swap_and_a_fresh_file() {
+        let (daemon, fake, _, _) = glide_rig("torn-tables", true);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let tables_of = |daemon: &Daemon| {
+            let state = daemon.store.load();
+            daemon.store.tables_for(state.screens["main"].output.as_ref().unwrap(), tables_key(&state.screens["main"].source, &state.options).unwrap())
+        };
+        let torn = tables_of(&daemon);
+        let bytes = std::fs::read(&torn).unwrap();
+        std::fs::write(&torn, &bytes[..bytes.len() / 2]).unwrap();
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert!(!events(&fake).iter().any(|event| event.starts_with("glide ")), "a torn tables file glided");
+        let fresh = tables_of(&daemon);
+        assert!(fresh != torn && fresh.is_file() && stale_tables(&fresh).is_none(), "{fresh:?}");
     }
 
     #[test]

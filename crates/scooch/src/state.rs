@@ -408,6 +408,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub fn write_parts(path: &Path, parts: &[&[u8]]) -> Result<()> {
+    write_with(path, parts, true)
+}
+
+pub fn write_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_with(path, &[bytes], false)
+}
+
+fn write_with(path: &Path, parts: &[&[u8]], sync: bool) -> Result<()> {
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let serial = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -415,7 +423,10 @@ pub fn write_parts(path: &Path, parts: &[&[u8]]) -> Result<()> {
     let written = fs::File::create(&partial)
         .and_then(|mut file| {
             parts.iter().try_for_each(|part| file.write_all(part))?;
-            file.sync_all()
+            if sync {
+                file.sync_all()?;
+            }
+            Ok(())
         })
         .and_then(|()| fs::rename(&partial, path));
     if written.is_err() {
