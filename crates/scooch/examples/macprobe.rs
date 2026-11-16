@@ -418,6 +418,9 @@ mod probe {
         if std::env::args().nth(1).as_deref() == Some("cold-split") {
             return cold_split(PathBuf::from(std::env::args().nth(2).unwrap_or_default()), PathBuf::from(std::env::args().nth(3).unwrap_or_default()));
         }
+        if std::env::args().nth(1).as_deref() == Some("slow-check") {
+            return slow_check(std::env::args().skip(2).collect());
+        }
         if std::env::args().nth(1).as_deref() == Some("gpu-bench") {
             return gpu_bench(PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "macbench".into())));
         }
@@ -2842,6 +2845,8 @@ mod probe {
         waited: Option<f64>,
         predicted: Option<f64>,
         split: Option<String>,
+        took: Option<f64>,
+        line: String,
     }
 
     fn number_after(line: &str, key: &str) -> Option<f64> {
@@ -2880,6 +2885,8 @@ mod probe {
         let later_ready = log.iter().find(|line| line.contains("glide helper ready ")).and_then(|line| number_after(line, "glide helper ready "));
         let from_launch = |key: &str| launch.zip(decision.and_then(|line| number_after(line, key))).map(|(at, after)| at + after);
         Cold {
+            took: log.iter().find_map(|line| line.split("early launch at the wake in ").nth(1).or_else(|| line.split("helper launched in ").nth(1))).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()),
+            line: String::new(),
             early: log.iter().any(|line| line.contains("glide early launch")),
             wake: log.iter().find(|line| line.contains(" wake ") && !line.contains(" glide ")).and_then(|line| stamp_of(line)).map(after_drop),
             launch,
@@ -2922,8 +2929,8 @@ mod probe {
             let rested = rest_for_cold(p, *last);
             let cold = cold_drag(p, screen, name, places);
             *last = Instant::now();
-            p.line(format!(
-                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}",
+            let line = format!(
+                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}, launch took {} ms",
                 index + 1,
                 cold.glided,
                 cold.skip,
@@ -2944,9 +2951,11 @@ mod probe {
                 cold.shown,
                 cold.split,
                 cold.from,
-                cold.tick
-            ));
-            cold
+                cold.tick,
+                rounded(cold.took)
+            );
+            p.line(line.clone());
+            Cold { line, ..cold }
         }
     }
 
@@ -2969,6 +2978,100 @@ mod probe {
         let home = p.home.clone();
         wait_until(Duration::from_secs(15), || fs::read_to_string(home.join("watch.pid")).ok().and_then(|text| text.trim().parse::<i32>().ok()).is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)).context("the restarted daemon wrote no pid file")?;
         Ok(true)
+    }
+
+    const SLOW_LIMIT: f64 = 60.0;
+
+    struct Judged {
+        direct: Vec<Option<f64>>,
+        glided: usize,
+        pairs: Vec<f64>,
+        clock: Option<f64>,
+    }
+
+    impl Judged {
+        fn largest(&self) -> Option<f64> {
+            self.direct.iter().flatten().copied().reduce(f64::max)
+        }
+
+        fn direct_ok(&self) -> bool {
+            self.direct.len() == 10 && self.glided == 0 && self.direct.iter().all(|value| value.is_some_and(|value| value <= SLOW_LIMIT))
+        }
+
+        fn clock_ok(&self) -> bool {
+            self.pairs.len() == 10 && self.clock.is_some_and(|clock| clock <= SLOW_LIMIT)
+        }
+
+        fn said(&self) -> String {
+            let round = |values: &[Option<f64>]| values.iter().map(|value| value.map_or("none".to_string(), |value| format!("{value:.0}"))).collect::<Vec<_>>().join(", ");
+            let pairs: Vec<Option<f64>> = self.pairs.iter().map(|pair| Some(*pair)).collect();
+            format!(
+                "by the daemon's own time waited plus the early and open laps plus the launch per slow drag [{}] ms, largest {} ms, glided {}, by the daemon clock each slow drag against its off drag [{}] ms, mean without the largest and the smallest {} ms, limit {SLOW_LIMIT} ms",
+                round(&self.direct),
+                rounded(self.largest()),
+                self.glided,
+                round(&pairs),
+                rounded(self.clock)
+            )
+        }
+
+        fn verdicts(&self, p: &mut Probe) {
+            if !self.direct_ok() {
+                p.fail("a slow helper held the plain swap back by more than 60 ms of the daemon's own time");
+            }
+            if !self.clock_ok() {
+                p.fail("a slow helper held the plain swap back by more than 60 ms by the daemon clock");
+            }
+        }
+    }
+
+    fn laps_of(line: &str) -> Option<(f64, Vec<(String, f64)>)> {
+        let rest = line.split("began Some(").nth(1)?;
+        let began = rest.split(')').next()?.parse::<f64>().ok()?;
+        let laps = rest.split(" ms after the drop, took ").nth(1)?.split(", sessions hold").next()?;
+        Some((began, laps.split(", ").skip(1).filter_map(|lap| lap.rsplit_once(' ').and_then(|(name, value)| Some((name.to_string(), value.parse::<f64>().ok()?)))).collect()))
+    }
+
+    fn daemon_clock(line: &str) -> Option<f64> {
+        laps_of(line).map(|(began, laps)| began + laps.iter().filter(|(name, _)| name != "later").map(|(_, value)| value).sum::<f64>())
+    }
+
+    fn own_time(line: &str) -> Option<f64> {
+        let (_, laps) = laps_of(line)?;
+        let lap = |wanted: &str| laps.iter().find(|(name, _)| name == wanted).map_or(0.0, |(_, value)| *value);
+        let launched = number_after(line, "launch took ").or_else(|| number_after(line, "in ms wake ").zip(number_after(line, ", launch ")).map(|(wake, launch)| (launch - wake).max(0.0)));
+        Some(number_after(line, "waited ").unwrap_or(0.0) + lap("early") + lap("open") + launched.unwrap_or(0.0))
+    }
+
+    fn judge_slow(slow: &[String], off: &[String]) -> Judged {
+        let pairs: Vec<f64> = slow.iter().zip(off).filter_map(|(slow, off)| daemon_clock(slow).zip(daemon_clock(off)).map(|(a, b)| a - b)).collect();
+        let mut sorted = pairs.clone();
+        sorted.sort_by(f64::total_cmp);
+        let inner = sorted.get(1..sorted.len().saturating_sub(1)).filter(|inner| !inner.is_empty());
+        let clock = inner.map(|inner| inner.iter().sum::<f64>() / inner.len() as f64);
+        Judged { direct: slow.iter().map(|line| own_time(line)).collect(), glided: slow.iter().filter(|line| line.contains(", glided true,")).count(), pairs, clock }
+    }
+
+    fn slow_check(paths: Vec<String>) -> ExitCode {
+        let mut failed = false;
+        for path in paths {
+            let Ok(text) = fs::read_to_string(&path) else {
+                println!("{path} could not be read");
+                failed = true;
+                continue;
+            };
+            let pick = |arm: &str| text.lines().filter(|line| line.split(&format!("- {arm} ")).nth(1).is_some_and(|rest| rest.split(':').next().is_some_and(|index| index.parse::<u32>().is_ok()))).map(str::to_string).collect::<Vec<String>>();
+            let judged = judge_slow(&pick("slow"), &pick("off"));
+            println!("{path}");
+            println!("  {}", judged.said());
+            println!("  direct {}, daemon clock {}", if judged.direct_ok() { "passes" } else { "fails" }, if judged.clock_ok() { "passes" } else { "fails" });
+            failed |= !judged.direct_ok() || !judged.clock_ok();
+        }
+        if failed {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        }
     }
 
     fn middle(values: &[u128]) -> Option<u128> {
@@ -3052,10 +3155,10 @@ mod probe {
             let glided_slow = slow.iter().filter(|cold| cold.glided).count();
             let pairs: Vec<i128> = slow.iter().zip(&off).filter_map(|(slow, off)| slow.set.zip(off.set).map(|(a, b)| a as i128 - b as i128)).collect();
             let gap = slow_set.zip(off_set).map(|(a, b)| a as i128 - b as i128);
-            p.line(format!("- slow helper drags glided {glided_slow} of 10, drop to set median {slow_set:?} ms against {off_set:?} ms with the glide off, a gap of {gap:?} ms, each drag against the same drag with the glide off {pairs:?} ms"));
-            if glided_slow > 0 || gap.is_none_or(|gap| gap > 60) || sets(&slow).len() < 10 {
-                p.fail("a slow helper held the plain swap back by more than 60 ms");
-            }
+            let lines = |round: &[Cold]| round.iter().map(|cold| cold.line.clone()).collect::<Vec<String>>();
+            let judged = judge_slow(&lines(&slow), &lines(&off));
+            p.line(format!("- slow helper drags glided {glided_slow} of 10, drop to set as the probe saw it median {slow_set:?} ms against {off_set:?} ms with the glide off, a gap of {gap:?} ms, each drag against the same drag with the glide off {pairs:?} ms, reported only, {}", judged.said()));
+            judged.verdicts(p);
         }
         bare_wakes(p);
         Ok(())
