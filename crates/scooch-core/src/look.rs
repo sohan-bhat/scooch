@@ -391,7 +391,29 @@ fn sky_region(lab: &[[f32; 3]], busy: &[f32], grid: &Grid) -> Vec<f32> {
     }
     let sky: Vec<bool> = votes.iter().map(|(yes, all)| 2 * yes > *all).collect();
     let roots: Vec<usize> = (0..top).map(|i| root(&mut parent, i)).collect();
-    origin.par_iter().map(|o| if *o != u32::MAX && sky[roots[*o as usize]] { 1.0 } else { 0.0 }).collect()
+    let under = undecided(&lab[..top], busy, &ways, w);
+    origin.par_iter().enumerate().map(|(i, o)| if *o != u32::MAX { if sky[roots[*o as usize]] { 1.0 } else { 0.0 } } else if under.get(i).copied().unwrap_or(false) { 0.5 } else { 0.0 }).collect()
+}
+
+fn undecided(top: &[[f32; 3]], busy: &[f32], ways: &[u8], w: usize) -> Vec<bool> {
+    let mut queue: VecDeque<u32> = (0..top.len()).filter(|i| busy[*i] < SKY_BUSY && top[*i][0] <= WHITE_LIGHT && top[*i][1].hypot(top[*i][2]) < SKY_CHROMA).map(|i| i as u32).collect();
+    if queue.is_empty() {
+        return Vec::new();
+    }
+    let mut reached = vec![false; ways.len()];
+    for i in &queue {
+        reached[*i as usize] = true;
+    }
+    while let Some(i) = queue.pop_front() {
+        let i = i as usize;
+        for (k, n) in [i.wrapping_sub(1), i + 1, i.wrapping_sub(w), i + w].into_iter().enumerate() {
+            if ways[i] & 1 << k != 0 && !reached[n] {
+                reached[n] = true;
+                queue.push_back(n as u32);
+            }
+        }
+    }
+    reached
 }
 
 pub(crate) fn byte(v: f32) -> u8 {
