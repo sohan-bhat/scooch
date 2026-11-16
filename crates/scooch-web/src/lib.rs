@@ -348,7 +348,7 @@ mod tests {
         bare.options = off;
         on.screen(w, h);
         bare.screen(w, h);
-        let same = |a: &Answer, b: &Answer| a.bundle.xmap == b.bundle.xmap && a.bundle.ymap == b.bundle.ymap;
+        let same = |a: &Answer, b: &Answer| a.bundle == b.bundle && a.fits == b.fits;
         assert!(same(&on.drop_icons(&icons), &bare.drop_icons(&icons)), "at rest the page placed the bare picture unlike scenery off");
         let mut moving = icons.clone();
         for step in 0..12 {
@@ -358,5 +358,10 @@ mod tests {
             assert!(same(&on.drag(&moving, Duration::from_secs(1), &zero), &bare.drag(&moving, Duration::from_secs(1), &zero)), "drag step {step} placed the bare picture unlike scenery off");
         }
         assert!(same(&on.drop_icons(&moving), &bare.drop_icons(&moving)), "the drop after the drag placed the bare picture unlike scenery off");
+        for icons in [&icons, &moving] {
+            let placement = scooch_core::solve(&analysis, &scene(w, h, icons), &off, None);
+            let drawn = |options: &Options| scooch_core::bundle(&image, &analysis, &placement, &scene(w, h, icons), options);
+            assert!(drawn(&auto) == drawn(&off), "the bare picture drawn with scenery on differs from scenery off, so the page must also draw with the session's options");
+        }
     }
 }

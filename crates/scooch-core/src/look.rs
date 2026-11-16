@@ -386,7 +386,7 @@ fn sky_region(lab: &[[f32; 3]], busy: &[f32], grid: &Grid) -> Vec<f32> {
     for i in (0..top).filter(|i| open[*i]) {
         let (l, chroma, hue) = colour_of([soft[0][i], soft[1][i], soft[2][i]]);
         let vote = &mut votes[root(&mut parent, i)];
-        vote.0 += ((chroma < SKY_SEED.1 && l > WHITE_LIGHT) || (SKY_SEED.0..=SKY_WINDOW.1).contains(&hue)) as usize;
+        vote.0 += usize::from(if chroma < SKY_SEED.1 { l > WHITE_LIGHT } else { (SKY_SEED.0..=SKY_WINDOW.1).contains(&hue) });
         vote.1 += 1;
     }
     let sky: Vec<bool> = votes.iter().map(|(yes, all)| 2 * yes > *all).collect();

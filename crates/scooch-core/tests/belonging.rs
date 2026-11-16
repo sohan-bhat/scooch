@@ -123,7 +123,17 @@ fn made(name: &str) -> RgbImage {
                 let (blue, white, cream) = (oklch(0.62, 0.09, 245.0), oklch(0.9, 0.01, 100.0), oklch(0.88, 0.03, 85.0));
                 mix(mix(blue, white, smoothstep(0.36, 0.44, u)), cream, smoothstep(0.66, 0.74, u)).map(|c| c + 2.0 * grain)
             }
-            "pink-white" => oklch(0.85, 0.03, 350.0).map(|c| c + 2.0 * grain),
+            "pink-over-teal" => mix(oklch(0.85, 0.03, 350.0), scooch_core::ISLAND_WATER.map(|c| c as f32), ((v - 0.3) / 0.45).clamp(0.0, 1.0)).map(|c| c + 2.0 * grain),
+            grey if grey.starts_with("grey-over-teal-") => {
+                let seed = grey["grey-over-teal-".len()..].parse::<u32>().unwrap_or(1);
+                let (cast, turn) = (250f32.to_radians(), (360.0 * hash(x / 3, y / 3, seed)).to_radians());
+                let (a, b) = (0.008 * cast.cos() + 0.05 * turn.cos(), 0.008 * cast.sin() + 0.05 * turn.sin());
+                if v < 0.25 {
+                    oklch(0.5, a.hypot(b), b.atan2(a).to_degrees())
+                } else {
+                    mix(oklch(0.5, 0.008, 250.0), scooch_core::ISLAND_WATER.map(|c| c as f32), ((v - 0.25) / 0.35).clamp(0.0, 1.0))
+                }
+            }
             "teal-blue-corner" => {
                 let corner = smoothstep(0.7, 0.9, u) * (1.0 - smoothstep(0.15, 0.35, v));
                 mix(oklch(0.5, 0.08, 205.0), oklch(0.42, 0.1, 250.0), corner).map(|c| c + 2.0 * grain)
@@ -465,7 +475,7 @@ fn kinds(image: &RgbImage, (w, h): (u32, u32)) -> (f64, f64) {
 }
 
 #[test]
-fn one_top_cell_does_not_decide_sky_or_water() {
+fn teal_water_up_to_the_top_edge_stays_water() {
     let (w, h) = (1440u32, 900u32);
     let sea = made("sea-210-216");
     let (clouds, land) = kinds(&sea, (w, h));
@@ -492,9 +502,25 @@ fn the_top_edge_votes_cell_by_cell() {
     let blue = sky_share(&made("mixed-top"), (w, h), |x| x < 0.3);
     println!("mixed-top: {blue:.3} of the blue reads as sky");
     assert!(blue > 0.95, "a top row of 40% blue, 30% white and 30% cream did not read as sky: {blue:.3}");
-    let pink = sky_share(&made("pink-white"), (w, h), |_| true);
-    println!("pink-white: {pink:.3} reads as sky");
-    assert!(pink < 0.05, "a pink white at hue 350 read as blue sky: {pink:.3}");
+    let (clouds, land) = kinds(&made("pink-over-teal"), (w, h));
+    println!("pink-over-teal: clouds {clouds:.4} land {land:.4}");
+    assert!(clouds == 0.0 && land > 0.01, "a pink white top at hue 350 voted the teal water under it into sky: clouds {clouds:.4} land {land:.4}");
+}
+
+#[test]
+fn a_dark_grey_top_votes_neither_blue_nor_light() {
+    let (w, h) = (1440u32, 900u32);
+    let got: Vec<(String, f64, f64)> = (1..=4)
+        .map(|seed| {
+            let name = format!("grey-over-teal-{seed}");
+            let (clouds, land) = kinds(&made(&name), (w, h));
+            println!("{name}: clouds {clouds:.4} land {land:.4}");
+            (name, clouds, land)
+        })
+        .collect();
+    for (name, clouds, land) in got {
+        assert!(clouds == 0.0 && land > 0.01, "{name}: a dark grey top with a noise hue voted the teal water under it into sky: clouds {clouds:.4} land {land:.4}");
+    }
 }
 
 #[test]
