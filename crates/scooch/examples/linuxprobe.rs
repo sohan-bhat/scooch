@@ -114,6 +114,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             self.failed.push(text);
         }
 
+        fn kde_wayland(&self) -> bool {
+            self.kind == Some(Kind::Kde) && self.session == Session::Wayland
+        }
+
+        fn xfce_x11(&self) -> bool {
+            self.kind == Some(Kind::Xfce) && self.session == Session::X11
+        }
+
         fn soft(&mut self, name: &str, reason: &str) {
             let text = format!("{name} on {}, {reason}", std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "no desktop".into()));
             self.line(format!("- **soft** {text}"));
@@ -282,10 +290,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                             p.raw(format!("snapshot icon {}", show(icon)));
                         }
                     }
-                    Err(error) => p.line(format!("- adapter snapshot failed {error:#}")),
+                    Err(error) => p.fail(format!("the adapter could not read the icons {error:#}")),
                 }
             }
-            Err(error) => p.line(format!("- adapter failed {error:#}")),
+            Err(error) => p.fail(format!("the adapter for this desktop failed {error:#}")),
         }
         defaults(p);
         Ok(())
@@ -1088,9 +1096,17 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let started = Instant::now();
             let set = linux.set_wallpaper(&screen, &path);
             p.line(format!("- set the {kind} picture {:?} in {} ms", set.as_ref().map_err(|error| error.to_string()), started.elapsed().as_millis()));
+            if p.kind == Some(Kind::Cinnamon) {
+                let uri = record::Settings::get(&Gsettings, "org.cinnamon.desktop.background picture-uri").ok().flatten();
+                p.line(format!("  - Cinnamon `picture-uri` right after the adapter's set, before any write back {uri:?}"));
+            }
             std::thread::sleep(Duration::from_secs(2));
             let back = linux.wallpaper(&screen);
-            p.line(format!("  - read back {:?}, same path {}", back.as_ref().map_err(|error| error.to_string()), back.as_ref().is_ok_and(|back| back.as_deref() == Some(path.as_path()))));
+            let same = back.as_ref().is_ok_and(|back| back.as_deref() == Some(path.as_path()));
+            p.line(format!("  - read back {:?}, same path {same}", back.as_ref().map_err(|error| error.to_string())));
+            if set.is_err() || !same {
+                p.fail(format!("setting the {kind} picture and reading it back did not give the same path"));
+            }
             match capture(p.session, &physical_frame) {
                 Ok(shot) => {
                     let _ = fs::write(p.out.join(format!("wallpaper-{}.png", kind.to_lowercase())), scooch_core::encode_png(&shot)?);
@@ -1105,37 +1121,45 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn restore(p: &mut Probe, linux: &Linux, screen: &Screen) {
-        let original = p.originals.iter().find(|(seen, _)| seen.id == screen.id).and_then(|(_, path)| path.clone());
-        match original {
-            Some(path) => {
-                let result = linux.set_wallpaper(screen, &path);
-                p.line(format!("- restored to {} {:?}", path.display(), result.map_err(|error| error.to_string())));
-            }
-            None => {
-                let desktop = match p.kind {
-                    Some(Kind::Gnome) => "gnome",
-                    Some(Kind::Kde) => "kde",
-                    Some(Kind::Xfce) => "xfce",
-                    Some(Kind::Cinnamon) => "cinnamon",
-                    Some(Kind::Mate) => "mate",
-                    None => "",
-                };
-                let store: Box<dyn record::Settings> = match p.kind {
-                    Some(Kind::Xfce) => Box::new(Xfconf),
-                    Some(Kind::Kde) => Box::new(Plasma),
-                    _ => Box::new(Gsettings),
-                };
-                let result = record::restore(store.as_ref(), &record::file(&p.home), desktop);
-                p.line(format!("- no original picture was recorded, restored the record directly {:?}", result.map_err(|error| error.to_string())));
-            }
+        let recorded: Vec<(Box<dyn record::Settings>, String, Option<String>)> = keys(p, screen).into_iter().filter_map(|(store, key)| p.recorded.iter().find(|(seen, _)| *seen == key).map(|(_, value)| value.clone()).map(|value| (store, key, value))).collect();
+        if recorded.is_empty() {
+            let original = p.originals.iter().find(|(seen, _)| seen.id == screen.id).and_then(|(_, path)| path.clone());
+            let person = p.home.join("person");
+            let home = p.home.clone();
+            let result = original.as_ref().map(|path| {
+                let _ = fs::create_dir_all(&person);
+                std::env::set_var("SCOOCH_HOME", &person);
+                let result = linux.set_wallpaper(screen, path);
+                std::env::set_var("SCOOCH_HOME", &home);
+                result
+            });
+            p.line(format!("- no setting was recorded for `{}` at the start, so its original picture {:?} was set the way a person would {:?}", screen.id, original, result.map(|result| result.map_err(|error| error.to_string()))));
+            return;
         }
+        let listed = p.kind == Some(Kind::Cinnamon) && recorded.iter().any(|(_, key, _)| key.ends_with(" picture-uri-list"));
+        for (store, key, value) in &recorded {
+            if listed && key.ends_with(" picture-uri") {
+                p.line(format!("- `{key}` not written back, since Scooch never writes it on a Cinnamon with a picture list"));
+                continue;
+            }
+            let result = store.set(key, value.as_deref());
+            p.line(format!("- `{key}` written back to the recorded value {:?}", result.map_err(|error| error.to_string())));
+        }
+        let _ = fs::remove_file(record::file(&p.home));
         std::thread::sleep(Duration::from_secs(1));
-        for (store, key) in keys(p, screen) {
+        for (store, key, value) in recorded {
             let now_value = store.get(&key).ok().flatten();
-            let before = p.recorded.iter().find(|(seen, _)| *seen == key).map(|(_, value)| value.clone());
-            p.line(format!("- `{key}` now {now_value:?}, equal to the recorded value {}", before.as_ref().is_some_and(|before| *before == now_value)));
+            p.line(format!("- `{key}` now {now_value:?}, equal to the recorded value {}", now_value == value));
+            if now_value == value {
+                continue;
+            }
+            let empty = now_value.as_deref().is_none_or(|text| text.trim_matches('\'').is_empty());
+            if listed && key.ends_with(" picture-uri") && empty {
+                p.soft("`picture-uri` after the restore", "Cinnamon empties picture-uri when the picture list is written, and the list and the mode went back to their recorded values");
+            } else {
+                p.fail(format!("`{key}` did not go back to the value recorded at the start"));
+            }
         }
-        p.line(format!("- record file left behind {}", record::file(&p.home).exists()));
     }
 
     fn proc_numbers(process: u32) -> Option<(u64, u64, u64)> {
@@ -1182,6 +1206,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let home = p.home.clone();
         let first = wait_until(Duration::from_secs(60), || rendered(&home));
         p.line(format!("- first render after {:?} ms", first.map(|time| time.as_millis())));
+        if first.is_none() {
+            p.fail("the daemon did not render within 60 s of its start");
+        }
         std::thread::sleep(Duration::from_secs(2));
         let mut times = Vec::new();
         let frame = primary_frame(p).unwrap_or(screen.frame);
@@ -1194,12 +1221,21 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             });
             let target = seen.unwrap_or((frame.x + SUBJECT.0 * frame.w, frame.y + SUBJECT.1 * frame.h));
             let moved = Instant::now();
-            let detail = move_icon(p, target).unwrap_or_else(|error| format!("failed {error:#}"));
+            let tried = move_icon(p, target);
+            let could = tried.is_ok();
+            let detail = tried.unwrap_or_else(|error| format!("failed {error:#}"));
             let changed = wait_until(Duration::from_secs(10), || linux.wallpaper(&screen).ok().flatten() != before);
             let latency = changed.map(|_| moved.elapsed().as_millis());
             let moved_icons = icons(&linux) != rects_before;
             let place = seen.map_or("not found, so the picture's own spot".to_string(), |(x, y)| format!("{x:.0},{y:.0}"));
             p.line(format!("- move {round} onto the subject seen at {place}, {detail}, icons moved by the adapter's reading {moved_icons}, new wallpaper after {latency:?} ms"));
+            if !could && p.kde_wayland() {
+                if round == 1 {
+                    p.soft("the moves onto the subject", "KDE on Wayland gives the probe no way to move an icon without a person");
+                }
+            } else if latency.is_none() {
+                p.fail(format!("move {round} onto the subject brought no new wallpaper within 10 s, {detail}"));
+            }
             times.extend(latency);
             std::thread::sleep(Duration::from_millis(800));
         }
@@ -1220,6 +1256,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             code = wait_until(Duration::from_secs(5), || matches!(child.try_wait(), Ok(Some(_)))).map(|_| "ended");
         }
         p.line(format!("- SIGTERM sent {stopped}, process {:?}", code.unwrap_or("still running")));
+        if code.is_none() {
+            p.fail("the daemon did not end within 5 s of SIGTERM");
+        }
         if code.is_some() {
             p.daemon = None;
         }
@@ -1280,12 +1319,18 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         std::thread::sleep(Duration::from_secs(3));
         let same = !kept.is_empty() && kept == now;
         let line = format!("navy picture with the icon on the subject, scenery auto then off, scooch scenery said {said:?} then {back:?}, the daemon's answers belongs {belongs:?}, same placements and files {same}, wallpaper unchanged {}, wallpapers set {sets}, daemon lines {window:?}", shown == showing);
-        if !moved {
-            p.line(format!("- {line}"));
-            p.soft("the scenery switch line", "the probe has no way to move an icon on this session, so the icon never reached the subject");
-        } else if !taken(&home) {
+        if !taken(&home) {
             p.line(format!("- {line}"));
             p.fail("the daemon never took in a wallpaper another program set while it ran");
+        } else if !moved && p.kde_wayland() {
+            p.line(format!("- {line}"));
+            p.soft("the scenery switch line", "KDE on Wayland gives the probe no way to move an icon without a person, so the icon never reached the subject");
+        } else if !moved {
+            p.line(format!("- {line}"));
+            p.fail(format!("the icon could not be moved onto the navy picture's subject, {detail}"));
+        } else if swapped.is_none() {
+            p.line(format!("- {line}"));
+            p.fail("the icon reached the navy picture's subject and no new wallpaper came within 10 s");
         } else if same && shown == showing && sets == 0 {
             p.line(format!("- {line}"));
         } else {
@@ -1355,11 +1400,22 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let second = all.iter().find(|found| !found.primary).unwrap_or(&all[1]).screen.clone();
         let second_frame = physical(&second.frame, scale);
         let target = (second_frame.x + 0.5 * second_frame.w, second_frame.y + 0.3 * second_frame.h);
-        let detail = move_icon(p, target).unwrap_or_else(|error| format!("failed {error:#}"));
+        let tried = move_icon(p, target);
+        let could = tried.is_ok();
+        let detail = tried.unwrap_or_else(|error| format!("failed {error:#}"));
         std::thread::sleep(Duration::from_secs(4));
         let icon = probe_icon(p, &linux).ok();
         let landed = icon.is_some_and(|icon| inside(&second_frame, (icon.x + icon.w / 2.0, icon.y + icon.h / 2.0)));
         p.line(format!("- moved the probe icon toward `{}`, {detail}, the adapter now reads it at {}, inside that monitor {landed}", second.id, icon.as_ref().map_or("nothing".into(), show)));
+        if !landed {
+            if !could && p.kde_wayland() {
+                p.soft("the move to the second monitor", "KDE on Wayland gives the probe no way to move an icon without a person");
+            } else if could && p.xfce_x11() {
+                p.soft("the move to the second monitor", "xfdesktop under Xvfb takes the probe's drag but does not carry the icon across to the second monitor");
+            } else {
+                p.fail(format!("the probe icon did not reach the second monitor, {detail}"));
+            }
+        }
         if let Ok(snapshot) = linux.snapshot() {
             for found in &all {
                 let mine: Vec<String> = snapshot.icons.iter().filter(|icon| touches(&found.screen.frame, icon)).map(show).collect();
@@ -1377,6 +1433,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let path = p.home.join(format!("monitor-{index}.jpg"));
             fs::write(&path, jpeg(&photo_at(width, height, subject))?)?;
             let set = linux.set_wallpaper(screen, &path);
+            if set.is_err() {
+                p.fail(format!("setting a picture for `{}` failed", screen.id));
+            }
             p.line(format!("- set `{}` to {} {:?}", screen.id, path.display(), set.map_err(|error| error.to_string())));
             pictures.push((screen.clone(), path));
         }
@@ -1402,6 +1461,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let home = p.home.clone();
         let first = wait_until(Duration::from_secs(60), || rendered(&home) && state_entries(&home).len() >= picked.len());
         p.line(format!("- started Scooch as process {process}, every screen rendered after {:?} ms", first.map(|time| time.as_millis())));
+        if first.is_none() {
+            p.fail("Scooch did not render every screen within 60 s");
+        }
         std::thread::sleep(Duration::from_secs(2));
         for (id, entry) in state_entries(&home) {
             p.line(format!("- state for `{id}` source {} output {} icons {}", entry["source"], entry["output"], entry["icons"]));
@@ -1422,8 +1484,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         let distinct = outputs.iter().flatten().collect::<std::collections::BTreeSet<_>>().len();
         p.line(format!("- distinct pictures across the screens {distinct} of {}", outputs.len()));
+        if distinct < outputs.len() {
+            p.fail("two screens showed the same picture where each has its own");
+        }
         let reaper = p.daemon.take().map(|mut child| std::thread::spawn(move || child.wait().ok()));
         let off = Command::new(&program).arg("off").env("SCOOCH_HOME", &p.home).stdin(Stdio::null()).output();
+        if !off.as_ref().is_ok_and(|result| result.status.success()) {
+            p.fail("scooch off did not end cleanly");
+        }
         match &off {
             Ok(result) => p.line(format!("- scooch off exit {:?}, said `{}` `{}`", result.status.code(), String::from_utf8_lossy(&result.stdout).trim().replace('\n', " "), String::from_utf8_lossy(&result.stderr).trim().replace('\n', " "))),
             Err(error) => p.line(format!("- scooch off could not run {error}")),
@@ -1431,13 +1499,23 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         if let Some(reaper) = reaper {
             let ended = wait_until(Duration::from_secs(5), || reaper.is_finished());
             p.line(format!("- the watcher ended {}", ended.is_some()));
+            if ended.is_none() {
+                p.fail("the watcher did not end within 5 s of scooch off");
+            }
         }
         std::thread::sleep(Duration::from_secs(2));
         for (screen, path) in &pictures {
             let now_showing = linux.wallpaper(screen).ok().flatten();
             p.line(format!("- after off `{}` shows {:?}, its own picture again {}", screen.id, now_showing, now_showing.as_deref() == Some(path.as_path())));
+            if now_showing.as_deref() != Some(path.as_path()) {
+                p.fail(format!("after scooch off `{}` did not show its own picture again", screen.id));
+            }
         }
-        p.line(format!("- record file left behind {}", record::file(&p.home).exists()));
+        let left = record::file(&p.home).exists();
+        p.line(format!("- record file left behind {left}"));
+        if left {
+            p.fail("scooch off left its record file behind");
+        }
         Ok(())
     }
 

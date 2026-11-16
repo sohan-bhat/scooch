@@ -124,10 +124,14 @@ pub struct Entry {
     pub absent_since: Option<u64>,
     #[serde(skip_serializing_if = "is_zero")]
     pub absent_ticks: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub belongs: Option<Belongs>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub drawn: Option<String>,
+}
+
+fn lenient<'de, D: Deserializer<'de>, T: serde::de::DeserializeOwned>(deserializer: D) -> std::result::Result<Option<T>, D::Error> {
+    Ok(serde_json::from_value(serde_json::Value::deserialize(deserializer)?).ok())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,6 +403,41 @@ pub fn scratch(name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read_with(field: &str, odd: serde_json::Value) -> State {
+        let mut state = State { on: true, ..State::default() };
+        state.screens.insert("main".into(), Entry { output: Some("/d/out/main-3.jpg".into()), counter: 3, belongs: Some(Belongs { key: 1, stamp: 2, answer: false }), drawn: Some("f".into()), ..Entry::new(Path::new("/p/mine.jpg")) });
+        let mut text = serde_json::to_value(&state).unwrap();
+        text["screens"]["main"][field] = odd;
+        parse(Some(serde_json::to_vec(&text).unwrap().as_slice()))
+    }
+
+    fn kept(state: &State) -> bool {
+        let entry = &state.screens["main"];
+        state.on && entry.original == Path::new("/p/mine.jpg") && entry.output.as_deref() == Some(Path::new("/d/out/main-3.jpg")) && entry.counter == 3
+    }
+
+    #[test]
+    fn a_belonging_answer_with_a_missing_field_keeps_every_entry() {
+        let state = read_with("belongs", serde_json::json!({"key": 1, "stamp": 2}));
+        assert!(kept(&state));
+        assert_eq!(state.screens["main"].belongs, None);
+    }
+
+    #[test]
+    fn a_belonging_answer_that_is_text_keeps_every_entry() {
+        let state = read_with("belongs", serde_json::json!("x"));
+        assert!(kept(&state));
+        assert_eq!(state.screens["main"].belongs, None);
+    }
+
+    #[test]
+    fn a_drawn_mark_that_is_a_number_keeps_every_entry() {
+        let state = read_with("drawn", serde_json::json!(7));
+        assert!(kept(&state));
+        assert_eq!(state.screens["main"].drawn, None);
+        assert_eq!(state.screens["main"].belongs.map(|known| known.stamp), Some(2));
+    }
 
     #[test]
     fn a_missing_file_loads_as_off() {
