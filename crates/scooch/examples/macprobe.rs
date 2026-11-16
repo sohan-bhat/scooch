@@ -23,13 +23,17 @@ mod probe {
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, ExitCode, Stdio};
-    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     const PROBES: [(&str, bool); 4] = [("scooch-probe-a.txt", false), ("scooch-probe-twentyeight.txt", false), ("scooch probe with spaces that wraps.txt", false), ("scooch-probe-folder", true)];
     const RUNNER_ONLY: &str = "macprobe changes the wallpaper, Desktop files and the login item, so it runs those checks only on a GitHub Actions runner where GITHUB_ACTIONS is true.";
     const GRAY: [u8; 3] = [118, 118, 118];
     const LIMIT: Duration = Duration::from_secs(20);
+    const STOP_AFTER: Duration = Duration::from_secs(300);
+    const BUDGET: Duration = Duration::from_secs(68 * 60);
+    static PAST: AtomicBool = AtomicBool::new(false);
 
     static START: OnceLock<Instant> = OnceLock::new();
 
@@ -211,6 +215,90 @@ mod probe {
         motion: Option<Option<String>>,
         scanned: usize,
         struck: bool,
+        shared: Arc<Mutex<Vec<String>>>,
+        last: Arc<Mutex<String>>,
+    }
+
+    struct Watch {
+        done: Arc<AtomicBool>,
+        fired: Arc<Mutex<Option<String>>>,
+        limit: Duration,
+    }
+
+    impl Watch {
+        fn start(p: &Probe, title: &str, limit: Duration) -> Watch {
+            PAST.store(false, Ordering::SeqCst);
+            let (done, fired) = (Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(None)));
+            let (ended, mark, shared, last, out, home, title) = (done.clone(), fired.clone(), p.shared.clone(), p.last.clone(), p.out.clone(), p.home.clone(), title.to_string());
+            let left = BUDGET.saturating_sub(START.get().map_or(Duration::ZERO, Instant::elapsed));
+            let limit = limit.min(left.saturating_sub(STOP_AFTER));
+            let wait = move |span: Duration| {
+                let started = Instant::now();
+                while started.elapsed() < span {
+                    if ended.load(Ordering::SeqCst) {
+                        return true;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                ended.load(Ordering::SeqCst)
+            };
+            std::thread::spawn(move || {
+                if wait(limit) {
+                    return;
+                }
+                PAST.store(true, Ordering::SeqCst);
+                let step = last.lock().map(|step| step.clone()).unwrap_or_default();
+                println!("- section {title} passed its deadline of {} s, its last step was `{step}`", limit.as_secs());
+                if let Ok(mut mark) = mark.lock() {
+                    *mark = Some(step.clone());
+                }
+                if wait(STOP_AFTER) {
+                    return;
+                }
+                let step = last.lock().map(|step| step.clone()).unwrap_or_default();
+                let mut lines = shared.lock().map(|lines| lines.clone()).unwrap_or_default();
+                let stopped = format!("{title} passed its deadline of {} s and did not return in {} s more, its last step was `{step}`", limit.as_secs(), STOP_AFTER.as_secs());
+                let earlier: Vec<String> = lines.iter().filter_map(|line| line.strip_prefix("- **missing** ").or_else(|| line.strip_prefix("- **check failed** ")).map(str::to_string)).collect();
+                lines.extend([format!("- **check failed** {stopped}, so the probe stopped here"), String::new(), "## Result".to_string(), String::new()]);
+                lines.extend(earlier.into_iter().chain([stopped]).map(|failure| format!("- **failed** {failure}")));
+                let _ = fs::write(out.join("report.md"), lines.join("\n") + "\n");
+                if let Some(pid) = fs::read_to_string(home.join("watch.pid")).ok().and_then(|pid| pid.trim().parse::<i32>().ok()) {
+                    unsafe { libc::kill(pid, libc::SIGTERM) };
+                }
+                let _ = std::io::stdout().flush();
+                unsafe { libc::_exit(1) };
+            });
+            Watch { done, fired, limit }
+        }
+
+        fn finish(self) -> Option<(String, Duration)> {
+            self.done.store(true, Ordering::SeqCst);
+            PAST.store(false, Ordering::SeqCst);
+            self.fired.lock().ok().and_then(|fired| fired.clone()).map(|step| (step, self.limit))
+        }
+    }
+
+    fn deadline(title: &str) -> Duration {
+        let longest: u64 = match title {
+            "1 Session facts" => 4_566,
+            "2 Permission" => 2_134,
+            "3 Icons" => 9_499,
+            "3b Live layer" => 47_610,
+            "3c Helper colour and scale" => 5_578,
+            "4 First run" => 101_164,
+            "5 Move to new wallpaper" => 62_364,
+            "5b Scenery" => 157_529,
+            "5c Glide" => 292_101,
+            "5d Cold drags" => 1_421_507,
+            "5e Bare wakes" => 600_083,
+            "6 Idle" => 71_080,
+            "7 Off" => 2_687,
+            "8 Second cycle" => 277_539,
+            "9 Spaces" => 91_112,
+            "10 Cleanup" => 308,
+            _ => 600_000,
+        };
+        Duration::from_millis((longest * 3).max(30_000))
     }
 
     impl Probe {
@@ -218,11 +306,20 @@ mod probe {
             let text = text.into();
             println!("{text}");
             let _ = writeln!(self.log, "{:>8} {text}", now());
+            if let Ok(mut shared) = self.shared.lock() {
+                shared.push(text.clone());
+            }
+            if let (false, Ok(mut last)) = (text.is_empty(), self.last.lock()) {
+                last.clone_from(&text);
+            }
             self.report.push(text);
         }
 
         fn raw(&mut self, text: impl AsRef<str>) {
             let _ = writeln!(self.log, "{:>8} {}", now(), text.as_ref());
+            if let Ok(mut last) = self.last.lock() {
+                *last = text.as_ref().lines().next().unwrap_or_default().chars().take(200).collect();
+            }
         }
 
         fn limit(&mut self, text: impl Into<String>) {
@@ -248,9 +345,14 @@ mod probe {
             self.line(format!("## {title}"));
             self.line(String::new());
             let started = Instant::now();
+            let watch = Watch::start(self, title, deadline(title));
             if let Err(error) = check(self) {
                 self.line(format!("- **check failed** {error:#}"));
                 self.failed.push(format!("{title} stopped with {error:#}"));
+            }
+            if let Some((step, limit)) = watch.finish() {
+                self.line(format!("- **check failed** {title} passed its deadline of {} s, its last step was `{step}`", limit.as_secs()));
+                self.failed.push(format!("{title} passed its deadline of {} s", limit.as_secs()));
             }
             stutters(self);
             self.line(format!("- took {} ms", started.elapsed().as_millis()));
@@ -355,6 +457,8 @@ mod probe {
             motion: None,
             scanned: 0,
             struck: false,
+            shared: Arc::new(Mutex::new(Vec::new())),
+            last: Arc::new(Mutex::new(String::new())),
         };
         probe.section("1 Session facts", facts);
         if !probe.runner {
@@ -536,7 +640,7 @@ mod probe {
 
     fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> Option<Duration> {
         let started = Instant::now();
-        while started.elapsed() < limit {
+        while started.elapsed() < limit && !PAST.load(Ordering::SeqCst) {
             if done() {
                 return Some(started.elapsed());
             }
