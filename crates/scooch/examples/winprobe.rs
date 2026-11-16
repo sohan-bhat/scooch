@@ -4013,8 +4013,21 @@ mod probe {
         let gone = wait_until(Duration::from_secs(40).saturating_sub(last.elapsed()), || helper_children(daemon).is_empty());
         pump(Duration::from_secs(35).saturating_sub(last.elapsed()));
         let still = helper_children(daemon);
-        p.line(format!("- no helper {:?} s after the last drag, 35 s after it helper processes {still:?}", gone.map(|_| last.elapsed().as_secs())));
-        if !still.is_empty() {
+        let checked = epoch();
+        let launch = log_lines(&log).into_iter().skip(before_wakes).rev().find(|line| line.contains("glide early launch") && stamp_of(line).is_some_and(|at| checked - at < 2.0));
+        let gone_soon = !still.is_empty() && launch.is_some() && wait_until(Duration::from_secs(3), || helper_children(daemon).is_empty()).is_some();
+        let launched_at = launch.as_deref().and_then(stamp_of);
+        let after: Vec<String> = log_lines(&log).into_iter().skip(before_wakes).filter(|line| launched_at.is_some_and(|at| stamp_of(line).is_some_and(|stamp| stamp >= at))).collect();
+        let quit = after.iter().find(|line| line.contains("glide early helper quit")).cloned();
+        let lived = quit.as_deref().and_then(|line| line.split("it lived ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<f64>().ok());
+        let worked = after.iter().any(|line| commanded(line));
+        let early = gone_soon && lived.is_some_and(|lived| lived <= 2000.0) && !worked;
+        p.line(format!(
+            "- no helper {:?} s after the last drag, 35 s after it helper processes {still:?}{}",
+            gone.map(|_| last.elapsed().as_secs()),
+            if still.is_empty() { String::new() } else { format!(", judged by the launch line {launch:?} and the quit line {quit:?}, sent work {worked}, gone within 3 s {gone_soon}, so launched early by a wake {early}") }
+        ));
+        if !still.is_empty() && !early {
             p.failed.push("a helper was still running 35 s after the last drag".into());
         }
         let before_bare = log_lines(&log).len();
@@ -4024,8 +4037,9 @@ mod probe {
         }
         pump(Duration::from_millis(2000));
         let bare: Vec<String> = log_lines(&log).into_iter().skip(before_bare).collect();
-        let launches = bare.iter().filter(|line| line.contains("glide early launch")).count();
-        let lived: Vec<f64> = bare.iter().filter_map(|line| line.split("it lived ").nth(1).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse().ok())).collect();
+        let starts: Vec<usize> = bare.iter().enumerate().filter(|(_, line)| line.contains("glide early launch")).map(|(index, _)| index).collect();
+        let launches = starts.len();
+        let lived: Vec<f64> = starts.iter().filter_map(|start| bare.iter().skip(start + 1).find_map(|line| line.split("it lived ").nth(1).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse().ok()))).collect();
         let sent: Vec<String> = bare.iter().filter(|line| commanded(line)).map(|line| line.chars().take(160).collect()).collect();
         let left = helper_children(daemon);
         p.line(format!("- thirty wakes with nothing moved after the helper was gone: early launches {launches}, each quit after living {lived:?} ms, helper commands or picture warms {sent:?}, helper processes two seconds after the last wake {left:?}"));
