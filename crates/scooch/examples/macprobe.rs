@@ -285,7 +285,7 @@ mod probe {
             "3 Icons" => 9_499,
             "3b Live layer" => 47_610,
             "3c Helper colour and scale" => 5_578,
-            "3d Reveal captures" => 75_000,
+            "3d Reveal captures" => 50_000,
             "4 First run" => 101_164,
             "5 Move to new wallpaper" => 62_364,
             "5b Scenery" => 157_529,
@@ -2421,17 +2421,36 @@ mod probe {
         if !file.is_file() {
             still_file(&file, &test_still(width, height))?;
         }
-        for (label, env) in [("spin kept", None), ("spin skipped", Some(scooch::live::SKIP_SPIN)), ("transaction present", Some(scooch::live::TRANSACTION))] {
-            if let Err(error) = reveal_captures(p, &screen, label, env) {
-                p.line(format!("- the reveal captures with the {label} could not run {error:#}"));
+        p.line("- the capture by window number sees the layer while it is still hidden, so it tells whether the window server has the first frame before the layer is shown. It cannot see the unhide itself, and a flash shorter than the gap between two captures can fall between them".to_string());
+        match reveal_captures(p, &screen, "default transaction present", None) {
+            Ok(seen) => {
+                if seen.bad > 0 {
+                    p.fail(format!("{} of {REVEAL_OPENS} opens with the default reveal had a black or empty capture after shown", seen.bad));
+                }
+                if seen.saw < REVEAL_CONTROL {
+                    p.fail(format!("the control was blind, it saw an empty layer in {} of {REVEAL_OPENS} opens of the default reveal where at least {REVEAL_CONTROL} are needed, so the reveal is not proven on this Mac", seen.saw));
+                }
             }
+            Err(error) => p.fail(format!("the reveal captures with the default reveal could not run {error:#}")),
+        }
+        if let Err(error) = reveal_captures(p, &screen, "spin, reported only", Some(scooch::live::SPIN)) {
+            p.line(format!("- the reveal captures with the spin could not run {error:#}"));
         }
         Ok(())
+    }
+
+    const REVEAL_CONTROL: usize = 3;
+    const REVEAL_QUICK: Duration = Duration::from_millis(8);
+
+    struct Revealed {
+        saw: usize,
+        bad: usize,
     }
 
     struct Opened {
         saw: bool,
         bad: bool,
+        quick: bool,
         reveal: Option<u64>,
         shown: Option<u128>,
     }
@@ -2477,7 +2496,7 @@ mod probe {
         let _ = helper.close(id, Duration::from_secs(3));
         let Some(shown) = shown else {
             p.line(format!("  - open {id}: no shown within 5 s, window {number:?}, {failed:?}"));
-            return Ok(Opened { saw: false, bad: false, reveal: None, shown: None });
+            return Ok(Opened { saw: false, bad: false, quick: false, reveal: None, shown: None });
         };
         let (early, late): (Vec<_>, Vec<_>) = captures.iter().partition(|(at, _)| *at < shown);
         let empty = |list: &[&(Instant, Option<Vec<[u8; 3]>>)]| list.iter().filter(|(_, shot)| shot.as_ref().is_none_or(Vec::is_empty)).count();
@@ -2500,7 +2519,8 @@ mod probe {
             empty(&late),
             settled.as_deref().map(black)
         ));
-        Ok(Opened { saw, bad, reveal: drawn.map(|(reveal, _)| reveal), shown: Some(to_shown) })
+        let quick = late.first().is_some_and(|(at, _)| at.saturating_duration_since(shown) <= REVEAL_QUICK);
+        Ok(Opened { saw, bad, quick, reveal: drawn.map(|(reveal, _)| reveal), shown: Some(to_shown) })
     }
 
     fn spread(values: &[u128]) -> String {
@@ -2512,13 +2532,13 @@ mod probe {
         }
     }
 
-    fn reveal_captures(p: &mut Probe, screen: &Screen, label: &str, switch: Option<&str>) -> Result<()> {
+    fn reveal_captures(p: &mut Probe, screen: &Screen, label: &str, switch: Option<&str>) -> Result<Revealed> {
         let (width, height) = pixels(screen);
         let file = p.home.join(format!("probe-still-{width}x{height}.jpg"));
         let env: Vec<(&str, &str)> = switch.map(|name| (name, "1")).into_iter().collect();
         let mut helper = scooch::live::Helper::spawn_with(&p.bin, Duration::from_secs(5), &env)?;
         helper.warm(scooch::live::Hints::default(), None, None, Duration::from_secs(30))?;
-        p.line(format!("- reveal captures with the {label}, {REVEAL_OPENS} opens of the helper's layer over the test still, the helper's new window captured alone by its number from the moment it is listed until {} ms after shown, every {REVEAL_STRIDE}th pixel compared, the captures before shown are the control, reported only", REVEAL_WATCH.as_millis()));
+        p.line(format!("- reveal captures with the {label}, {REVEAL_OPENS} opens of the helper's layer over the test still, the helper's new window captured alone by its number from the moment it is listed until {} ms after shown, every {REVEAL_STRIDE}th pixel compared, the captures before shown are the control", REVEAL_WATCH.as_millis()));
         let mut opened = Vec::new();
         for id in 1..=REVEAL_OPENS {
             opened.push(reveal_open(p, &mut helper, screen, &file, id)?);
@@ -2528,13 +2548,15 @@ mod probe {
         let bad = opened.iter().filter(|open| open.bad).count();
         let reveals: Vec<u128> = opened.iter().filter_map(|open| open.reveal.map(u128::from)).collect();
         let shown: Vec<u128> = opened.iter().filter_map(|open| open.shown).collect();
+        let quick = opened.iter().filter(|open| open.quick).count();
         p.line(format!(
-            "  - with the {label}: the control saw the hidden layer in {saw} of {REVEAL_OPENS} opens, in every open {}, opens with a black or empty capture after shown {bad} of {REVEAL_OPENS}, reveal {}, Open to shown {}",
+            "  - with the {label}: the control saw the hidden layer in {saw} of {REVEAL_OPENS} opens, in every open {}, opens with a black or empty capture after shown {bad} of {REVEAL_OPENS}, opens whose first capture after shown began within {} ms of it {quick} of {REVEAL_OPENS}, reveal {}, Open to shown {}",
             saw == opened.len(),
+            REVEAL_QUICK.as_millis(),
             spread(&reveals),
             spread(&shown)
         ));
-        Ok(())
+        Ok(Revealed { saw, bad })
     }
 
     fn modes(display: u32) -> Vec<(usize, usize, usize, usize, bool, *const c_void)> {
