@@ -6,7 +6,7 @@ import { still } from './still';
 type Connection = { saveData?: boolean; effectiveType?: string };
 type Level = 'none' | 'main' | 'all';
 
-export const budget = { stage: 0, busy: true, steps: 0, lastStepAt: 0 };
+export const budget = { stage: 0, busy: true, hero: false, steps: 0, lastStepAt: 0 };
 
 const waiting: (() => void)[] = [];
 
@@ -26,7 +26,13 @@ export function release() {
   for (const resume of waiting.splice(0)) resume();
 }
 
+export function heroReady() {
+  if (!budget.hero) performance.mark('scooch:hero');
+  budget.hero = true;
+}
+
 export function finished() {
+  heroReady();
   if (budget.busy) performance.mark('scooch:uploads');
   budget.busy = false;
 }

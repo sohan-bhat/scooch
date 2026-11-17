@@ -33,7 +33,8 @@ import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
 import { still as native } from './still';
-import { advance, budget, calm, finished, level, memory, pause, prefetch, stillsPlanned, upgrades } from './budget';
+import { advance, budget, calm, finished, heroReady, level, memory, pause, prefetch, stillsPlanned, upgrades } from './budget';
+import { inHeroSet, sharpAllowed } from './sharpset';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
 import { rendererCaughtUp, stripUpload } from './upload';
@@ -250,41 +251,62 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const sharpen = async () => {
       const amount = level();
       await wait(() => runtime.shown);
-      const main = screens.main.sharpUrl();
-      if (amount !== 'none' && main) prefetch([main]);
       await wait(() => runtime.props && runtime.painted && runtime.gallery);
-      if (amount === 'all') prefetch(Object.values(gallery.current).flatMap((frame) => frame.sharpUrl() ?? []));
-      if (memory() >= 4) {
+      if (amount === 'none') {
+        finished();
+        return;
+      }
+      await wait(() => native.off || !stillsPlanned() || (native.ready && (amount === 'main' || budget.stage >= 2 || !desktop())));
+      if (stopped) return;
+      const main = sharpAllowed('main') ? screens.main.sharpUrl() : null;
+      const pictures = amount === 'all' && sharpAllowed('gallery');
+      const labelsUp = async () => {
+        if (memory() < 4) return;
         for (const upgrade of upgrades) {
           await calm();
           if (stopped) return;
           await upgrade(calm).catch(() => false);
         }
-      }
-      if (amount === 'none') {
-        finished();
-        return;
-      }
-      await wait(() => native.off || !stillsPlanned() || (native.ready && (amount === 'main' || budget.stage >= 1 || !desktop())));
+      };
+      const mainUp = async () => {
+        if (!main || native.off || !stillsPlanned()) return;
+        await calm();
+        await screens.main.sharpen(gl, calm).catch(() => false);
+      };
+      const galleryUp = async () => {
+        if (!pictures) return;
+        for (const frame of Object.values(gallery.current)) {
+          await calm();
+          if (stopped || native.off || !stillsPlanned()) return;
+          await frame.sharpen(gl, calm).catch(() => false);
+        }
+      };
+      const steps = [
+        ['labels', labelsUp],
+        ['main', mainUp],
+        ['gallery', galleryUp],
+      ] as const;
+      if (main && inHeroSet('main')) prefetch([main]);
+      for (const [name, run] of steps) if (inHeroSet(name)) await run();
       if (stopped) return;
+      heroReady();
+      await wait(() => !runtime.posterUp);
+      if (stopped) return;
+      if (main && !inHeroSet('main')) prefetch([main]);
+      if (pictures && !inHeroSet('gallery')) prefetch(Object.values(gallery.current).flatMap((frame) => frame.sharpUrl() ?? []));
+      if (!inHeroSet('labels')) await labelsUp();
       if (native.off || !stillsPlanned()) {
         finished();
         return;
       }
-      await calm();
-      await screens.main.sharpen(gl, calm).catch(() => false);
-      advance(2);
+      if (!inHeroSet('main')) await mainUp();
+      advance(3);
       if (amount !== 'all') {
         finished();
         return;
       }
-      await wait(() => budget.stage >= 3 || native.off || !stillsPlanned() || !desktop());
-      for (const frame of Object.values(gallery.current)) {
-        await calm();
-        if (stopped) return;
-        if (native.off || !stillsPlanned()) break;
-        await frame.sharpen(gl, calm).catch(() => false);
-      }
+      await wait(() => budget.stage >= 5 || native.off || !stillsPlanned() || !desktop());
+      if (!inHeroSet('gallery')) await galleryUp();
       finished();
     };
     timer = window.setTimeout(() => void sharpen(), 0);
