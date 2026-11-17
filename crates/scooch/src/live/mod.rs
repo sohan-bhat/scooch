@@ -16,6 +16,7 @@ pub const HELPER: &str = "--live-helper";
 pub const VERSION: u32 = 3;
 pub const SLOW_HELLO: &str = "SCOOCH_HELPER_SLOW_HELLO_MS";
 pub const SKIP_SPIN: &str = "SCOOCH_HELPER_SKIP_SPIN";
+pub const TRANSACTION: &str = "SCOOCH_HELPER_TRANSACTION";
 const QUIT_WAIT: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

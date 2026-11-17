@@ -1,5 +1,5 @@
 use super::{layer, picture};
-use crate::live::helper::{self, Build, Platform, Waker};
+use crate::live::helper::{self, Build, Commit, Platform, Waker};
 use crate::live::Hints;
 use crate::platform::Screen;
 use anyhow::Result;
@@ -21,6 +21,7 @@ pub struct Host {
     busy: Option<super::Busy>,
     app: bool,
     spin: bool,
+    transaction: bool,
     revealed: Vec<(&'static str, u64)>,
 }
 
@@ -45,7 +46,12 @@ impl Platform for Host {
     }
 
     fn present(&mut self, layer: &layer::Layer) -> Result<()> {
-        objc2::rc::autoreleasepool(|_| layer.order());
+        objc2::rc::autoreleasepool(|_| {
+            if self.transaction {
+                layer.transact(true);
+            }
+            layer.order()
+        });
         Ok(())
     }
 
@@ -80,7 +86,9 @@ impl Platform for Host {
 
     fn show(&mut self, layer: &layer::Layer) -> Result<()> {
         let started = Instant::now();
-        if self.spin {
+        if self.transaction {
+            layer.transact(false);
+        } else if self.spin {
             layer::spin(SETTLE_IN.as_secs_f64());
         }
         let spun = started.elapsed();
@@ -91,6 +99,10 @@ impl Platform for Host {
 
     fn revealed(&mut self) -> Vec<(&'static str, u64)> {
         std::mem::take(&mut self.revealed)
+    }
+
+    fn committer(&self) -> Option<Commit> {
+        self.transaction.then(|| Box::new(layer::commit) as Commit)
     }
 
     fn close(&mut self, layer: layer::Layer) {
@@ -130,6 +142,6 @@ pub fn serve() -> ExitCode {
     let Some(marker) = MainThreadMarker::new() else {
         return helper::refuse("the helper has to run on the main thread");
     };
-    let spin = !std::env::var(crate::live::SKIP_SPIN).is_ok_and(|value| value == "1");
-    helper::serve(Host { marker, busy: None, app: false, spin, revealed: Vec::new() })
+    let on = |name: &str| std::env::var(name).is_ok_and(|value| value == "1");
+    helper::serve(Host { marker, busy: None, app: false, spin: !on(crate::live::SKIP_SPIN), transaction: on(crate::live::TRANSACTION), revealed: Vec::new() })
 }

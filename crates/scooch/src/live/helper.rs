@@ -8,6 +8,7 @@ pub const IDLE_EXIT: Duration = Duration::from_secs(30);
 pub const LAYER_IDLE: Duration = Duration::from_secs(5);
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
+pub type Commit = Box<dyn Fn() + Send>;
 
 type Out = Arc<Mutex<Box<dyn Write + Send>>>;
 
@@ -44,7 +45,7 @@ pub use running::{serve, Build, Platform};
 
 #[cfg(any(windows, target_os = "macos"))]
 mod running {
-    use super::{read, say, Out, Waker, IDLE_EXIT, LAYER_IDLE};
+    use super::{read, say, Commit, Out, Waker, IDLE_EXIT, LAYER_IDLE};
     use crate::live::{warm_failed, Command, Hints, Reply, VERSION};
     use crate::platform::Screen;
     use anyhow::Result;
@@ -92,6 +93,9 @@ mod running {
         fn show(&mut self, layer: &Self::Layer) -> Result<()>;
         fn revealed(&mut self) -> Vec<(&'static str, u64)> {
             Vec::new()
+        }
+        fn committer(&self) -> Option<Commit> {
+            None
         }
         fn close(&mut self, layer: Self::Layer);
         fn abandon(&mut self, layer: Self::Layer) {
@@ -391,6 +395,7 @@ mod running {
         still: Option<Decoding>,
         size: (u32, u32),
         period: Duration,
+        commit: Option<Commit>,
     }
 
     fn load_pair(a: &Path, b: &Path, pictures: &[Loaded]) -> Result<(Bundle, Bundle, Loaded), String> {
@@ -414,7 +419,7 @@ mod running {
             let _ = events.send(event);
             waker();
         };
-        let Start { id, gpu, surface, still, size, period } = start;
+        let Start { id, gpu, surface, still, size, period, commit } = start;
         let begun = Instant::now();
         let made = still
             .ok_or_else(|| "open needs the still the system shows now".to_string())
@@ -432,6 +437,9 @@ mod running {
         let mut shown = vec![(Shown::Still(Arc::new(first)), 1.0f32)];
         let result = P::frame(|| screen.show(&looks(&shown)));
         let ok = result.is_ok();
+        if let (true, Some(commit)) = (ok, commit.as_ref()) {
+            commit();
+        }
         tell(Event::Presented { id, result, first: begun.elapsed().as_millis() as u64 });
         let slow_after = period.mul_f32(1.5);
         let mut motion: Option<Motion> = None;
@@ -850,7 +858,7 @@ mod running {
                 self.fail(Some(id), "the layer window is gone");
                 return;
             };
-            let start = Start { id, gpu, surface: Surface(self.platform.target(&layer)), still, size: self.platform.pixels(&layer), period: self.platform.period(&layer) };
+            let start = Start { id, gpu, surface: Surface(self.platform.target(&layer)), still, size: self.platform.pixels(&layer), period: self.platform.period(&layer), commit: self.platform.committer() };
             let (jobs, receiver) = mpsc::channel();
             let (events, waker) = (self.events.clone(), self.waker.clone());
             let spawned = std::thread::Builder::new().name(format!("scooch-live-render-{id}")).spawn(move || render::<P>(start, receiver, events, waker));
