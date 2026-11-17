@@ -37,6 +37,7 @@ const models = [
     resolution: '2k',
     file: 'lamp.glb',
     textures: { color: 1024, normal: 512, arm: 512 },
+    full: { color: 2048 },
     lite: true,
   },
   {
@@ -240,7 +241,7 @@ async function buildModel(io, model, variant) {
   );
   else steps.push(
     weld(),
-    resized(/baseColor/, model.textures.color * variant.scale),
+    resized(/baseColor/, (variant.name === 'full' && model.full?.color) || model.textures.color * variant.scale),
     resized(/normal/, model.textures.normal * (variant.detail ?? variant.scale)),
     resized(/metallicRoughness|occlusion/, model.textures.arm * (variant.detail ?? variant.scale)),
     ktx2({ ...color, slots: /baseColor/ }),
