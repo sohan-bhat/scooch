@@ -41,7 +41,7 @@
   "firsts": {
     "gamepad": 0.085,
     "main": 0.165,
-    "wide": 0.33,
+    "wide": 0.3,
     "laptop": 0.69,
     "glasses": 0.73,
     "labels": 0.73,
