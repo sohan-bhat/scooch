@@ -31,7 +31,6 @@ function pick<T extends string>(names: readonly T[], folder: string) {
 const full = pick(heroes, 'models');
 const query = new URLSearchParams(window.location.search);
 const still = query.has('still');
-const hero = query.has('hero');
 const lite = !still;
 const urls = lite ? pick(heroes, 'models/lite') : full;
 const extraUrls = pick(extras, 'models');
@@ -454,7 +453,7 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
       <primitive object={televisionFrame} position={TELEVISION.position} rotation-y={TELEVISION.rotation}>
         <primitive object={television.scene} />
       </primitive>
-      {hero ? null : <LateExtras phone={phone} onExtras={onExtras} onConsole={onConsole} />}
+      <LateExtras phone={phone} onExtras={onExtras} onConsole={onConsole} />
       <Sharpener list={heroUrls} when={heroesWhen} done={heroesDone} />
       <Sharpener list={sharpUrls} when={extrasWhen} done={extrasDone} />
     </group>
