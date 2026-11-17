@@ -10,6 +10,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const QUIET: Duration = Duration::from_millis(250);
+pub const SAVE_QUIET: Duration = Duration::from_millis(20);
 const REAP_EVERY: Duration = Duration::from_secs(2);
 pub const REST: Duration = Duration::from_secs(30);
 pub const LIMIT: Duration = Duration::from_secs(2);
@@ -385,6 +386,7 @@ pub struct Daemon {
     mapped: Mutex<HashMap<String, MapKey>>,
     last_screens: Mutex<Vec<Screen>>,
     stills: Mutex<HashMap<String, Duration>>,
+    saves: Mutex<Option<Instant>>,
     #[cfg(test)]
     pub marks: Mutex<Option<crate::glide::tests::Events>>,
 }
@@ -430,7 +432,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()), stills: Mutex::new(HashMap::new()), #[cfg(test)] marks: Mutex::new(None) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()), stills: Mutex::new(HashMap::new()), saves: Mutex::new(None), #[cfg(test)] marks: Mutex::new(None) }
     }
 
     #[cfg(test)]
@@ -480,10 +482,42 @@ impl Daemon {
     pub fn gather(&self, worker: &Signal) {
         self.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).woke(Instant::now());
         self.wake_early();
+        if self.heard_save(worker) {
+            return;
+        }
         if self.quick_look() {
             worker.take();
         } else {
             worker.settle(QUIET, LIMIT);
+        }
+    }
+
+    fn heard_save(&self, worker: &Signal) -> bool {
+        let mut handled = self.saves.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(first) = self.desktop.place_saved().filter(|at| handled.is_none_or(|seen| *at > seen)) else { return false };
+        let mut last = first;
+        loop {
+            let due = last + SAVE_QUIET;
+            let now = Instant::now();
+            if now < due {
+                std::thread::sleep(due - now);
+                last = self.desktop.place_saved().unwrap_or(last);
+                continue;
+            }
+            let taken = Instant::now();
+            if let Ok(snapshot) = self.desktop.snapshot() {
+                if trace() {
+                    eprintln!("{} save read {} ms after the first call, icons {:016x}", stamp(), taken.saturating_duration_since(first).as_millis(), icon_print(&snapshot));
+                }
+                *self.handed.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((taken, snapshot));
+            }
+            worker.take();
+            let newest = self.desktop.place_saved().unwrap_or(last);
+            *handled = Some(newest);
+            if newest <= taken {
+                return true;
+            }
+            last = newest;
         }
     }
 
@@ -1718,13 +1752,14 @@ pub mod tests {
         pub button: Mutex<bool>,
         pub covered: Mutex<bool>,
         pub bad_profile: Mutex<bool>,
+        pub saves: Mutex<Vec<Instant>>,
         pub events: crate::glide::tests::Events,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), bad_profile: Mutex::new(false), events: Arc::new(Mutex::new(Vec::new())) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), bad_profile: Mutex::new(false), saves: Mutex::new(Vec::new()), events: Arc::new(Mutex::new(Vec::new())) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -1885,6 +1920,11 @@ pub mod tests {
 
         fn reads_at_once(&self) -> bool {
             *self.at_once.lock().unwrap()
+        }
+
+        fn place_saved(&self) -> Option<Instant> {
+            let now = Instant::now();
+            self.saves.lock().unwrap().iter().filter(|at| **at <= now).max().copied()
         }
 
         fn pointer(&self) -> Option<(f32, f32)> {
@@ -4269,6 +4309,79 @@ pub mod tests {
         let before = fake.snapshots.load(Ordering::SeqCst);
         assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
         assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
+    }
+
+    fn saved_rig(name: &str) -> (Daemon, Arc<Fake>) {
+        let (daemon, fake, _) = rig(name, vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        fake.place(vec![moved_subject()]);
+        (daemon, fake)
+    }
+
+    #[test]
+    fn a_burst_of_three_saves_ticks_once_after_the_quiet_from_the_last_and_reads_once() {
+        let (daemon, fake) = saved_rig("saves-burst");
+        let first = Instant::now();
+        let last = first + Duration::from_millis(20);
+        *fake.saves.lock().unwrap() = vec![first, first + Duration::from_millis(10), last];
+        let signal = Signal::default();
+        signal.wake();
+        let before = fake.snapshots.load(Ordering::SeqCst);
+        daemon.gather(&signal);
+        let ended = Instant::now();
+        assert!(ended >= last + SAVE_QUIET, "the tick began {:?} after the last save", ended.saturating_duration_since(last));
+        assert!(ended < first + QUIET, "the saves waited for the settle, {:?}", ended.duration_since(first));
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
+        assert!(signal.pending.lock().unwrap().last.is_none());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1, "the tick read the desktop again");
+    }
+
+    #[test]
+    fn a_save_skips_the_settle_and_any_other_wake_still_settles() {
+        let (daemon, fake) = saved_rig("saves-settle");
+        *fake.saves.lock().unwrap() = vec![Instant::now()];
+        let signal = Signal::default();
+        signal.wake();
+        let started = Instant::now();
+        daemon.gather(&signal);
+        assert!(started.elapsed() < Duration::from_millis(200), "the save waited for the settle, {:?}", started.elapsed());
+        assert!(daemon.handed.lock().unwrap().is_some());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        fake.place(vec![corner()]);
+        signal.wake();
+        let started = Instant::now();
+        daemon.gather(&signal);
+        assert!(started.elapsed() >= Duration::from_millis(200), "a wake with no new save did not settle, {:?}", started.elapsed());
+        assert!(daemon.handed.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn the_late_notice_after_a_save_tick_renders_nothing() {
+        let (daemon, fake) = saved_rig("saves-late");
+        *fake.saves.lock().unwrap() = vec![Instant::now()];
+        let signal = Signal::default();
+        signal.wake();
+        daemon.gather(&signal);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let sets = fake.sets.load(Ordering::SeqCst);
+        signal.wake();
+        daemon.gather(&signal);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        assert_eq!(fake.sets.load(Ordering::SeqCst), sets);
+    }
+
+    #[test]
+    fn a_desktop_that_hears_no_saves_stays_on_the_settle() {
+        let (daemon, fake) = saved_rig("saves-none");
+        assert_eq!(fake.place_saved(), None);
+        let signal = Signal::default();
+        signal.wake();
+        let started = Instant::now();
+        daemon.gather(&signal);
+        assert!(started.elapsed() >= Duration::from_millis(200), "no save heard and yet no settle, {:?}", started.elapsed());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
     }
 
     fn map_rig(name: &str) -> (Daemon, Arc<Fake>, PathBuf) {

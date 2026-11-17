@@ -1,4 +1,5 @@
 pub mod parse;
+pub mod saves;
 
 #[cfg(target_os = "linux")]
 pub mod autostart;
@@ -35,7 +36,7 @@ mod system {
     use scooch_core::{Rect, RgbImage};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     static LAST_SET: AtomicU64 = AtomicU64::new(0);
     const OWN_ECHO: Duration = Duration::from_secs(1);
@@ -265,6 +266,10 @@ mod system {
             self.kind.reads_at_once()
         }
 
+        fn place_saved(&self) -> Option<Instant> {
+            super::saves::SAVES.last()
+        }
+
         fn name(&self) -> String {
             format!("{} on {}", self.kind.name(), self.session_name())
         }
@@ -292,7 +297,7 @@ mod system {
         }
 
         fn run(&self, wake: Wake) -> Result<()> {
-            watch::run(wake, self.shell.watches(), &self.desktop, self.session)
+            watch::run(wake, self.shell.watches(), &self.desktop, self.session, self.kind.hears_saves())
         }
 
         fn autostart(&self, exe: Option<&Path>) -> Result<()> {

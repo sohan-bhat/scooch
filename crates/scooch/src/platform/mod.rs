@@ -135,6 +135,9 @@ pub trait Desktop: Send + Sync {
     fn reads_at_once(&self) -> bool {
         false
     }
+    fn place_saved(&self) -> Option<Instant> {
+        None
+    }
     fn pointer(&self) -> Option<(f32, f32)> {
         None
     }

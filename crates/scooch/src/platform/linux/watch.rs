@@ -1,7 +1,7 @@
 use super::parse::desktop::Session;
 use super::parse::wakes::{self, Spot};
 use super::screens::{self, Shared};
-use super::{pointer, set_recently, Signal, Watches};
+use super::{pointer, saves, set_recently, Signal, Watches};
 use crate::platform::Wake;
 use anyhow::{anyhow, Result};
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
@@ -23,9 +23,17 @@ fn tagged(wake: &Shared, name: &'static str) -> Shared {
     }
 }
 
-pub fn run(wake: Wake, watches: Watches, desktop: &Path, session: Session) -> Result<()> {
+pub fn run(wake: Wake, watches: Watches, desktop: &Path, session: Session, hears_saves: bool) -> Result<()> {
     let wake: Shared = Arc::from(wake);
     let (gave_up, lost) = channel::<&'static str>();
+    let home = watches.signals.iter().find_map(|signal| match signal {
+        Signal::Metadata(desktop) => Some(desktop.clone()),
+        _ => None,
+    });
+    if let Some(home) = home.filter(|_| hears_saves) {
+        let save_wake = tagged(&wake, "metadata call");
+        let _ = std::thread::Builder::new().name("scooch-saves".into()).spawn(move || hear_saves(home.as_deref(), &save_wake));
+    }
     let mut targets = vec![Target { path: desktop.to_path_buf(), kind: Kind::Desktop }];
     targets.extend(watches.files.iter().map(|watch| Target { path: watch.folder.clone(), kind: Kind::File(watch.matches, watch.wallpaper) }));
     let files_wake = wake.clone();
@@ -210,6 +218,33 @@ fn listen(signal: &Signal, wake: &Shared) -> bool {
         }
     }
     true
+}
+
+pub fn monitor() -> zbus::Result<zbus::blocking::MessageIterator> {
+    let connection = zbus::blocking::Connection::session()?;
+    connection.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus.Monitoring"), "BecomeMonitor", &(&[wakes::SAVE_RULE] as &[&str], 0u32))?;
+    Ok(zbus::blocking::MessageIterator::from(connection))
+}
+
+pub fn is_save(message: &zbus::Message) -> bool {
+    let header = message.header();
+    header.interface().is_some_and(|name| name.as_str() == "org.gtk.vfs.Metadata") && header.member().is_some_and(|name| name.as_str() == "Set")
+}
+
+pub fn save_body(message: &zbus::Message) -> (String, Vec<u8>, bool) {
+    let body = message.body();
+    let little = matches!(body.data().context().endian(), zvariant::Endian::Little);
+    (body.signature().to_string_no_parens(), body.data().bytes().to_vec(), little)
+}
+
+fn hear_saves(desktop: Option<&str>, wake: &Shared) {
+    let opened = monitor().map(move |messages| {
+        messages.map_while(Result::ok).filter(is_save).map(move |message| {
+            let (signature, body, little) = save_body(&message);
+            wakes::place_saved(&signature, &body, little, desktop)
+        })
+    });
+    saves::hear(opened, &saves::SAVES, wake, &mut |line| eprintln!("{line}"));
 }
 
 pub fn wanted(signal: &Signal, message: &zbus::Message) -> bool {

@@ -14,6 +14,10 @@ impl Kind {
         matches!(self, Kind::Kde | Kind::Xfce)
     }
 
+    pub fn hears_saves(self) -> bool {
+        matches!(self, Kind::Gnome | Kind::Cinnamon | Kind::Mate)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Kind::Gnome => "GNOME",
@@ -60,6 +64,12 @@ mod tests {
     fn only_desktops_that_keep_every_place_in_one_file_read_at_once() {
         assert!(Kind::Kde.reads_at_once() && Kind::Xfce.reads_at_once());
         assert!(!Kind::Gnome.reads_at_once() && !Kind::Cinnamon.reads_at_once() && !Kind::Mate.reads_at_once());
+    }
+
+    #[test]
+    fn only_desktops_that_save_places_through_gvfs_hear_saves() {
+        assert!(Kind::Gnome.hears_saves() && Kind::Cinnamon.hears_saves() && Kind::Mate.hears_saves());
+        assert!(!Kind::Kde.hears_saves() && !Kind::Xfce.hears_saves());
     }
 
     #[test]
