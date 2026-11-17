@@ -8,6 +8,20 @@ export function idle(timeout = 400) {
   });
 }
 
+const fast = { on: () => false };
+
+export function quietFast(test: () => boolean) {
+  fast.on = test;
+}
+
+function nextTask() {
+  return new Promise<void>((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => resolve();
+    channel.port2.postMessage(0);
+  });
+}
+
 const holds = new Set<() => boolean>();
 const HOLD_LIMIT = 1000;
 
@@ -24,6 +38,10 @@ function held() {
 }
 
 export async function quiet(budget = 6, timeout = 400) {
+  if (fast.on()) {
+    await nextTask();
+    return;
+  }
   for (let attempt = 0; attempt < 8; attempt++) {
     const left = await idle(timeout);
     if (left >= budget) break;

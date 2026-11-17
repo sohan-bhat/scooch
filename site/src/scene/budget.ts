@@ -53,7 +53,15 @@ export function level(): Level {
 const HEADROOM = 600;
 const PATIENCE = 4000;
 
+export function covered() {
+  return runtime.posterUp && runtime.ready && runtime.still < 0;
+}
+
 export async function calm() {
+  if (covered()) {
+    await quiet();
+    return;
+  }
   for (;;) {
     if (stillsPlanned()) {
       await new Promise<void>((resolve) => waiting.push(resolve));

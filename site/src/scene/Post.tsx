@@ -4,13 +4,13 @@ import { BlendFunction, CopyPass, ToneMappingMode } from 'postprocessing';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinusConstantAlphaFactor, SRGBColorSpace, Vector2, WebGLRenderTarget, type Texture } from 'three';
 import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass } from 'postprocessing';
-import { holdQuiet, quiet } from '@/lib/idle';
+import { holdQuiet, quiet, quietFast } from '@/lib/idle';
 import { release as releaseLoader } from '@/lib/load';
 import { changed, clockSweeping, runtime, story, wallClock } from '@/story/state';
 import { beats, TOTAL } from '@/story/timeline';
 import { quality, type Toggle } from './quality';
 import { allocate, freeze, inView, nativeAllowed, nativeOff, screenBox, still, thaw } from './still';
-import { budget, grant, release } from './budget';
+import { budget, covered, grant, release } from './budget';
 import { animating, hooks, live, things } from './touch';
 import { precompile } from './warm';
 
@@ -269,6 +269,7 @@ export function Post({ phone }: { phone: boolean }) {
   }, [copy, overlay, present, accumulate, totals, heldTarget]);
 
   useEffect(() => holdQuiet(() => loading() && (BUILDING.has(still.phase) || performance.now() - still.inputAt < YIELD)), []);
+  useEffect(() => quietFast(covered), []);
 
   useEffect(() => {
     const input = () => {
@@ -724,7 +725,7 @@ export function Post({ phone }: { phone: boolean }) {
       }
       if (still.phase === 'still') {
         if (runtime.changedAt > still.builtAt) still.stale = true;
-        const due = still.stale && (still.arrived || !budget.busy || now - budget.lastStepAt > 1000) && (!loading() || now - still.builtAt > COALESCE);
+        const due = still.stale && !(covered() && budget.busy) && (still.arrived || !budget.busy || now - budget.lastStepAt > 1000) && (!loading() || now - still.builtAt > COALESCE);
         if (still.held) {
           const second = Math.floor(wallClock() / 1000);
           const tick = (clockSweeping(now) || (second !== still.second && !runtime.clockHold)) && inView(things.clock, camera);
