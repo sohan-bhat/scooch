@@ -285,6 +285,7 @@ mod probe {
             "3 Icons" => 9_499,
             "3b Live layer" => 47_610,
             "3c Helper colour and scale" => 5_578,
+            "3d Reveal captures" => 50_000,
             "4 First run" => 101_164,
             "5 Move to new wallpaper" => 62_364,
             "5b Scenery" => 157_529,
@@ -476,6 +477,7 @@ mod probe {
         probe.section("3 Icons", icons);
         probe.section("3b Live layer", live);
         probe.section("3c Helper colour and scale", colour_scale);
+        probe.section("3d Reveal captures", reveal_check);
         probe.section("4 First run", first_run);
         probe.section("5 Move to new wallpaper", moves);
         probe.section("5b Scenery", scenery_check);
@@ -2386,6 +2388,177 @@ mod probe {
         Ok(())
     }
 
+    const REVEAL_OPENS: u32 = 20;
+    const REVEAL_WATCH: Duration = Duration::from_millis(150);
+    const REVEAL_STRIDE: usize = 4;
+
+    fn helper_windows(pid: u32) -> Vec<i64> {
+        layer::every_window().into_iter().filter(|window| window.pid == i64::from(pid)).map(|window| window.number).collect()
+    }
+
+    fn new_window(pid: u32, screen: &Screen, before: &[i64]) -> Option<i64> {
+        layer::listing().into_iter().find(|window| window.pid == i64::from(pid) && !before.contains(&window.number) && window.bounds.x < screen.frame.x + screen.frame.w && screen.frame.x < window.bounds.x + window.bounds.w && window.bounds.w >= screen.frame.w * 0.9).map(|window| window.number)
+    }
+
+    fn sampled(shot: &Shot) -> Vec<[u8; 3]> {
+        (0..shot.height).step_by(REVEAL_STRIDE).flat_map(|y| (0..shot.width).step_by(REVEAL_STRIDE).map(move |x| (x, y))).map(|(x, y)| shot.at(x, y)).collect()
+    }
+
+    fn black(pixels: &[[u8; 3]]) -> bool {
+        !pixels.is_empty() && pixels.iter().filter(|pixel| pixel.iter().all(|channel| *channel <= 8)).count() * 100 >= pixels.len() * 95
+    }
+
+    fn largest_gap(a: &[[u8; 3]], b: &[[u8; 3]]) -> Option<u8> {
+        (a.len() == b.len() && !a.is_empty()).then(|| a.iter().zip(b).map(|(one, two)| (0..3).map(|channel| one[channel].abs_diff(two[channel])).max().unwrap_or(0)).max().unwrap_or(0))
+    }
+
+    fn reveal_check(p: &mut Probe) -> Result<()> {
+        let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
+        accessory(marker);
+        let screen = platform::current()?.screens()?.into_iter().next().context("no screen")?;
+        let (width, height) = pixels(&screen);
+        let file = p.home.join(format!("probe-still-{width}x{height}.jpg"));
+        if !file.is_file() {
+            still_file(&file, &test_still(width, height))?;
+        }
+        p.line("- the capture by window number sees the layer while it is still hidden, so it tells whether the window server has the first frame before the layer is shown. It cannot see the unhide itself, and a flash shorter than the gap between two captures can fall between them".to_string());
+        match reveal_captures(p, &screen, "default transaction present", None) {
+            Ok(seen) => {
+                if seen.bad > 0 {
+                    p.fail(format!("{} of {REVEAL_OPENS} opens with the default reveal had a black or empty capture after shown", seen.bad));
+                }
+                if seen.saw < REVEAL_CONTROL {
+                    p.fail(format!("the control was blind, it saw an empty layer in {} of {REVEAL_OPENS} opens of the default reveal where at least {REVEAL_CONTROL} are needed, so the reveal is not proven on this Mac", seen.saw));
+                }
+            }
+            Err(error) => p.fail(format!("the reveal captures with the default reveal could not run {error:#}")),
+        }
+        if let Err(error) = reveal_captures(p, &screen, "spin, reported only", Some(scooch::live::SPIN)) {
+            p.line(format!("- the reveal captures with the spin could not run {error:#}"));
+        }
+        Ok(())
+    }
+
+    const REVEAL_CONTROL: usize = 3;
+    const REVEAL_QUICK: Duration = Duration::from_millis(8);
+
+    struct Revealed {
+        saw: usize,
+        bad: usize,
+    }
+
+    struct Opened {
+        saw: bool,
+        bad: bool,
+        quick: bool,
+        reveal: Option<u64>,
+        shown: Option<u128>,
+    }
+
+    fn reveal_open(p: &mut Probe, helper: &mut scooch::live::Helper, screen: &Screen, file: &Path, id: u32) -> Result<Opened> {
+        let before = helper_windows(helper.pid);
+        helper.ask_open(id, screen, file)?;
+        let asked = Instant::now();
+        let (mut number, mut shown, mut failed, mut drawn) = (None, None::<Instant>, None, None);
+        let mut captures: Vec<(Instant, Option<Vec<[u8; 3]>>)> = Vec::new();
+        while asked.elapsed() < Duration::from_secs(5) && failed.is_none() && shown.is_none_or(|shown| shown.elapsed() < REVEAL_WATCH) {
+            if number.is_none() {
+                number = new_window(helper.pid, screen, &before);
+            }
+            if let Some(number) = number {
+                let at = Instant::now();
+                captures.push((at, grab_window(number).map(|shot| sampled(&shot))));
+            }
+            let wait = if number.is_some() { Duration::ZERO } else { Duration::from_millis(2) };
+            while let Some(reply) = helper.next(wait) {
+                match reply {
+                    scooch::live::Reply::Shown { id: got, .. } if got == id => shown = Some(helper.arrived().unwrap_or_else(Instant::now)),
+                    scooch::live::Reply::Drawn { id: got, reveal, revealing, .. } if got == id => drawn = Some((reveal, revealing)),
+                    scooch::live::Reply::Failed { id: got, why } if got.is_none_or(|got| got == id) => failed = Some(why),
+                    _ => {}
+                }
+                if wait.is_zero() {
+                    continue;
+                }
+                break;
+            }
+        }
+        if drawn.is_none() && shown.is_some() {
+            drawn = helper
+                .expect(Duration::from_millis(500), |reply| match reply {
+                    scooch::live::Reply::Drawn { id: got, reveal, revealing, .. } if *got == id => Some(Ok((*reveal, revealing.clone()))),
+                    _ => None,
+                })
+                .ok();
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        let settled = number.and_then(grab_window).map(|shot| sampled(&shot));
+        let _ = helper.close(id, Duration::from_secs(3));
+        let Some(shown) = shown else {
+            p.line(format!("  - open {id}: no shown within 5 s, window {number:?}, {failed:?}"));
+            return Ok(Opened { saw: false, bad: false, quick: false, reveal: None, shown: None });
+        };
+        let (early, late): (Vec<_>, Vec<_>) = captures.iter().partition(|(at, _)| *at < shown);
+        let empty = |list: &[&(Instant, Option<Vec<[u8; 3]>>)]| list.iter().filter(|(_, shot)| shot.as_ref().is_none_or(Vec::is_empty)).count();
+        let dark = |list: &[&(Instant, Option<Vec<[u8; 3]>>)]| list.iter().filter(|(_, shot)| shot.as_deref().is_some_and(black)).count();
+        let largest = late.iter().filter_map(|(_, shot)| shot.as_deref().zip(settled.as_deref()).and_then(|(shot, settled)| largest_gap(shot, settled))).max();
+        let seen_after = late.len() - empty(&late) - dark(&late);
+        let saw = empty(&early) + dark(&early) > 0 && seen_after > 0;
+        let bad = empty(&late) + dark(&late) > 0;
+        let to_shown = shown.saturating_duration_since(asked).as_millis();
+        let times = |list: &[&(Instant, Option<Vec<[u8; 3]>>)]| list.iter().map(|(at, _)| at.saturating_duration_since(asked).as_millis()).collect::<Vec<_>>();
+        p.line(format!(
+            "  - open {id}: window {number:?}, Open to shown {to_shown} ms, before shown {} captures at {:?} ms after Open with {} black and {} empty, after shown {} captures at {:?} ms with {} black and {} empty, largest difference after shown from the settled layer {largest:?} of 255, settled capture black {:?}, the control saw the hidden layer {saw}, reveal and its steps {drawn:?}",
+            early.len(),
+            times(&early),
+            dark(&early),
+            empty(&early),
+            late.len(),
+            times(&late),
+            dark(&late),
+            empty(&late),
+            settled.as_deref().map(black)
+        ));
+        let quick = late.first().is_some_and(|(at, _)| at.saturating_duration_since(shown) <= REVEAL_QUICK);
+        Ok(Opened { saw, bad, quick, reveal: drawn.map(|(reveal, _)| reveal), shown: Some(to_shown) })
+    }
+
+    fn spread(values: &[u128]) -> String {
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        match (sorted.get(sorted.len() / 2), sorted.first(), sorted.last()) {
+            (Some(middle), Some(low), Some(high)) => format!("median {middle} ms from {low} to {high} ms"),
+            _ => "none".to_string(),
+        }
+    }
+
+    fn reveal_captures(p: &mut Probe, screen: &Screen, label: &str, switch: Option<&str>) -> Result<Revealed> {
+        let (width, height) = pixels(screen);
+        let file = p.home.join(format!("probe-still-{width}x{height}.jpg"));
+        let env: Vec<(&str, &str)> = switch.map(|name| (name, "1")).into_iter().collect();
+        let mut helper = scooch::live::Helper::spawn_with(&p.bin, Duration::from_secs(5), &env)?;
+        helper.warm(scooch::live::Hints::default(), None, None, Duration::from_secs(30))?;
+        p.line(format!("- reveal captures with the {label}, {REVEAL_OPENS} opens of the helper's layer over the test still, the helper's new window captured alone by its number from the moment it is listed until {} ms after shown, every {REVEAL_STRIDE}th pixel compared, the captures before shown are the control", REVEAL_WATCH.as_millis()));
+        let mut opened = Vec::new();
+        for id in 1..=REVEAL_OPENS {
+            opened.push(reveal_open(p, &mut helper, screen, &file, id)?);
+        }
+        drop(helper);
+        let saw = opened.iter().filter(|open| open.saw).count();
+        let bad = opened.iter().filter(|open| open.bad).count();
+        let reveals: Vec<u128> = opened.iter().filter_map(|open| open.reveal.map(u128::from)).collect();
+        let shown: Vec<u128> = opened.iter().filter_map(|open| open.shown).collect();
+        let quick = opened.iter().filter(|open| open.quick).count();
+        p.line(format!(
+            "  - with the {label}: the control saw the hidden layer in {saw} of {REVEAL_OPENS} opens, in every open {}, opens with a black or empty capture after shown {bad} of {REVEAL_OPENS}, opens whose first capture after shown began within {} ms of it {quick} of {REVEAL_OPENS}, reveal {}, Open to shown {}",
+            saw == opened.len(),
+            REVEAL_QUICK.as_millis(),
+            spread(&reveals),
+            spread(&shown)
+        ));
+        Ok(Revealed { saw, bad })
+    }
+
     fn modes(display: u32) -> Vec<(usize, usize, usize, usize, bool, *const c_void)> {
         unsafe {
             let keys = [kCGDisplayShowDuplicateLowResolutionModes];
@@ -2853,6 +3026,7 @@ mod probe {
         launched_at: Option<String>,
         launched_from_drop: Option<f64>,
         start_after: Option<String>,
+        go: Option<f64>,
         line: String,
     }
 
@@ -2898,6 +3072,7 @@ mod probe {
             launched_at: early_line.and_then(|line| line.split("glide early launch at ").nth(1)).and_then(|rest| rest.split(" in ").next()).map(str::to_string),
             launched_from_drop: early_line.and_then(|line| stamp_of(line)).map(after_drop),
             start_after: log.iter().find(|line| line.contains(" drag start at ")).and_then(|line| line.split(" found ").nth(1)).and_then(|rest| rest.split(" ms after the down").next()).map(str::to_string),
+            go: gliding.map(after_drop),
             made: decision.and_then(|line| number_after(line, "made it in ")).filter(|_| early),
             found: decision.and_then(|line| line.split("open found it made ").nth(1)).and_then(|rest| rest.split(',').next()).and_then(|word| word.trim().parse::<bool>().ok()),
             line: String::new(),
@@ -2916,7 +3091,7 @@ mod probe {
             tick: log.iter().find(|line| line.contains(" tick ") && line.contains("Rendered")).map(|line| {
                 let took = line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()).unwrap_or(0.0);
                 let began = stamp_of(line).map(|ended| ((ended - took / 1000.0 - dropped) * 1000.0).round());
-                format!("began {began:?} ms after the drop, took {took} ms, {}", line.split(")] ").nth(1).unwrap_or_default().chars().take(150).collect::<String>())
+                format!("began {began:?} ms after the drop, took {took} ms, {}", line.split(")] ").nth(1).unwrap_or_default().chars().take(400).collect::<String>())
             }),
             set,
             glided: gliding.is_some(),
@@ -2949,7 +3124,7 @@ mod probe {
                 _ => "none".to_string(),
             };
             let line = format!(
-                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}, launch took {} ms, the early window took {} ms, open found it made {:?}, early launch came {came}, drag start found {} ms after the down",
+                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}, launch took {} ms, the early window took {} ms, open found it made {:?}, early launch came {came}, drag start found {} ms after the down, drop to go {} ms beside drop to set {} ms by the daemon's laps",
                 index + 1,
                 cold.glided,
                 cold.skip,
@@ -2974,7 +3149,9 @@ mod probe {
                 rounded(cold.took),
                 rounded(cold.made),
                 cold.found,
-                cold.start_after.as_deref().unwrap_or("never")
+                cold.start_after.as_deref().unwrap_or("never"),
+                rounded(cold.go),
+                rounded(cold.tick.as_deref().and_then(set_by_laps))
             );
             p.line(line.clone());
             Cold { line, ..cold }
@@ -3053,6 +3230,18 @@ mod probe {
         let began = rest.split(')').next()?.parse::<f64>().ok()?;
         let laps = rest.split(" ms after the drop, took ").nth(1)?.split(", sessions hold").next()?;
         Some((began, laps.split(", ").skip(1).filter_map(|lap| lap.rsplit_once(' ').and_then(|(name, value)| Some((name.to_string(), value.parse::<f64>().ok()?)))).collect()))
+    }
+
+    fn set_by_laps(tick: &str) -> Option<f64> {
+        let (began, laps) = laps_of(tick)?;
+        let mut at = began;
+        for (name, value) in laps {
+            at += value;
+            if name == "set" {
+                return Some(at);
+            }
+        }
+        None
     }
 
     fn daemon_clock(line: &str) -> Option<f64> {
@@ -3142,10 +3331,14 @@ mod probe {
         let on = cold_round(p, &screen, name, places, "cold");
         let glided = on.iter().filter(|cold| cold.glided).count();
         let found = on.iter().filter(|cold| cold.found == Some(true)).count();
+        let read = on.iter().filter(|cold| cold.found.is_some()).count();
+        let missed: Vec<usize> = on.iter().enumerate().filter(|(_, cold)| cold.found == Some(false) && cold.glided && cold.early).map(|(index, _)| index + 1).collect();
         let before_drop = on.iter().filter(|cold| cold.launched_from_drop.is_some_and(|at| at < 0.0)).count();
-        p.line(format!("- cold drags where open found the early window made {found} of 10, early launches before the drop {before_drop} of 10"));
-        if found < 8 {
-            p.fail("open found the early window made in fewer than eight of ten cold drags");
+        p.line(format!("- cold drags where open found the early window made {found} of the {read} whose helper line the probe could read, {} not read, glided early launches read as not found {missed:?}, early launches before the drop {before_drop} of 10", on.len() - read));
+        if read < 8 {
+            p.fail(format!("the probe could read the helper's line in only {read} of ten cold drags, so whether open found the early window cannot be judged"));
+        } else if found * 10 < read * 8 {
+            p.fail("open found the early window made in fewer than eight of ten cold drags it could read");
         }
         let (slow, off) = if restart_daemon(p, true)? {
             p.line(format!("- the daemon restarted with {}={SLOW_HELLO_MS}, so each helper answers hello {} s late, after the drop even when it was launched at the drag start, then one drag to settle the new daemon that is not counted, then ten pairs, each a drag with the glide on and the slow helper followed by a drag with the glide off, both after 35 s at rest so they meet the same runner load, and before each pair one uncounted drag with the glide on so the slow drag finds glide tables", scooch::live::SLOW_HELLO, SLOW_HELLO_MS / 1000));

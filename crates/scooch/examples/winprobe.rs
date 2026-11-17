@@ -2729,7 +2729,13 @@ mod probe {
             }
             worst_cover.1 = worst_cover.1.max(redrawn);
         }
-        let from_settle = settled.or(failed.as_ref().map(|f| f.0)).unwrap_or(u128::MAX);
+        let gone = display_rate().filter(|rate| *rate >= 24).map_or(2000 / 60, |rate| 2000 / u128::from(rate)) + 1;
+        let (from_settle, judged) = match (settled, failed.as_ref()) {
+            (Some(settled), _) => (settled, "from settled".to_string()),
+            (None, Some((at, _))) if run.ending == Ending::Never => (at + gone, format!("from {gone} ms, two refresh periods, after the close reply")),
+            (None, Some((at, _))) => (*at, "from the failure".to_string()),
+            (None, None) => (u128::MAX, "from settled".to_string()),
+        };
         let held: Vec<(usize, (f32, u8, u8))> = shots.iter().enumerate().filter(|(_, (at, _))| *at >= from_settle).map(|(index, (_, shot))| (index, difference(shot, &run.new.1, &wide))).collect();
         let after_gap = difference(&after, &run.new.1, &wide);
         let worst_held = held.iter().max_by_key(|(_, d)| d.1).copied();
@@ -2768,7 +2774,7 @@ mod probe {
             after_gap.2
         );
         if let Some((index, d)) = worst_held {
-            line += &format!(", worst from settled to a second after close mean {:.2} 99th {} largest {}", d.0, d.1, d.2);
+            line += &format!(", worst {judged} to a second after close mean {:.2} 99th {} largest {}", d.0, d.1, d.2);
             if d.1 > 2 {
                 let (at, shot) = &shots[index];
                 line += &format!(", {}", evidence(p, &format!("{}-handover", run.name), shot, &run.new.1, &wide, &marks(*at)));

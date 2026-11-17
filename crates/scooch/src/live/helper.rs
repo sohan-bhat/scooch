@@ -8,6 +8,7 @@ pub const IDLE_EXIT: Duration = Duration::from_secs(30);
 pub const LAYER_IDLE: Duration = Duration::from_secs(5);
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
+pub type Commit = Box<dyn Fn() + Send>;
 
 type Out = Arc<Mutex<Box<dyn Write + Send>>>;
 
@@ -44,7 +45,7 @@ pub use running::{serve, Build, Platform};
 
 #[cfg(any(windows, target_os = "macos"))]
 mod running {
-    use super::{read, say, Out, Waker, IDLE_EXIT, LAYER_IDLE};
+    use super::{read, say, Commit, Out, Waker, IDLE_EXIT, LAYER_IDLE};
     use crate::live::{warm_failed, Command, Hints, Reply, VERSION};
     use crate::platform::Screen;
     use anyhow::Result;
@@ -90,6 +91,12 @@ mod running {
             Duration::from_micros(16_667)
         }
         fn show(&mut self, layer: &Self::Layer) -> Result<()>;
+        fn revealed(&mut self) -> Vec<(&'static str, u64)> {
+            Vec::new()
+        }
+        fn committer(&self) -> Option<Commit> {
+            None
+        }
         fn close(&mut self, layer: Self::Layer);
         fn abandon(&mut self, layer: Self::Layer) {
             std::mem::forget(layer);
@@ -199,6 +206,7 @@ mod running {
         shown: bool,
         stopped: bool,
         closing: Option<(Instant, bool)>,
+        told: Option<String>,
     }
 
     fn spent(since: Instant) -> u64 {
@@ -388,6 +396,7 @@ mod running {
         still: Option<Decoding>,
         size: (u32, u32),
         period: Duration,
+        commit: Option<Commit>,
     }
 
     fn load_pair(a: &Path, b: &Path, pictures: &[Loaded]) -> Result<(Bundle, Bundle, Loaded), String> {
@@ -411,7 +420,7 @@ mod running {
             let _ = events.send(event);
             waker();
         };
-        let Start { id, gpu, surface, still, size, period } = start;
+        let Start { id, gpu, surface, still, size, period, commit } = start;
         let begun = Instant::now();
         let made = still
             .ok_or_else(|| "open needs the still the system shows now".to_string())
@@ -429,6 +438,9 @@ mod running {
         let mut shown = vec![(Shown::Still(Arc::new(first)), 1.0f32)];
         let result = P::frame(|| screen.show(&looks(&shown)));
         let ok = result.is_ok();
+        if let (true, Some(commit)) = (ok, commit.as_ref()) {
+            commit();
+        }
         tell(Event::Presented { id, result, first: begun.elapsed().as_millis() as u64 });
         let slow_after = period.mul_f32(1.5);
         let mut motion: Option<Motion> = None;
@@ -847,7 +859,7 @@ mod running {
                 self.fail(Some(id), "the layer window is gone");
                 return;
             };
-            let start = Start { id, gpu, surface: Surface(self.platform.target(&layer)), still, size: self.platform.pixels(&layer), period: self.platform.period(&layer) };
+            let start = Start { id, gpu, surface: Surface(self.platform.target(&layer)), still, size: self.platform.pixels(&layer), period: self.platform.period(&layer), commit: self.platform.committer() };
             let (jobs, receiver) = mpsc::channel();
             let (events, waker) = (self.events.clone(), self.waker.clone());
             let spawned = std::thread::Builder::new().name(format!("scooch-live-render-{id}")).spawn(move || render::<P>(start, receiver, events, waker));
@@ -857,7 +869,7 @@ mod running {
                 return;
             }
             let now = Instant::now();
-            self.layers.insert(id, Live { layer: Some(layer), jobs, split, asked, touched: now, shown: false, stopped: false, closing: None });
+            self.layers.insert(id, Live { layer: Some(layer), jobs, split, asked, touched: now, shown: false, stopped: false, closing: None, told: None });
         }
 
         fn begin_close(&mut self, id: u32, answer: bool) {
@@ -892,6 +904,9 @@ mod running {
                 } else {
                     self.platform.abandon(layer);
                 }
+            }
+            if let Some(why) = live.told.take() {
+                self.fail(Some(id), why);
             }
             if live.closing.is_some_and(|(_, answer)| answer) {
                 self.tell(Reply::Closed { id });
@@ -1037,6 +1052,7 @@ mod running {
                         (Ok(()), None) => Err("the layer window is gone".to_string()),
                         (Err(why), _) => Err(why),
                     };
+                    let revealing_steps: Vec<(String, u64)> = self.platform.revealed().into_iter().map(|(name, took)| (String::from(name), took)).collect();
                     match shown {
                         Ok(()) => {
                             if let Some(live) = self.layers.get_mut(&id) {
@@ -1045,9 +1061,9 @@ mod running {
                                 let ms = live.asked.elapsed().as_millis() as u64;
                                 let split = &live.split;
                                 let steps = split.steps.iter().map(|(name, took)| (String::from(*name), *took)).collect();
-                                let drawn = Reply::Drawn { id, window: split.window, first, reveal: spent(revealing), make: split.make, present: split.present, found: split.found, steps };
-                                self.tell(Reply::Shown { id, ms });
+                                let drawn = Reply::Drawn { id, window: split.window, first, reveal: spent(revealing), make: split.make, present: split.present, found: split.found, steps, revealing: revealing_steps };
                                 self.tell(drawn);
+                                self.tell(Reply::Shown { id, ms });
                             }
                         }
                         Err(why) => {
@@ -1115,7 +1131,9 @@ mod running {
                     Some(_) => {}
                     None if self.leaving => self.begin_close(id, false),
                     None if shown && touched.elapsed() > LAYER_IDLE => {
-                        self.fail(Some(id), format!("layer {id} closed after {} s without a command", LAYER_IDLE.as_secs()));
+                        if let Some(live) = self.layers.get_mut(&id) {
+                            live.told = Some(format!("layer {id} closed after {} s without a command", LAYER_IDLE.as_secs()));
+                        }
                         self.begin_close(id, false);
                     }
                     None => {}
@@ -1182,6 +1200,8 @@ mod running {
         use scooch_core::Rect;
         use std::io::Write;
 
+        static DEVICE: Mutex<()> = Mutex::new(());
+
         #[derive(Clone, Default)]
         struct Captured(Arc<Mutex<Vec<u8>>>);
 
@@ -1214,6 +1234,9 @@ mod running {
             during: Option<Box<dyn FnOnce() + Send>>,
             watched: Option<Captured>,
             ready_when_made: Option<bool>,
+            reveal: crate::live::Reveal,
+            log: Arc<Mutex<Vec<String>>>,
+            failed_at_close: Option<bool>,
         }
 
         #[cfg(target_os = "macos")]
@@ -1288,11 +1311,22 @@ mod running {
             }
 
             fn show(&mut self, _layer: &Drawn) -> Result<()> {
+                let mut log = self.log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if self.reveal == crate::live::Reveal::Spin {
+                    log.push("spin".into());
+                }
+                log.push("show".into());
                 Ok(())
+            }
+
+            fn committer(&self) -> Option<Commit> {
+                let log = self.log.clone();
+                (self.reveal == crate::live::Reveal::Transaction).then(|| Box::new(move || log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push("commit".into())) as Commit)
             }
 
             #[cfg(windows)]
             fn close(&mut self, layer: Drawn) {
+                self.failed_at_close = self.watched.as_ref().map(|out| out.replies().iter().any(|reply| matches!(reply, Reply::Failed { .. })));
                 self.closed += 1;
                 self.gone.push(layer.screen);
                 let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(windows::Win32::Foundation::HWND(layer.window as *mut std::ffi::c_void)) };
@@ -1300,6 +1334,7 @@ mod running {
 
             #[cfg(target_os = "macos")]
             fn close(&mut self, layer: Drawn) {
+                self.failed_at_close = self.watched.as_ref().map(|out| out.replies().iter().any(|reply| matches!(reply, Reply::Failed { .. })));
                 self.closed += 1;
                 self.gone.push(layer.screen);
                 drop(layer.metal);
@@ -1376,6 +1411,7 @@ mod running {
 
         #[test]
         fn two_screens_of_different_sizes_warm_and_glide_on_one_device() {
+            let _device = DEVICE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let folder = std::env::temp_dir().join(format!("scooch-helper-{}", std::process::id()));
             std::fs::create_dir_all(&folder).unwrap();
             let paint = |width: u32, height: u32, step: u32| RgbImage::from_raw(width, height, (0..height).flat_map(|y| (0..width).flat_map(move |x| [((x * step + y) % 256) as u8, ((y * 2) % 256) as u8, ((x + y * step) % 256) as u8])).collect()).unwrap();
@@ -1423,6 +1459,94 @@ mod running {
             let _ = std::fs::remove_dir_all(&folder);
         }
 
+        fn opening(reveal: crate::live::Reveal, decodable: bool) -> Option<(Vec<Reply>, Vec<String>, usize)> {
+            let _device = DEVICE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let folder = std::env::temp_dir().join(format!("scooch-commit-{}-{reveal:?}-{decodable}", std::process::id()));
+            std::fs::create_dir_all(&folder).unwrap();
+            let still = folder.join("still.png");
+            if decodable {
+                std::fs::write(&still, scooch_core::encode_png(&RgbImage::from_pixel(64, 48, [90, 120, 200].into())).unwrap()).unwrap();
+            }
+            let (events, inbox) = mpsc::channel();
+            let out = Captured::default();
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let platform = Fake { reveal, log: log.clone(), ..Fake::default() };
+            let mut helper = Helper { platform, out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            helper.event(Event::Command(Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: Some(1), canvas: None, scales: BTreeMap::new() }));
+            helper.event(Event::Command(Command::Open { id: 1, screen: "main".into(), rect: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0, still: Some(still) }));
+            let started = Instant::now();
+            let mut replies = Vec::new();
+            while started.elapsed() < Duration::from_secs(90) {
+                while let Ok(event) = inbox.try_recv() {
+                    helper.event(event);
+                }
+                helper.advance();
+                replies = out.replies();
+                let shown = replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 1, .. }));
+                let failed = replies.iter().any(|reply| matches!(reply, Reply::Failed { .. }));
+                if shown || (failed && helper.layers.is_empty() && helper.pending.is_empty()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = std::fs::remove_dir_all(&folder);
+            if replies.iter().any(|reply| matches!(reply, Reply::Failed { why, .. } if why.contains("no device"))) {
+                assert!(std::env::var_os("SCOOCH_NEED_ADAPTER").is_none(), "no adapter, and this runner must have one");
+                println!("skipped: no adapter");
+                return None;
+            }
+            let seen = log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+            Some((replies, seen, helper.platform.closed))
+        }
+
+        #[test]
+        fn the_default_commits_the_first_frames_transaction_before_presented_and_shows_with_no_spin() {
+            let Some((replies, seen, _)) = opening(crate::live::Reveal::from(None), true) else { return };
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 1, .. })), "{replies:?}");
+            assert_eq!(seen, vec!["commit".to_string(), "show".to_string()]);
+        }
+
+        #[test]
+        fn the_spin_switch_gives_the_old_order_show_after_presented_with_no_commit() {
+            let Some((replies, seen, _)) = opening(crate::live::Reveal::from(Some("1")), true) else { return };
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 1, .. })), "{replies:?}");
+            assert_eq!(seen, vec!["spin".to_string(), "show".to_string()]);
+        }
+
+        #[test]
+        fn the_drawn_reply_goes_out_before_shown_so_the_daemon_holds_it_at_shown() {
+            let Some((replies, _, _)) = opening(crate::live::Reveal::from(None), true) else { return };
+            let drawn = replies.iter().position(|reply| matches!(reply, Reply::Drawn { id: 1, .. }));
+            let shown = replies.iter().position(|reply| matches!(reply, Reply::Shown { id: 1, .. }));
+            assert!(drawn.zip(shown).is_some_and(|(drawn, shown)| drawn < shown), "{replies:?}");
+        }
+
+        #[test]
+        fn a_first_frame_that_fails_closes_its_layer_with_no_commit_and_no_show() {
+            let Some((replies, seen, closed)) = opening(crate::live::Reveal::from(None), false) else { return };
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Failed { id: Some(1), .. })) && !replies.iter().any(|reply| matches!(reply, Reply::Shown { .. })), "{replies:?}");
+            assert!(seen.is_empty(), "{seen:?}");
+            assert_eq!(closed, 1, "{replies:?}");
+        }
+
+        #[test]
+        fn a_layer_closed_by_the_five_second_rule_is_reported_only_after_its_window_is_gone() {
+            let (events, _inbox) = mpsc::channel();
+            let out = Captured::default();
+            let platform = Fake { watched: Some(out.clone()), ..Fake::default() };
+            let mut helper = Helper { platform, out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let screen = Screen { id: "idle".into(), frame: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0 };
+            let Ok(Build::Whole(layer, _)) = helper.platform.make(&screen, &Hints::default(), None) else { panic!("the fake made no layer") };
+            let (jobs, _receiver) = mpsc::channel();
+            let idle = Instant::now().checked_sub(LAYER_IDLE + Duration::from_millis(50)).unwrap_or_else(Instant::now);
+            helper.layers.insert(7, Live { layer: Some(layer), jobs, split: Split::default(), asked: idle, touched: idle, shown: true, stopped: true, closing: None, told: None });
+            helper.sweep();
+            let replies = out.replies();
+            assert_eq!(helper.platform.closed, 1, "{replies:?}");
+            assert_eq!(helper.platform.failed_at_close, Some(false), "{replies:?}");
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Failed { id: Some(7), why } if why.starts_with("layer 7 closed after"))), "{replies:?}");
+        }
+
         fn closed_after_stop(stopped: bool) -> (usize, usize, Vec<Reply>) {
             let (events, _inbox) = mpsc::channel();
             let out = Captured::default();
@@ -1430,7 +1554,7 @@ mod running {
             let screen = Screen { id: "stuck".into(), frame: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0 };
             let Ok(Build::Whole(layer, _)) = helper.platform.make(&screen, &Hints::default(), None) else { panic!("the fake made no layer") };
             let (jobs, _receiver) = mpsc::channel();
-            helper.layers.insert(1, Live { layer: Some(layer), jobs, split: Split::default(), asked: Instant::now(), touched: Instant::now(), shown: true, stopped, closing: None });
+            helper.layers.insert(1, Live { layer: Some(layer), jobs, split: Split::default(), asked: Instant::now(), touched: Instant::now(), shown: true, stopped, closing: None, told: None });
             helper.begin_close(1, true);
             if let Some(live) = helper.layers.get_mut(&1) {
                 live.closing = Instant::now().checked_sub(STOP_WAIT + Duration::from_millis(50)).map(|since| (since, true));
