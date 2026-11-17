@@ -28,7 +28,7 @@ mod probe {
     use std::time::{Duration, Instant};
     use x11rb::connection::Connection as _;
     use x11rb::wrapper::ConnectionExt as _;
-    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT};
+    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, KeyButMask, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT};
     use x11rb::protocol::xtest::ConnectionExt as _;
     use zbus::zvariant;
 
@@ -860,7 +860,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let Some(control) = control_code(&conn) else { return Ok(false) };
         let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
         for (index, point) in points.iter().enumerate() {
-            if index == 1 {
+            if index == 0 && points.len() > 1 {
                 conn.xtest_fake_input(KEY_PRESS_EVENT, control, 0, root, 0, 0, 0)?;
                 conn.flush()?;
                 pause(80);
@@ -884,6 +884,49 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         Ok(true)
     }
 
+    const OFFSETS: [u64; 16] = [0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600, 2000];
+    const STEADY: Duration = Duration::from_millis(400);
+    const TRUTH: Duration = Duration::from_millis(2500);
+
+    type Rects = Vec<[i64; 4]>;
+    type Stamps = Arc<Mutex<Vec<(Instant, &'static str)>>>;
+
+    struct Taken<T> {
+        began: Duration,
+        took: Duration,
+        seen: T,
+    }
+
+    struct Bench<'a> {
+        linux: &'a Linux,
+        log: PathBuf,
+        stamps: Stamps,
+        steady: bool,
+        scale: f32,
+    }
+
+    struct Plan {
+        group: bool,
+        index: usize,
+        before: Rects,
+        moving: Rects,
+        from: (i16, i16),
+        to: (i16, i16),
+    }
+
+    #[derive(Default)]
+    struct Tally {
+        whole: [usize; 2],
+        firsts: [Vec<u128>; 2],
+        xinput: Vec<f64>,
+        poll: Vec<f64>,
+        over: usize,
+        sets: Vec<f64>,
+        partly: [usize; 2],
+        rule: [[usize; 3]; 2],
+        cost: Vec<u128>,
+    }
+
     fn after_drop(p: &mut Probe) -> Result<()> {
         if p.session != Session::X11 {
             p.line("- the probe drags with XTest, which a Wayland session does not take, so this section reads nothing here".to_string());
@@ -894,83 +937,303 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let _ = child.kill();
             let _ = child.wait();
         }
+        let screen = linux.screens()?.first().cloned().context("no screen")?;
+        if let Some(picture) = p.pictures.first().cloned() {
+            let set = linux.set_wallpaper(&screen, &picture).map_err(|error| format!("{error:#}"));
+            p.line(format!("- the probe picture set on `{}` before the daemon starts, so it begins from a picture it can arrange and not from one Scooch drew in section 6, {set:?}", screen.id));
+        }
         let program = scooch_program()?;
         let process = start_daemon(p, &program, "drop.log")?;
         let home = p.home.clone();
         let first = wait_until(Duration::from_secs(60), || rendered(&home));
-        p.line(format!("- the daemon {process} rendered after {:?} ms, its wakes are read from drop.log, and the probe reads the places itself through the adapter", first.map(|time| time.as_millis())));
-        let log = p.out.join("drop.log");
-        let log_lines = || fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_string).collect::<Vec<String>>();
+        p.line(format!("- the daemon {process} rendered after {:?} ms, its wakes and wallpaper sets are read from drop.log, and the probe reads the places itself through the adapter", first.map(|time| time.as_millis())));
+        let stamps = releases();
+        let steady = matches!(p.kind, Some(Kind::Cinnamon | Kind::Mate));
         let scale = factor(p);
-        let screen = linux.screens()?.first().cloned().context("no screen")?;
         let frame = physical(&screen.frame, scale);
         let at = |x: f32, y: f32| ((frame.x + frame.w * x) as i16, (frame.y + frame.h * y) as i16);
-        let read = || {
-            let started = Instant::now();
-            let mut rects: Vec<[i64; 4]> = icons(&linux).iter().map(|rect| [rect.x.round() as i64, rect.y.round() as i64, rect.w.round() as i64, rect.h.round() as i64]).collect();
-            rects.sort_unstable();
-            (rects, started.elapsed())
-        };
-        let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |since| since.as_secs_f64());
-        let offsets = [0u64, 20, 40, 60, 80];
-        p.line("- ten drags of the probe icon, then five drags of a group of three icons selected by a click and two control clicks, each by XTest, with reads at 0, 20, 40, 60 and 80 ms after the drop against the places read 2.5 s later".to_string());
-        let mut whole = (0usize, 0usize);
-        for (kind, count) in [("single", 10usize), ("group", 5)] {
-            for index in 0..count {
-                let (before, _) = read();
-                let from = if kind == "single" {
-                    let grab = grab_point(&probe_icon(p, &linux)?);
-                    (grab.0 as i16, grab.1 as i16)
-                } else {
-                    let mut chosen: Vec<Rect> = icons(&linux).iter().map(|rect| physical(rect, scale)).collect();
-                    chosen.sort_by(|a, b| (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap_or(std::cmp::Ordering::Equal));
-                    let points: Vec<(i16, i16)> = chosen.iter().take(3).map(|rect| {
-                        let grab = grab_point(rect);
-                        (grab.0 as i16, grab.1 as i16)
-                    }).collect();
-                    if points.len() < 3 || !clicks(&points).unwrap_or(false) {
-                        p.line(format!("  - group drag {}: three icons could not be selected", index + 1));
-                        continue;
-                    }
-                    points[0]
-                };
-                let to = if index % 2 == 0 { at(0.5, 0.5) } else { at(0.35, 0.55) };
-                let lines = log_lines().len();
-                let sent = drag(from, to).is_ok();
-                let dropped = Instant::now();
-                let dropped_at = now();
-                let mut reads = Vec::new();
-                for offset in offsets {
-                    std::thread::sleep(Duration::from_millis(offset).saturating_sub(dropped.elapsed()));
-                    let began = dropped.elapsed();
-                    let (rects, took) = read();
-                    reads.push((offset, began, took, rects));
-                }
-                std::thread::sleep(Duration::from_millis(2500));
-                let (last, _) = read();
-                let changed: Vec<[i64; 4]> = last.iter().filter(|rect| !before.contains(rect)).copied().collect();
-                let finals: Vec<usize> = reads.iter().map(|(_, _, _, rects)| changed.iter().filter(|rect| rects.contains(rect)).count()).collect();
-                let wakes: Vec<f64> = log_lines().into_iter().skip(lines).filter(|line| line.contains(" wake ")).filter_map(|line| line.split_whitespace().next().and_then(|stamp| stamp.parse::<f64>().ok())).map(|stamp| ((stamp - dropped_at) * 1000.0).round()).collect();
-                if !changed.is_empty() && finals.first() == Some(&changed.len()) {
-                    if kind == "single" {
-                        whole.0 += 1;
-                    } else {
-                        whole.1 += 1;
-                    }
-                }
-                let said: Vec<String> = reads.iter().zip(&finals).map(|((offset, began, took, _), shown)| format!("{offset} ms read at {} ms took {} ms {shown} of {} final", began.as_millis(), took.as_millis(), changed.len())).collect();
-                p.line(format!("  - {kind} drag {}: sent {sent}, icons that moved {}, wakes after the drop at {wakes:?} ms, reads {}", index + 1, changed.len(), said.join(", ")));
-                if kind == "group" {
-                    let _ = clicks(&[at(0.92, 0.92)]);
-                }
+        let bench = Bench { linux: &linux, log: p.out.join("drop.log"), stamps, steady, scale };
+        let back = if steady { ", back to back for the first 400 ms on this desktop" } else { "" };
+        p.line(format!("- ten drags of the probe icon, each to whichever of two spots lies farther from it, then five drags of the same three icons from the leftmost column, selected by three control clicks after a click on empty desktop, each by XTest, with reads at 0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600 and 2000 ms after the drop{back}, against the places read 2.5 s after the drop, each read printed as began+took:moved places it shows"));
+        let mut tally = Tally::default();
+        let mut tracked = probe_icon(p, &linux).ok().map(|rect| ((rect.x + rect.w / 2.0) / scale, (rect.y + rect.h / 2.0) / scale));
+        for index in 0..10 {
+            let before = places(&linux);
+            let Some(icon) = tracked.and_then(|point| nearest(&before, point)) else {
+                p.line(format!("  - single drag {}: the probe icon could not be found", index + 1));
+                continue;
+            };
+            let from = grab(&icon, scale);
+            let to = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
+            let changed = one_drag(p, &bench, &mut tally, Plan { group: false, index, before, moving: vec![icon], from, to });
+            if let [moved] = changed.as_slice() {
+                tracked = Some(center(moved));
             }
         }
-        p.line(format!("- the first read after the drop showed the whole move in {} of 10 single drags and in {} of 5 group drags", whole.0, whole.1));
+        let mut group: Rects = Vec::new();
+        for index in 0..5 {
+            let _ = clicks(&[at(0.92, 0.92)]);
+            let before = places(&linux);
+            let mut chosen: Rects = if group.len() == 3 && group.iter().all(|rect| before.contains(rect)) { group.clone() } else { before.iter().filter(|rect| inside(&screen.frame, center(rect))).take(3).copied().collect() };
+            chosen.sort_unstable();
+            let points: Vec<(i16, i16)> = chosen.iter().map(|rect| grab(rect, scale)).collect();
+            if points.len() < 3 || !clicks(&points).unwrap_or(false) {
+                p.line(format!("  - group drag {}: three icons could not be selected", index + 1));
+                continue;
+            }
+            let to = farther(points[0], [at(0.62, 0.25), at(0.85, 0.25)]);
+            group = one_drag(p, &bench, &mut tally, Plan { group: true, index, before, moving: chosen, from: points[0], to });
+        }
+        let _ = clicks(&[at(0.92, 0.92)]);
+        summary(p, &bench, &tally);
         if let Some(mut child) = p.daemon.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
         Ok(())
+    }
+
+    fn one_drag(p: &mut Probe, bench: &Bench, tally: &mut Tally, plan: Plan) -> Rects {
+        let (kind, slot) = if plan.group { ("group", 1) } else { ("single", 0) };
+        let log_mark = log_lines(&bench.log).len();
+        let stamp_mark = bench.stamps.lock().map(|list| list.len()).unwrap_or(0);
+        let sent = drag(plan.from, plan.to).is_ok();
+        let dropped = Instant::now();
+        let dropped_wall = wall();
+        let read = || places(bench.linux);
+        let reads = series(&read, dropped, bench.steady);
+        std::thread::sleep(TRUTH.saturating_sub(dropped.elapsed()));
+        let last = places(bench.linux);
+        let changed: Rects = last.iter().filter(|rect| !plan.before.contains(rect)).copied().collect();
+        let first_final = reads.iter().find(|taken| !changed.is_empty() && taken.seen == last).map(|taken| taken.began.as_millis());
+        if !changed.is_empty() && reads.first().is_some_and(|taken| taken.seen == last) {
+            tally.whole[slot] += 1;
+        }
+        tally.firsts[slot].extend(first_final);
+        let lines = log_lines(&bench.log);
+        let (wakes, set) = daemon_after(lines.get(log_mark..).unwrap_or_default(), dropped_wall);
+        tally.sets.extend(set);
+        let seen: Vec<(Instant, &'static str)> = bench.stamps.lock().map(|list| list.get(stamp_mark..).map(<[_]>::to_vec).unwrap_or_default()).unwrap_or_default();
+        let first_of = |name: &str| seen.iter().find(|(_, which)| *which == name).map(|(at, _)| since(*at, dropped));
+        let (xinput, desktop, poll) = (first_of("xinput"), first_of("xinput desktop"), first_of("poll"));
+        tally.xinput.extend(xinput);
+        tally.poll.extend(poll);
+        tally.over += usize::from(desktop.is_some());
+        let woke = if wakes.is_empty() { "none".to_string() } else { wakes.join(", ") };
+        p.line(format!(
+            "  - {kind} drag {}: sent {sent}, from {},{} to {},{}, places that moved {}, first final read began at {} ms, XInput2 saw the release at {} ms and over the desktop at {} ms, the 10 ms poll at {} ms, wakes after the drop {woke}, the daemon set the wallpaper at {} ms",
+            plan.index + 1,
+            plan.from.0,
+            plan.from.1,
+            plan.to.0,
+            plan.to.1,
+            changed.len(),
+            shown_ms(first_final.map(|ms| ms as f64)),
+            shown_ms(xinput),
+            shown_ms(desktop),
+            shown_ms(poll),
+            shown_ms(set)
+        ));
+        let shown: Vec<String> = reads.iter().map(|taken| format!("{}+{}:{}", taken.began.as_millis(), taken.took.as_millis(), changed.iter().filter(|rect| taken.seen.contains(rect)).count())).collect();
+        p.line(format!("    - reads {}", shown.join(" ")));
+        if bench.steady {
+            steady_lines(p, tally, &plan, &reads, &last, slot);
+        }
+        changed
+    }
+
+    fn steady_lines(p: &mut Probe, tally: &mut Tally, plan: &Plan, reads: &[Taken<Rects>], last: &[[i64; 4]], slot: usize) {
+        let partial: Vec<&Taken<Rects>> = reads.iter().filter(|taken| taken.seen.as_slice() != last && taken.seen != plan.before).collect();
+        tally.partly[slot] += usize::from(!partial.is_empty());
+        let quick = reads.iter().take_while(|taken| taken.began < STEADY).count();
+        let ended = |taken: &Taken<Rects>| taken.began + taken.took;
+        let verdict = match reads[..quick].iter().position(|taken| taken.seen != plan.before) {
+            None => "no read within 400 ms saw a move".to_string(),
+            Some(at) if at + 1 >= quick => "the read that saw the move was the last within 400 ms".to_string(),
+            Some(at) => {
+                let (first, second) = (&reads[at], &reads[at + 1]);
+                let cost = ended(second).saturating_sub(ended(first)).as_millis();
+                tally.rule[slot][0] += 1;
+                tally.cost.push(cost);
+                if second.seen == first.seen {
+                    let half = first.seen.as_slice() != last;
+                    tally.rule[slot][1] += 1;
+                    tally.rule[slot][2] += usize::from(half);
+                    let what = if half { "a half done move" } else { "the whole move" };
+                    format!("the read twice rule goes on at {} ms with {what}, its second read cost {cost} ms", ended(second).as_millis())
+                } else {
+                    format!("the read twice rule sees two different reads ending at {} ms and does not go on, its second read cost {cost} ms", ended(second).as_millis())
+                }
+            }
+        };
+        let tail = partial.last().map_or_else(String::new, |taken| format!(", the last of them began at {} ms", taken.began.as_millis()));
+        p.line(format!("    - partly moved in {} reads{tail}, {verdict}", partial.len()));
+    }
+
+    fn summary(p: &mut Probe, bench: &Bench, tally: &Tally) {
+        p.line(format!("- the first read after the drop showed the whole move in {} of 10 single drags and in {} of 5 group drags", tally.whole[0], tally.whole[1]));
+        p.line(format!("- the first final read began at {} ms in single drags and at {} ms in group drags", sorted(&tally.firsts[0]), sorted(&tally.firsts[1])));
+        p.line(format!(
+            "- XInput2 saw the release at a median {} ms after the drop in {} drags and over the desktop in {}, the 10 ms poll at a median {} ms in {} drags",
+            shown_ms(median(&tally.xinput)),
+            tally.xinput.len(),
+            tally.over,
+            shown_ms(median(&tally.poll)),
+            tally.poll.len()
+        ));
+        p.line(format!("- the daemon set the wallpaper at a median {} ms after the drop, in {} of 15 drags", shown_ms(median(&tally.sets)), tally.sets.len()));
+        if bench.steady {
+            let costs: Vec<f64> = tally.cost.iter().map(|cost| *cost as f64).collect();
+            p.line(format!("- a read showed the move partly done in {} of 10 single drags and in {} of 5 group drags", tally.partly[0], tally.partly[1]));
+            p.line(format!(
+                "- the read twice rule had a pair to judge in {} single and {} group drags, went on in {} and {}, with a half done move in {} and {}, its second read cost a median {} ms and at most {} ms",
+                tally.rule[0][0],
+                tally.rule[1][0],
+                tally.rule[0][1],
+                tally.rule[1][1],
+                tally.rule[0][2],
+                tally.rule[1][2],
+                shown_ms(median(&costs)),
+                shown_ms(tally.cost.iter().max().map(|cost| *cost as f64))
+            ));
+        }
+    }
+
+    fn series(read: &impl Fn() -> Rects, dropped: Instant, steady: bool) -> Vec<Taken<Rects>> {
+        let mut taken = Vec::new();
+        while steady && dropped.elapsed() < STEADY {
+            let began = dropped.elapsed();
+            let seen = read();
+            taken.push(Taken { began, took: dropped.elapsed().saturating_sub(began), seen });
+        }
+        for offset in OFFSETS {
+            if steady && Duration::from_millis(offset) <= STEADY {
+                continue;
+            }
+            std::thread::sleep(Duration::from_millis(offset).saturating_sub(dropped.elapsed()));
+            let began = dropped.elapsed();
+            let seen = read();
+            taken.push(Taken { began, took: dropped.elapsed().saturating_sub(began), seen });
+        }
+        taken
+    }
+
+    fn releases() -> Stamps {
+        let stamps: Stamps = Arc::new(Mutex::new(Vec::new()));
+        for (name, desktop_only) in [("xinput", false), ("xinput desktop", true)] {
+            let stamps = stamps.clone();
+            std::thread::spawn(move || {
+                let record: screens::Shared = Arc::new(move || {
+                    if let Ok(mut list) = stamps.lock() {
+                        list.push((Instant::now(), name));
+                    }
+                });
+                scooch::platform::linux::pointer::watch(&record, desktop_only)
+            });
+        }
+        let polled = stamps.clone();
+        std::thread::spawn(move || {
+            let Ok((conn, number)) = x11rb::connect(None) else { return };
+            let Some(root) = conn.setup().roots.get(number).map(|screen| screen.root) else { return };
+            let record = || {
+                if let Ok(mut list) = polled.lock() {
+                    list.push((Instant::now(), "poll"));
+                }
+            };
+            let mut down = false;
+            loop {
+                let Some(mask) = conn.query_pointer(root).ok().and_then(|cookie| cookie.reply().ok()).map(|reply| u16::from(reply.mask)) else { return };
+                let pressed = mask & u16::from(KeyButMask::BUTTON1) != 0;
+                if down && !pressed {
+                    record();
+                }
+                down = pressed;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        stamps
+    }
+
+    fn rounded(rect: &Rect) -> [i64; 4] {
+        [rect.x.round() as i64, rect.y.round() as i64, rect.w.round() as i64, rect.h.round() as i64]
+    }
+
+    fn places(linux: &Linux) -> Rects {
+        let mut rects: Rects = icons(linux).iter().map(rounded).collect();
+        rects.sort_unstable();
+        rects
+    }
+
+    fn center(rect: &[i64; 4]) -> (f32, f32) {
+        (rect[0] as f32 + rect[2] as f32 / 2.0, rect[1] as f32 + rect[3] as f32 / 2.0)
+    }
+
+    fn nearest(rects: &[[i64; 4]], point: (f32, f32)) -> Option<[i64; 4]> {
+        let away = |rect: &[i64; 4]| {
+            let (x, y) = center(rect);
+            (x - point.0).hypot(y - point.1)
+        };
+        rects.iter().copied().min_by(|a, b| away(a).total_cmp(&away(b)))
+    }
+
+    fn grab(rect: &[i64; 4], scale: f32) -> (i16, i16) {
+        (((rect[0] as f32 + rect[2] as f32 / 2.0) * scale) as i16, ((rect[1] as f32 + rect[3] as f32 / 3.0) * scale) as i16)
+    }
+
+    fn farther(from: (i16, i16), spots: [(i16, i16); 2]) -> (i16, i16) {
+        let away = |spot: (i16, i16)| (i32::from(spot.0) - i32::from(from.0)).pow(2) + (i32::from(spot.1) - i32::from(from.1)).pow(2);
+        if away(spots[0]) >= away(spots[1]) {
+            spots[0]
+        } else {
+            spots[1]
+        }
+    }
+
+    fn since(at: Instant, base: Instant) -> f64 {
+        match at.checked_duration_since(base) {
+            Some(after) => after.as_secs_f64() * 1000.0,
+            None => -base.duration_since(at).as_secs_f64() * 1000.0,
+        }
+    }
+
+    fn wall() -> f64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |since| since.as_secs_f64())
+    }
+
+    fn log_lines(log: &Path) -> Vec<String> {
+        fs::read_to_string(log).unwrap_or_default().lines().map(str::to_string).collect()
+    }
+
+    fn daemon_after(lines: &[String], dropped: f64) -> (Vec<String>, Option<f64>) {
+        let mut wakes = Vec::new();
+        let mut set = None;
+        for line in lines {
+            let mut words = line.split_whitespace();
+            let Some(stamp) = words.next().and_then(|word| word.parse::<f64>().ok()) else { continue };
+            let after = (stamp - dropped) * 1000.0;
+            match words.next() {
+                Some("wake") => wakes.push(format!("{} {after:.0}", words.collect::<Vec<_>>().join(" "))),
+                Some("set") if set.is_none() => set = Some(after),
+                _ => {}
+            }
+        }
+        (wakes, set)
+    }
+
+    fn shown_ms(value: Option<f64>) -> String {
+        value.map_or_else(|| "none".to_string(), |value| format!("{value:.1}"))
+    }
+
+    fn median(values: &[f64]) -> Option<f64> {
+        let mut sorted = values.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        sorted.get(sorted.len() / 2).copied()
+    }
+
+    fn sorted(values: &[u128]) -> String {
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        format!("{sorted:?}")
     }
 
     fn probe_icon(p: &Probe, linux: &Linux) -> Result<Rect> {
