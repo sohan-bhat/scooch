@@ -352,6 +352,12 @@ fn unix_now() -> u64 {
 
 type MapKey = (u64, (u32, u32), u64);
 
+#[derive(Clone, Copy)]
+enum Hold {
+    Taking,
+    Since(Instant),
+}
+
 pub struct Daemon {
     pub desktop: Arc<dyn Desktop>,
     pub store: Store,
@@ -368,7 +374,7 @@ pub struct Daemon {
     moved: Mutex<Vec<String>>,
     handed: Mutex<Option<(Instant, Snapshot)>>,
     icons: Mutex<Option<Vec<Rect>>>,
-    quick_at: Mutex<Option<Instant>>,
+    quick_hold: Mutex<Option<Hold>>,
     mapped: Mutex<HashMap<String, MapKey>>,
     last_screens: Mutex<Vec<Screen>>,
 }
@@ -414,7 +420,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_at: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()) }
     }
 
     pub fn quick_look(&self) -> bool {
@@ -425,10 +431,13 @@ impl Daemon {
                 self.look(started, false)
             };
         }
-        let lately = self.quick_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_some_and(|at| at.elapsed() < QUIET);
-        let quick = self.desktop.reads_at_once() && !lately && self.look(started, true);
+        let held = self.quick_hold.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_some_and(|hold| match hold {
+            Hold::Taking => true,
+            Hold::Since(at) => at.elapsed() < QUIET,
+        });
+        let quick = self.desktop.reads_at_once() && !held && self.look(started, true);
         if quick {
-            *self.quick_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+            *self.quick_hold.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Hold::Taking);
         }
         quick
     }
@@ -656,6 +665,15 @@ impl Daemon {
     }
 
     pub fn tick(&self) -> Report {
+        let report = self.tick_once();
+        let mut hold = self.quick_hold.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*hold, Some(Hold::Taking)) {
+            *hold = Some(Hold::Since(Instant::now()));
+        }
+        report
+    }
+
+    fn tick_once(&self) -> Report {
         let handed = self.handed.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
         let before = self.store.read();
         *self.ledger.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Ledger { expected: before.clone(), external: false };
