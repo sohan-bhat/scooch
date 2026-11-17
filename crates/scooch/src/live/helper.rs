@@ -90,6 +90,9 @@ mod running {
             Duration::from_micros(16_667)
         }
         fn show(&mut self, layer: &Self::Layer) -> Result<()>;
+        fn revealed(&mut self) -> Vec<(&'static str, u64)> {
+            Vec::new()
+        }
         fn close(&mut self, layer: Self::Layer);
         fn abandon(&mut self, layer: Self::Layer) {
             std::mem::forget(layer);
@@ -1037,6 +1040,7 @@ mod running {
                         (Ok(()), None) => Err("the layer window is gone".to_string()),
                         (Err(why), _) => Err(why),
                     };
+                    let revealing_steps: Vec<(String, u64)> = self.platform.revealed().into_iter().map(|(name, took)| (String::from(name), took)).collect();
                     match shown {
                         Ok(()) => {
                             if let Some(live) = self.layers.get_mut(&id) {
@@ -1045,7 +1049,7 @@ mod running {
                                 let ms = live.asked.elapsed().as_millis() as u64;
                                 let split = &live.split;
                                 let steps = split.steps.iter().map(|(name, took)| (String::from(*name), *took)).collect();
-                                let drawn = Reply::Drawn { id, window: split.window, first, reveal: spent(revealing), make: split.make, present: split.present, found: split.found, steps };
+                                let drawn = Reply::Drawn { id, window: split.window, first, reveal: spent(revealing), make: split.make, present: split.present, found: split.found, steps, revealing: revealing_steps };
                                 self.tell(Reply::Shown { id, ms });
                                 self.tell(drawn);
                             }

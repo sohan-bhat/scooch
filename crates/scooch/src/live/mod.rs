@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 pub const HELPER: &str = "--live-helper";
 pub const VERSION: u32 = 3;
 pub const SLOW_HELLO: &str = "SCOOCH_HELPER_SLOW_HELLO_MS";
+pub const SKIP_SPIN: &str = "SCOOCH_HELPER_SKIP_SPIN";
 const QUIT_WAIT: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -74,7 +75,7 @@ pub enum Reply {
         scale: Option<f32>,
     },
     Shown { id: u32, ms: u64 },
-    Drawn { id: u32, window: u64, first: u64, reveal: u64, make: u64, present: u64, found: bool, steps: Vec<(String, u64)> },
+    Drawn { id: u32, window: u64, first: u64, reveal: u64, make: u64, present: u64, found: bool, steps: Vec<(String, u64)>, #[serde(default)] revealing: Vec<(String, u64)> },
     Device { ms: u64 },
     Canvas { #[serde(default)] warm_id: Option<u32>, ms: u64 },
     Glided { id: u32, frames: u32, slow_frames: u32, first_frame_ms: u64, #[serde(default)] uploads: u32, #[serde(default = "one")] scale: f32 },
@@ -392,7 +393,7 @@ mod tests {
             Reply::Hello { version: VERSION, pid: 9 },
             Reply::Ready { adapter: "gpu".into(), ms: 12, uploads: 1, kind: "integrated".into(), warm_id: Some(4), from: Some("cache".into()), scale: Some(0.6) },
             Reply::Shown { id: 3, ms: 40 },
-            Reply::Drawn { id: 3, window: 12, first: 20, reveal: 34, make: 80, present: 10, found: true, steps: vec![("screen".into(), 2), ("window".into(), 78)] },
+            Reply::Drawn { id: 3, window: 12, first: 20, reveal: 34, make: 80, present: 10, found: true, steps: vec![("screen".into(), 2), ("window".into(), 78)], revealing: vec![("spin".into(), 34), ("unhide".into(), 2)] },
             Reply::Glided { id: 3, frames: 24, slow_frames: 1, first_frame_ms: 30, uploads: 1, scale: 0.75 },
             Reply::Settled { id: 3 },
             Reply::Closed { id: 3 },
