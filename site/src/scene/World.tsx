@@ -820,7 +820,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
           <Lively />
         </Suspense>
       ) : null}
-      <ContactShadows position={[0, DESK_TOP + 0.0015, 0.0]} scale={[2.0, 0.95]} resolution={512} blur={2.4} far={0.3} opacity={0.62} frames={1} color="#0a0806" />
+      <ContactShadows position={[0, DESK_TOP + 0.0015, 0.0]} scale={[2.0, 0.95]} resolution={512} blur={0.4} far={0.3} opacity={0.7} frames={1} color="#0a0806" />
       <mesh position={[0, 1.6, -0.98]} material={wall}>
         <planeGeometry args={[9, 3.2]} />
       </mesh>
