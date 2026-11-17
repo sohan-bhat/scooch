@@ -53,6 +53,8 @@ export const runtime = {
   clockSweepAt: 0,
   posterUp: true,
   restReady: false,
+  swapReady: false,
+  restLoaded: false,
   dropPoster: null as (() => void) | null,
 };
 

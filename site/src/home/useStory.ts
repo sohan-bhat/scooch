@@ -212,8 +212,22 @@ export function introduce(refs: Refs, still: number) {
   runtime.shown = true;
   performance.mark('scooch:shown');
   const inputs = ['wheel', 'touchstart', 'keydown', 'pointerdown', 'scroll'] as const;
-  const swap = () => {
+  const clock = (moved: boolean) => {
+    if (moved || runtime.restLoaded) {
+      releaseClock();
+      return;
+    }
+    const go = () => {
+      for (const name of inputs) window.removeEventListener(name, go);
+      window.removeEventListener('scooch:rest', go);
+      releaseClock();
+    };
+    for (const name of inputs) window.addEventListener(name, go, { passive: true });
+    window.addEventListener('scooch:rest', go);
+  };
+  const swap = (input?: unknown) => {
     if (!runtime.posterUp) return;
+    const moved = input !== 'rest';
     runtime.posterUp = false;
     runtime.dropPoster = null;
     for (const name of inputs) window.removeEventListener(name, swap);
@@ -222,7 +236,7 @@ export function introduce(refs: Refs, still: number) {
       duration: 0.15,
       ease: 'none',
       onComplete: () => {
-        if (!shoot) releaseClock();
+        if (!shoot) clock(moved);
         performance.mark('scooch:swap');
         glass?.removeAttribute('role');
       },
@@ -232,7 +246,7 @@ export function introduce(refs: Refs, still: number) {
   for (const name of inputs) window.addEventListener(name, swap, { passive: true });
   const watch = () => {
     if (!runtime.posterUp) return;
-    if (runtime.restReady) swap();
+    if (runtime.restReady || runtime.swapReady) swap('rest');
     else requestAnimationFrame(watch);
   };
   requestAnimationFrame(watch);
