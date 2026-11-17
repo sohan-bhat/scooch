@@ -745,7 +745,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         shadow-camera-near={0.2}
         shadow-camera-far={3}
       />
-      {quality.tier === 'full' ? <pointLight ref={inner} position={bulbWorld} color="#ffb46b" intensity={INNER} distance={0.32} decay={2} /> : null}
+      {quality.phone ? null : <pointLight ref={inner} position={bulbWorld} color="#ffb46b" intensity={INNER} distance={0.32} decay={2} />}
       <directionalLight ref={rim} position={[1.4, 1.8, -1.6]} color={scratch.street} intensity={0.3} />
       {quality.tier === 'full' ? (
         <>
