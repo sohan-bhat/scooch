@@ -7,10 +7,57 @@ const STRIP = 1 << 19;
 
 type Source = HTMLCanvasElement | ImageBitmap | Pixels;
 
+const AHEAD = 3;
+const fences = new WeakMap<WebGL2RenderingContext, WebGLSync[]>();
+const nextTask = () => new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+
+export async function caughtUp(context: WebGL2RenderingContext) {
+  if (context.isContextLost()) return;
+  const queue = fences.get(context) ?? [];
+  fences.set(context, queue);
+  const sync = context.fenceSync(context.SYNC_GPU_COMMANDS_COMPLETE, 0);
+  if (sync) {
+    context.flush();
+    queue.push(sync);
+  }
+  for (;;) {
+    if (context.isContextLost()) {
+      queue.length = 0;
+      return;
+    }
+    while (queue.length > 0 && context.getSyncParameter(queue[0], context.SYNC_STATUS) === context.SIGNALED) context.deleteSync(queue.shift()!);
+    if (queue.length < AHEAD) return;
+    await nextTask();
+  }
+}
+
+const probes = new WeakMap<WebGL2RenderingContext, WebGLSync>();
+
+export function gpuQuiet(context: WebGL2RenderingContext) {
+  if (context.isContextLost()) return false;
+  const probe = probes.get(context);
+  if (!probe) {
+    const sync = context.fenceSync(context.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!sync) return true;
+    context.flush();
+    probes.set(context, sync);
+    return false;
+  }
+  if (context.getSyncParameter(probe, context.SYNC_STATUS) !== context.SIGNALED) return false;
+  context.deleteSync(probe);
+  probes.delete(context);
+  return true;
+}
+
+export function rendererCaughtUp(gl: WebGLRenderer) {
+  return caughtUp(gl.getContext() as WebGL2RenderingContext);
+}
+
 export async function stripUpload(gl: WebGLRenderer, texture: Texture, source: Source, wait: () => Promise<void> = quiet) {
   if (!('data' in source) && !(source instanceof ImageBitmap)) {
     texture.needsUpdate = true;
     await wait();
+    await rendererCaughtUp(gl);
     if ((gl.getContext() as WebGL2RenderingContext).isContextLost()) return false;
     gl.initTexture(texture);
     return true;
@@ -41,6 +88,7 @@ async function strips(gl: WebGLRenderer, texture: Texture, source: Source, wait:
     const count = Math.min(rows, height - y);
     const part = image ? await createImageBitmap(image, 0, y, width, count, { imageOrientation: texture.flipY ? 'flipY' : 'from-image' }) : null;
     await wait();
+    await caughtUp(context);
     if (!alive()) {
       part?.close();
       return false;

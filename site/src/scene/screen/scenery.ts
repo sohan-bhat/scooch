@@ -30,6 +30,7 @@ import { quiet } from '@/lib/idle';
 import { fetchEarly } from '@/story/early';
 import { changed } from '@/story/state';
 import { still } from '../still';
+import { caughtUp } from '../upload';
 
 type Table = { file: string; width: number; height: number; layers?: number };
 
@@ -411,6 +412,7 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       for (let y = 0; y < height; y += rows) {
         const strip = await createImageBitmap(bitmap, 0, y, width, Math.min(rows, height - y));
         await wait();
+        await caughtUp(context);
         if (started !== generation || context.isContextLost()) {
           strip.close();
           bitmap.close();
