@@ -45,6 +45,11 @@ fn fbm(x: f32, y: f32, seed: u32) -> f32 {
 fn made(name: &str) -> RgbImage {
     let (w, h) = (1600u32, 1000u32);
     let mix = |a: [f32; 3], b: [f32; 3], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    let stars: std::collections::HashSet<(u32, u32)> = (0..200).map(|k| ((hash(k, 1, 91) * w as f32) as u32, (hash(k, 2, 92) * h as f32) as u32)).collect();
+    let dusk = |v: f32, hue: f32| {
+        let t = (v / 0.6).min(1.0);
+        oklch(0.10 + 0.45 * t, 0.01 + 0.09 * t, hue)
+    };
     RgbImage::from_fn(w, h, |x, y| {
         let (u, v) = (x as f32 / w as f32, y as f32 / h as f32);
         let grain = hash(x, y, 7) - 0.5;
@@ -138,6 +143,16 @@ fn made(name: &str) -> RgbImage {
                 let corner = smoothstep(0.7, 0.9, u) * (1.0 - smoothstep(0.15, 0.35, v));
                 mix(oklch(0.5, 0.08, 205.0), oklch(0.42, 0.1, 250.0), corner).map(|c| c + 2.0 * grain)
             }
+            "dusk-225" => dusk(v, 225.0).map(|c| c + 2.0 * grain),
+            "dusk-250" => dusk(v, 250.0).map(|c| c + 2.0 * grain),
+            "dusk-225-hill" => if v > 0.8 { mix([18.0, 20.0, 16.0], [70.0, 66.0, 54.0], fbm(u * 60.0, v * 40.0, 21)).map(|c| c + 30.0 * grain) } else { dusk(v, 225.0).map(|c| c + 2.0 * grain) },
+            "vignette-225" => {
+                let k = smoothstep(0.2, 0.5, (u - 0.5).hypot(v - 0.5));
+                oklch(0.62 - 0.32 * k, 0.09 - 0.065 * k, 225.0).map(|c| c + 2.0 * grain)
+            }
+            "night-260" => if stars.contains(&(x, y)) { [255.0; 3] } else { oklch(0.15, 0.04, 260.0).map(|c| c + 2.0 * grain) },
+            "overcast-edge" => oklch(0.5, if v < 0.4 { 0.01 } else { 0.09 }, 225.0).map(|c| c + 2.0 * grain),
+            "overcast-smooth" => oklch(0.5, 0.01 + 0.08 * ((v - 0.3) / 0.2).clamp(0.0, 1.0), 225.0).map(|c| c + 2.0 * grain),
             "wall-window" => mix([55.0, 85.0, 140.0], [100.0, 160.0, 225.0], ((u - 0.45) / 0.1).clamp(0.0, 1.0)).map(|c| c + 2.0 * grain),
             _ => [0.0; 3],
         };
@@ -271,6 +286,84 @@ const FRAMINGS: [(f64, (f64, f64)); 6] = [(1.0, (0.5, 0.5)), (1.0, (0.0, 0.0)), 
 
 fn column(w: u32) -> Vec<Rect> {
     (0..16).map(|k| Rect { x: w as f32 - 60.0, y: 10.0 + 55.0 * k as f32, w: 50.0, h: 50.0 }).collect()
+}
+
+fn table_icons(w: u32, h: u32) -> (Vec<Rect>, Vec<Rect>) {
+    let column = (0..16).map(|k| Rect { x: w as f32 - 120.0, y: 20.0 + 110.0 * k as f32, w: 100.0, h: 100.0 }).collect();
+    let scattered = layouts::scattered(w, h, 12, 2027).into_iter().map(|r| Rect { w: 100.0, h: 100.0, ..r }).collect();
+    (column, scattered)
+}
+
+fn drawn(image: &RgbImage, icons: &[Rect], (w, h): (u32, u32)) -> (usize, usize) {
+    let analysis = scooch_core::analyze(image);
+    let scene = Scene { width: w, height: h, icons: icons.to_vec() };
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let placement = scooch_core::solve(&analysis, &scene, &options, None);
+    let layers = scooch_core::render_layers(image, &analysis, &placement, &scene, &options);
+    let bundle = scooch_core::bundle(image, &analysis, &placement, &scene, &options);
+    let gw = bundle.grid_width as usize;
+    let cloud = |x: u32, y: u32| bundle.look.get(((y as usize / 4) * gw + x as usize / 4) * 4).copied().unwrap_or(0) >= 128;
+    layers.scenery.enumerate_pixels().filter(|(_, _, p)| p[3] > 0).fold((0, 0), |(c, l), (x, y, _)| if cloud(x, y) { (c + 1, l) } else { (c, l + 1) })
+}
+
+#[test]
+fn a_dark_grey_top_leaves_its_sky_bare() {
+    let (w, h) = (2880u32, 1800u32);
+    let (column, scattered) = table_icons(w, h);
+    let mut got = Vec::new();
+    for name in ["dusk-225", "dusk-225-hill", "vignette-225", "overcast-smooth", "overcast-edge", "dusk-250", "night-260"] {
+        let image = made(name);
+        for (layout, icons) in [("column", &column), ("scattered", &scattered)] {
+            let (clouds, islands) = drawn(&image, icons, (w, h));
+            println!("{name} {layout}: clouds {clouds} islands {islands} pixels");
+            got.push((name, layout, clouds, islands));
+        }
+    }
+    for (name, layout, clouds, islands) in got {
+        if name == "overcast-edge" {
+            assert!(islands > 0 && clouds == 0, "{name} {layout} lost the islands under its hard edge: clouds {clouds} islands {islands}");
+        } else {
+            assert!(clouds == 0 && islands == 0, "{name} {layout} drew scenery under a dark grey top: clouds {clouds} islands {islands}");
+        }
+    }
+}
+
+fn digest(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+#[test]
+fn the_belonging_answers_match_their_version() {
+    let (w, h) = (2880u32, 1800u32);
+    let (column, scattered) = table_icons(w, h);
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let mut pictures: Vec<(String, RgbImage)> = layouts::photos().into_iter().map(|p| (p.file_stem().unwrap().to_string_lossy().to_string(), scooch_core::open(&p).expect("open"))).collect();
+    let more = ["thin-sky", "sky-band", "sea-under-sky", "lake-under-haze", "lake-under-blue-haze", "sea-soft-horizon", "sea-210-216", "mixed-top", "pink-over-teal", "teal-blue-corner", "wall-window", "grey-over-teal-1", "grey-over-teal-2", "dusk-225", "dusk-250", "dusk-225-hill", "vignette-225", "night-260", "overcast-edge", "overcast-smooth"];
+    pictures.extend(MADE.iter().chain(&more).map(|n| (format!("made-{n}"), made(n))));
+    let mut table = String::new();
+    for (name, image) in &pictures {
+        let analysis = scooch_core::analyze(image);
+        for (layout, icons) in [("column", &column), ("scattered", &scattered)] {
+            let scene = Scene { width: w, height: h, icons: icons.clone() };
+            let belongs = scooch_core::Session::new().belongs(image, &analysis, &scene, &options);
+            let placement = scooch_core::fill(analysis.source_width, analysis.source_height, &scene);
+            let (map, _, _) = scooch_core::belonging_map(image, &analysis, &placement, &scene, &options);
+            let clouds = map.iter().any(|v| v[0] >= 0.5 && v[1] >= 0.5);
+            let islands = map.iter().any(|v| v[0] < 0.5 && v[1] >= 0.5);
+            table.push_str(&format!("{name} {layout} belongs {belongs} clouds {clouds} islands {islands}\n"));
+        }
+    }
+    print!("{table}");
+    let got = digest(table.as_bytes());
+    let recorded = scooch_core::BELONGING_ANSWERS;
+    assert!(recorded.windows(2).all(|p| p[1].0 == p[0].0 + 1 && p[1].1 != p[0].1), "each entry of BELONGING_ANSWERS raises the version by one and records a new digest");
+    let (version, want) = recorded[recorded.len() - 1];
+    assert!(
+        version == scooch_core::BELONGING_VERSION && got == want,
+        "the belonging answers give digest {got:#018x}, but version {version} records {want:#018x}. A rule change moved an answer, so raise BELONGING_VERSION to {} and add ({}, {got:#018x}) to BELONGING_ANSWERS",
+        version + 1,
+        version + 1
+    );
 }
 
 fn grid(w: u32, h: u32, across: usize, down: usize) -> Vec<Rect> {

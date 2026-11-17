@@ -14,6 +14,34 @@ pub struct Session {
     seen: Option<(Analysis, u64)>,
 }
 
+/// A belonging map handed from one session to another, with the picture it was worked out for.
+#[derive(Clone)]
+pub struct Map((u64, (u32, u32), Arc<look::Belonging>));
+
+impl Map {
+    pub fn bytes(&self) -> usize {
+        self.0 .2.bytes()
+    }
+
+    /// The picture key, the source size and the stamp this map was worked out for, the same three a session compares before it uses the map. A caller can compare them with the file it keeps without writing any bytes.
+    pub fn key(&self) -> (u64, (u32, u32), u64) {
+        let (picture, source, map) = &self.0;
+        (*picture, *source, map.stamp())
+    }
+
+    /// The whole map as one file. The bytes are the same on every system for the same map, fixed width and little endian, and they carry the picture key, the source size, the stamp, `BELONGING_VERSION` and `BELONGING_MAP_FORMAT`, so `from_bytes` and a later `Session::adopt` can tell whether the file still fits.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let (picture, source, map) = &self.0;
+        map.file(*picture, *source)
+    }
+
+    /// The map from a file `to_bytes` wrote, or nothing when the file cannot be trusted: shorter than its header, another magic word, another `BELONGING_MAP_FORMAT` or `BELONGING_VERSION`, a payload of another length than the header gives, or a checksum that does not match. It never panics and never reads past the slice. A map it gives back is used by a session only for the same picture, source size and stamp, so a file from another picture or screen is never drawn from.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Map> {
+        let (picture, source, map) = look::Belonging::from_file(bytes)?;
+        Some(Map((picture, source, Arc::new(map))))
+    }
+}
+
 struct Held {
     image: u64,
     source: (u32, u32),
@@ -141,6 +169,17 @@ impl Session {
     pub fn solve(&mut self, image: &RgbImage, analysis: &Analysis, scene: &Scene, options: &Options, previous: Option<&Placement>) -> Placement {
         let options = self.options(image, analysis, scene, options);
         crate::solve(analysis, scene, &options, previous)
+    }
+
+    /// The belonging map this session last drew from, or when it has drawn nothing the one it last worked out or adopted, to hand to a later session for the same picture with `adopt`, so the map is not worked out again. Once the session has drawn with scenery, the map it drew from comes first, so an adopted map that did not fit is not handed back.
+    pub fn map(&self) -> Option<Map> {
+        let held = self.held.as_ref().and_then(|h| h.parts.belonging.clone().map(|b| (h.image, h.source, b)));
+        held.or_else(|| self.kept.clone()).map(Map)
+    }
+
+    /// Takes a map from `map`. A later call uses it only for the same picture and source size and when it fits the stamp, so a map from another picture, screen, icon unit, setting or belonging version is never used.
+    pub fn adopt(&mut self, map: Map) {
+        self.kept = Some(map.0);
     }
 
     #[doc(hidden)]

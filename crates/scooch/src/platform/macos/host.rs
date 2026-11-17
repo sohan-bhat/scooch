@@ -1,5 +1,5 @@
 use super::{layer, picture};
-use crate::live::helper::{self, Platform, Waker};
+use crate::live::helper::{self, Build, Platform, Waker};
 use crate::live::Hints;
 use crate::platform::Screen;
 use anyhow::Result;
@@ -24,17 +24,40 @@ pub struct Host {
 
 impl Platform for Host {
     type Layer = layer::Layer;
+    type Making = layer::Making;
 
     fn composition(&self, _hints: &Hints) -> Result<bool> {
         Ok(false)
     }
 
-    fn open(&mut self, screen: &Screen, _hints: &Hints) -> Result<layer::Layer> {
+    fn make(&mut self, screen: &Screen, _hints: &Hints, making: Option<layer::Making>) -> Result<Build<layer::Making, layer::Layer>> {
+        let making = match making {
+            Some(making) => making,
+            None if !self.app => {
+                self.begin();
+                return Ok(Build::Partly(layer::Making::Start, "app"));
+            }
+            None => layer::Making::Start,
+        };
+        layer::step(self.marker, screen, making)
+    }
+
+    fn present(&mut self, layer: &layer::Layer) -> Result<()> {
+        objc2::rc::autoreleasepool(|_| layer.order());
+        Ok(())
+    }
+
+    fn visible(&mut self, layer: &layer::Layer, waited: Duration) -> Result<bool> {
+        objc2::rc::autoreleasepool(|_| layer.waited(waited))
+    }
+
+    fn begin(&mut self) {
         if !self.app {
-            NSApplication::sharedApplication(self.marker).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            objc2::rc::autoreleasepool(|_| {
+                NSApplication::sharedApplication(self.marker).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            });
             self.app = true;
         }
-        layer::open(self.marker, screen)
     }
 
     fn target(&self, layer: &layer::Layer) -> Target {
@@ -68,7 +91,7 @@ impl Platform for Host {
     }
 
     fn wait(&mut self, timeout: Duration) {
-        layer::wait(timeout);
+        objc2::rc::autoreleasepool(|_| layer::wait(timeout));
     }
 
     fn waker(&self) -> Waker {

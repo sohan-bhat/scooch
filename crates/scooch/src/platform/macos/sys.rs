@@ -1,6 +1,6 @@
 #![allow(non_upper_case_globals, non_snake_case, clippy::too_many_arguments)]
 
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGPoint, CGRect};
 use std::ffi::{c_char, c_void};
 
 pub type Ref = *const c_void;
@@ -84,6 +84,9 @@ extern "C" {
     pub fn CGContextDrawImage(context: Ref, rect: CGRect, image: Ref);
     pub fn CGImageGetWidth(image: Ref) -> usize;
     pub fn CGImageGetHeight(image: Ref) -> usize;
+    pub fn CGEventCreate(source: Ref) -> Ref;
+    pub fn CGEventGetLocation(event: Ref) -> CGPoint;
+    pub fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
 }
 
 #[link(name = "ImageIO", kind = "framework")]

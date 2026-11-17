@@ -23,13 +23,17 @@ mod probe {
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, ExitCode, Stdio};
-    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     const PROBES: [(&str, bool); 4] = [("scooch-probe-a.txt", false), ("scooch-probe-twentyeight.txt", false), ("scooch probe with spaces that wraps.txt", false), ("scooch-probe-folder", true)];
     const RUNNER_ONLY: &str = "macprobe changes the wallpaper, Desktop files and the login item, so it runs those checks only on a GitHub Actions runner where GITHUB_ACTIONS is true.";
     const GRAY: [u8; 3] = [118, 118, 118];
     const LIMIT: Duration = Duration::from_secs(20);
+    const STOP_AFTER: Duration = Duration::from_secs(300);
+    const BUDGET: Duration = Duration::from_secs(68 * 60);
+    static PAST: AtomicBool = AtomicBool::new(false);
 
     static START: OnceLock<Instant> = OnceLock::new();
 
@@ -211,6 +215,91 @@ mod probe {
         motion: Option<Option<String>>,
         scanned: usize,
         struck: bool,
+        shared: Arc<Mutex<Vec<String>>>,
+        last: Arc<Mutex<String>>,
+    }
+
+    struct Watch {
+        done: Arc<AtomicBool>,
+        fired: Arc<Mutex<Option<String>>>,
+        limit: Duration,
+    }
+
+    impl Watch {
+        fn start(p: &Probe, title: &str, limit: Duration) -> Watch {
+            PAST.store(false, Ordering::SeqCst);
+            let (done, fired) = (Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(None)));
+            let (ended, mark, shared, last, out, home, title) = (done.clone(), fired.clone(), p.shared.clone(), p.last.clone(), p.out.clone(), p.home.clone(), title.to_string());
+            let left = BUDGET.saturating_sub(START.get().map_or(Duration::ZERO, Instant::elapsed));
+            let limit = limit.min(left.saturating_sub(STOP_AFTER));
+            let wait = move |span: Duration| {
+                let started = Instant::now();
+                while started.elapsed() < span {
+                    if ended.load(Ordering::SeqCst) {
+                        return true;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                ended.load(Ordering::SeqCst)
+            };
+            std::thread::spawn(move || {
+                if wait(limit) {
+                    return;
+                }
+                PAST.store(true, Ordering::SeqCst);
+                let step = last.lock().map(|step| step.clone()).unwrap_or_default();
+                println!("- section {title} passed its deadline of {} s, its last step was `{step}`", limit.as_secs());
+                if let Ok(mut mark) = mark.lock() {
+                    *mark = Some(step.clone());
+                }
+                if wait(STOP_AFTER) {
+                    return;
+                }
+                let step = last.lock().map(|step| step.clone()).unwrap_or_default();
+                let mut lines = shared.lock().map(|lines| lines.clone()).unwrap_or_default();
+                let stopped = format!("{title} passed its deadline of {} s and did not return in {} s more, its last step was `{step}`", limit.as_secs(), STOP_AFTER.as_secs());
+                let earlier: Vec<String> = lines.iter().filter_map(|line| line.strip_prefix("- **missing** ").or_else(|| line.strip_prefix("- **check failed** ")).map(str::to_string)).collect();
+                lines.extend([format!("- **check failed** {stopped}, so the probe stopped here"), String::new(), "## Result".to_string(), String::new()]);
+                lines.extend(earlier.into_iter().chain([stopped]).map(|failure| format!("- **failed** {failure}")));
+                let _ = fs::write(out.join("report.md"), lines.join("\n") + "\n");
+                if let Some(pid) = fs::read_to_string(home.join("watch.pid")).ok().and_then(|pid| pid.trim().parse::<i32>().ok()) {
+                    unsafe { libc::kill(pid, libc::SIGTERM) };
+                }
+                let _ = std::io::stdout().flush();
+                unsafe { libc::_exit(1) };
+            });
+            Watch { done, fired, limit }
+        }
+
+        fn finish(self) -> Option<(String, Duration)> {
+            self.done.store(true, Ordering::SeqCst);
+            PAST.store(false, Ordering::SeqCst);
+            self.fired.lock().ok().and_then(|fired| fired.clone()).map(|step| (step, self.limit))
+        }
+    }
+
+    fn deadline(title: &str) -> Duration {
+        let longest: u64 = match title {
+            "1 Session facts" => 4_566,
+            "2 Permission" => 2_134,
+            "3 Icons" => 9_499,
+            "3b Live layer" => 47_610,
+            "3c Helper colour and scale" => 5_578,
+            "4 First run" => 101_164,
+            "5 Move to new wallpaper" => 62_364,
+            "5b Scenery" => 157_529,
+            "5c Glide" => 292_101,
+            "5d Cold drags" => 1_421_507,
+            "5e Bare wakes" => 600_083,
+            "5f Finder after the drop" => 60_000,
+            "6 Idle" => 71_080,
+            "7 Off" => 2_687,
+            "8 Second cycle" => 277_539,
+            "9 Spaces" => 91_112,
+            "10 Cleanup" => 308,
+            _ => 600_000,
+        };
+        Duration::from_millis((longest * 3).max(30_000))
     }
 
     impl Probe {
@@ -218,11 +307,20 @@ mod probe {
             let text = text.into();
             println!("{text}");
             let _ = writeln!(self.log, "{:>8} {text}", now());
+            if let Ok(mut shared) = self.shared.lock() {
+                shared.push(text.clone());
+            }
+            if let (false, Ok(mut last)) = (text.is_empty(), self.last.lock()) {
+                last.clone_from(&text);
+            }
             self.report.push(text);
         }
 
         fn raw(&mut self, text: impl AsRef<str>) {
             let _ = writeln!(self.log, "{:>8} {}", now(), text.as_ref());
+            if let Ok(mut last) = self.last.lock() {
+                *last = text.as_ref().lines().next().unwrap_or_default().chars().take(200).collect();
+            }
         }
 
         fn limit(&mut self, text: impl Into<String>) {
@@ -248,9 +346,14 @@ mod probe {
             self.line(format!("## {title}"));
             self.line(String::new());
             let started = Instant::now();
+            let watch = Watch::start(self, title, deadline(title));
             if let Err(error) = check(self) {
                 self.line(format!("- **check failed** {error:#}"));
                 self.failed.push(format!("{title} stopped with {error:#}"));
+            }
+            if let Some((step, limit)) = watch.finish() {
+                self.line(format!("- **check failed** {title} passed its deadline of {} s, its last step was `{step}`", limit.as_secs()));
+                self.failed.push(format!("{title} passed its deadline of {} s", limit.as_secs()));
             }
             stutters(self);
             self.line(format!("- took {} ms", started.elapsed().as_millis()));
@@ -316,6 +419,9 @@ mod probe {
         if std::env::args().nth(1).as_deref() == Some("cold-split") {
             return cold_split(PathBuf::from(std::env::args().nth(2).unwrap_or_default()), PathBuf::from(std::env::args().nth(3).unwrap_or_default()));
         }
+        if std::env::args().nth(1).as_deref() == Some("slow-check") {
+            return slow_check(std::env::args().skip(2).collect());
+        }
         if std::env::args().nth(1).as_deref() == Some("gpu-bench") {
             return gpu_bench(PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "macbench".into())));
         }
@@ -355,6 +461,8 @@ mod probe {
             motion: None,
             scanned: 0,
             struck: false,
+            shared: Arc::new(Mutex::new(Vec::new())),
+            last: Arc::new(Mutex::new(String::new())),
         };
         probe.section("1 Session facts", facts);
         if !probe.runner {
@@ -374,6 +482,7 @@ mod probe {
         probe.section("5c Glide", glide_check);
         probe.section("5d Cold drags", cold_drags_check);
         probe.section("5e Bare wakes", rest_wakes);
+        probe.section("5f Finder after the drop", finder_after_drop);
         probe.section("6 Idle", idle);
         probe.section("7 Off", off);
         probe.section("8 Second cycle", second_cycle);
@@ -536,7 +645,7 @@ mod probe {
 
     fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> Option<Duration> {
         let started = Instant::now();
-        while started.elapsed() < limit {
+        while started.elapsed() < limit && !PAST.load(Ordering::SeqCst) {
             if done() {
                 return Some(started.elapsed());
             }
@@ -2738,6 +2847,13 @@ mod probe {
         waited: Option<f64>,
         predicted: Option<f64>,
         split: Option<String>,
+        took: Option<f64>,
+        made: Option<f64>,
+        found: Option<bool>,
+        launched_at: Option<String>,
+        launched_from_drop: Option<f64>,
+        start_after: Option<String>,
+        line: String,
     }
 
     fn number_after(line: &str, key: &str) -> Option<f64> {
@@ -2775,8 +2891,17 @@ mod probe {
         let launch = decided.zip(decision.and_then(|line| number_after(line, "helper launched "))).map(|(at, before)| at - before);
         let later_ready = log.iter().find(|line| line.contains("glide helper ready ")).and_then(|line| number_after(line, "glide helper ready "));
         let from_launch = |key: &str| launch.zip(decision.and_then(|line| number_after(line, key))).map(|(at, after)| at + after);
+        let early = log.iter().any(|line| line.contains("glide early launch"));
+        let early_line = log.iter().find(|line| line.contains("glide early launch at "));
         Cold {
-            early: log.iter().any(|line| line.contains("glide early launch")),
+            took: log.iter().find_map(|line| line.split("early launch at the wake in ").nth(1).or_else(|| line.split("early launch at the drag start in ").nth(1)).or_else(|| line.split("helper launched in ").nth(1))).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()),
+            launched_at: early_line.and_then(|line| line.split("glide early launch at ").nth(1)).and_then(|rest| rest.split(" in ").next()).map(str::to_string),
+            launched_from_drop: early_line.and_then(|line| stamp_of(line)).map(after_drop),
+            start_after: log.iter().find(|line| line.contains(" drag start at ")).and_then(|line| line.split(" found ").nth(1)).and_then(|rest| rest.split(" ms after the down").next()).map(str::to_string),
+            made: decision.and_then(|line| number_after(line, "made it in ")).filter(|_| early),
+            found: decision.and_then(|line| line.split("open found it made ").nth(1)).and_then(|rest| rest.split(',').next()).and_then(|word| word.trim().parse::<bool>().ok()),
+            line: String::new(),
+            early,
             wake: log.iter().find(|line| line.contains(" wake ") && !line.contains(" glide ")).and_then(|line| stamp_of(line)).map(after_drop),
             launch,
             hello: from_launch("hello "),
@@ -2818,8 +2943,13 @@ mod probe {
             let rested = rest_for_cold(p, *last);
             let cold = cold_drag(p, screen, name, places);
             *last = Instant::now();
-            p.line(format!(
-                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}",
+            let came = match (cold.launched_at.as_deref(), cold.launched_from_drop) {
+                (Some(kind), Some(at)) if at < 0.0 => format!("at {kind}, {} ms before the drop", (-at).round()),
+                (Some(kind), Some(at)) => format!("at {kind}, {} ms after the drop", at.round()),
+                _ => "none".to_string(),
+            };
+            let line = format!(
+                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}, launch took {} ms, the early window took {} ms, open found it made {:?}, early launch came {came}, drag start found {} ms after the down",
                 index + 1,
                 cold.glided,
                 cold.skip,
@@ -2840,9 +2970,14 @@ mod probe {
                 cold.shown,
                 cold.split,
                 cold.from,
-                cold.tick
-            ));
-            cold
+                cold.tick,
+                rounded(cold.took),
+                rounded(cold.made),
+                cold.found,
+                cold.start_after.as_deref().unwrap_or("never")
+            );
+            p.line(line.clone());
+            Cold { line, ..cold }
         }
     }
 
@@ -2857,7 +2992,7 @@ mod probe {
         let mut command = Command::new(&p.bin);
         command.arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
         if slow {
-            command.env(scooch::live::SLOW_HELLO, "1000");
+            command.env(scooch::live::SLOW_HELLO, SLOW_HELLO_MS.to_string());
         } else {
             command.env_remove(scooch::live::SLOW_HELLO);
         }
@@ -2865,6 +3000,101 @@ mod probe {
         let home = p.home.clone();
         wait_until(Duration::from_secs(15), || fs::read_to_string(home.join("watch.pid")).ok().and_then(|text| text.trim().parse::<i32>().ok()).is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)).context("the restarted daemon wrote no pid file")?;
         Ok(true)
+    }
+
+    const SLOW_LIMIT: f64 = 60.0;
+    const SLOW_HELLO_MS: u64 = 5000;
+
+    struct Slowness {
+        direct: Vec<Option<f64>>,
+        glided: usize,
+        pairs: Vec<f64>,
+        clock: Option<f64>,
+    }
+
+    impl Slowness {
+        fn largest(&self) -> Option<f64> {
+            self.direct.iter().flatten().copied().reduce(f64::max)
+        }
+
+        fn direct_ok(&self) -> bool {
+            self.direct.len() == 10 && self.glided == 0 && self.direct.iter().all(|value| value.is_some_and(|value| value <= SLOW_LIMIT))
+        }
+
+        fn clock_ok(&self) -> bool {
+            self.pairs.len() == 10 && self.clock.is_some_and(|clock| clock <= SLOW_LIMIT)
+        }
+
+        fn said(&self) -> String {
+            let round = |values: &[Option<f64>]| values.iter().map(|value| value.map_or("none".to_string(), |value| format!("{value:.0}"))).collect::<Vec<_>>().join(", ");
+            let pairs: Vec<Option<f64>> = self.pairs.iter().map(|pair| Some(*pair)).collect();
+            format!(
+                "by the daemon's own time waited plus the early and open laps plus the launch per slow drag [{}] ms, largest {} ms, glided {}, by the daemon clock each slow drag against its off drag [{}] ms, mean without the largest and the smallest {} ms, limit {SLOW_LIMIT} ms",
+                round(&self.direct),
+                rounded(self.largest()),
+                self.glided,
+                round(&pairs),
+                rounded(self.clock)
+            )
+        }
+
+        fn verdicts(&self, p: &mut Probe) {
+            if !self.direct_ok() {
+                p.fail("a slow helper held the plain swap back by more than 60 ms of the daemon's own time");
+            }
+            if !self.clock_ok() {
+                p.fail("a slow helper held the plain swap back by more than 60 ms by the daemon clock");
+            }
+        }
+    }
+
+    fn laps_of(line: &str) -> Option<(f64, Vec<(String, f64)>)> {
+        let rest = line.split("began Some(").nth(1)?;
+        let began = rest.split(')').next()?.parse::<f64>().ok()?;
+        let laps = rest.split(" ms after the drop, took ").nth(1)?.split(", sessions hold").next()?;
+        Some((began, laps.split(", ").skip(1).filter_map(|lap| lap.rsplit_once(' ').and_then(|(name, value)| Some((name.to_string(), value.parse::<f64>().ok()?)))).collect()))
+    }
+
+    fn daemon_clock(line: &str) -> Option<f64> {
+        laps_of(line).map(|(began, laps)| began + laps.iter().filter(|(name, _)| name != "later").map(|(_, value)| value).sum::<f64>())
+    }
+
+    fn own_time(line: &str) -> Option<f64> {
+        let (_, laps) = laps_of(line)?;
+        let lap = |wanted: &str| laps.iter().find(|(name, _)| name == wanted).map_or(0.0, |(_, value)| *value);
+        let launched = number_after(line, "launch took ").or_else(|| number_after(line, "in ms wake ").zip(number_after(line, ", launch ")).map(|(wake, launch)| (launch - wake).max(0.0)));
+        Some(number_after(line, "waited ").unwrap_or(0.0) + lap("early") + lap("open") + launched.unwrap_or(0.0))
+    }
+
+    fn judge_slow(slow: &[String], off: &[String]) -> Slowness {
+        let pairs: Vec<f64> = slow.iter().zip(off).filter_map(|(slow, off)| daemon_clock(slow).zip(daemon_clock(off)).map(|(a, b)| a - b)).collect();
+        let mut sorted = pairs.clone();
+        sorted.sort_by(f64::total_cmp);
+        let inner = sorted.get(1..sorted.len().saturating_sub(1)).filter(|inner| !inner.is_empty());
+        let clock = inner.map(|inner| inner.iter().sum::<f64>() / inner.len() as f64);
+        Slowness { direct: slow.iter().map(|line| own_time(line)).collect(), glided: slow.iter().filter(|line| line.contains(", glided true,")).count(), pairs, clock }
+    }
+
+    fn slow_check(paths: Vec<String>) -> ExitCode {
+        let mut failed = false;
+        for path in paths {
+            let Ok(text) = fs::read_to_string(&path) else {
+                println!("{path} could not be read");
+                failed = true;
+                continue;
+            };
+            let pick = |arm: &str| text.lines().filter(|line| line.split(&format!("- {arm} ")).nth(1).is_some_and(|rest| rest.split(':').next().is_some_and(|index| index.parse::<u32>().is_ok()))).map(str::to_string).collect::<Vec<String>>();
+            let judged = judge_slow(&pick("slow"), &pick("off"));
+            println!("{path}");
+            println!("  {}", judged.said());
+            println!("  direct {}, daemon clock {}", if judged.direct_ok() { "passes" } else { "fails" }, if judged.clock_ok() { "passes" } else { "fails" });
+            failed |= !judged.direct_ok() || !judged.clock_ok();
+        }
+        if failed {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        }
     }
 
     fn middle(values: &[u128]) -> Option<u128> {
@@ -2911,8 +3141,14 @@ mod probe {
         p.line("- ten drags with the glide on, each after 35 s at rest so the helper is gone".to_string());
         let on = cold_round(p, &screen, name, places, "cold");
         let glided = on.iter().filter(|cold| cold.glided).count();
+        let found = on.iter().filter(|cold| cold.found == Some(true)).count();
+        let before_drop = on.iter().filter(|cold| cold.launched_from_drop.is_some_and(|at| at < 0.0)).count();
+        p.line(format!("- cold drags where open found the early window made {found} of 10, early launches before the drop {before_drop} of 10"));
+        if found < 8 {
+            p.fail("open found the early window made in fewer than eight of ten cold drags");
+        }
         let (slow, off) = if restart_daemon(p, true)? {
-            p.line(format!("- the daemon restarted with {}=1000, so each helper answers hello a second late, then one drag to settle the new daemon that is not counted, then ten pairs, each a drag with the glide on and the slow helper followed by a drag with the glide off, both after 35 s at rest so they meet the same runner load, and before each pair one uncounted drag with the glide on so the slow drag finds glide tables", scooch::live::SLOW_HELLO));
+            p.line(format!("- the daemon restarted with {}={SLOW_HELLO_MS}, so each helper answers hello {} s late, after the drop even when it was launched at the drag start, then one drag to settle the new daemon that is not counted, then ten pairs, each a drag with the glide on and the slow helper followed by a drag with the glide off, both after 35 s at rest so they meet the same runner load, and before each pair one uncounted drag with the glide on so the slow drag finds glide tables", scooch::live::SLOW_HELLO, SLOW_HELLO_MS / 1000));
             let mut last = Instant::now();
             cold_one(p, &screen, name, places, ("settling", 0), &mut last);
             let (mut slow, mut off) = (Vec::new(), Vec::new());
@@ -2948,13 +3184,95 @@ mod probe {
             let glided_slow = slow.iter().filter(|cold| cold.glided).count();
             let pairs: Vec<i128> = slow.iter().zip(&off).filter_map(|(slow, off)| slow.set.zip(off.set).map(|(a, b)| a as i128 - b as i128)).collect();
             let gap = slow_set.zip(off_set).map(|(a, b)| a as i128 - b as i128);
-            p.line(format!("- slow helper drags glided {glided_slow} of 10, drop to set median {slow_set:?} ms against {off_set:?} ms with the glide off, a gap of {gap:?} ms, each drag against the same drag with the glide off {pairs:?} ms"));
-            if glided_slow > 0 || gap.is_none_or(|gap| gap > 60) || sets(&slow).len() < 10 {
-                p.fail("a slow helper held the plain swap back by more than 60 ms");
-            }
+            let lines = |round: &[Cold]| round.iter().map(|cold| cold.line.clone()).collect::<Vec<String>>();
+            let judged = judge_slow(&lines(&slow), &lines(&off));
+            p.line(format!("- slow helper drags glided {glided_slow} of 10, drop to set as the probe saw it median {slow_set:?} ms against {off_set:?} ms with the glide off, a gap of {gap:?} ms, each drag against the same drag with the glide off {pairs:?} ms, reported only, {}", judged.said()));
+            judged.verdicts(p);
         }
         bare_wakes(p);
+        built_not_shown(p, marker, &screen);
+        launch_nothing(p, marker, &screen, name);
         Ok(())
+    }
+
+    fn built_not_shown(p: &mut Probe, marker: MainThreadMarker, screen: &Screen) {
+        let before = ours().len();
+        match layer::make(marker, screen) {
+            Ok(built) => {
+                let during = ours();
+                let flagged = during.iter().filter(|window| window.on_screen).count();
+                let listed = layer::listing().into_iter().filter(|window| window.pid == std::process::id() as i64).count();
+                p.line(format!("- control in the probe's own process, a layer built and never ordered in, window number {}: every-window entries of the probe {before} before and {} with it, {flagged} of them flagged on screen, {listed} in the on-screen listing, layers {:?}", built.number(), during.len(), during.iter().map(|window| window.layer).collect::<Vec<_>>()));
+                built.close();
+                spin(0.2);
+                p.line(format!("  - after closing it, every-window entries of the probe {}", ours().len()));
+            }
+            Err(error) => p.line(format!("- control in the probe's own process could not build a layer {error:#}")),
+        }
+    }
+
+    fn click(at: (f32, f32)) {
+        post(5, at);
+        std::thread::sleep(Duration::from_millis(120));
+        post(1, at);
+        std::thread::sleep(Duration::from_millis(120));
+        post(2, at);
+    }
+
+    fn empty_spot(screen: &Screen, icons: &[Rect]) -> (f32, f32) {
+        let clear = |(x, y): (f32, f32)| icons.iter().all(|icon| x < icon.x - 60.0 || x > icon.x + icon.w + 60.0 || y < icon.y - 60.0 || y > icon.y + icon.h + 60.0);
+        let frame = screen.frame;
+        (2..9)
+            .flat_map(|row| (1..10).map(move |column| (frame.x + frame.w * column as f32 / 10.0, frame.y + frame.h * row as f32 / 10.0)))
+            .find(|spot| clear(*spot))
+            .unwrap_or((frame.x + frame.w * 0.85, frame.y + frame.h * 0.75))
+    }
+
+    fn launches_from(p: &mut Probe, act: impl FnOnce()) -> (usize, usize, Vec<String>) {
+        let _ = wait_until(Duration::from_secs(4), || helper_pids(p).is_empty());
+        let lines = daemon_log(p).lines().count();
+        act();
+        std::thread::sleep(Duration::from_millis(1200));
+        let log = new_lines(&daemon_log(p), lines);
+        let at_drag = log.iter().filter(|line| line.contains("glide early launch at the drag start")).count();
+        let at_wake = log.iter().filter(|line| line.contains("glide early launch at the wake")).count();
+        let starts = log.iter().filter_map(|line| line.split(" drag start at ").nth(1)).map(|rest| rest.split(", ").skip(1).collect::<Vec<_>>().join(", ")).collect();
+        (at_drag, at_wake, starts)
+    }
+
+    fn launch_nothing(p: &mut Probe, marker: MainThreadMarker, screen: &Screen, name: &str) {
+        let gone = wait_until(Duration::from_secs(15), || helper_pids(p).is_empty()).is_some();
+        let icons: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().map(|(_, rect)| rect).collect();
+        let Some(icon) = position(p, name) else {
+            p.fail("the probe icon was not found for the drags that must launch nothing");
+            return;
+        };
+        let empty = empty_spot(screen, &icons);
+        let mut said = Vec::new();
+        let mut launched = 0;
+        let clicked = launches_from(p, || click(icon));
+        launched += clicked.0;
+        said.push(format!("a click on the icon with no move: at the drag start {}, at the wake {}, drag start lines {:?}", clicked.0, clicked.1, clicked.2));
+        let bare = launches_from(p, || drag(empty, (empty.0 + 80.0, empty.1)));
+        launched += bare.0;
+        said.push(format!("a drag that begins on empty desktop: at the drag start {}, at the wake {}, drag start lines {:?}", bare.0, bare.1, bare.2));
+        match cover(marker, screen) {
+            Ok(window) => {
+                let under = launches_from(p, || drag(icon, (icon.0 + 80.0, icon.1)));
+                window.close();
+                spin(0.3);
+                launched += under.0;
+                said.push(format!("a drag that begins on the icon under another app's window: at the drag start {}, at the wake {}, drag start lines {:?}", under.0, under.1, under.2));
+            }
+            Err(error) => said.push(format!("the covering window could not be made {error:#}")),
+        }
+        if position(p, name).is_some_and(|now| (now.0 - icon.0).abs() > 5.0 || (now.1 - icon.1).abs() > 5.0) {
+            let _ = place(p, name, icon);
+        }
+        p.line(format!("- three gestures that must launch nothing at the drag start, helpers gone before {gone}: {}", said.join("; ")));
+        if launched > 0 {
+            p.fail("a click, a drag that begins on empty desktop or one under another app's window launched a helper at the drag start");
+        }
     }
 
     fn old_tables(p: &mut Probe, screen: &Screen, name: &str, places: ((f32, f32), (f32, f32))) {
@@ -2995,13 +3313,25 @@ mod probe {
         let rested = rest_for_cold(p, Instant::now());
         let lines = daemon_log(p).lines().count();
         let mut alive = Vec::new();
+        let (mut listed, mut shown) = (Vec::new(), 0);
         for _ in 0..30 {
             poke(p);
             std::thread::sleep(Duration::from_millis(400));
-            alive.push(helper_pids(p).len());
+            let pids = helper_pids(p);
+            alive.push(pids.len());
+            if !pids.is_empty() {
+                let every: Vec<layer::Seen> = layer::every_window().into_iter().filter(|window| pids.contains(&(window.pid as i32))).collect();
+                let on = layer::listing().into_iter().filter(|window| pids.contains(&(window.pid as i32))).count();
+                shown += on;
+                listed.push(format!("{} listed, {} flagged on screen, {on} in the on-screen listing, layers {:?}, sizes {:?}", every.len(), every.iter().filter(|window| window.on_screen).count(), every.iter().map(|window| window.layer).collect::<Vec<_>>(), every.iter().map(|window| (window.bounds.w.round(), window.bounds.h.round())).collect::<Vec<_>>()));
+            }
         }
         std::thread::sleep(Duration::from_millis(2000));
         let left = helper_pids(p);
+        p.line(format!("- bare wakes, the helper's windows in the every-window listing while its early window was built and not shown, per sample with a helper alive: {listed:?}"));
+        if shown > 0 {
+            p.fail("a window of an early helper was on screen at a bare wake");
+        }
         let log = new_lines(&daemon_log(p), lines);
         let launches = log.iter().filter(|line| line.contains("glide early launch")).count();
         let lived: Vec<f64> = log.iter().filter_map(|line| number_after(line, "it lived ")).collect();
@@ -3011,6 +3341,68 @@ mod probe {
         if launches > 2 || lived.len() != launches || lived.iter().any(|lived| *lived > 2000.0) || !sent.is_empty() || !left.is_empty() {
             p.fail("thirty bare wakes launched more than two helpers, kept one past two seconds, or sent it work");
         }
+    }
+
+    type Layout = Vec<(String, [i64; 4])>;
+
+    fn layout(view: &finder::View) -> (Option<Layout>, Duration) {
+        let started = Instant::now();
+        let icons = finder::named(view).ok().map(|icons| {
+            let mut icons: Layout = icons.into_iter().map(|(name, rect)| (name, [rect.x.round() as i64, rect.y.round() as i64, rect.w.round() as i64, rect.h.round() as i64])).collect();
+            icons.sort();
+            icons
+        });
+        (icons, started.elapsed())
+    }
+
+    fn finder_after_drop(p: &mut Probe) -> Result<()> {
+        let screen = main_screen(p)?;
+        let name = PROBES[0].0;
+        if dismiss_prompt(p).is_none() {
+            p.line("- the reads need Apple Events to Finder, which the open consent window blocks, so they were skipped".to_string());
+            return Ok(());
+        }
+        if scooch_pid(p).is_none() {
+            p.line("- no daemon runs, so the drags were skipped".to_string());
+            return Ok(());
+        }
+        if state(p)["glide"] != serde_json::json!(true) {
+            let _ = p.scooch(&["glide"], LIMIT);
+        }
+        let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
+        let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
+        let offsets = [0u64, 20, 40, 60, 80];
+        let view = finder::view();
+        p.line("- ten mouse drags of one icon by CGEvent, the daemon running with the glide on, and after each drop the probe's own Finder reads by Apple Event at 0, 20, 40, 60 and 80 ms after its drop stamp, each against the layout read 2.5 s later".to_string());
+        let mut hits = [0usize; 5];
+        let mut firsts = Vec::new();
+        for index in 0..10 {
+            let from = position(p, name).unwrap_or(subject);
+            let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
+            let (before, _) = layout(&view);
+            drag(from, to);
+            let dropped = Instant::now();
+            let mut reads = Vec::new();
+            for offset in offsets {
+                std::thread::sleep(Duration::from_millis(offset).saturating_sub(dropped.elapsed()));
+                let began = dropped.elapsed();
+                let (icons, took) = layout(&view);
+                reads.push((offset, began, took, icons));
+            }
+            std::thread::sleep(Duration::from_millis(2500));
+            let (last, _) = layout(&view);
+            let finals: Vec<bool> = reads.iter().map(|(_, _, _, icons)| icons.is_some() && *icons == last).collect();
+            for (hit, shown) in hits.iter_mut().zip(&finals) {
+                *hit += usize::from(*shown);
+            }
+            let first = reads.iter().zip(&finals).find(|(_, shown)| **shown).map(|((offset, ..), _)| *offset);
+            firsts.push(first);
+            let said: Vec<String> = reads.iter().zip(&finals).map(|((offset, began, took, icons), shown)| format!("{offset} ms read at {} ms took {} ms {}", began.as_millis(), took.as_millis(), if icons.is_none() { "unread" } else if *shown { "final" } else if *icons == before { "before" } else { "other" })).collect();
+            p.line(format!("  - drag {}: the layout moved {}, first read with the final layout {}, reads {}", index + 1, last.is_some() && last != before, first.map_or("none".to_string(), |first| format!("{first} ms")), said.join(", ")));
+        }
+        let earliest = offsets.iter().zip(&hits).find(|(_, hits)| **hits == 10).map(|(offset, _)| *offset);
+        p.line(format!("- the earliest read after the drop that showed the final layout in ten of ten {}, reads with the final layout per offset {}, first such read per drag {:?}", earliest.map_or("none".to_string(), |earliest| format!("{earliest} ms")), offsets.iter().zip(&hits).map(|(offset, hits)| format!("{offset} ms {hits} of 10")).collect::<Vec<_>>().join(", "), firsts));
+        Ok(())
     }
 
     fn rest_wakes(p: &mut Probe) -> Result<()> {
@@ -3679,6 +4071,8 @@ mod probe {
     }
 
     fn cleanup(p: &mut Probe) -> Result<()> {
+        let kept = fs::copy(p.home.join("watch.log"), p.out.join("watch.log"));
+        p.line(format!("- the daemon's log copied into the artifact as watch.log {:?} bytes", kept.ok()));
         put_motion_back(p);
         if p.stand.is_some() || launchd::loaded() || launchd::plist_path().is_ok_and(|path| path.exists()) {
             let ran = p.scooch(&["off"], Duration::from_secs(60));

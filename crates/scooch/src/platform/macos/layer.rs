@@ -1,11 +1,12 @@
 use super::store::{convert, Plist};
 use super::sys::{self, Ref};
+use crate::live::helper::Build;
 use crate::platform::Screen;
 use anyhow::{Context, Result};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
-use objc2_app_kit::{NSBackingStoreType, NSColor, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowStyleMask};
+use objc2_app_kit::{NSBackingStoreType, NSColor, NSScreen, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowStyleMask};
 use objc2_foundation::{NSPoint, NSRect};
 use objc2_core_graphics::{kCGColorSpaceSRGB, CGColorSpace};
 use objc2_quartz_core::{CALayerDelegate, CAMetalLayer, CATransaction};
@@ -281,6 +282,12 @@ pub fn covered(seen: &[Seen], screen: &Rect, ours: i64) -> bool {
     })
 }
 
+pub fn desktop_at(seen: &[Seen], (x, y): (f32, f32), desktop: i64, icons: i64) -> bool {
+    let here = |window: &&Seen| x >= window.bounds.x && x < window.bounds.x + window.bounds.w && y >= window.bounds.y && y < window.bounds.y + window.bounds.h;
+    let covered = seen.iter().filter(here).any(|window| APP_LEVELS.contains(&window.layer) && window.alpha > 0.0);
+    !covered && seen.iter().filter(here).any(|window| window.owner == "Finder" && window.layer > desktop && window.layer <= icons)
+}
+
 pub fn choose(seen: &[Seen], screen: &Rect, desktop: i64, ours: i64) -> Option<i64> {
     let here = |window: &&Seen| window.pid != ours && overlaps(&window.bounds, screen);
     let picture = seen.iter().filter(here).any(|window| window.layer < desktop && is_picture(window));
@@ -375,6 +382,21 @@ impl Layer {
         }
         None
     }
+
+    pub fn order(&self) {
+        self.window.orderFrontRegardless();
+        CATransaction::flush();
+    }
+
+    pub fn waited(&self, waited: Duration) -> Result<bool> {
+        if self.visible() {
+            return Ok(true);
+        }
+        if waited >= SHOW_WAIT {
+            anyhow::bail!(HIDDEN);
+        }
+        Ok(false)
+    }
 }
 
 impl Drop for Layer {
@@ -402,18 +424,61 @@ pub fn open(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
 }
 
 fn build(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
-    let (display, number) = super::picture::screen_for(marker, &screen.id)?;
-    let (desktop, _) = levels();
-    let seen = listing();
-    let ours = std::process::id() as i64;
-    if covered(&seen, &screen.frame, ours) {
-        anyhow::bail!(COVERED);
+    let layer = built(marker, screen)?;
+    layer.order();
+    layer.shown_after().context(HIDDEN)?;
+    Ok(layer)
+}
+
+pub fn make(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
+    objc2::rc::autoreleasepool(|_| built(marker, screen))
+}
+
+fn built(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
+    let mut making = Making::Start;
+    loop {
+        match step(marker, screen, making)? {
+            Build::Partly(next, _) => making = next,
+            Build::Whole(layer, _) => return Ok(layer),
+        }
     }
-    let level = choose(&seen, &screen.frame, desktop, ours).context(NO_ROOM)?;
+}
+
+pub enum Making {
+    Start,
+    Screen(Retained<NSScreen>, u32),
+    Level(Retained<NSScreen>, u32, i64),
+}
+
+pub fn step(marker: MainThreadMarker, screen: &Screen, making: Making) -> Result<Build<Making, Layer>> {
+    objc2::rc::autoreleasepool(|_| build_step(marker, screen, making))
+}
+
+fn build_step(marker: MainThreadMarker, screen: &Screen, making: Making) -> Result<Build<Making, Layer>> {
+    match making {
+        Making::Start => {
+            let (display, number) = super::picture::screen_for(marker, &screen.id)?;
+            Ok(Build::Partly(Making::Screen(display, number), "screen"))
+        }
+        Making::Screen(display, number) => {
+            let (desktop, _) = levels();
+            let seen = listing();
+            let ours = std::process::id() as i64;
+            if covered(&seen, &screen.frame, ours) {
+                anyhow::bail!(COVERED);
+            }
+            let level = choose(&seen, &screen.frame, desktop, ours).context(NO_ROOM)?;
+            Ok(Build::Partly(Making::Level(display, number, level), "list"))
+        }
+        Making::Level(display, number, level) => Ok(Build::Whole(hidden(marker, &display, number, level), "window")),
+    }
+}
+
+fn hidden(marker: MainThreadMarker, display: &NSScreen, number: u32, level: i64) -> Layer {
     let frame = display.frame();
     let scale = display.backingScaleFactor();
     let local = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
-    let window = unsafe { NSWindow::initWithContentRect_styleMask_backing_defer_screen(NSWindow::alloc(marker), local, NSWindowStyleMask::Borderless, NSBackingStoreType::Buffered, false, Some(&display)) };
+    let window = unsafe { NSWindow::initWithContentRect_styleMask_backing_defer_screen(NSWindow::alloc(marker), local, NSWindowStyleMask::Borderless, NSBackingStoreType::Buffered, false, Some(display)) };
     unsafe { window.setReleasedWhenClosed(false) };
     window.setFrame_display(frame, false);
     window.setLevel(level as isize);
@@ -434,12 +499,8 @@ fn build(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
     view.setWantsLayer(true);
     window.setContentView(Some(&view));
     let seen = watch(&window, &metal);
-    window.orderFrontRegardless();
-    CATransaction::flush();
     let pixels = ((frame.size.width * scale).round() as u32, (frame.size.height * scale).round() as u32);
-    let layer = Layer { window: ManuallyDrop::new(window), view: ManuallyDrop::new(view), metal: ManuallyDrop::new(metal), seen, level, pixels, display: number };
-    layer.shown_after().context(HIDDEN)?;
-    Ok(layer)
+    Layer { window: ManuallyDrop::new(window), view: ManuallyDrop::new(view), metal: ManuallyDrop::new(metal), seen, level, pixels, display: number }
 }
 
 pub fn seconds(host: u64) -> f64 {
@@ -546,6 +607,18 @@ mod tests {
         assert_eq!(choose(&owner_mac, &SCREEN, DESKTOP, 99), Some(DESKTOP));
         let runner = [window("Finder", -2147483603, ""), window("Dock", -2147483624, "Wallpaper-A4BD"), window("Wallpaper", -2147483625, "Offscreen Wallpaper Window")];
         assert_eq!(choose(&runner, &SCREEN, DESKTOP, 99), Some(DESKTOP));
+    }
+
+    #[test]
+    fn a_press_on_the_desktop_is_one_only_where_finder_icons_lie_uncovered() {
+        let icons = window("Finder", -2147483603, "");
+        assert!(desktop_at(std::slice::from_ref(&icons), (100.0, 100.0), DESKTOP, -2147483603));
+        let browser = Seen { bounds: Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 }, ..window("Finder", 0, "") };
+        assert!(!desktop_at(&[browser.clone(), icons.clone()], (100.0, 100.0), DESKTOP, -2147483603));
+        assert!(desktop_at(&[browser, icons.clone()], (600.0, 500.0), DESKTOP, -2147483603));
+        let clear = Seen { alpha: 0.0, ..window("Overlay", 3, "") };
+        assert!(desktop_at(&[clear, icons], (100.0, 100.0), DESKTOP, -2147483603));
+        assert!(!desktop_at(&[window("Dock", -2147483624, "")], (100.0, 100.0), DESKTOP, -2147483603));
     }
 
     #[test]

@@ -229,6 +229,7 @@ mod probe {
         probe.section("5b Solid color and slideshow", modes);
         probe.section("6 End to end", end_to_end);
         probe.section("6b Daemon glide", daemon_glide);
+        probe.section("6c Explorer after the drop", explorer_after_drop);
         probe.section("9 Live layer", live);
         probe.section("8 Display scaling", scaling);
         probe.section("7 Cleanup", cleanup);
@@ -3806,6 +3807,109 @@ mod probe {
         Ok(window)
     }
 
+    type Spots = Vec<(String, [i64; 2])>;
+
+    fn spots(automation: &IUIAutomation, list: HWND) -> (Option<Spots>, Duration) {
+        let started = Instant::now();
+        let found = automation_rects(automation, list).ok().map(|rects| {
+            let mut spots: Spots = rects.into_iter().map(|(name, rect)| (name, [rect.x.round() as i64, rect.y.round() as i64])).collect();
+            spots.sort();
+            spots
+        });
+        (found, started.elapsed())
+    }
+
+    fn center_of(automation: &IUIAutomation, list: HWND, shown: &str) -> Option<POINT> {
+        automation_rects(automation, list).ok()?.into_iter().find(|(seen, _)| seen == shown).map(|(_, rect)| POINT { x: (rect.x + rect.w / 2.0) as i32, y: (rect.y + 20.0) as i32 })
+    }
+
+    fn select(points: &[POINT]) -> bool {
+        let Some((first, rest)) = points.split_first() else { return false };
+        let mut sent = click(*first, false);
+        pump(Duration::from_millis(200));
+        sent &= unsafe { SendInput(&[key(VK_CONTROL, false)], size_of::<INPUT>() as i32) } == 1;
+        for point in rest {
+            sent &= click(*point, false);
+            pump(Duration::from_millis(200));
+        }
+        sent &= unsafe { SendInput(&[key(VK_CONTROL, true)], size_of::<INPUT>() as i32) } == 1;
+        pump(Duration::from_millis(200));
+        sent
+    }
+
+    fn explorer_after_drop(p: &mut Probe) -> Result<()> {
+        uncover(p);
+        let desktop = platform::current()?;
+        let screen = desktop.screens()?.first().context("no screen")?.clone();
+        let recorded = desktop.wallpaper(&screen).ok().flatten();
+        fs::write(p.home.join("state.json"), br#"{"version":1,"on":true,"glide":false,"options":{"scenery":"auto"}}"#)?;
+        let log = p.out.join("drop-daemon.log");
+        let mut child = start_glide_daemon(p, &log, false)?;
+        let home = p.home.clone();
+        let first = wait_until(Duration::from_secs(60), || rendered(&home));
+        p.line(format!("- the daemon {} rendered after {:?} ms, its wakes are read from its log, and the probe reads the places itself by UI Automation", child.id(), first.map(|time| time.as_millis())));
+        let view = shell::view()?;
+        let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
+        let at = |x: f32, y: f32| POINT { x: (screen.frame.x + screen.frame.w * x) as i32, y: (screen.frame.y + screen.frame.h * y) as i32 };
+        let places = [at(0.5, 0.5), at(0.38, 0.5)];
+        let offsets = [0u64, 20, 40, 60, 80];
+        let names: Vec<String> = [PROBES[0], PROBES[1], PROBES[5]].iter().map(|(name, folder)| shown_name(name, *folder)).collect();
+        p.line("- ten drags of one icon, then five drags of a group of three icons selected by a click and two control clicks, each by SendInput, with reads at 0, 20, 40, 60 and 80 ms after the drop against the places read 2.5 s later".to_string());
+        let mut whole = (0usize, 0usize);
+        for (kind, count) in [("single", 10usize), ("group", 5)] {
+            for index in 0..count {
+                let moving: Vec<String> = if kind == "single" { names[..1].to_vec() } else { names.clone() };
+                let Some(from) = center_of(&automation, view.list, &moving[0]) else {
+                    p.line(format!("  - {kind} drag {}: `{}` was not found on the desktop", index + 1, moving[0]));
+                    continue;
+                };
+                let to = if (from.x - places[0].x).abs() < 40 && (from.y - places[0].y).abs() < 40 { places[1] } else { places[0] };
+                if kind == "group" {
+                    let points: Vec<POINT> = moving.iter().filter_map(|name| center_of(&automation, view.list, name)).collect();
+                    let _ = select(&points);
+                }
+                let (before, _) = spots(&automation, view.list);
+                let lines = log_lines(&log).len();
+                let sent = drag_to(from, to);
+                let dropped = Instant::now();
+                let dropped_at = epoch();
+                let mut reads = Vec::new();
+                for offset in offsets {
+                    std::thread::sleep(Duration::from_millis(offset).saturating_sub(dropped.elapsed()));
+                    let began = dropped.elapsed();
+                    let (found, took) = spots(&automation, view.list);
+                    reads.push((offset, began, took, found));
+                }
+                pump(Duration::from_millis(2500));
+                let (last, _) = spots(&automation, view.list);
+                let place = |found: &Option<Spots>, name: &String| found.as_ref().and_then(|found| found.iter().find(|(seen, _)| seen == name).map(|(_, spot)| *spot));
+                let finals: Vec<usize> = reads.iter().map(|(_, _, _, found)| moving.iter().filter(|name| place(found, name).is_some() && place(found, name) == place(&last, name)).count()).collect();
+                let wakes: Vec<f64> = log_lines(&log).into_iter().skip(lines).filter(|line| line.contains(" wake ")).filter_map(|line| stamp_of(&line)).map(|stamp| ((stamp - dropped_at) * 1000.0).round()).collect();
+                let moved = moving.iter().filter(|name| place(&before, name) != place(&last, name)).count();
+                if finals.first() == Some(&moving.len()) {
+                    if kind == "single" {
+                        whole.0 += 1;
+                    } else {
+                        whole.1 += 1;
+                    }
+                }
+                let said: Vec<String> = reads.iter().zip(&finals).map(|((offset, began, took, _), shown)| format!("{offset} ms read at {} ms took {} ms {shown} of {} final", began.as_millis(), took.as_millis(), moving.len())).collect();
+                p.line(format!("  - {kind} drag {}: sent {sent}, icons moved {moved} of {}, wakes after the drop at {wakes:?} ms, reads {}", index + 1, moving.len(), said.join(", ")));
+                if kind == "group" {
+                    let _ = click(at(0.92, 0.92), false);
+                    pump(Duration::from_millis(300));
+                }
+            }
+        }
+        p.line(format!("- the first read after the drop showed the whole move in {} of 10 single drags and in {} of 5 group drags", whole.0, whole.1));
+        let stopped = stop_glide_daemon(&mut child);
+        p.line(format!("- daemon stopped {stopped:?}"));
+        if let Some(recorded) = &recorded {
+            let _ = desktop.set_wallpaper(&screen, recorded);
+        }
+        Ok(())
+    }
+
     fn daemon_glide(p: &mut Probe) -> Result<()> {
         let found = animation();
         let result = daemon_glide_steps(p);
@@ -4013,8 +4117,21 @@ mod probe {
         let gone = wait_until(Duration::from_secs(40).saturating_sub(last.elapsed()), || helper_children(daemon).is_empty());
         pump(Duration::from_secs(35).saturating_sub(last.elapsed()));
         let still = helper_children(daemon);
-        p.line(format!("- no helper {:?} s after the last drag, 35 s after it helper processes {still:?}", gone.map(|_| last.elapsed().as_secs())));
-        if !still.is_empty() {
+        let checked = epoch();
+        let launch = log_lines(&log).into_iter().skip(before_wakes).rev().find(|line| line.contains("glide early launch") && stamp_of(line).is_some_and(|at| checked - at < 2.0));
+        let gone_soon = !still.is_empty() && launch.is_some() && wait_until(Duration::from_secs(3), || helper_children(daemon).is_empty()).is_some();
+        let launched_at = launch.as_deref().and_then(stamp_of);
+        let after: Vec<String> = log_lines(&log).into_iter().skip(before_wakes).filter(|line| launched_at.is_some_and(|at| stamp_of(line).is_some_and(|stamp| stamp >= at))).collect();
+        let quit = after.iter().find(|line| line.contains("glide early helper quit")).cloned();
+        let lived = quit.as_deref().and_then(|line| line.split("it lived ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<f64>().ok());
+        let worked = after.iter().any(|line| commanded(line));
+        let early = gone_soon && lived.is_some_and(|lived| lived <= 2000.0) && !worked;
+        p.line(format!(
+            "- no helper {:?} s after the last drag, 35 s after it helper processes {still:?}{}",
+            gone.map(|_| last.elapsed().as_secs()),
+            if still.is_empty() { String::new() } else { format!(", judged by the launch line {launch:?} and the quit line {quit:?}, sent work {worked}, gone within 3 s {gone_soon}, so launched early by a wake {early}") }
+        ));
+        if !still.is_empty() && !early {
             p.failed.push("a helper was still running 35 s after the last drag".into());
         }
         let before_bare = log_lines(&log).len();
@@ -4024,8 +4141,9 @@ mod probe {
         }
         pump(Duration::from_millis(2000));
         let bare: Vec<String> = log_lines(&log).into_iter().skip(before_bare).collect();
-        let launches = bare.iter().filter(|line| line.contains("glide early launch")).count();
-        let lived: Vec<f64> = bare.iter().filter_map(|line| line.split("it lived ").nth(1).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse().ok())).collect();
+        let starts: Vec<usize> = bare.iter().enumerate().filter(|(_, line)| line.contains("glide early launch")).map(|(index, _)| index).collect();
+        let launches = starts.len();
+        let lived: Vec<f64> = starts.iter().filter_map(|start| bare.iter().skip(start + 1).find_map(|line| line.split("it lived ").nth(1).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse().ok()))).collect();
         let sent: Vec<String> = bare.iter().filter(|line| commanded(line)).map(|line| line.chars().take(160).collect()).collect();
         let left = helper_children(daemon);
         p.line(format!("- thirty wakes with nothing moved after the helper was gone: early launches {launches}, each quit after living {lived:?} ms, helper commands or picture warms {sent:?}, helper processes two seconds after the last wake {left:?}"));
@@ -4050,8 +4168,12 @@ mod probe {
         let rest_skips: Vec<String> = rested.log.iter().filter(|line| line.contains("glide skipped")).map(|line| line.chars().take(200).collect()).collect();
         let cold = stamp(" glide early launch").or_else(|| stamp(" glide helper launched")).zip(stamp(" glide ready")).map(|(started, ready)| ((ready - started) * 1000.0).round());
         let shown = stamp(" glide open after snapshot").zip(rested.log.iter().find(|line| gliding(line)).and_then(|line| stamp_of(line))).map(|(asked, shown)| ((shown - asked) * 1000.0).round());
+        let decided = rested.log.iter().find(|line| line.contains("glide decision at the set"));
+        let launched_early = rested.log.iter().any(|line| line.contains("glide early launch"));
+        let early_window = decided.and_then(|line| line.split("made it in ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<u64>().ok()).filter(|_| launched_early);
+        let found_made = decided.and_then(|line| line.split("open found it made ").nth(1)).and_then(|rest| rest.split(',').next()).and_then(|word| word.trim().parse::<bool>().ok());
         p.line(format!(
-            "- the first drag after the helper went away, to {},{} and now at {:?}: glided {rest_glided}, skip reasons {rest_skips:?}, helper start to ready {cold:?} ms, open after the snapshot to shown {shown:?} ms, wallpaper set {:?} ms after the drop, log {:?}",
+            "- the first drag after the helper went away, to {},{} and now at {:?}: glided {rest_glided}, skip reasons {rest_skips:?}, helper start to ready {cold:?} ms, open after the snapshot to shown {shown:?} ms, wallpaper set {:?} ms after the drop, the early window took {early_window:?} ms, open found it made {found_made:?}, log {:?}",
             rest_target.x,
             rest_target.y,
             icon_spot(name, folder),

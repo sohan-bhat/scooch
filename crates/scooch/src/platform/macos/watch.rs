@@ -1,24 +1,28 @@
 use super::sys::{self, Ref, StreamContext};
-use super::Wake;
+use super::{DragHooks, Wake};
 use anyhow::{bail, Context, Result};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{msg_send, MainThreadMarker};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification, NSEvent, NSEventMask, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWorkspaceApplicationKey, NSWorkspaceDidLaunchApplicationNotification,
-    NSWorkspaceDidMountNotification, NSWorkspaceDidUnmountNotification, NSWorkspaceDidWakeNotification,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification, NSEvent, NSEventMask, NSEventType, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWorkspaceApplicationKey,
+    NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidMountNotification, NSWorkspaceDidUnmountNotification, NSWorkspaceDidWakeNotification,
 };
 use objc2_foundation::{NSArray, NSNotification, NSNotificationCenter, NSNotificationName, NSString};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, NonNull};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 type Shared = Arc<dyn Fn() + Send + Sync>;
 
 pub static DROPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static DRAG: OnceLock<DragHooks> = OnceLock::new();
+static PRESSED: AtomicU64 = AtomicU64::new(0);
 
 const STREAM_LATENCY: f64 = 0.05;
 const FINDER: &str = "com.apple.finder";
@@ -123,17 +127,45 @@ extern "C" fn changed(_stream: Ref, info: *mut c_void, count: usize, paths: *con
 
 fn mouse(wake: Shared) {
     let traced = crate::daemon::trace();
-    let on_up = RcBlock::new(move |_: NonNull<NSEvent>| {
-        let front = finder_in_front();
-        if traced {
-            eprintln!("{} mouse up, Finder in front {front}", crate::daemon::stamp());
-        }
-        if front {
-            DROPPED.store(true, std::sync::atomic::Ordering::SeqCst);
-            wake();
+    let on_mouse = RcBlock::new(move |event: NonNull<NSEvent>| {
+        let kind = unsafe { event.as_ref() }.r#type();
+        let press = PRESSED.fetch_add(1, Ordering::SeqCst) + 1;
+        if kind == NSEventType::LeftMouseDown {
+            pressed_down(press, traced);
+        } else if kind == NSEventType::LeftMouseUp {
+            let front = finder_in_front();
+            if traced {
+                eprintln!("{} mouse up, Finder in front {front}", crate::daemon::stamp());
+            }
+            if front {
+                DROPPED.store(true, Ordering::SeqCst);
+                wake();
+            }
         }
     });
-    std::mem::forget(NSEvent::addGlobalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseUp, &on_up));
+    std::mem::forget(NSEvent::addGlobalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp, &on_mouse));
+}
+
+fn pressed_down(press: u64, traced: bool) {
+    let Some(hooks) = DRAG.get() else { return };
+    let Some(from) = crate::platform::pressed(super::pointer_now(), &hooks.on_icon) else { return };
+    let _ = std::thread::Builder::new().name("scooch-press".into()).spawn(move || {
+        let found = crate::platform::follow(from, |gap| {
+            std::thread::sleep(gap);
+            (PRESSED.load(Ordering::SeqCst) == press).then(|| (super::button_held(), super::pointer_now()))
+        });
+        if let Some(after) = found {
+            drag_started(from, after, traced);
+        }
+    });
+}
+
+fn drag_started(from: (f32, f32), after: Duration, traced: bool) {
+    let front = super::on_main(|_| finder_in_front());
+    let started = front && DRAG.get().is_some_and(|hooks| (hooks.start)(from));
+    if traced {
+        eprintln!("{} drag start at {:.0},{:.0} found {} ms after the down, Finder in front {front}, an icon drag {started}", crate::daemon::stamp(), from.0, from.1, after.as_millis());
+    }
 }
 
 unsafe fn on_finder_launch(center: &NSNotificationCenter, wake: Shared) {

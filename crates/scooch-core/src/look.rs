@@ -155,9 +155,75 @@ pub struct Belonging {
     stamp: u64,
 }
 
+const MAP_MAGIC: [u8; 8] = *b"SCOOCHBM";
+const MAP_HEADER: usize = 56;
+const MAP_LEAD: usize = 28;
+
+fn fnv(parts: &[&[u8]]) -> u64 {
+    parts.iter().flat_map(|p| p.iter()).fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
 impl Belonging {
+    pub(crate) fn file(&self, picture: u64, source: (u32, u32)) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(MAP_LEAD + 8 * self.sky.len());
+        for v in [self.grid.w, self.grid.h, self.grid.cell] {
+            payload.extend_from_slice(&(v as u32).to_le_bytes());
+        }
+        for v in self.size {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in self.sky.iter().chain(&self.belong) {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut out = Vec::with_capacity(MAP_HEADER + payload.len());
+        out.extend_from_slice(&MAP_MAGIC);
+        out.extend_from_slice(&crate::BELONGING_MAP_FORMAT.to_le_bytes());
+        out.extend_from_slice(&crate::BELONGING_VERSION.to_le_bytes());
+        out.extend_from_slice(&picture.to_le_bytes());
+        out.extend_from_slice(&source.0.to_le_bytes());
+        out.extend_from_slice(&source.1.to_le_bytes());
+        out.extend_from_slice(&self.stamp.to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        let sum = fnv(&[&out, &payload]);
+        out.extend_from_slice(&sum.to_le_bytes());
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    pub(crate) fn from_file(bytes: &[u8]) -> Option<(u64, (u32, u32), Belonging)> {
+        let (head, payload) = (bytes.get(..MAP_HEADER)?, bytes.get(MAP_HEADER..)?);
+        let half = |from: &[u8], at: usize| -> Option<u32> { Some(u32::from_le_bytes(from.get(at..at + 4)?.try_into().ok()?)) };
+        let word = |from: &[u8], at: usize| -> Option<u64> { Some(u64::from_le_bytes(from.get(at..at + 8)?.try_into().ok()?)) };
+        let trusted = head.get(..8)? == MAP_MAGIC.as_slice()
+            && half(head, 8)? == crate::BELONGING_MAP_FORMAT
+            && half(head, 12)? == crate::BELONGING_VERSION
+            && word(head, 40)? == payload.len() as u64
+            && word(head, 48)? == fnv(&[head.get(..48)?, payload]);
+        if !trusted {
+            return None;
+        }
+        let (picture, source, stamp) = (word(head, 16)?, (half(head, 24)?, half(head, 28)?), word(head, 32)?);
+        let (w, h, cell) = (half(payload, 0)? as usize, half(payload, 4)? as usize, half(payload, 8)? as usize);
+        let size = [f64::from_bits(word(payload, 12)?), f64::from_bits(word(payload, 20)?)];
+        let cells = w.checked_mul(h)?;
+        if w == 0 || h == 0 || cell == 0 || size.iter().any(|s| !s.is_finite() || *s <= 0.0) || cells.checked_mul(8)?.checked_add(MAP_LEAD)? != payload.len() {
+            return None;
+        }
+        let values: Vec<f32> = payload.get(MAP_LEAD..)?.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
+        if values.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        let (sky, belong) = values.split_at(cells);
+        let empty = belong.iter().all(|b| *b <= 0.0);
+        Some((picture, source, Belonging { grid: Grid { w, h, cell }, size, sky: sky.to_vec(), belong: belong.to_vec(), empty, source, stamp }))
+    }
+
     pub fn bytes(&self) -> usize {
         (self.sky.len() + self.belong.len()) * 4
+    }
+
+    pub(crate) fn stamp(&self) -> u64 {
+        self.stamp
     }
 
     pub fn fits(&self, source: (u32, u32), stamp: u64) -> bool {
@@ -391,7 +457,29 @@ fn sky_region(lab: &[[f32; 3]], busy: &[f32], grid: &Grid) -> Vec<f32> {
     }
     let sky: Vec<bool> = votes.iter().map(|(yes, all)| 2 * yes > *all).collect();
     let roots: Vec<usize> = (0..top).map(|i| root(&mut parent, i)).collect();
-    origin.par_iter().map(|o| if *o != u32::MAX && sky[roots[*o as usize]] { 1.0 } else { 0.0 }).collect()
+    let under = undecided(&lab[..top], busy, &ways, w);
+    origin.par_iter().enumerate().map(|(i, o)| if *o != u32::MAX { if sky[roots[*o as usize]] { 1.0 } else { 0.0 } } else if under.get(i).copied().unwrap_or(false) { 0.5 } else { 0.0 }).collect()
+}
+
+fn undecided(top: &[[f32; 3]], busy: &[f32], ways: &[u8], w: usize) -> Vec<bool> {
+    let mut queue: VecDeque<u32> = (0..top.len()).filter(|i| busy[*i] < SKY_BUSY && top[*i][0] <= WHITE_LIGHT && top[*i][1].hypot(top[*i][2]) < SKY_CHROMA).map(|i| i as u32).collect();
+    if queue.is_empty() {
+        return Vec::new();
+    }
+    let mut reached = vec![false; ways.len()];
+    for i in &queue {
+        reached[*i as usize] = true;
+    }
+    while let Some(i) = queue.pop_front() {
+        let i = i as usize;
+        for (k, n) in [i.wrapping_sub(1), i + 1, i.wrapping_sub(w), i + w].into_iter().enumerate() {
+            if ways[i] & 1 << k != 0 && !reached[n] {
+                reached[n] = true;
+                queue.push_back(n as u32);
+            }
+        }
+    }
+    reached
 }
 
 pub(crate) fn byte(v: f32) -> u8 {
@@ -591,7 +679,7 @@ pub(crate) fn same(a: &Analysis, b: &Analysis) -> bool {
 
 pub(crate) fn stamp(print: u64, scene: &Scene, options: &Options) -> u64 {
     let u = scenery::active(scene, options).then(|| shape::ground(scene)).flatten().map_or(0.0, |g| g.u);
-    let words = [print, u.to_bits() as u64, options.scenery as u64];
+    let words = [print, u.to_bits() as u64, options.scenery as u64, crate::BELONGING_VERSION as u64];
     fingerprint(scene.width, scene.height, &words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>())
 }
 

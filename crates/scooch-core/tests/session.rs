@@ -377,6 +377,189 @@ fn belongs_says_what_the_bundle_carries() {
     }
 }
 
+fn table_scene(w: u32, h: u32, layout: &str) -> Scene {
+    let icons = if layout == "column" {
+        (0..16).map(|k| Rect { x: w as f32 - 120.0, y: 20.0 + 110.0 * k as f32, w: 100.0, h: 100.0 }).collect()
+    } else {
+        layouts::scattered(w, h, 12, 2027).into_iter().map(|r| Rect { w: 100.0, h: 100.0, ..r }).collect()
+    };
+    Scene { width: w, height: h, icons }
+}
+
+fn good_file() -> Vec<u8> {
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let image = made("deep-sky");
+    let analysis = scooch_core::analyze(&image);
+    let mut session = Session::new();
+    assert!(session.belongs(&image, &analysis, &table_scene(960, 600, "column"), &options));
+    session.map().expect("a map").to_bytes()
+}
+
+#[test]
+fn a_map_through_bytes_draws_as_the_cold_one() {
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    for name in ["deep-sky", "flat-water"] {
+        let image = made(name);
+        let analysis = scooch_core::analyze(&image);
+        for layout in ["column", "scattered"] {
+            let scene = table_scene(2880, 1800, layout);
+            let placement = scooch_core::solve(&analysis, &scene, &options, None);
+            let mut cold = Session::new();
+            let tables = cold.tables_shared(&image, &analysis, &placement, &scene, &options);
+            let (_, still) = cold.still_shared(&image, &analysis, &placement, &scene, &options);
+            let file = cold.map().expect("a map").to_bytes();
+            let mut kept = Session::new();
+            kept.adopt(scooch_core::Map::from_bytes(&file).expect("the file reads back"));
+            let again = kept.tables_shared(&image, &analysis, &placement, &scene, &options);
+            let (_, again_still) = kept.still_shared(&image, &analysis, &placement, &scene, &options);
+            println!("{name} {layout}: file {} bytes", file.len());
+            assert!(*again == *tables && again_still.as_raw() == still.as_raw(), "{name} {layout}: a map read back from its bytes drew other tables or another still");
+        }
+    }
+}
+
+#[test]
+fn a_map_file_it_cannot_trust_gives_nothing() {
+    let good = good_file();
+    assert!(scooch_core::Map::from_bytes(&good).is_some(), "the good file did not read back");
+    let changed = |at: usize, by: u8| {
+        let mut bad = good.clone();
+        bad[at] ^= by;
+        bad
+    };
+    let field = |at: usize, value: u64, width: usize| {
+        let mut bad = good.clone();
+        bad[at..at + width].copy_from_slice(&value.to_le_bytes()[..width]);
+        let sum = bad[..48].iter().chain(&bad[56..]).fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3));
+        bad[48..56].copy_from_slice(&sum.to_le_bytes());
+        bad
+    };
+    let length = good.len() as u64 - 56;
+    let mut long = good.clone();
+    long.push(0);
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("an empty slice", Vec::new()),
+        ("shorter than the header", good[..30].to_vec()),
+        ("the header alone", good[..56].to_vec()),
+        ("one byte short", good[..good.len() - 1].to_vec()),
+        ("one byte long", long),
+        ("a header that says a shorter payload", field(40, length - 1, 8)),
+        ("a header that says a longer payload", field(40, length + 1, 8)),
+        ("a flipped bit in the payload", changed(good.len() - 5, 1)),
+        ("a checksum that does not match", changed(48, 1)),
+        ("another magic word", field(0, u64::from_le_bytes(*b"SCOOCHXX"), 8)),
+        ("another format", field(8, scooch_core::BELONGING_MAP_FORMAT as u64 + 1, 4)),
+        ("another belonging version", field(12, scooch_core::BELONGING_VERSION as u64 + 1, 4)),
+    ];
+    for (why, bytes) in cases {
+        assert!(scooch_core::Map::from_bytes(&bytes).is_none(), "{why}: the file was trusted");
+    }
+}
+
+#[test]
+fn any_bytes_give_a_map_or_nothing() {
+    let good = good_file();
+    let mut state = 2027u64;
+    let mut next = move || {
+        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) as usize
+    };
+    let mut trusted = 0usize;
+    for k in 0..3000 {
+        let bytes = match k % 3 {
+            0 => (0..next() % 200).map(|_| next() as u8).collect::<Vec<u8>>(),
+            1 => good[..next() % good.len()].to_vec(),
+            _ => {
+                let mut bad = good.clone();
+                let at = next() % bad.len();
+                bad[at] ^= 1 + (next() % 255) as u8;
+                bad
+            }
+        };
+        let got = scooch_core::Map::from_bytes(&bytes);
+        trusted += got.is_some() as usize;
+        assert!(got.is_none() || bytes == good, "slice {k} of {} bytes was trusted", bytes.len());
+    }
+    println!("3000 slices, {trusted} trusted");
+}
+
+#[test]
+fn a_map_file_from_another_picture_is_not_drawn_from() {
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let (a, b) = (made("deep-sky"), made("flat-water"));
+    let (found_a, found_b) = (scooch_core::analyze(&a), scooch_core::analyze(&b));
+    let scene = table_scene(2880, 1800, "scattered");
+    let mut first = Session::new();
+    assert!(first.belongs(&a, &found_a, &scene, &options));
+    let file = first.map().expect("a map").to_bytes();
+    let placement = scooch_core::solve(&found_b, &scene, &options, None);
+    let mut fresh = Session::new();
+    let cold = fresh.tables_shared(&b, &found_b, &placement, &scene, &options);
+    let mut later = Session::new();
+    later.adopt(scooch_core::Map::from_bytes(&file).expect("the file reads back"));
+    let drawn = later.tables_shared(&b, &found_b, &placement, &scene, &options);
+    assert!(*drawn == *cold, "a map file from another picture changed the tables of this one");
+    let (handed, own) = (later.map().expect("a map"), fresh.map().expect("a map"));
+    assert!(handed.to_bytes() == own.to_bytes() && handed.to_bytes() != file, "after another picture the session handed back the refused map");
+    assert_eq!(handed.key(), own.key(), "after another picture the key is not the one of a cold session");
+    let mut taller = scene.clone();
+    taller.icons.iter_mut().for_each(|r| r.h *= 1.25);
+    let lifted = scooch_core::solve(&found_a, &taller, &options, None);
+    let mut fresh = Session::new();
+    fresh.tables_shared(&a, &found_a, &lifted, &taller, &options);
+    let mut later = Session::new();
+    later.adopt(scooch_core::Map::from_bytes(&file).expect("the file reads back"));
+    later.tables_shared(&a, &found_a, &lifted, &taller, &options);
+    let (handed, own) = (later.map().expect("a map"), fresh.map().expect("a map"));
+    assert!(handed.to_bytes() == own.to_bytes() && handed.to_bytes() != file, "after another icon unit the session handed back the refused map");
+    assert_eq!(handed.key(), own.key(), "after another icon unit the key is not the one of a cold session");
+}
+
+#[test]
+fn a_fitting_adopted_map_is_handed_on_unchanged() {
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let image = made("flat-water");
+    let analysis = scooch_core::analyze(&image);
+    let scene = table_scene(2880, 1800, "column");
+    let mut first = Session::new();
+    assert!(first.belongs(&image, &analysis, &scene, &options));
+    let file = first.map().expect("a map").to_bytes();
+    let placement = scooch_core::solve(&analysis, &scene, &options, None);
+    let mut later = Session::new();
+    later.adopt(scooch_core::Map::from_bytes(&file).expect("the file reads back"));
+    later.tables_shared(&image, &analysis, &placement, &scene, &options);
+    assert!(later.map().expect("a map").to_bytes() == file, "a map that fits came back as other bytes after one call");
+}
+
+#[test]
+fn a_handed_map_is_used_only_where_it_fits() {
+    let options = Options { scenery: Scenery::Auto, ..Options::default() };
+    let (image, other) = (made("deep-sky"), made("flat-water"));
+    let (analysis, elsewhere) = (scooch_core::analyze(&image), scooch_core::analyze(&other));
+    let at = |w: u32, h: u32, grow: f32| {
+        let mut scene = Scene { width: w, height: h, icons: layouts::layout("scattered", &analysis, w, h) };
+        scene.icons.iter_mut().for_each(|r| r.h *= grow);
+        scene
+    };
+    let scene = at(2880, 1800, 1.0);
+    let mut first = Session::new();
+    assert!(first.belongs(&image, &analysis, &scene, &options));
+    let map = first.map().expect("a map to hand on");
+    let mut wide = Session::new();
+    assert!(wide.belongs(&image, &analysis, &at(5120, 2880, 1.0), &options));
+    println!("the map holds {} bytes at 2880 by 1800 and {} at 5120 by 2880", map.bytes(), wide.map().expect("map").bytes());
+    let mut next = Session::new();
+    next.adopt(map.clone());
+    assert!(next.belongs(&image, &analysis, &scene, &options));
+    assert_eq!(next.map_ids().0, first.map_ids().0, "the new session worked the handed map out again");
+    for (what, picture, found, there) in [("picture", &other, &elsewhere, at(2880, 1800, 1.0)), ("screen", &image, &analysis, at(2560, 1600, 1.0)), ("icon unit", &image, &analysis, at(2880, 1800, 1.25))] {
+        let mut later = Session::new();
+        later.adopt(map.clone());
+        later.belongs(picture, found, &there, &options);
+        assert_ne!(later.map_ids().0, first.map_ids().0, "a map from another {what} was taken");
+    }
+}
+
 #[test]
 fn the_belonging_stamp_follows_what_the_map_depends_on() {
     let (w, h) = (960u32, 600u32);

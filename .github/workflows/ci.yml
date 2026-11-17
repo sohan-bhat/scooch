@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, probe-water, scenery-3]
   pull_request:
 
 concurrency:

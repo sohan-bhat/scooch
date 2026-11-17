@@ -261,6 +261,10 @@ mod system {
     }
 
     impl Desktop for Linux {
+        fn reads_at_once(&self) -> bool {
+            self.kind.reads_at_once()
+        }
+
         fn name(&self) -> String {
             format!("{} on {}", self.kind.name(), self.session_name())
         }

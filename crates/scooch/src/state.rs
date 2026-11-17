@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const VERSION: u32 = 1;
+pub const UNREAD: &str = "Some saved settings did not read.";
+pub const NEWER: &str = "Saved settings came from a newer Scooch.";
 pub const BUSY: &str = "Another scooch command is still running, so try again in a moment.";
 pub const COMMAND_PATIENCE: Duration = Duration::from_secs(20);
 
@@ -54,6 +56,8 @@ pub struct Start {
     pub draws: Vec<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reveals: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missed: Option<u32>,
     pub at: u64,
 }
 
@@ -255,10 +259,27 @@ impl Store {
         self.root.join("state.unreadable.json")
     }
 
+    pub fn kept_file(&self) -> PathBuf {
+        self.root.join("state.kept.json")
+    }
+
+    fn keep(&self, bytes: &[u8], first: &str) {
+        if fs::read(self.kept_file()).ok().as_deref() != Some(bytes) && write_atomic(&self.kept_file(), bytes).is_ok() {
+            eprintln!("{first} Each screen's own picture is kept. The old file is at {}.", self.kept_file().display());
+        }
+    }
+
     pub fn read(&self) -> Option<Vec<u8>> {
         let bytes = fs::read(self.state_file()).ok()?;
-        if serde_json::from_slice::<State>(&bytes).is_ok() {
+        if let Ok(state) = serde_json::from_slice::<State>(&bytes) {
+            if state.version > VERSION {
+                self.keep(&bytes, NEWER);
+            }
             return Some(bytes);
+        }
+        if let Some(saved) = salvage(&bytes) {
+            self.keep(&bytes, UNREAD);
+            return serde_json::to_vec_pretty(&saved).ok();
         }
         if fs::rename(self.state_file(), self.aside_file()).is_err() {
             let _ = write_atomic(&self.aside_file(), &bytes);
@@ -343,6 +364,22 @@ impl Store {
     }
 }
 
+fn salvage(bytes: &[u8]) -> Option<State> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let screens = value.get("screens")?.as_object()?;
+    let mut state = State::fresh();
+    if let Some(on) = value.get("on").and_then(serde_json::Value::as_bool) {
+        state.on = on;
+    }
+    for (id, entry) in screens {
+        let read = serde_json::from_value::<Entry>(entry.clone()).ok().or_else(|| entry.get("original").and_then(serde_json::Value::as_str).map(|original| Entry::new(Path::new(original))));
+        if let Some(read) = read {
+            state.screens.insert(id.clone(), read);
+        }
+    }
+    Some(state)
+}
+
 pub fn parse(bytes: Option<&[u8]>) -> State {
     let mut state = bytes.and_then(|bytes| serde_json::from_slice::<State>(bytes).ok()).unwrap_or_else(State::fresh);
     state.version = VERSION;
@@ -373,6 +410,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub fn write_parts(path: &Path, parts: &[&[u8]]) -> Result<()> {
+    write_with(path, parts, true)
+}
+
+pub fn write_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_with(path, &[bytes], false)
+}
+
+fn write_with(path: &Path, parts: &[&[u8]], sync: bool) -> Result<()> {
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let serial = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -380,7 +425,10 @@ pub fn write_parts(path: &Path, parts: &[&[u8]]) -> Result<()> {
     let written = fs::File::create(&partial)
         .and_then(|mut file| {
             parts.iter().try_for_each(|part| file.write_all(part))?;
-            file.sync_all()
+            if sync {
+                file.sync_all()?;
+            }
+            Ok(())
         })
         .and_then(|()| fs::rename(&partial, path));
     if written.is_err() {
@@ -437,6 +485,78 @@ mod tests {
         assert!(kept(&state));
         assert_eq!(state.screens["main"].drawn, None);
         assert_eq!(state.screens["main"].belongs.map(|known| known.stamp), Some(2));
+    }
+
+    fn written(name: &str, edit: impl FnOnce(&mut serde_json::Value)) -> (Store, Vec<u8>) {
+        let store = Store::at(scratch(name));
+        let mut state = State { on: true, ..State::default() };
+        state.screens.insert("main".into(), Entry { output: Some("/d/out/main-3.jpg".into()), counter: 3, ..Entry::new(Path::new("/p/mine.jpg")) });
+        state.screens.insert("side".into(), Entry { output: Some("/d/out/side-5.jpg".into()), counter: 5, ..Entry::new(Path::new("/p/yours.jpg")) });
+        store.save(&state).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&fs::read(store.state_file()).unwrap()).unwrap();
+        edit(&mut value);
+        let bytes = serde_json::to_vec_pretty(&value).unwrap();
+        fs::write(store.state_file(), &bytes).unwrap();
+        (store, bytes)
+    }
+
+    #[test]
+    fn an_entry_that_does_not_read_keeps_its_original_and_the_others_whole() {
+        let (store, _) = written("salvage-entry", |value| value["screens"]["main"]["counter"] = serde_json::json!("x"));
+        let state = store.load();
+        assert!(state.on);
+        assert_eq!(state.screens["main"].original, Path::new("/p/mine.jpg"));
+        let side = &state.screens["side"];
+        assert_eq!((side.original.as_path(), side.output.as_deref(), side.counter), (Path::new("/p/yours.jpg"), Some(Path::new("/d/out/side-5.jpg")), 5));
+    }
+
+    #[test]
+    fn a_top_level_field_that_does_not_read_keeps_every_entry_whole() {
+        let (store, _) = written("salvage-tally", |value| value["tally"] = serde_json::json!("x"));
+        let state = store.load();
+        assert!(state.on);
+        assert_eq!((state.screens["main"].output.as_deref(), state.screens["main"].counter), (Some(Path::new("/d/out/main-3.jpg")), 3));
+        assert_eq!((state.screens["side"].output.as_deref(), state.screens["side"].counter), (Some(Path::new("/d/out/side-5.jpg")), 5));
+    }
+
+    #[test]
+    fn a_file_that_is_not_json_loads_fresh_and_goes_aside() {
+        let store = Store::at(scratch("salvage-none"));
+        fs::create_dir_all(&store.root).unwrap();
+        fs::write(store.state_file(), b"not json at all").unwrap();
+        let state = store.load();
+        assert!(!state.on && state.screens.is_empty());
+        assert_eq!(fs::read(store.aside_file()).unwrap(), b"not json at all");
+        assert!(!store.kept_file().exists());
+    }
+
+    #[test]
+    fn the_kept_copy_holds_the_bytes_that_were_read() {
+        let (store, bytes) = written("salvage-kept", |value| value["screens"]["main"]["counter"] = serde_json::json!("x"));
+        let state = store.load();
+        store.save(&state).unwrap();
+        assert_eq!(fs::read(store.kept_file()).unwrap(), bytes);
+        assert!(store.load().screens.contains_key("main"));
+    }
+
+    #[test]
+    fn a_file_from_a_newer_version_is_kept_byte_for_byte_before_the_first_save() {
+        let (store, bytes) = written("newer", |value| {
+            value["version"] = serde_json::json!(VERSION + 1);
+            value["screens"]["main"]["later"] = serde_json::json!({"kind": "unknown here"});
+        });
+        let state = store.load();
+        store.save(&state).unwrap();
+        assert_eq!(fs::read(store.kept_file()).unwrap(), bytes);
+        assert_eq!(state.screens["main"].original, Path::new("/p/mine.jpg"));
+    }
+
+    #[test]
+    fn a_file_at_our_own_version_is_not_copied() {
+        let (store, _) = written("own-version", |value| value["screens"]["main"]["later"] = serde_json::json!(1));
+        let state = store.load();
+        store.save(&state).unwrap();
+        assert!(!store.kept_file().exists());
     }
 
     #[test]

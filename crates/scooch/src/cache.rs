@@ -103,6 +103,29 @@ pub fn keep_pixels(store: &Store, key: u64, image: &RgbImage) {
     }
 }
 
+pub fn map_file(store: &Store, screen: &str, key: u64) -> PathBuf {
+    store.cache().join(format!("{}.{key:016x}.map", crate::state::file_safe(screen)))
+}
+
+pub fn kept_map(store: &Store, screen: &str, key: u64) -> Option<scooch_core::Map> {
+    scooch_core::Map::from_bytes(&fs::read(map_file(store, screen, key)).ok()?)
+}
+
+pub fn keep_map(store: &Store, screen: &str, key: u64, map: &scooch_core::Map) -> Result<()> {
+    fs::create_dir_all(store.cache())?;
+    let file = map_file(store, screen, key);
+    write_atomic(&file, &map.to_bytes())?;
+    let owner = crate::state::file_safe(screen);
+    for found in fs::read_dir(store.cache())?.flatten() {
+        let path = found.path();
+        let name = found.file_name().to_string_lossy().into_owned();
+        if path != file && name.strip_suffix(".map").and_then(|stem| stem.rsplit_once('.')).is_some_and(|(of, _)| of == owner) {
+            let _ = fs::remove_file(path);
+        }
+    }
+    Ok(())
+}
+
 pub fn trim(folder: &Path, kind: &str, kept: usize) {
     let Ok(entries) = fs::read_dir(folder) else { return };
     let mut files: Vec<(SystemTime, PathBuf)> = entries
