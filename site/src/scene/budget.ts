@@ -27,6 +27,7 @@ export function release() {
 }
 
 export function finished() {
+  if (budget.busy) performance.mark('scooch:uploads');
   budget.busy = false;
 }
 
@@ -78,6 +79,7 @@ export async function calm() {
 }
 
 export function advance(to: number) {
+  if (to > budget.stage) performance.mark(`scooch:stage-${to}`);
   budget.stage = Math.max(budget.stage, to);
 }
 
