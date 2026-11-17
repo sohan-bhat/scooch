@@ -13,10 +13,13 @@ const sizes = [
   { name: 'phone', width: 390, height: 844, scale: 2, crop: { width: 780, height: 940 } },
 ];
 
+const only = process.argv.find((arg) => arg.startsWith('--only='))?.slice(7).split(',');
+
 await mkdir(out, { recursive: true });
 const browser = await launch();
 try {
   for (const size of sizes) {
+    if (only && !only.includes(`${size.name}${size.suffix ?? ''}`)) continue;
     for (let beat = 0; beat < BEATS; beat++) {
       const { context, page } = await openStill(browser, { beat, ...size });
       const shot = await page.screenshot({ type: 'png' });
