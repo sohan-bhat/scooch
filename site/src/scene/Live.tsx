@@ -357,7 +357,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
     }
     live.quiet = quiet;
     if (!quiet) hideHint();
-    if (runtime.ready && !hint.readyAt) {
+    if (runtime.ready && !runtime.posterUp && !hint.readyAt) {
       hint.readyAt = now;
       hint.done = hinted() || runtime.still >= 0;
       hint.element = document.querySelector<HTMLElement>('[data-overlay="hint"]');
