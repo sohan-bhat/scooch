@@ -1565,6 +1565,7 @@ pub mod tests {
         pub gallery: Mutex<Vec<PathBuf>>,
         pub broken: Mutex<Option<String>>,
         pub mid_render: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        pub on_set: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         pub refuse: Mutex<Vec<String>>,
         pub unknowable: Mutex<bool>,
         pub crash_after_set: Mutex<bool>,
@@ -1582,7 +1583,7 @@ pub mod tests {
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), events: Arc::new(Mutex::new(Vec::new())) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), events: Arc::new(Mutex::new(Vec::new())) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -1677,6 +1678,10 @@ pub mod tests {
         fn set_wallpaper(&self, screen: &Screen, path: &Path) -> Result<()> {
             if self.refuse.lock().unwrap().contains(&screen.id) {
                 anyhow::bail!("The desktop would not take the picture.");
+            }
+            let work = self.on_set.lock().unwrap().take();
+            if let Some(work) = work {
+                work();
             }
             self.sets.fetch_add(1, Ordering::SeqCst);
             self.events.lock().unwrap().push((format!("set {}", path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()), Instant::now()));
@@ -3768,6 +3773,33 @@ pub mod tests {
         assert!(started.elapsed() >= Duration::from_millis(200), "the later change did not settle, {:?}", started.elapsed());
         assert!(daemon.handed.lock().unwrap().is_none());
         assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
+    }
+
+    #[test]
+    fn a_wake_while_the_tick_of_a_quick_take_still_runs_settles() {
+        let (daemon, fake) = at_once_rig("pure-during");
+        fake.place(vec![on_subject()]);
+        let signal = Arc::new(Signal::default());
+        signal.wake();
+        daemon.gather(&signal);
+        assert!(daemon.handed.lock().unwrap().is_some(), "the pure move was not taken at once");
+        fake.place(vec![corner()]);
+        let woke: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        let (waker, noted) = (signal.clone(), woke.clone());
+        *fake.on_set.lock().unwrap() = Some(Box::new(move || {
+            std::thread::sleep(QUIET + Duration::from_millis(100));
+            *noted.lock().unwrap() = Some(Instant::now());
+            waker.wake();
+        }));
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let woke = woke.lock().unwrap().expect("the tick set no wallpaper");
+        let before = fake.snapshots.load(Ordering::SeqCst);
+        daemon.gather(&signal);
+        assert!(Instant::now() >= woke + QUIET, "the wake during the tick did not settle, gather ended {:?} after it", woke.elapsed());
+        assert!(daemon.handed.lock().unwrap().is_none(), "the wake during the tick was taken at once");
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
     }
 
     #[test]
