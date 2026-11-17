@@ -248,7 +248,7 @@ pub fn primary_down() -> bool {
     use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
     use ::windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
     let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
-    unsafe { GetAsyncKeyState(i32::from(button.0)) } < 0
+    (unsafe { GetAsyncKeyState(i32::from(button.0)) }) < 0
 }
 
 fn dragging() -> bool {
