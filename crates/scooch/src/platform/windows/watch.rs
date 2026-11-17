@@ -1,10 +1,11 @@
 use super::{com, shell, sta, startup, wakes, Wake};
+use crate::platform::DragStart;
 use anyhow::{bail, Context, Result};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use ::windows::core::{w, PCWSTR};
 use ::windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM, ERROR_SUCCESS};
@@ -61,6 +62,8 @@ thread_local! {
 
 static RETRY: Mutex<wakes::Retry> = Mutex::new(wakes::Retry::new());
 static ATTACHED: AtomicBool = AtomicBool::new(false);
+static DRAGGING: AtomicBool = AtomicBool::new(false);
+pub static DRAG: OnceLock<DragStart> = OnceLock::new();
 
 fn wake(cause: &str) {
     if crate::daemon::trace() {
@@ -236,9 +239,36 @@ unsafe extern "system" fn event(_hook: HWINEVENTHOOK, kind: u32, window: HWND, o
     let handle = window.0 as isize;
     let on_list = LIST.with(|list| list.get() != 0 && list.get() == handle);
     let on_view = VIEW.with(|host| host.get() != 0 && host.get() == handle);
-    if wakes::event(kind, on_list, on_view, object, child) {
+    if wakes::event(kind, on_list, on_view, object, child) && !dragging() {
         wake("list");
     }
+}
+
+pub fn primary_down() -> bool {
+    use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use ::windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+    let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
+    unsafe { GetAsyncKeyState(i32::from(button.0)) } < 0
+}
+
+fn dragging() -> bool {
+    if !primary_down() {
+        DRAGGING.store(false, Ordering::SeqCst);
+        return false;
+    }
+    if DRAGGING.load(Ordering::SeqCst) {
+        return true;
+    }
+    let mut point = ::windows::Win32::Foundation::POINT::default();
+    if unsafe { ::windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point) }.is_err() {
+        return false;
+    }
+    let started = DRAG.get().is_some_and(|start| start((point.x as f32, point.y as f32)));
+    DRAGGING.store(started, Ordering::SeqCst);
+    if crate::daemon::trace() {
+        eprintln!("{} drag start at {},{}, an icon drag {started}", crate::daemon::stamp(), point.x, point.y);
+    }
+    started
 }
 
 unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
