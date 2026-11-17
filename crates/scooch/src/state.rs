@@ -56,6 +56,8 @@ pub struct Start {
     pub draws: Vec<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reveals: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missed: Option<u32>,
     pub at: u64,
 }
 
