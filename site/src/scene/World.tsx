@@ -393,6 +393,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       const ready = new Set(screens.main.textures());
       await streamScenery(screens.main.scenery);
       await upload(screens.main.textures().filter((texture) => !ready.has(texture)));
+      if (runtime.still >= 0) await screens.main.sharpen(gl, quiet).catch(() => false);
       const buffer = quality.liveSize(gl, new Vector2());
       const limit = Math.round(Math.max(buffer.x, buffer.y) * 0.8);
       const order = ['canoe', 'wide', 'tall', 'city', 'moon'];
@@ -409,6 +410,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         await upload(frame.textures());
         if (stopped) return;
         await frame.renderIdle(gl, 0);
+        if (runtime.still >= 0) await frame.sharpen(gl, quiet).catch(() => false);
         if (stopped) return;
         gallery.current[picture.id] = frame;
         if (picture.id === 'canoe') {

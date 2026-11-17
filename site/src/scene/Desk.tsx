@@ -36,8 +36,8 @@ const query = new URLSearchParams(window.location.search);
 const still = query.has('still');
 const lite = !still;
 const urls = lite ? pick(heroes, 'models/lite') : full;
-const extraUrls = pick(extras, 'models');
 const sharpExtras = ['clock', 'cassette', 'plant', 'stapler', 'glasses', 'gamepad'] as const;
+const extraUrls = { ...pick(extras, 'models'), ...(still ? pick(sharpExtras, 'models/sharp') : {}) };
 const ordered = <T extends string>(names: readonly T[], first: boolean) => names.filter((name) => sharpAllowed(name) && inHeroSet(name) === first);
 const heroFirst = ordered(heroes, true).map((name) => full[name]);
 const sharpFirst = Object.values(pick(ordered(sharpExtras, true), 'models/sharp'));
@@ -367,6 +367,7 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
       .then(async () => {
         target.dispose();
         await labels.ready(gl);
+        if (still) await labels.sharpen(gl, quiet);
         for (const texture of textures) {
           await quiet();
           await rendererCaughtUp(gl);
