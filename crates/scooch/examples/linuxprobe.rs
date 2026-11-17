@@ -725,6 +725,27 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 let _ = linux.run(Box::new(move || adapter_push("adapter wake".into())));
             }
         });
+        if p.kind.is_some_and(Kind::hears_saves) {
+            let push = push.clone();
+            std::thread::spawn(move || {
+                let messages = match scooch::platform::linux::watch::monitor() {
+                    Ok(messages) => messages,
+                    Err(error) => {
+                        push(format!("metadata monitor refused {error}"));
+                        return;
+                    }
+                };
+                for message in messages.map_while(Result::ok).filter(scooch::platform::linux::watch::is_save) {
+                    let (signature, body, little) = scooch::platform::linux::watch::save_body(&message);
+                    let file = wakes::saved_file(&signature, &body, little);
+                    let hex: Vec<String> = body.iter().map(|byte| format!("{byte:02x}")).collect();
+                    push(format!("metadata save {file:?}"));
+                    if let Ok(mut kept) = heard().lock() {
+                        kept.push(format!("{} ms, signature {signature}, little endian {little}, file {file:?}, body {}", now(), hex.concat()));
+                    }
+                }
+            });
+        }
         for (rule, name) in [(wakes::GVFS_RULE, "gvfs AttributeChanged"), (wakes::DCONF_RULE, "dconf Notify"), (wakes::XFCONF_RULE, "xfconf PropertyChanged"), (wakes::DING_RULE, "DING geometry Changed")] {
             let push = push.clone();
             std::thread::spawn(move || {
@@ -766,6 +787,22 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             }
         });
         std::thread::sleep(Duration::from_secs(2));
+    }
+
+    fn heard() -> &'static Mutex<Vec<String>> {
+        static HEARD: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+        HEARD.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    fn heard_saves(p: &mut Probe) {
+        if !p.kind.is_some_and(Kind::hears_saves) {
+            return;
+        }
+        let kept = heard().lock().map(|kept| kept.clone()).unwrap_or_default();
+        p.line(format!("- metadata saves heard so far by the probe's own bus monitor {}", kept.len()));
+        for each in kept.iter().take(2) {
+            p.line(format!("  - `{each}`"));
+        }
     }
 
     fn describe(message: &zbus::Message) -> String {
@@ -960,8 +997,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         let screen = linux.screens()?.first().cloned().context("no screen")?;
         if let Some(picture) = p.pictures.first().cloned() {
+            let cleared = fs::remove_file(record::file(&p.home)).is_ok();
             let set = linux.set_wallpaper(&screen, &picture).map_err(|error| format!("{error:#}"));
-            p.line(format!("- the probe picture set on `{}` before the daemon starts, so it begins from a picture it can arrange and not from one Scooch drew in section 6, {set:?}", screen.id));
+            let now_showing = linux.wallpaper(&screen).map_err(|error| format!("{error:#}"));
+            p.line(format!("- the probe picture set on `{}` before the daemon starts, after the record of section 6's set was removed {cleared}, so the set cannot turn into putting back the original, {set:?}, the desktop now shows {now_showing:?}", screen.id));
         }
         let program = scooch_program()?;
         let process = start_daemon(p, &program, "drop.log")?;
@@ -1014,6 +1053,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         let _ = clicks(&[at(0.92, 0.92)]);
         summary(p, &bench, &tally);
+        heard_saves(p);
         if kde {
             let _ = screen_reader(false);
         }
@@ -1846,7 +1886,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         std::thread::sleep(Duration::from_secs(2));
         let mut times = Vec::new();
+        let mut sets = Vec::new();
         let frame = primary_frame(p).unwrap_or(screen.frame);
+        let log = p.out.join("watch.log");
         for round in 1..=5 {
             let before = linux.wallpaper(&screen).ok().flatten();
             let rects_before = icons(&linux);
@@ -1856,7 +1898,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             });
             let target = seen.unwrap_or((frame.x + SUBJECT.0 * frame.w, frame.y + SUBJECT.1 * frame.h));
             let moved = Instant::now();
+            let mark = log_lines(&log).len();
             let tried = move_icon(p, target);
+            let dropped = wall();
             let could = tried.is_ok();
             let detail = tried.unwrap_or_else(|error| format!("failed {error:#}"));
             let changed = wait_until(Duration::from_secs(10), || linux.wallpaper(&screen).ok().flatten() != before);
@@ -1872,10 +1916,17 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 p.fail(format!("move {round} onto the subject brought no new wallpaper within 10 s, {detail}"));
             }
             times.extend(latency);
-            std::thread::sleep(Duration::from_millis(800));
+            std::thread::sleep(Duration::from_millis(1800));
+            let lines = log_lines(&log);
+            let (wakes, set) = daemon_after(lines.get(mark..).unwrap_or_default(), dropped);
+            sets.extend(set);
+            let woke = if wakes.is_empty() { "none".to_string() } else { wakes.join(", ") };
+            p.line(format!("  - wakes after the drop {woke}, the daemon set the wallpaper at {} ms", shown_ms(set)));
         }
         times.sort_unstable();
         p.line(format!("- median move to new wallpaper {:?} ms", times.get(times.len() / 2)));
+        p.line(format!("- the daemon set the wallpaper at a median {} ms after the drop, in {} of 5 moves", shown_ms(median(&sets)), sets.len()));
+        heard_saves(p);
         switch_check(p, &linux, &screen, (&program, process))?;
         std::thread::sleep(Duration::from_secs(3));
         let before = proc_numbers(process);
