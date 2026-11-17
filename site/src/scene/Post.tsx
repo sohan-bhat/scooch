@@ -815,7 +815,7 @@ export function Post({ phone }: { phone: boolean }) {
     resized(quality.composer);
     resized(quality.fastComposer);
     const now = performance.now();
-    if (live.pressing || animating(now)) motion.until = Math.max(motion.until, now + SHARP_AFTER);
+    if (live.dragging || animating(now)) motion.until = Math.max(motion.until, now + SHARP_AFTER);
     const moving = now < motion.until;
     const before = motion.was;
     if (moving && !before) quality.motionSharp = quality.allowed;

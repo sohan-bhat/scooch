@@ -193,7 +193,10 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       if (press.id) {
         const dx = event.clientX - press.x;
         const dy = event.clientY - press.y;
-        if (Math.hypot(dx, dy) > 6) press.moved = true;
+        if (Math.hypot(dx, dy) > 6) {
+          press.moved = true;
+          live.dragging = true;
+        }
         if (!press.moved) return;
         if (press.id === 'icon' && press.mesh) {
           const rect = (element.parentElement ?? element).getBoundingClientRect();
@@ -247,6 +250,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       const found = pick(event);
       press.id = found.id || (event.pointerType === 'mouse' ? 'space' : '');
       live.pressing = !!press.id;
+      live.dragging = false;
       press.x = event.clientX;
       press.y = event.clientY;
       press.moved = false;
@@ -277,6 +281,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
     };
     const onUp = (event: PointerEvent) => {
       live.pressing = false;
+      live.dragging = false;
       if (!press.id) return;
       const id = press.id;
       press.id = '';

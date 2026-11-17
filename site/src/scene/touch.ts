@@ -20,6 +20,7 @@ export const hooks = {
 export const live = {
   quiet: false,
   pressing: false,
+  dragging: false,
   lastScroll: -1e9,
   hover: '',
   lamp: 1,
