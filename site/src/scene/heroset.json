@@ -8,21 +8,19 @@
     "clock"
   ],
   "move": [
-    "labels",
-    "gamepad",
     "main"
   ],
   "order": [
-    "labels",
     "gamepad",
-    "glasses",
     "main",
     "wide",
     "laptop",
-    "city",
-    "moon",
-    "canoe",
+    "glasses",
+    "labels",
     "stapler",
+    "canoe",
+    "moon",
+    "city",
     "tall"
   ],
   "measured": {
@@ -41,16 +39,16 @@
     "labels": 0
   },
   "firsts": {
-    "labels": 0,
-    "gamepad": 0.08,
-    "glasses": 0.085,
+    "gamepad": 0.085,
     "main": 0.165,
-    "wide": 0.575,
+    "wide": 0.335,
     "laptop": 0.69,
-    "city": 0.725,
-    "moon": 0.735,
-    "canoe": 0.75,
+    "glasses": 0.73,
+    "labels": 0.73,
     "stapler": 0.795,
+    "canoe": null,
+    "moon": null,
+    "city": null,
     "tall": null
   },
   "view": "1440x900@2"
