@@ -41,7 +41,6 @@ export const runtime = {
   props: false,
   scenery: false,
   gallery: false,
-  introAt: null as number | null,
   abandoned: false,
   resume: null as (() => void) | null,
   frozen: null as number | null,

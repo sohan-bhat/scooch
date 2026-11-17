@@ -39,6 +39,7 @@ function arrival() {
   changed();
 }
 const LOST_FOR = 4000;
+const READY_FOR = 300;
 
 function giveUp() {
   const at = story.progress * TOTAL;
@@ -308,8 +309,8 @@ export function Post({ phone }: { phone: boolean }) {
     let timer = 0;
     const wait = () => {
       if (stopped) return;
-      const intro = performance.getEntriesByName('scooch:intro')[0]?.startTime;
-      if (intro === undefined || performance.now() - intro < 1000) {
+      const ready = performance.getEntriesByName('scooch:ready')[0]?.startTime;
+      if (ready === undefined || performance.now() - ready < READY_FOR) {
         timer = window.setTimeout(wait, 500);
         return;
       }
@@ -442,7 +443,7 @@ export function Post({ phone }: { phone: boolean }) {
     };
   }, [fast, gl, scene, camera]);
 
-  const introAt = useRef(0);
+  const readyAt = useRef(0);
 
   const band = useCallback(() => {
     const composer = quality.nativeComposer;
@@ -566,7 +567,7 @@ export function Post({ phone }: { phone: boolean }) {
   const settle = useCallback(
     (now: number, moving: boolean, time: number) => {
       arrival();
-      if (!introAt.current) introAt.current = performance.getEntriesByName('scooch:intro')[0]?.startTime ?? 0;
+      if (!readyAt.current) readyAt.current = performance.getEntriesByName('scooch:ready')[0]?.startTime ?? 0;
       const hold = holding();
       const calm =
         (hold ? !still.lost : still.ready && !still.off) &&
@@ -575,8 +576,8 @@ export function Post({ phone }: { phone: boolean }) {
         !live.tape &&
         runtime.settled &&
         !document.hidden &&
-        introAt.current > 0 &&
-        now - introAt.current > 2500 &&
+        readyAt.current > 0 &&
+        now - readyAt.current > READY_FOR &&
         quality.chain === 'sharp' &&
         now - quality.blendAt > BLEND &&
         now - still.inputAt > STILL_AFTER &&

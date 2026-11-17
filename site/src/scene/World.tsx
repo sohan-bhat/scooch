@@ -100,20 +100,6 @@ function stageFor(glass: Glass): Stage {
   };
 }
 
-function flicker(t: number) {
-  if (t < 0.15) return 0;
-  if (t < 0.22) return 0.9;
-  if (t < 0.3) return 0.12;
-  if (t < 0.36) return 0.75;
-  if (t < 0.46) return 0.2;
-  return Math.min(0.55 + (t - 0.46) * 1.5, 1);
-}
-
-function ramp(t: number, start: number, length: number) {
-  const x = Math.min(Math.max((t - start) / length, 0), 1);
-  return x * x * (3 - 2 * x);
-}
-
 export function Surroundings() {
   const texture = useLoader(HDRLoader, asset('hdri/studio.hdr'));
   const gl = useThree((state) => state.gl);
@@ -604,7 +590,6 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
 
   const shadowFrames = useRef(0);
   const shadowProps = useRef(false);
-  const readyAt = useRef(-1);
 
   useFrame((state, delta) => {
     if (!rig || !built) return;
@@ -624,25 +609,9 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     rig.apply(camera as PerspectiveCamera, story.camera, time, lookX, lookY, Math.min(delta, 0.1), size.width, size.height, idle, runtime.frozen !== null);
     runtime.settled = rig.settled(lookX, lookY);
 
-    if (runtime.introAt === null && runtime.ready && runtime.still < 0) {
-      if (readyAt.current < 0) readyAt.current = time;
-      if (story.progress > 0.05) runtime.introAt = time - 10;
-      else if (runtime.props || time - readyAt.current > 1.6) runtime.introAt = time + 0.12;
-      if (runtime.introAt !== null) performance.mark('scooch:intro');
-    }
-    let intro = 1;
-    if (runtime.still >= 0) intro = runtime.hero ? 0 : 1;
-    else if (runtime.introAt === null) intro = 0;
-    else intro = time - runtime.introAt;
-    const still = runtime.still >= 0;
-    const introLamp = still ? intro : intro >= 1.6 ? 1 : flicker(intro);
-    const introStreet = still ? intro : ramp(intro, 0.5, 1.3);
-    const introTube = still ? intro : ramp(intro, 0.9, 1.0);
-    const introLcd = still ? intro : ramp(intro, 1.3, 0.6);
-
     const away = 1 - story.inside;
     const hum = idle ? 1 + Math.sin(time * 13.1) * 0.006 + Math.sin(time * 29.7 + 1.1) * 0.004 + Math.sin(time * 7.3) * 0.003 : 1;
-    const lamp = story.lamp * live.lamp * introLamp * hum * away;
+    const lamp = story.lamp * live.lamp * hum * away;
     if (spot.current) spot.current.intensity = SPOT * lamp;
     if (inner.current) inner.current.intensity = INNER * lamp;
     wall.uniforms.uLevel.value = lamp;
@@ -652,11 +621,11 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     floor.uniforms.uBlindsLevel.value = streetLevel * 0.6;
     wall.uniforms.uFade.value = 0.25 + 0.75 * away;
     floor.uniforms.uFade.value = 0.25 + 0.75 * away;
-    updateWindow(camera, scratch.window.copy(scratch.street).multiplyScalar(STREET_LEVEL * streetLevel * introStreet), scratch.stripe.copy(stripeColor).multiplyScalar(STRIPE * story.blinds * away));
-    const ambient = Math.min(story.lamp * live.lamp, 1) * introLamp * away;
+    updateWindow(camera, scratch.window.copy(scratch.street).multiplyScalar(STREET_LEVEL * streetLevel), scratch.stripe.copy(stripeColor).multiplyScalar(STRIPE * story.blinds * away));
+    const ambient = Math.min(story.lamp * live.lamp, 1) * away;
     scene.environmentIntensity = (0.05 + 0.17 * ambient) * (0.3 + 0.7 * away);
     if (rim.current) rim.current.intensity = (0.12 + 0.2 * ambient) * away;
-    for (const bulb of bulbs.current) bulb.emissiveIntensity = BULB_GLOW * story.lamp * live.lamp * introLamp * hum;
+    for (const bulb of bulbs.current) bulb.emissiveIntensity = BULB_GLOW * story.lamp * live.lamp * hum;
     if (Math.abs(live.aim - aimed.current) > 0.0005 && spot.current) {
       aimed.current = live.aim;
       const cos = Math.cos(live.aim);
@@ -674,7 +643,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     }
     fog.density = 0.32 + story.inside * 0.25;
 
-    const tubeOn = Math.min(story.tubeOn, introTube);
+    const tubeOn = story.tubeOn;
     const crt = screens.crt.uniforms;
     const city = gallery.current.city;
     const channel = story.city > 0.5 && city ? city.texture : screens.main.texture;
@@ -684,7 +653,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     if (moon && big.uFrame.value !== moon.texture) big.uFrame.value = moon.texture;
     big.uTime.value = time;
     big.uOn.value = moon ? Math.min(Math.max((story.fly - 1.7) / 0.3, 0), 1) : 0;
-    big.uLampLevel.value = story.lamp * introLamp;
+    big.uLampLevel.value = story.lamp;
     crt.uOsdLevel.value = story.osd;
     writing.current?.(story.written);
     wall.uniforms.uCaptionLevel.value = phone ? 0 : story.wall;
@@ -727,7 +696,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       }
     }
 
-    const lcdPower = second.current ? introLcd * away * away : 0;
+    const lcdPower = second.current ? away * away : 0;
     const lcd = screens.lcd.uniforms;
     lcd.uTime.value = time;
     lcd.uPower.value = lcdPower;
