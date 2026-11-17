@@ -39,6 +39,13 @@ function Juice() {
 
 const Stage = lazy(() => import('@/scene/Stage'));
 
+const vignette = `radial-gradient(100% 100% at 50% 50%, ${Array.from({ length: 19 }, (_, index) => {
+  const distance = index * 0.04;
+  const x = Math.min(Math.max((distance * 0.92 - 0.8) / (0.3 * 0.799 - 0.8), 0), 1);
+  const keep = x * x * (3 - 2 * x);
+  return `rgba(0, 0, 0, ${(1 - keep ** (1 / 2.2)).toFixed(3)}) ${Math.round(distance * 100)}%`;
+}).join(', ')})`;
+
 const posters = [
   { name: 'phone', media: '(max-width: 767px), (orientation: portrait)', widths: [792, 1188, 1584], sizes: 'calc(100svh * 0.85)' },
   { name: 'square', media: '(max-aspect-ratio: 16/10)', widths: [1440, 2048, 2880], sizes: '100vw' },
@@ -95,6 +102,7 @@ export function Story({ live, beats, canvas, still, section, onReady }: Props) {
           <img src={asset('stills/hero-desktop-2765.webp')} srcSet={posterSet('desktop', posters[2].widths, 'webp')} sizes={posters[2].sizes} alt="" width={2765} height={1080} fetchPriority="high" decoding="sync" {...{ elementtiming: 'hero' }} />
         </picture>
         <Juice />
+        <div aria-hidden className="stage-vignette pointer-events-none absolute inset-0" style={{ backgroundImage: vignette }} />
         <div aria-hidden className="stage-scrim pointer-events-none absolute inset-x-0 bottom-0 h-[46svh] bg-gradient-to-t from-room via-room/85 to-transparent wide:h-[16svh] wide:via-room/40" />
         <Beats refs={beats} />
         <div id="desk-controls" />

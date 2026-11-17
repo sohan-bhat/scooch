@@ -94,7 +94,7 @@ function Effects({ full }: { full: boolean }) {
       <Bloom mipmapBlur levels={full ? 5 : 4} luminanceThreshold={1.3} luminanceSmoothing={0.35} intensity={0.6} radius={0.7} />
       <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
       <SMAA />
-      <Vignette offset={0.3} darkness={0.62} />
+      {runtime.still >= 0 && <Vignette offset={0.3} darkness={0.62} />}
       <Noise ref={noise} premultiply blendFunction={BlendFunction.SOFT_LIGHT} opacity={quality.grainOpacity()} />
     </>
   );
