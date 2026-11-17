@@ -68,11 +68,19 @@ export function covered() {
   return posterCovers() && runtime.ready;
 }
 
+export function restHeld() {
+  return !runtime.posterUp && budget.hero && still.phase === 'still' && !quality.moving;
+}
+
+export function fastPath() {
+  return covered() || restHeld();
+}
+
 const FRAME = 16;
 const wakers = new Set<() => void>();
 
 export function pause(slow: number) {
-  const fast = posterCovers();
+  const fast = posterCovers() || restHeld();
   return new Promise<void>((resolve) => {
     const wake = () => {
       wakers.delete(wake);
@@ -85,7 +93,8 @@ export function pause(slow: number) {
 }
 
 export async function calm() {
-  if (covered()) {
+  if (fastPath()) {
+    if (!covered()) budget.lastStepAt = performance.now();
     await quiet();
     return;
   }

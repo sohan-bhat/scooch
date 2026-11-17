@@ -10,7 +10,7 @@ import { changed, clockSweeping, runtime, story, wallClock } from '@/story/state
 import { beats, TOTAL } from '@/story/timeline';
 import { quality, type Toggle } from './quality';
 import { allocate, freeze, inView, nativeAllowed, nativeOff, screenBox, still, thaw } from './still';
-import { budget, covered, grant, pause, release } from './budget';
+import { budget, covered, fastPath, grant, pause, release } from './budget';
 import { gpuQuiet } from './upload';
 import { animating, hooks, live, things } from './touch';
 import { precompile } from './warm';
@@ -273,7 +273,7 @@ export function Post({ phone }: { phone: boolean }) {
   }, [copy, overlay, present, accumulate, totals, heldTarget]);
 
   useEffect(() => holdQuiet(() => loading() && (BUILDING.has(still.phase) || performance.now() - still.inputAt < YIELD)), []);
-  useEffect(() => quietFast(covered), []);
+  useEffect(() => quietFast(fastPath), []);
 
   useEffect(() => {
     const input = () => {

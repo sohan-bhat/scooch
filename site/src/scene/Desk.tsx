@@ -10,7 +10,7 @@ import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
 import { still as native } from './still';
-import { advance, budget, calm, covered, level, pause, prefetch, upgrades } from './budget';
+import { advance, budget, calm, fastPath, level, pause, prefetch, upgrades } from './budget';
 import { labelProps } from './labels';
 import { live, makeLive, obstacles, rimmed } from './touch';
 import { quiet } from '@/lib/idle';
@@ -143,7 +143,7 @@ function Sharpener({ list, when, done, width = 1 }: { list: string[]; when: () =
   const [ended, setEnded] = useState(0);
   const step = useCallback(() => {
     const go = () => setIndex((value) => value + 1);
-    if (covered()) startTransition(go);
+    if (fastPath()) startTransition(go);
     else go();
   }, []);
   const next = useCallback(() => {
