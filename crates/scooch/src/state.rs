@@ -21,6 +21,7 @@ pub struct State {
     #[serde(default = "fresh_options", deserialize_with = "options_or_scenery")]
     pub options: Options,
     pub glide: bool,
+    pub predict: bool,
     pub screens: BTreeMap<String, Entry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
@@ -96,7 +97,7 @@ impl Tally {
 
 impl Default for State {
     fn default() -> Self {
-        Self { version: VERSION, on: false, options: Options::default(), glide: true, screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new(), scales: BTreeMap::new(), starts: BTreeMap::new() }
+        Self { version: VERSION, on: false, options: Options::default(), glide: true, predict: true, screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new(), scales: BTreeMap::new(), starts: BTreeMap::new() }
     }
 }
 
