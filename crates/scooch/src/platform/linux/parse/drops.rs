@@ -142,10 +142,8 @@ impl Tracker {
             Guess::Unsure { from } | Guess::Stay { from, .. } | Guess::Move { from, .. } => *from,
         };
         let alone = moved_alone(before, after, &from);
-        let (gone, still) = {
-            let (before, after) = (keys(before), keys(after));
-            (less(&before, &after).len(), before == after)
-        };
+        let held = keys(after);
+        let gone = less(&keys(before), &held).len();
         self.selection = match alone {
             Some(place) => Selection::One(Some(Rect { x: place[0] as f32, y: place[1] as f32, w: place[2] as f32, h: place[3] as f32 })),
             None if gone > 1 => Selection::Many,
@@ -153,8 +151,8 @@ impl Tracker {
         };
         self.known = Some(keys(after));
         let (agreed, shown) = match guess {
-            Guess::Move { to, shown, .. } => (alone == Some(key(to)), *shown),
-            Guess::Stay { shown, .. } => (still, *shown),
+            Guess::Move { to, shown, .. } => (held.contains(&key(to)), *shown),
+            Guess::Stay { from, shown } => (held.contains(&key(from)), *shown),
             _ => return None,
         };
         if shown {
@@ -249,6 +247,19 @@ mod tests {
         let stay = tracker.released((672.0, 594.0), true, |_| None);
         assert_eq!(stay, Guess::Stay { from: icon, shown: true });
         assert_eq!(tracker.verify(&stay, &[icon], &[icon]), Some(Verdict::Agreed));
+    }
+
+    #[test]
+    fn a_second_drag_before_the_net_does_not_count_as_a_miss() {
+        let mut tracker = Tracker::new();
+        let icon = at(961.0, 506.0);
+        let other = at(18.0, 40.0);
+        known_single(&mut tracker, icon);
+        tracker.pressed(plain((1007.0, 536.0), Some(icon)));
+        let guess = tracker.released((672.0, 594.0), true, landing);
+        assert_eq!(tracker.verify(&guess, &[icon, other], &[at(649.0, 506.0), at(122.0, 40.0)]), Some(Verdict::Agreed));
+        assert!(!tracker.off);
+        assert!(!matches!(tracker.selection, Selection::One(_)), "two moves in one net window cannot name the selection");
     }
 
     #[test]
