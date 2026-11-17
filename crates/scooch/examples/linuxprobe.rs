@@ -861,6 +861,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn drag(from: (i16, i16), to: (i16, i16)) -> Result<()> {
+        drag_ending(from, to, false)
+    }
+
+    fn drag_ending(from: (i16, i16), to: (i16, i16), escape: bool) -> Result<()> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
@@ -878,17 +882,54 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             pause(30);
         }
         pause(200);
+        if escape {
+            let code = key_code(&conn, 0xff1b).context("no Escape key")?;
+            conn.xtest_fake_input(KEY_PRESS_EVENT, code, 0, root, 0, 0, 0)?;
+            conn.flush()?;
+            pause(60);
+            conn.xtest_fake_input(KEY_RELEASE_EVENT, code, 0, root, 0, 0, 0)?;
+            conn.flush()?;
+            pause(200);
+        }
         conn.xtest_fake_input(BUTTON_RELEASE_EVENT, 1, 0, root, 0, 0, 0)?;
         conn.flush()?;
         conn.sync()?;
         Ok(())
     }
 
-    fn control_code(conn: &x11rb::rust_connection::RustConnection) -> Option<u8> {
+    fn key_code(conn: &x11rb::rust_connection::RustConnection, keysym: u32) -> Option<u8> {
         let (min, max) = (conn.setup().min_keycode, conn.setup().max_keycode);
         let map = conn.get_keyboard_mapping(min, max - min + 1).ok()?.reply().ok()?;
         let per = usize::from(map.keysyms_per_keycode).max(1);
-        map.keysyms.chunks(per).position(|syms| syms.contains(&0xffe3)).and_then(|index| u8::try_from(usize::from(min) + index).ok())
+        map.keysyms.chunks(per).position(|syms| syms.contains(&keysym)).and_then(|index| u8::try_from(usize::from(min) + index).ok())
+    }
+
+    fn control_code(conn: &x11rb::rust_connection::RustConnection) -> Option<u8> {
+        key_code(conn, 0xffe3)
+    }
+
+    fn control_click(point: (i16, i16)) -> Result<()> {
+        let (conn, number) = x11rb::connect(None)?;
+        let root = conn.setup().roots.get(number).context("no root")?.root;
+        let control = control_code(&conn).context("no Control key")?;
+        let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
+        conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, point.0, point.1, 0)?;
+        conn.flush()?;
+        pause(120);
+        conn.xtest_fake_input(KEY_PRESS_EVENT, control, 0, root, 0, 0, 0)?;
+        conn.flush()?;
+        pause(80);
+        conn.xtest_fake_input(BUTTON_PRESS_EVENT, 1, 0, root, 0, 0, 0)?;
+        conn.flush()?;
+        pause(60);
+        conn.xtest_fake_input(BUTTON_RELEASE_EVENT, 1, 0, root, 0, 0, 0)?;
+        conn.flush()?;
+        pause(80);
+        conn.xtest_fake_input(KEY_RELEASE_EVENT, control, 0, root, 0, 0, 0)?;
+        conn.flush()?;
+        conn.sync()?;
+        pause(300);
+        Ok(())
     }
 
     fn clicks(points: &[(i16, i16)]) -> Result<bool> {
@@ -982,6 +1023,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         predicted: [usize; 2],
         last_clicked: usize,
         pressed_only: usize,
+        guessed: [usize; 2],
+        held: [usize; 2],
         live_firsts: Vec<u128>,
     }
 
@@ -1035,6 +1078,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let changed = one_drag(p, &bench, &mut tally, Plan { group: false, index, before, moving: vec![icon], from, to });
             if let [moved] = changed.as_slice() {
                 tracked = Some(center(moved));
+            }
+        }
+        if bench.lattice.is_some() {
+            if let Some(point) = tracked {
+                specials(p, &bench, point, &at);
             }
         }
         let mut group: Rects = Vec::new();
@@ -1113,6 +1161,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         ));
         let shown: Vec<String> = reads.iter().map(|taken| format!("{}+{}:{}", taken.began.as_millis(), taken.took.as_millis(), changed.iter().filter(|rect| taken.seen.contains(rect)).count())).collect();
         p.line(format!("    - reads {}", shown.join(" ")));
+        if bench.lattice.is_some() {
+            let (guessed, verdict) = guessed(&wakes, lines.get(log_mark..).unwrap_or_default());
+            tally.guessed[slot] += usize::from(guessed);
+            tally.held[slot] += usize::from(verdict == "agreed");
+            p.line(format!("    - the daemon predicted a move {guessed}, its net found {verdict}"));
+        }
         if bench.steady {
             steady_lines(p, tally, &plan, &reads, &last, slot);
         }
@@ -1148,6 +1202,65 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             }
         }
         changed
+    }
+
+    fn guessed(wakes: &[String], lines: &[String]) -> (bool, &'static str) {
+        let guessed = wakes.iter().any(|wake| wake.starts_with("predicted drop "));
+        let said = [("predicted drop agreed", "agreed"), ("predicted drop missed", "missed"), ("predicted no move and the file showed none", "a guess of no move, and the file showed none"), ("predicted no move and the file showed a move", "a guess of no move, but the file showed a move")];
+        let verdict = lines.iter().find_map(|line| said.iter().find(|(needle, _)| line.contains(needle)).map(|(_, verdict)| *verdict)).unwrap_or("not judged");
+        (guessed, verdict)
+    }
+
+    fn special(p: &mut Probe, bench: &Bench, name: &str, act: impl FnOnce() -> Result<String>) {
+        let before = places(bench.linux);
+        let mark = log_lines(&bench.log).len();
+        let detail = act().unwrap_or_else(|error| format!("failed with {error:#}"));
+        let dropped = wall();
+        std::thread::sleep(TRUTH);
+        let after = places(bench.linux);
+        let lines = log_lines(&bench.log);
+        let fresh = lines.get(mark..).unwrap_or_default();
+        let (wakes, set) = daemon_after(fresh, dropped);
+        let sets = fresh.iter().filter(|line| line.split_whitespace().nth(1) == Some("set")).count();
+        let (guessed, verdict) = guessed(&wakes, fresh);
+        let woke = if wakes.is_empty() { "none".to_string() } else { wakes.join(", ") };
+        p.line(format!("  - {name}: {detail}, the daemon predicted a move {guessed}, its net found {verdict}, wakes after the drop {woke}, the daemon set the wallpaper {sets} times, first at {} ms, places unchanged 2.5 s after the drop {}", shown_ms(set), after == before));
+    }
+
+    fn specials(p: &mut Probe, bench: &Bench, point: (f32, f32), at: &dyn Fn(f32, f32) -> (i16, i16)) {
+        let scale = bench.scale;
+        let before = places(bench.linux);
+        let Some(icon) = nearest(&before, point) else { return };
+        let Some(other) = before.iter().copied().filter(|rect| *rect != icon).min_by(|a, b| {
+            let away = |rect: &[i64; 4]| (center(rect).0 - point.0).hypot(center(rect).1 - point.1);
+            away(a).total_cmp(&away(b))
+        }) else {
+            return;
+        };
+        let (from, onto) = (grab(&icon, scale), grab(&other, scale));
+        let _ = clicks(&[from]);
+        special(p, bench, "occupied drag", || {
+            drag(from, onto)?;
+            Ok(format!("the probe icon from {},{} onto the icon at {},{}", from.0, from.1, onto.0, onto.1))
+        });
+        let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
+        let _ = clicks(&[from]);
+        special(p, bench, "drag after a Control click", || {
+            control_click(onto)?;
+            drag(from, free)?;
+            Ok(format!("a Control click on the icon at {},{}, then the probe icon from {},{} to {},{}", onto.0, onto.1, from.0, from.1, free.0, free.1))
+        });
+        let _ = clicks(&[at(0.92, 0.92)]);
+        let now = places(bench.linux);
+        let Some(icon) = nearest(&now, (f32::from(free.0) / scale, f32::from(free.1) / scale)) else { return };
+        let from = grab(&icon, scale);
+        let _ = clicks(&[from]);
+        let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
+        special(p, bench, "drag ended with Escape", || {
+            drag_ending(from, free, true)?;
+            Ok(format!("the probe icon from {},{} toward {},{}, Escape before the release", from.0, from.1, free.0, free.1))
+        });
+        let _ = clicks(&[at(0.92, 0.92)]);
     }
 
     fn steady_lines(p: &mut Probe, tally: &mut Tally, plan: &Plan, reads: &[Taken<Rects>], last: &[[i64; 4]], slot: usize) {
@@ -1206,6 +1319,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             ));
         }
         if bench.lattice.is_some() {
+            p.line(format!("- the daemon predicted {} of 10 single drags and {} of 5 group drags, and its net found {} and {} of those guesses agreed", tally.guessed[0], tally.guessed[1], tally.held[0], tally.held[1]));
             p.line(format!(
                 "- the prediction from the press equalled the final places in {} single drags and {} group drags, anchored at the last clicked icon in {} group drags, and knowing only the pressed icon in {} group drags",
                 tally.predicted[0], tally.predicted[1], tally.last_clicked, tally.pressed_only
