@@ -17,6 +17,7 @@ import { quiet } from '@/lib/idle';
 import { rendererCaughtUp } from './upload';
 import { settle, warmDraw } from './warm';
 import { windowLit } from './window';
+import { inHeroSet, sharpAllowed } from './sharpset';
 
 export { BULB, DESK_TOP, LAMP, LAPTOP, TELEVISION } from './layout';
 
@@ -36,8 +37,11 @@ const lite = !still;
 const urls = lite ? pick(heroes, 'models/lite') : full;
 const extraUrls = pick(extras, 'models');
 const sharpExtras = ['clock', 'cassette', 'plant', 'stapler', 'glasses', 'gamepad'] as const;
-const sharpUrls = Object.values(pick(sharpExtras, 'models/sharp'));
-const heroUrls = heroes.map((name) => full[name]);
+const ordered = <T extends string>(names: readonly T[], first: boolean) => names.filter((name) => sharpAllowed(name) && inHeroSet(name) === first);
+const heroFirst = ordered(heroes, true).map((name) => full[name]);
+const heroLater = ordered(heroes, false).map((name) => full[name]);
+const sharpFirst = Object.values(pick(ordered(sharpExtras, true), 'models/sharp'));
+const sharpLater = Object.values(pick(ordered(sharpExtras, false), 'models/sharp'));
 
 const ktx2 = new KTX2Loader().setTranscoderPath(asset('basis/'));
 
@@ -134,26 +138,49 @@ function whenReady(start: () => void, test: () => boolean) {
   };
 }
 
-function Sharpener({ list, when, done }: { list: string[]; when: () => boolean; done: () => void }) {
+function Sharpener({ list, when, done, width = 1 }: { list: string[]; when: () => boolean; done: () => void; width?: number }) {
   const [index, setIndex] = useState(-1);
+  const [ended, setEnded] = useState(0);
   const step = useCallback(() => {
     const go = () => setIndex((value) => value + 1);
     if (covered()) startTransition(go);
     else go();
   }, []);
-  const next = useCallback(() => void calm().then(step), [step]);
-  useEffect(() => whenReady(() => void calm().then(step), when), [when, step]);
+  const next = useCallback(() => {
+    setEnded((value) => value + 1);
+    void calm().then(step);
+  }, [step]);
+  useEffect(
+    () =>
+      whenReady(() => {
+        for (let i = 0; i < width; i++) void calm().then(step);
+      }, when),
+    [when, step, width],
+  );
   useEffect(() => {
-    if (index >= list.length) done();
-  }, [index, list, done]);
-  return <Suspense fallback={null}>{index >= 0 && index < list.length ? <Sharpen key={list[index]} url={list[index]} onDone={next} /> : null}</Suspense>;
+    if (index >= 0 && ended >= list.length) done();
+  }, [index, ended, list, done]);
+  return (
+    <Suspense fallback={null}>
+      {list.slice(0, Math.max(0, index + 1)).map((url) => (
+        <Sharpen key={url} url={url} onDone={next} />
+      ))}
+    </Suspense>
+  );
 }
 
 const desktop = () => layoutFor(window.innerWidth, window.innerHeight) !== 'phone';
 const heroesWhen = () => lite && runtime.props && (quality.tier === 'full' || native.ready) && desktop() && level() === 'all';
-const extrasWhen = () => runtime.painted && native.ready && desktop() && level() === 'all' && budget.stage >= 2;
-const heroesDone = () => advance(1);
-const extrasDone = () => advance(3);
+const extrasWhen = () => runtime.painted && native.ready && desktop() && level() === 'all';
+const heroesFirstWhen = () => heroesWhen();
+const extrasFirstWhen = () => extrasWhen() && budget.stage >= 1;
+const heroesLaterWhen = () => heroesWhen() && !runtime.posterUp && (budget.stage >= 3 || !budget.busy);
+const extrasLaterWhen = () => extrasWhen() && !runtime.posterUp && budget.stage >= 4;
+const FIRST_WIDTH = 1;
+const heroesFirstDone = () => advance(1);
+const extrasFirstDone = () => advance(2);
+const heroesLaterDone = () => advance(4);
+const extrasLaterDone = () => advance(5);
 
 function prepare(root: Object3D) {
   root.traverse((child) => {
@@ -345,7 +372,7 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
           warmDraw(gl, scene, camera, holder);
         }
         if (stopped) return;
-        upgrades.add(sharpLabels);
+        if (sharpAllowed('labels')) upgrades.add(sharpLabels);
         if (!runtime.posterUp) fadeIn(group);
         group.visible = true;
         runtime.props = true;
@@ -395,9 +422,19 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
     () =>
       whenReady(
         () => {
-          if (desktop() && level() === 'all') prefetch([...(lite ? heroUrls : []), ...sharpUrls]);
+          if (desktop() && level() === 'all') prefetch([...(lite ? heroFirst : []), ...sharpFirst]);
         },
         () => runtime.shown,
+      ),
+    [],
+  );
+  useEffect(
+    () =>
+      whenReady(
+        () => {
+          if (desktop() && level() === 'all') prefetch([...(lite ? heroLater : []), ...sharpLater]);
+        },
+        () => runtime.shown && !runtime.posterUp,
       ),
     [],
   );
@@ -459,8 +496,10 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
         <primitive object={television.scene} />
       </primitive>
       <LateExtras phone={phone} onExtras={onExtras} onConsole={onConsole} />
-      <Sharpener list={heroUrls} when={heroesWhen} done={heroesDone} />
-      <Sharpener list={sharpUrls} when={extrasWhen} done={extrasDone} />
+      <Sharpener list={heroFirst} when={heroesFirstWhen} done={heroesFirstDone} width={FIRST_WIDTH} />
+      <Sharpener list={sharpFirst} when={extrasFirstWhen} done={extrasFirstDone} width={FIRST_WIDTH} />
+      <Sharpener list={heroLater} when={heroesLaterWhen} done={heroesLaterDone} />
+      <Sharpener list={sharpLater} when={extrasLaterWhen} done={extrasLaterDone} />
     </group>
   );
 }
