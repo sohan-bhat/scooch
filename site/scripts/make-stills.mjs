@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import { launch, openStill } from './browser.mjs';
+import { compare, liveShots, restPlaces } from './stills-gate.mjs';
 
 const site = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const out = join(site, 'public', 'stills');
@@ -16,10 +17,14 @@ const sizes = [
 const only = process.argv.find((arg) => arg.startsWith('--only='))?.slice(7).split(',');
 
 await mkdir(out, { recursive: true });
+const places = await restPlaces(site);
+const failures = [];
 const browser = await launch();
 try {
   for (const size of sizes) {
-    if (only && !only.includes(`${size.name}${size.suffix ?? ''}`)) continue;
+    const name = `${size.name}${size.suffix ?? ''}`;
+    if (only && !only.includes(name)) continue;
+    const files = [];
     for (let beat = 0; beat < BEATS; beat++) {
       const { context, page } = await openStill(browser, { beat, ...size });
       const shot = await page.screenshot({ type: 'png' });
@@ -27,10 +32,24 @@ try {
       let image = sharp(shot);
       if (size.crop) image = image.extract({ left: 0, top: 0, ...size.crop });
       const file = join(out, `${size.name}-${beat + 1}${size.suffix ?? ''}.webp`);
-      await writeFile(file, await image.webp({ quality: 78, effort: 6 }).toBuffer());
-      console.log('wrote', file);
+      const encoded = await image.webp({ quality: 78, effort: 6 }).toBuffer();
+      await writeFile(file, encoded);
+      files.push(encoded);
+      console.log('wrote', file, `${Math.round(encoded.length / 1024)} KB`);
+    }
+    const live = await liveShots(browser, size, places.slice(0, BEATS));
+    for (let beat = 0; beat < BEATS; beat++) {
+      const view = size.crop ? await sharp(live[beat]).extract({ left: 0, top: 0, ...size.crop }).png().toBuffer() : live[beat];
+      const result = await compare(files[beat], view);
+      const line = `${name} beat ${beat + 1} against live at rest: worst region ${result.region.toFixed(2)}, largest energy loss ${(result.loss * 100).toFixed(1)} percent at ${result.cell}, ${result.pass ? 'pass' : 'FAIL'}`;
+      console.log(line);
+      if (!result.pass) failures.push(line);
     }
   }
 } finally {
   await browser.close();
+}
+if (failures.length) {
+  console.error(`stills gate failed on ${failures.length}:\n${failures.join('\n')}`);
+  process.exitCode = 1;
 }
