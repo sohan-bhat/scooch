@@ -602,8 +602,10 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       shadowFrames.current += 1;
     }
     const time = runtime.frozen ?? state.clock.elapsedTime - runtime.timeShift;
-    const idle = runtime.idle;
-    const motion = idle && !runtime.posterUp ? 1 : 0;
+    const posed = runtime.hero || runtime.posterUp || (runtime.frozen !== null && native.posterPose);
+    const idle = runtime.idle && !posed;
+    const screenTime = posed ? 0 : time;
+    const motion = idle ? 1 : 0;
     const lookX = pointer.x * motion + live.look.x;
     const lookY = pointer.y * motion + live.look.y;
     rig.apply(camera as PerspectiveCamera, story.camera, time, lookX, lookY, Math.min(delta, 0.1), size.width, size.height, idle, runtime.frozen !== null);
@@ -651,7 +653,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const big = consoleScreen.uniforms;
     const moon = gallery.current.moon;
     if (moon && big.uFrame.value !== moon.texture) big.uFrame.value = moon.texture;
-    big.uTime.value = time;
+    big.uTime.value = screenTime;
     big.uOn.value = moon ? Math.min(Math.max((story.fly - 1.7) / 0.3, 0), 1) : 0;
     big.uLampLevel.value = story.lamp;
     crt.uOsdLevel.value = story.osd;
@@ -659,7 +661,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     wall.uniforms.uCaptionLevel.value = phone ? 0 : story.wall;
     wall.uniforms.uDrift.value.set(story.drift * 0.018, -story.drift * 0.028);
     floor.uniforms.uDrift.value.copy(wall.uniforms.uDrift.value);
-    crt.uTime.value = time;
+    crt.uTime.value = screenTime;
     const frameSize = screens.main.live.image as { width: number; height: number };
     const part = inside?.group.visible ? undefined : heldPart();
     const holding = hooks.drawHeld(gl, Math.min(delta, 0.05), part);
@@ -698,7 +700,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
 
     const lcdPower = second.current ? away * away : 0;
     const lcd = screens.lcd.uniforms;
-    lcd.uTime.value = time;
+    lcd.uTime.value = screenTime;
     lcd.uPower.value = lcdPower;
     lcd.uLampLevel.value = lamp;
 

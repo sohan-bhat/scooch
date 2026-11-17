@@ -105,7 +105,7 @@ export function useStory(refs: Refs, live: boolean, still: number) {
       );
       refs.section.current?.querySelector('.beats')?.removeAttribute('data-pending');
       if (still >= 0) {
-        built.timeline.progress(beatList[Math.min(still, beatList.length - 1)].rest / TOTAL);
+        built.timeline.progress(runtime.hero ? 0 : beatList[Math.min(still, beatList.length - 1)].rest / TOTAL);
         runtime.posed = true;
         return;
       }

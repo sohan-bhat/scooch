@@ -599,6 +599,7 @@ export function Post({ phone }: { phone: boolean }) {
       if (still.phase === 'live') {
         if (!calm) return;
         freeze(time);
+        still.posterPose = runtime.posterUp;
         still.phase = 'capture';
         still.startedAt = now;
         quality.hold = true;

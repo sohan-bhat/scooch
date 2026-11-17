@@ -37,6 +37,7 @@ export const still = {
   held: false,
   lost: false,
   sweep: false,
+  posterPose: false,
 };
 
 const descriptor = Object.getOwnPropertyDescriptor(Texture.prototype, 'needsUpdate');
