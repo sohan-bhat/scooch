@@ -285,6 +285,7 @@ mod probe {
             "3 Icons" => 9_499,
             "3b Live layer" => 47_610,
             "3c Helper colour and scale" => 5_578,
+            "3d Reveal captures" => 45_000,
             "4 First run" => 101_164,
             "5 Move to new wallpaper" => 62_364,
             "5b Scenery" => 157_529,
@@ -476,6 +477,7 @@ mod probe {
         probe.section("3 Icons", icons);
         probe.section("3b Live layer", live);
         probe.section("3c Helper colour and scale", colour_scale);
+        probe.section("3d Reveal captures", reveal_check);
         probe.section("4 First run", first_run);
         probe.section("5 Move to new wallpaper", moves);
         probe.section("5b Scenery", scenery_check);
@@ -2406,6 +2408,23 @@ mod probe {
         (a.len() == b.len() && !a.is_empty()).then(|| a.iter().zip(b).map(|(one, two)| (0..3).map(|channel| one[channel].abs_diff(two[channel])).max().unwrap_or(0)).max().unwrap_or(0))
     }
 
+    fn reveal_check(p: &mut Probe) -> Result<()> {
+        let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
+        accessory(marker);
+        let screen = platform::current()?.screens()?.into_iter().next().context("no screen")?;
+        let (width, height) = pixels(&screen);
+        let file = p.home.join(format!("probe-still-{width}x{height}.jpg"));
+        if !file.is_file() {
+            still_file(&file, &test_still(width, height))?;
+        }
+        for skip in [false, true] {
+            if let Err(error) = reveal_captures(p, &screen, skip) {
+                p.line(format!("- the reveal captures with the spin {} could not run {error:#}", if skip { "skipped" } else { "kept" }));
+            }
+        }
+        Ok(())
+    }
+
     fn reveal_captures(p: &mut Probe, screen: &Screen, skip: bool) -> Result<()> {
         let (width, height) = pixels(screen);
         let file = p.home.join(format!("probe-still-{width}x{height}.jpg"));
@@ -2512,11 +2531,6 @@ mod probe {
         let screen = desktop.screens()?.into_iter().next().context("no screen")?;
         let recorded = desktop.wallpaper(&screen).ok().flatten();
         still_through_helper(p, &screen, "native mode")?;
-        for skip in [false, true] {
-            if let Err(error) = reveal_captures(p, &screen, skip) {
-                p.line(format!("- the reveal captures with the spin {} could not run {error:#}", if skip { "skipped" } else { "kept" }));
-            }
-        }
         let (_, display) = picture::screen_for(marker, &screen.id)?;
         let current = unsafe { CGDisplayCopyDisplayMode(display) };
         let listed = modes(display);
