@@ -13,6 +13,7 @@ import { Tiering } from './Tiering';
 import { firstGuess, gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { ScreenTextures } from './screen/useScreen';
+import { nativeHopeful } from './still';
 import { Surroundings, World } from './World';
 
 const Controls = lazy(() => import('./Controls'));
@@ -92,6 +93,12 @@ function useShown() {
   return shown;
 }
 
+function posterShown() {
+  if (!runtime.posterUp || runtime.still >= 0 || !nativeHopeful()) return false;
+  const image = document.querySelector<HTMLImageElement>('.stage-still img');
+  return image !== null && !(image.complete && image.naturalWidth === 0);
+}
+
 export default function Stage({ onReady }: { onReady: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const shown = useShown();
@@ -99,7 +106,7 @@ export default function Stage({ onReady }: { onReady: () => void }) {
   const deviceDpr = window.devicePixelRatio || 1;
   const detected = suspend(detectTier, ['scooch-tier']);
   quality.detected = detected;
-  quality.configure(phone, deviceDpr, firstGuess(gpuClass().gpu, detected));
+  quality.configure(phone, deviceDpr, firstGuess(gpuClass().gpu, detected), posterShown());
   const [dpr, setDpr] = useState(() => (runtime.still >= 0 ? Math.min(deviceDpr, 2) : quality.canvasDpr));
   useEffect(() => {
     quality.onNative = () => setDpr(quality.nativeDpr);

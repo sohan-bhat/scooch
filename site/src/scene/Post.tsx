@@ -176,26 +176,29 @@ export function Post({ phone }: { phone: boolean }) {
   const bufferSize = useRef<[number, number] | null>(null);
   const viewSize = useMemo(() => new Vector2(), []);
   const measured = useMemo(() => ({ css: new Vector2(), buffer: new Vector2() }), []);
+  const nativeFits = useCallback(() => {
+    gl.getSize(measured.css);
+    gl.getDrawingBufferSize(measured.buffer);
+    const wide = Math.floor(measured.css.x * quality.nativeDpr);
+    const tall = Math.floor(measured.css.y * quality.nativeDpr);
+    if (!gl.getContext().isContextLost() && Math.abs(measured.buffer.x - wide) <= 1 && Math.abs(measured.buffer.y - tall) <= 1) return true;
+    quality.liveScale = 1;
+    setDpr(quality.sharpDpr);
+    nativeOff();
+    release();
+    return false;
+  }, [gl, setDpr, measured]);
   const turnNative = useCallback(() => {
     switchWanted.current = false;
     const context = gl.getContext();
     if (context.isContextLost() || still.off) return;
     setDpr(quality.nativeDpr);
-    gl.getSize(measured.css);
-    gl.getDrawingBufferSize(measured.buffer);
-    const wide = Math.floor(measured.css.x * quality.nativeDpr);
-    const tall = Math.floor(measured.css.y * quality.nativeDpr);
-    if (context.isContextLost() || Math.abs(measured.buffer.x - wide) > 1 || Math.abs(measured.buffer.y - tall) > 1) {
-      setDpr(quality.sharpDpr);
-      nativeOff();
-      release();
-      return;
-    }
+    if (!nativeFits()) return;
     quality.switched = true;
     quality.liveScale = quality.stillScale;
     quality.onNative?.();
     setNative(true);
-  }, [gl, setDpr, measured]);
+  }, [gl, setDpr, nativeFits]);
   const full = !phone && quality.tier === 'full';
   const fast = quality.hasFast && runtime.still < 0;
   const [level, setLevel] = useState(quality.gpu);
@@ -317,19 +320,23 @@ export function Post({ phone }: { phone: boolean }) {
         return;
       }
       if (!nativeAllowed(gl)) {
+        if (quality.liveScale < 0.999) {
+          quality.liveScale = 1;
+          setDpr(quality.sharpDpr);
+        }
         still.off = true;
         release();
         return;
       }
       still.bands = quality.gpu === 'low' && !quality.phone ? 6 : 3;
-      if (quality.liveScale < 0.999) setNative(true);
-      else switchWanted.current = true;
+      if (quality.liveScale >= 0.999) switchWanted.current = true;
+      else if (nativeFits()) setNative(true);
     };
     void pause(500).then(wait);
     return () => {
       stopped = true;
     };
-  }, [gl]);
+  }, [gl, setDpr, nativeFits]);
 
   const sharpComposer = useCallback(
     (value: EffectComposerType | null) => {
@@ -530,7 +537,12 @@ export function Post({ phone }: { phone: boolean }) {
 
   const place = useCallback(
     (full: boolean) => {
-      if (quality.liveScale >= 0.999) return;
+      if (quality.liveScale >= 0.999) {
+        if (corner.scale === '' || corner.scale === 'none') return;
+        corner.scale = 'none';
+        gl.domElement.style.transform = 'none';
+        return;
+      }
       gl.getSize(viewSize);
       const r = full ? 1 : quality.liveScale;
       gl.setViewport(0, viewSize.y * (1 - r), viewSize.x * r, viewSize.y * r);

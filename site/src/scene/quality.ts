@@ -169,7 +169,7 @@ class Quality {
     return fits(motion, 'motion') && fits(rest, 'rest') ? up : null;
   }
 
-  configure(phone: boolean, deviceDpr: number, gpu: GpuClass) {
+  configure(phone: boolean, deviceDpr: number, gpu: GpuClass, covered = false) {
     if (this.configured) return;
     this.configured = true;
     this.phone = phone;
@@ -182,7 +182,7 @@ class Quality {
     this.nativeDpr = Math.min(Math.max(deviceDpr, 1), NATIVE);
     this.sharpDpr = Math.min(chosen.sharp, this.nativeDpr);
     this.stillScale = this.sharpDpr / this.nativeDpr;
-    this.late = LATE ?? true;
+    this.late = LATE ?? !covered;
     this.liveScale = this.late && !this.switched ? 1 : this.stillScale;
     this.fastScale = Math.min(1, (FAST ?? chosen.fast) / this.sharpDpr);
     this.native = this.stillScale < 0.999;
@@ -211,7 +211,7 @@ class Quality {
     if (this.native) {
       this.sharpDpr = Math.min(chosen.sharp, this.nativeDpr * 0.9);
       this.stillScale = this.sharpDpr / this.nativeDpr;
-      if (this.switched) this.liveScale = this.stillScale;
+      if (this.liveScale < 0.999) this.liveScale = this.stillScale;
     }
     this.fastScale = Math.min(1, (FAST ?? chosen.fast) / this.sharpDpr);
     this.changes += 1;

@@ -52,14 +52,18 @@ if (descriptor?.set) {
   });
 }
 
-export function nativeAllowed(gl: WebGLRenderer) {
+export function nativeHopeful() {
   try {
     if (window.sessionStorage.getItem(KEY) === 'off') return false;
   } catch {
     return false;
   }
   const memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
-  if (memory !== undefined && memory < 4) return false;
+  return memory === undefined || memory >= 4;
+}
+
+export function nativeAllowed(gl: WebGLRenderer) {
+  if (!nativeHopeful()) return false;
   const context = gl.getContext();
   const size = gl.getSize(new Vector2()).multiplyScalar(quality.nativeDpr);
   const largest = context.getParameter(context.MAX_TEXTURE_SIZE) as number;
