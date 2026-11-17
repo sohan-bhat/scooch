@@ -7,6 +7,11 @@
     "lamp",
     "clock"
   ],
+  "move": [
+    "labels",
+    "gamepad",
+    "main"
+  ],
   "order": [
     "labels",
     "gamepad",
