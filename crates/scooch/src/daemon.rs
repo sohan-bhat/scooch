@@ -517,7 +517,6 @@ impl Daemon {
     fn keep_early(&self, generation: u64) {
         let (glider, desktop) = (self.glider.clone(), self.desktop.clone());
         let _ = std::thread::Builder::new().name("scooch-early".into()).spawn(move || {
-            let lock = || glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let launched = Instant::now();
             let cap = launched + crate::glide::EARLY_CAP;
             let mut end = launched + crate::glide::EARLY_LIFE;
@@ -526,18 +525,18 @@ impl Daemon {
                 if Instant::now() >= cap || !desktop.button_down() {
                     break;
                 }
-                if !lock().extend_early(generation, cap) {
+                if !glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).extend_early(generation, cap) {
                     return;
                 }
                 while desktop.button_down() && Instant::now() < cap {
                     std::thread::sleep(crate::glide::PRESS_POLL);
                 }
                 end = (Instant::now() + crate::glide::EARLY_LIFE).min(cap);
-                if !lock().extend_early(generation, end) {
+                if !glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).extend_early(generation, end) {
                     return;
                 }
             }
-            lock().expire_early(generation);
+            glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).expire_early(generation);
         });
     }
 
