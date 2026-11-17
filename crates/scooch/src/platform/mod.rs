@@ -97,9 +97,6 @@ pub trait Desktop: Send + Sync {
     fn reads_at_once(&self) -> bool {
         false
     }
-    fn pointer(&self) -> Option<(f32, f32)> {
-        None
-    }
 }
 
 pub const AGREE: Duration = Duration::from_millis(500);

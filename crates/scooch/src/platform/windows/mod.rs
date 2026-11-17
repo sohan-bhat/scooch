@@ -131,14 +131,6 @@ mod system {
         fn gallery(&self) -> Vec<std::path::PathBuf> {
             std::env::var_os("WINDIR").map(|dir| crate::platform::folder_and_children(&Path::new(&dir).join("Web").join("Wallpaper"))).unwrap_or_default()
         }
-
-        fn pointer(&self) -> Option<(f32, f32)> {
-            use windows::Win32::Foundation::POINT;
-            use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-            let mut point = POINT::default();
-            unsafe { GetCursorPos(&mut point) }.ok()?;
-            Some((point.x as f32, point.y as f32))
-        }
     }
 
     fn animations_off() -> bool {

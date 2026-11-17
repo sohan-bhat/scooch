@@ -376,7 +376,6 @@ pub struct Daemon {
     icons: Mutex<Option<Vec<Rect>>>,
     quick_hold: Mutex<Option<Hold>>,
     mapped: Mutex<HashMap<String, MapKey>>,
-    last_screens: Mutex<Vec<Screen>>,
 }
 
 #[derive(Default)]
@@ -420,7 +419,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()) }
     }
 
     pub fn quick_look(&self) -> bool {
@@ -472,10 +471,8 @@ impl Daemon {
         if !state.on || state.restoring || !state.screens.values().any(|entry| entry.output.is_some()) || self.glide_block(&state).is_some() {
             return false;
         }
-        let screens = self.last_screens.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-        let pointed = self.desktop.pointer().and_then(|point| crate::glide::under(&screens, point).cloned());
         let mut glider = self.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let launched = glider.wake(pointed.as_ref());
+        let launched = glider.wake();
         drop(glider);
         let Some(generation) = launched else { return false };
         self.reap_later();
@@ -703,7 +700,6 @@ impl Daemon {
                 let print = icon_print(snapshot);
                 *self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(print);
                 *self.icons.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(snapshot.icons.clone());
-                self.last_screens.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone_from(&snapshot.screens);
                 if trace() {
                     eprintln!("{} snapshot icons {print:016x}", stamp());
                 }
@@ -1576,14 +1572,13 @@ pub mod tests {
         pub reduce: Mutex<bool>,
         pub drop_seen: Mutex<bool>,
         pub at_once: Mutex<bool>,
-        pub pointer: Mutex<Option<(f32, f32)>>,
         pub events: crate::glide::tests::Events,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), events: Arc::new(Mutex::new(Vec::new())) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), events: Arc::new(Mutex::new(Vec::new())) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -1744,10 +1739,6 @@ pub mod tests {
 
         fn reads_at_once(&self) -> bool {
             *self.at_once.lock().unwrap()
-        }
-
-        fn pointer(&self) -> Option<(f32, f32)> {
-            *self.pointer.lock().unwrap()
         }
 
         fn decode(&self, path: &Path) -> Result<RgbImage> {
@@ -3360,26 +3351,6 @@ pub mod tests {
         daemon.glider.lock().unwrap().reset_for_test();
         daemon.glider.lock().unwrap().forget_early_for_test();
         assert!(daemon.wake_early(), "a real move lets the next wake launch early again");
-    }
-
-    #[test]
-    fn the_early_launch_asks_a_window_for_the_screen_under_the_pointer_and_none_off_every_screen() {
-        let (mut daemon, fake, _) = rig("glide-early-window", vec![screen("left", 0.0, 2.0), screen("right", 160.0, 2.0)]);
-        *fake.live.lock().unwrap() = true;
-        daemon.glider = Arc::new(Mutex::new(Glider::new(Box::new(crate::glide::tests::FakeSpawner::new(fake.events.clone())))));
-        fake.place(vec![subject(), Rect { x: subject().x + 160.0, ..subject() }]);
-        daemon.tick();
-        for (pointer, wanted) in [((200.0, 50.0), Some("window right")), ((500.0, 50.0), None)] {
-            daemon.glider.lock().unwrap().reset_for_test();
-            daemon.glider.lock().unwrap().forget_early_for_test();
-            fake.events.lock().unwrap().clear();
-            *fake.pointer.lock().unwrap() = Some(pointer);
-            assert!(daemon.wake_early(), "no early launch with the pointer at {pointer:?}");
-            let seen = events(&fake);
-            assert!(seen.iter().any(|event| event == "device"), "{seen:?}");
-            let windows: Vec<String> = seen.into_iter().filter(|event| event.starts_with("window")).collect();
-            assert_eq!(windows, wanted.map(String::from).into_iter().collect::<Vec<_>>(), "the pointer at {pointer:?}");
-        }
     }
 
     #[test]

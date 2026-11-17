@@ -216,12 +216,6 @@ impl Desktop for Mac {
         watch::DROPPED.swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
-    fn pointer(&self) -> Option<(f32, f32)> {
-        let event = sys::Owned::new(unsafe { sys::CGEventCreate(std::ptr::null()) })?;
-        let point = unsafe { sys::CGEventGetLocation(event.0) };
-        Some((point.x as f32, point.y as f32))
-    }
-
     fn reduce_motion(&self) -> bool {
         let saved = finder::preference("com.apple.universalaccess", "reduceMotion").and_then(|value| value.downcast_ref::<objc2_foundation::NSNumber>().map(|number| number.boolValue()));
         saved.unwrap_or_else(|| on_main(|_| objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()))

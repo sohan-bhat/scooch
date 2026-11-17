@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub const HELPER: &str = "--live-helper";
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 2;
 pub const SLOW_HELLO: &str = "SCOOCH_HELPER_SLOW_HELLO_MS";
 const QUIT_WAIT: Duration = Duration::from_millis(500);
 
@@ -43,7 +43,6 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         scales: BTreeMap<String, f32>,
     },
-    Window { screen: String, rect: Rect, scale: f32 },
     Open { id: u32, screen: String, rect: Rect, #[serde(default = "one")] scale: f32, #[serde(default)] still: Option<PathBuf> },
     Glide { id: u32, a: PathBuf, b: PathBuf, ms: u32 },
     Settle { id: u32, still: PathBuf, #[serde(default)] ms: Option<u32> },
@@ -74,7 +73,7 @@ pub enum Reply {
         scale: Option<f32>,
     },
     Shown { id: u32, ms: u64 },
-    Drawn { id: u32, window: u64, first: u64, reveal: u64, make: u64, present: u64, found: bool, steps: Vec<(String, u64)> },
+    Drawn { id: u32, window: u64, first: u64, reveal: u64 },
     Device { ms: u64 },
     Canvas { #[serde(default)] warm_id: Option<u32>, ms: u64 },
     Glided { id: u32, frames: u32, slow_frames: u32, first_frame_ms: u64, #[serde(default)] uploads: u32, #[serde(default = "one")] scale: f32 },
@@ -248,10 +247,6 @@ impl Helper {
         self.ready_for(warm_id, timeout)
     }
 
-    pub fn ask_window(&mut self, screen: &Screen) -> Result<()> {
-        self.send(&Command::Window { screen: screen.id.clone(), rect: screen.frame, scale: screen.scale })
-    }
-
     pub fn ask_open(&mut self, id: u32, screen: &Screen, still: &Path) -> Result<()> {
         self.send(&Command::Open { id, screen: screen.id.clone(), rect: screen.frame, scale: screen.scale, still: Some(still.to_path_buf()) })
     }
@@ -378,7 +373,6 @@ mod tests {
         let commands = [
             Command::Hello { version: VERSION },
             Command::Warm { hints: Hints { present: Some("bare".into()), scale: Some(0.5) }, picture: Some(PathBuf::from("p.jpg")), size: Some([1024, 768]), warm_id: Some(4), canvas: Some(PathBuf::from("main.canvas")), scales: BTreeMap::from([("gpu".to_string(), 0.75)]) },
-            Command::Window { screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5 },
             Command::Open { id: 3, screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5, still: Some(PathBuf::from("a.png")) },
             Command::Glide { id: 3, a: PathBuf::from("a.tables"), b: PathBuf::from("b.tables"), ms: 450 },
             Command::Settle { id: 3, still: PathBuf::from("b.png"), ms: None },
@@ -392,7 +386,6 @@ mod tests {
             Reply::Hello { version: VERSION, pid: 9 },
             Reply::Ready { adapter: "gpu".into(), ms: 12, uploads: 1, kind: "integrated".into(), warm_id: Some(4), from: Some("cache".into()), scale: Some(0.6) },
             Reply::Shown { id: 3, ms: 40 },
-            Reply::Drawn { id: 3, window: 12, first: 20, reveal: 34, make: 80, present: 10, found: true, steps: vec![("screen".into(), 2), ("window".into(), 78)] },
             Reply::Glided { id: 3, frames: 24, slow_frames: 1, first_frame_ms: 30, uploads: 1, scale: 0.75 },
             Reply::Settled { id: 3 },
             Reply::Closed { id: 3 },
