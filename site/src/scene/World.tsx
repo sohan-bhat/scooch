@@ -57,6 +57,9 @@ const SPOT = 4;
 const BULB_GLOW = 7;
 const RECT = 2.4;
 const SCREEN_SPOT = 0.09;
+const SPILL = { laptop: 0.8, television: 1.8, laptopAim: new Vector3(0.4, -0.45, 0), televisionAim: new Vector3(-0.5, -1, 0) };
+const PHONE_SPILL = { laptop: 1, television: 1.4, laptopAim: new Vector3(0, -0.45, 0), televisionAim: new Vector3(0, -0.45, 0) };
+const spill = () => (quality.phone ? PHONE_SPILL : SPILL);
 const INNER = 0.5;
 const STREET_LEVEL = 26;
 const STRIPE = 64;
@@ -439,7 +442,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       if (mesh.isMesh && mesh.userData.bulb) found.push(mesh.material as MeshStandardMaterial);
     });
     bulbs.current = found;
-    const placeScreenLight = (glass: Glass, rect: RectAreaLight | null, glow: SpotLight | null, target: Object3D) => {
+    const placeScreenLight = (glass: Glass, rect: RectAreaLight | null, glow: SpotLight | null, target: Object3D, aim: Vector3) => {
       const normal = new Vector3(0, 0, 1).applyQuaternion(glass.quaternion);
       if (rect) {
         rect.position.copy(glass.center).addScaledVector(normal, 0.004);
@@ -449,12 +452,12 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       }
       if (glow) {
         glow.position.copy(glass.center).addScaledVector(normal, 0.02);
-        target.position.copy(glass.center).addScaledVector(normal, 1).add(new Vector3(0, -0.45, 0));
+        target.position.copy(glass.center).addScaledVector(normal, 1).add(aim);
         glow.target = target;
       }
     };
-    placeScreenLight(built.laptop, laptopRect.current, laptopSpot.current, targets.laptop);
-    placeScreenLight(built.television, televisionRect.current, televisionSpot.current, targets.television);
+    placeScreenLight(built.laptop, laptopRect.current, laptopSpot.current, targets.laptop, spill().laptopAim);
+    placeScreenLight(built.television, televisionRect.current, televisionSpot.current, targets.television, spill().televisionAim);
     if (spot.current) {
       spot.current.target = targets.lamp;
       spot.current.shadow.needsUpdate = true;
@@ -714,12 +717,12 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const laptopLight = laptopRect.current ?? laptopSpot.current;
     if (laptopLight) {
       laptopLight.color.copy(lightFor(screens.secondColor, 0));
-      laptopLight.intensity = (laptopRect.current ? RECT : SCREEN_SPOT) * (1.5 - 0.5 * Math.min(story.lamp, 1)) * lcdPower;
+      laptopLight.intensity = (laptopRect.current ? RECT : SCREEN_SPOT * spill().laptop) * (1.5 - 0.5 * Math.min(story.lamp, 1)) * lcdPower;
     }
     const televisionLight = televisionRect.current ?? televisionSpot.current;
     if (televisionLight) {
       televisionLight.color.copy(lightFor(screens.balloon, story.place));
-      televisionLight.intensity = (televisionRect.current ? RECT * 1.3 : SCREEN_SPOT * 1.4) * (1.5 - 0.5 * Math.min(story.lamp, 1)) * tubeLight * away;
+      televisionLight.intensity = (televisionRect.current ? RECT * 1.3 : SCREEN_SPOT * spill().television) * (1.5 - 0.5 * Math.min(story.lamp, 1)) * tubeLight * away;
     }
 
     scratch.focus.copy(built.laptop.center).lerp(built.television.center, story.focus);
