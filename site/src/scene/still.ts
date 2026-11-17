@@ -36,6 +36,7 @@ export const still = {
   from: null as TextureType | null,
   held: false,
   lost: false,
+  sweep: false,
 };
 
 const descriptor = Object.getOwnPropertyDescriptor(Texture.prototype, 'needsUpdate');

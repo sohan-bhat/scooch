@@ -6,7 +6,7 @@ import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinu
 import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass } from 'postprocessing';
 import { holdQuiet, quiet } from '@/lib/idle';
 import { release as releaseLoader } from '@/lib/load';
-import { changed, runtime, story, wallClock } from '@/story/state';
+import { changed, clockSweeping, runtime, story, wallClock } from '@/story/state';
 import { beats, TOTAL } from '@/story/timeline';
 import { quality, type Toggle } from './quality';
 import { allocate, freeze, inView, nativeAllowed, nativeOff, screenBox, still, thaw } from './still';
@@ -591,6 +591,7 @@ export function Post({ phone }: { phone: boolean }) {
         still.refresh = false;
         still.from = null;
         still.held = false;
+        still.sweep = false;
         quality.hold = false;
         thaw();
         return;
@@ -683,7 +684,7 @@ export function Post({ phone }: { phone: boolean }) {
           return;
         }
         accumulate.renderTarget = into;
-        accumulate.fullscreenMaterial.blendAlpha = 1 / (still.pass + 1);
+        accumulate.fullscreenMaterial.blendAlpha = still.sweep ? 1 : 1 / (still.pass + 1);
         const clear = gl.autoClear;
         gl.autoClear = false;
         const box = still.box;
@@ -725,7 +726,7 @@ export function Post({ phone }: { phone: boolean }) {
         const due = still.stale && (still.arrived || !budget.busy || now - budget.lastStepAt > 1000) && (!loading() || now - still.builtAt > COALESCE);
         if (still.held) {
           const second = Math.floor(wallClock() / 1000);
-          const tick = second !== still.second && inView(things.clock, camera);
+          const tick = (clockSweeping(now) || (second !== still.second && !runtime.clockHold)) && inView(things.clock, camera);
           if (!tick && !due) return;
           if (due) {
             still.arrived = false;
@@ -742,12 +743,14 @@ export function Post({ phone }: { phone: boolean }) {
           return;
         }
         const second = Math.floor(wallClock() / 1000);
-        if (second !== still.second && inView(things.clock, camera)) {
+        const sweeping = clockSweeping(now);
+        if ((sweeping || (second !== still.second && !runtime.clockHold)) && inView(things.clock, camera)) {
           const target = quality.nativeComposer?.inputBuffer;
           still.second = second;
           still.box = target ? screenBox(things.clock, camera, target.width, target.height) : null;
           still.band = 0;
-          still.pass = 0;
+          still.pass = sweeping ? JITTER.length - 1 : 0;
+          still.sweep = sweeping;
           still.tick = true;
           still.phase = 'bands';
           return;
@@ -758,6 +761,7 @@ export function Post({ phone }: { phone: boolean }) {
           still.rebuilds += 1;
           still.startedAt = now;
           still.refresh = true;
+          still.sweep = false;
           still.row = 0;
           still.band = 0;
           still.pass = 0;

@@ -49,6 +49,8 @@ export const runtime = {
   settled: true,
   muted: false,
   clockOrigin: Date.now() - performance.now(),
+  clockHold: true,
+  clockSweepAt: 0,
 };
 
 export function changed() {
@@ -57,4 +59,17 @@ export function changed() {
 
 export function wallClock() {
   return runtime.clockOrigin + performance.now();
+}
+
+export const CLOCK_SWEEP = 400;
+
+export function clockSweeping(now = performance.now()) {
+  return runtime.clockSweepAt > 0 && now - runtime.clockSweepAt < CLOCK_SWEEP + 50;
+}
+
+export function releaseClock() {
+  if (!runtime.clockHold) return;
+  runtime.clockHold = false;
+  runtime.clockSweepAt = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : performance.now();
+  changed();
 }

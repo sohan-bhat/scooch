@@ -4,7 +4,7 @@ import Lenis from 'lenis';
 import { useEffect } from 'react';
 import { loader } from '@/lib/load';
 import { loadManifest, type DemoManifest } from '@/story/demo';
-import { runtime, story } from '@/story/state';
+import { releaseClock, runtime, story } from '@/story/state';
 import { beats as beatList, buildTimeline, TOTAL } from '@/story/timeline';
 
 type Refs = {
@@ -213,6 +213,7 @@ export function introduce(refs: Refs, still: number) {
       duration: 0.3,
       ease: 'power2.out',
       onComplete: () => {
+        releaseClock();
         runtime.shown = true;
         performance.mark('scooch:shown');
         glass?.removeAttribute('role');

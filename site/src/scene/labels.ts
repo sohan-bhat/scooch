@@ -1,6 +1,6 @@
 import { Box3, Mesh, MeshStandardMaterial, Object3D, PlaneGeometry, Vector3, type Texture, type WebGLRenderer } from 'three';
 import { quiet } from '@/lib/idle';
-import { changed, runtime, wallClock } from '@/story/state';
+import { CLOCK_SWEEP, changed, clockSweeping, runtime, wallClock } from '@/story/state';
 import { clockHands, type Turn } from './clock';
 import { stripUpload } from './upload';
 import { windowLit } from './window';
@@ -157,7 +157,14 @@ export function labelProps(group: Object3D) {
     update(amount: number) {
       typed?.reveal(amount);
       const at = wallClock();
-      hands?.set(new Date(runtime.frozen === null ? at : Math.floor(at / 1000) * 1000));
+      const real = new Date(runtime.frozen === null ? at : Math.floor(at / 1000) * 1000);
+      const poster = new Date(real);
+      poster.setHours(10, 9, 30, 0);
+      if (runtime.still >= 0 || runtime.clockHold) hands?.set(poster);
+      else if (clockSweeping()) {
+        const t = Math.min((performance.now() - runtime.clockSweepAt) / CLOCK_SWEEP, 1);
+        hands?.set(real, poster, t * t * (3 - 2 * t));
+      } else hands?.set(real);
     },
   };
 }

@@ -123,8 +123,13 @@ export function clockHands(clock: Object3D, turns: Record<string, Turn>, middle:
   });
   return {
     dial,
-    set(date: Date) {
-      for (const hand of turning) hand.holder.quaternion.setFromAxisAngle(hand.axis, -(hand.turn(date) * Math.PI * 2 - hand.angle));
+    set(date: Date, from?: Date, mix = 1) {
+      for (const hand of turning) {
+        const to = hand.turn(date);
+        const start = from ? hand.turn(from) : to;
+        const turn = start + ((((to - start) % 1) + 1.5) % 1 - 0.5) * mix;
+        hand.holder.quaternion.setFromAxisAngle(hand.axis, -(turn * Math.PI * 2 - hand.angle));
+      }
     },
   };
 }
