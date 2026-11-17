@@ -1,6 +1,8 @@
 pub const EXTENSION: &str = "XInputExtension";
 pub const QUERY_VERSION: u8 = 47;
 pub const SELECT_EVENTS: u8 = 46;
+pub const RAW_KEY_PRESS: u16 = 13;
+pub const RAW_BUTTON_PRESS: u16 = 15;
 pub const RAW_BUTTON_RELEASE: u16 = 16;
 pub const ALL_MASTER_DEVICES: u16 = 1;
 pub const POINTER_EMULATED: u32 = 1 << 16;
@@ -23,13 +25,51 @@ pub fn query_version(major: u8) -> Vec<u8> {
 }
 
 pub fn select_releases(major: u8, window: u32) -> Vec<u8> {
+    select_raw(major, window, &[RAW_BUTTON_RELEASE])
+}
+
+pub fn select_raw(major: u8, window: u32, kinds: &[u16]) -> Vec<u8> {
+    let mask = kinds.iter().fold(0u32, |mask, kind| mask | 1 << kind);
     let mut body = window.to_ne_bytes().to_vec();
     body.extend_from_slice(&1u16.to_ne_bytes());
     body.extend_from_slice(&0u16.to_ne_bytes());
     body.extend_from_slice(&ALL_MASTER_DEVICES.to_ne_bytes());
     body.extend_from_slice(&1u16.to_ne_bytes());
-    body.extend_from_slice(&(1u32 << RAW_BUTTON_RELEASE).to_ne_bytes());
+    body.extend_from_slice(&mask.to_ne_bytes());
     request(major, SELECT_EVENTS, &body)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Raw {
+    Press(u32),
+    Release(u32),
+    Key,
+}
+
+pub fn raw(event: &[u8], major: u8) -> Option<Raw> {
+    if event.len() < 28 || event[0] & 0x7f != GENERIC_EVENT || event[1] != major {
+        return None;
+    }
+    let kind = u16::from_ne_bytes([event[8], event[9]]);
+    let detail = u32::from_ne_bytes([event[16], event[17], event[18], event[19]]);
+    let flags = u32::from_ne_bytes([event[24], event[25], event[26], event[27]]);
+    match kind {
+        RAW_KEY_PRESS => Some(Raw::Key),
+        RAW_BUTTON_PRESS if flags & POINTER_EMULATED == 0 => Some(Raw::Press(detail)),
+        RAW_BUTTON_RELEASE if flags & POINTER_EMULATED == 0 => Some(Raw::Release(detail)),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layer {
+    pub viewable: bool,
+    pub dnd: bool,
+    pub frame: scooch_core::Rect,
+}
+
+pub fn topmost(stack: &[Layer], point: (f32, f32)) -> Option<usize> {
+    stack.iter().rposition(|layer| layer.viewable && !layer.dnd && super::xfce::contains(&layer.frame, point))
 }
 
 pub fn version(reply: &[u8]) -> Option<(u16, u16)> {
@@ -91,6 +131,33 @@ mod tests {
         assert!(!primary_release(&raw_event(131, 15, 1, 0), 131));
         assert!(!primary_release(&raw_event(140, RAW_BUTTON_RELEASE, 1, 0), 131));
         assert!(!primary_release(&raw_event(131, RAW_BUTTON_RELEASE, 1, 0)[..20], 131));
+    }
+
+    #[test]
+    fn presses_releases_and_keys_are_told_apart() {
+        assert_eq!(raw(&raw_event(131, RAW_BUTTON_PRESS, 1, 0), 131), Some(Raw::Press(1)));
+        assert_eq!(raw(&raw_event(131, RAW_BUTTON_PRESS, 3, 0), 131), Some(Raw::Press(3)));
+        assert_eq!(raw(&raw_event(131, RAW_BUTTON_RELEASE, 1, 0), 131), Some(Raw::Release(1)));
+        assert_eq!(raw(&raw_event(131, RAW_KEY_PRESS, 9, 0), 131), Some(Raw::Key));
+        assert_eq!(raw(&raw_event(131, RAW_BUTTON_PRESS, 1, POINTER_EMULATED), 131), None);
+        assert_eq!(raw(&raw_event(131, 14, 9, 0), 131), None);
+        assert_eq!(raw(&raw_event(140, RAW_KEY_PRESS, 9, 0), 131), None);
+        let select = select_raw(131, 0x1e5, &[RAW_KEY_PRESS, RAW_BUTTON_PRESS, RAW_BUTTON_RELEASE]);
+        assert_eq!(u32::from_ne_bytes([select[16], select[17], select[18], select[19]]), (1 << 13) | (1 << 15) | (1 << 16));
+        assert_eq!(select_releases(131, 0x1e5), select_raw(131, 0x1e5, &[RAW_BUTTON_RELEASE]));
+    }
+
+    #[test]
+    fn a_release_with_a_dnd_window_on_top_of_the_desktop_still_counts_as_over_the_desktop() {
+        let frame = |x: f32, y: f32, w: f32, h: f32| scooch_core::Rect { x, y, w, h };
+        let desktop = Layer { viewable: true, dnd: false, frame: frame(0.0, 0.0, 1920.0, 1080.0) };
+        let hidden = Layer { viewable: false, dnd: false, frame: frame(600.0, 500.0, 400.0, 300.0) };
+        let drag_icon = Layer { viewable: true, dnd: true, frame: frame(640.0, 560.0, 64.0, 64.0) };
+        let panel = Layer { viewable: true, dnd: false, frame: frame(0.0, 0.0, 1920.0, 27.0) };
+        let stack = [desktop, hidden, panel, drag_icon];
+        assert_eq!(topmost(&stack, (672.0, 594.0)), Some(0));
+        assert_eq!(topmost(&stack, (672.0, 10.0)), Some(2));
+        assert_eq!(topmost(&stack[1..], (672.0, 594.0)), None);
     }
 
     #[test]
