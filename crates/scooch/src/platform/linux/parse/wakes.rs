@@ -88,6 +88,32 @@ pub fn desktop_in_home(desktop: &Path, home: &Path) -> Option<String> {
     Some(if text.is_empty() { String::new() } else { format!("/{text}") })
 }
 
+pub const SAVE_RULE: &str = "type='method_call',interface='org.gtk.vfs.Metadata',member='Set'";
+
+fn byte_string(body: &[u8], at: &mut usize, little: bool) -> Option<String> {
+    let start = at.checked_add(3)? & !3;
+    let raw: [u8; 4] = body.get(start..start.checked_add(4)?)?.try_into().ok()?;
+    let length = usize::try_from(if little { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) }).ok()?;
+    let from = start + 4;
+    let bytes = body.get(from..from.checked_add(length)?)?;
+    *at = from + length;
+    Some(String::from_utf8_lossy(bytes.strip_suffix(&[0]).unwrap_or(bytes)).into_owned())
+}
+
+pub fn saved_file(signature: &str, body: &[u8], little: bool) -> Option<(String, String)> {
+    if !signature.starts_with("ayay") {
+        return None;
+    }
+    let mut at = 0;
+    let tree = byte_string(body, &mut at, little)?;
+    let path = byte_string(body, &mut at, little)?;
+    Some((tree, path))
+}
+
+pub fn place_saved(signature: &str, body: &[u8], little: bool, desktop_in_home: Option<&str>) -> bool {
+    saved_file(signature, body, little).is_none_or(|(tree, path)| metadata(&tree, &path, desktop_in_home))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +183,28 @@ mod tests {
         assert_eq!(nearest(Path::new("/home/ada/.config/nemo"), exists), Some(Spot { folder: PathBuf::from("/home/ada"), waiting: Some(".config".into()) }));
         assert_eq!(nearest(Path::new("/home/ada/Desktop"), exists), Some(Spot { folder: PathBuf::from("/home/ada"), waiting: Some("Desktop".into()) }));
         assert_eq!(nearest(Path::new("relative"), |_| false), None);
+    }
+
+    const DESKTOP_SET: &str = "2d0000002f686f6d652f72756e6e65722f2e6c6f63616c2f73686172652f677666732d6d657461646174612f686f6d65000000001c0000002f4465736b746f702f73636f6f63682d70726f62652d612e7478740028000000120000006e656d6f2d69636f6e2d706f736974696f6e000173000000070000003637322c35393400";
+    const ELSEWHERE_SET: &str = "2d0000002f686f6d652f72756e6e65722f2e6c6f63616c2f73686172652f677666732d6d657461646174612f686f6d6500000000110000002f446f63756d656e74732f612e7478740000000028000000120000006e656d6f2d69636f6e2d706f736974696f6e000173000000070000003637322c35393400";
+    const BIG_SET: &str = "0000002d2f686f6d652f72756e6e65722f2e6c6f63616c2f73686172652f677666732d6d657461646174612f686f6d65000000000000001c2f4465736b746f702f73636f6f63682d70726f62652d612e7478740000000028000000126e656d6f2d69636f6e2d706f736974696f6e000173000000000000073637322c35393400";
+
+    fn bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len()).step_by(2).map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn a_set_call_for_a_desktop_file_wakes_and_one_for_a_file_elsewhere_does_not() {
+        let desktop = Some("/Desktop");
+        let tree = "/home/runner/.local/share/gvfs-metadata/home".to_string();
+        assert_eq!(saved_file("ayaya{sv}", &bytes(DESKTOP_SET), true), Some((tree.clone(), "/Desktop/scooch-probe-a.txt".into())));
+        assert_eq!(saved_file("ayaya{sv}", &bytes(BIG_SET), false), Some((tree, "/Desktop/scooch-probe-a.txt".into())));
+        assert!(place_saved("ayaya{sv}", &bytes(DESKTOP_SET), true, desktop));
+        assert!(!place_saved("ayaya{sv}", &bytes(ELSEWHERE_SET), true, desktop));
+        assert!(!place_saved("ayaya{sv}", &bytes(DESKTOP_SET), true, None));
+        assert_eq!(saved_file("ss", &bytes(DESKTOP_SET), true), None);
+        assert_eq!(saved_file("ayaya{sv}", &bytes(DESKTOP_SET)[..60], true), None);
+        assert!(place_saved("ayaya{sv}", &bytes(DESKTOP_SET)[..60], true, desktop), "a call whose file cannot be told must still wake");
     }
 
     #[test]
