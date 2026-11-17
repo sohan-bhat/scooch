@@ -285,6 +285,15 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
           await frame.sharpen(gl, calm).catch(() => false);
         }
       };
+      const sharpened = new Set<string>();
+      const pictureUp = async (id: string) => {
+        const frame = gallery.current[id];
+        if (!pictures || !frame || sharpened.has(id)) return;
+        sharpened.add(id);
+        await calm();
+        if (stopped || native.off || !stillsPlanned()) return;
+        await frame.sharpen(gl, calm).catch(() => false);
+      };
       const steps = [
         ['labels', labelsUp],
         ['main', mainUp],
@@ -301,7 +310,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         if (stopped) return;
         if (name === 'labels') await labelsUp();
         else if (name === 'main') await mainUp();
-        else if (name === 'gallery') await galleryUp();
+        else if (name === 'gallery') for (const id of Object.keys(gallery.current)) await pictureUp(id);
+        else if (gallery.current[name]) await pictureUp(name);
         else if (heroModels.has(name) ? heroesWhen() : extrasWhen()) await sharpenModel(gl, scene, name, () => stopped).catch(() => false);
         performance.mark(`scooch:rest-${name}`);
       }

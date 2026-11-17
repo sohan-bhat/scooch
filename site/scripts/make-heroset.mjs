@@ -91,10 +91,11 @@ function imageSizes(buffer) {
 }
 
 async function baseSize(name) {
-  if (name === 'main' || name === 'gallery') {
-    const manifest = JSON.parse(await readFile(join(site, 'public', 'demo', 'manifest.json'), 'utf8'));
-    const canvases = name === 'main' ? [manifest.scenery.canvas] : manifest.pictures.map((picture) => picture.scenery.canvas);
-    return Math.min(...canvases.map((canvas) => Math.max(canvas.width, canvas.height)));
+  const manifest = JSON.parse(await readFile(join(site, 'public', 'demo', 'manifest.json'), 'utf8'));
+  const picture = manifest.pictures.find((candidate) => candidate.id === name);
+  if (name === 'main' || picture) {
+    const canvas = picture ? picture.scenery.canvas : manifest.scenery.canvas;
+    return Math.max(canvas.width, canvas.height);
   }
   if (name === 'labels') return 768;
   const path = heroModels.includes(name) ? join(site, 'public', 'models', 'lite', `${name}.glb`) : join(site, 'public', 'models', `${name}.glb`);
@@ -150,7 +151,7 @@ async function storyOrder(browser, names) {
           for (const texture of bound) {
             if (!texture) continue;
             if (texture === main.texture) add('main', object);
-            for (const frame of Object.values(gallery)) if (frame.texture === texture) add('gallery', object);
+            for (const [id, frame] of Object.entries(gallery)) if (frame.texture === texture) add(id, object);
           }
         }
       });
@@ -191,7 +192,9 @@ try {
   console.log('heroset', hero.join(','), `largest energy loss ${(result.loss * 100).toFixed(1)} percent, worst region ${result.region.toFixed(2)}, ${result.pass ? 'pass' : 'fail'}`);
   if (!result.pass) process.exitCode = 1;
   const measured = Object.fromEntries(names.map((name) => [name, Math.round(gains[name] * 1000) / 10]));
-  const story = await storyOrder(browser, names.filter((name) => !hero.includes(name)));
+  const manifest = JSON.parse(await readFile(join(site, 'public', 'demo', 'manifest.json'), 'utf8'));
+  const later = names.filter((name) => !hero.includes(name)).flatMap((name) => (name === 'gallery' ? manifest.pictures.map((picture) => picture.id) : [name]));
+  const story = await storyOrder(browser, later);
   console.log('heroset order', story.map(({ name, first }) => `${name} ${first ?? 'never'}`).join(', '));
   const restOrder = story.map(({ name }) => name);
   const firsts = Object.fromEntries(story.map(({ name, first }) => [name, first]));
