@@ -213,6 +213,7 @@ export function introduce(refs: Refs, still: number) {
   performance.mark('scooch:shown');
   const inputs = ['wheel', 'touchstart', 'keydown', 'pointerdown', 'scroll'] as const;
   const clock = (moved: boolean) => {
+    if (new URLSearchParams(window.location.search).has('hold')) return;
     if (moved || runtime.restLoaded) {
       releaseClock();
       return;
