@@ -18,6 +18,8 @@ pub const SHOWN_AFTER_WAKE: Duration = Duration::from_millis(450);
 pub const BARE: u32 = 2;
 pub const EARLY_EVERY: Duration = Duration::from_secs(10);
 pub const EARLY_LIFE: Duration = Duration::from_millis(1500);
+pub const EARLY_CAP: Duration = Duration::from_secs(30);
+pub const PRESS_POLL: Duration = Duration::from_millis(50);
 const SAMPLES: usize = 3;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -288,6 +290,18 @@ impl Link for Real {
     }
 }
 
+pub struct Warmup {
+    pub picture: PathBuf,
+    pub size: [u32; 2],
+    pub canvas: Option<PathBuf>,
+}
+
+pub struct Launch<'a> {
+    pub screen: Option<&'a Screen>,
+    pub warm: Option<&'a Warmup>,
+    pub drag: bool,
+}
+
 pub struct Plan<'a> {
     pub screen: &'a Screen,
     pub picture: &'a Path,
@@ -435,6 +449,8 @@ pub struct Glider {
     ready_at: Option<Instant>,
     early_launch: bool,
     early_generation: u64,
+    early_until: Option<Instant>,
+    early_window: Option<String>,
     moved_now: bool,
     thrown: u32,
     last_early: Option<Instant>,
@@ -517,7 +533,7 @@ fn keep(said: &mut Vec<String>, line: String) {
 impl Glider {
     pub fn new(spawner: Box<dyn Spawn>) -> Self {
         let forced = std::env::var_os(FORCE).is_some_and(|value| !value.is_empty() && value != "0");
-        Self { forced, software: false, strikes: 0, stalled: false, spawner, link: None, warmed: None, last_warm: None, ready: false, next: 0, late: 0, flights: Vec::new(), early: Vec::new(), doomed: false, huge: std::collections::HashMap::new(), adapter: None, scales: BTreeMap::new(), learned: Vec::new(), prepared: None, noted: false, revived: false, starts: BTreeMap::new(), fresh_starts: Vec::new(), launched: None, ready_at: None, early_launch: false, early_generation: 0, moved_now: false, thrown: 0, last_early: None, woke: None, said: Vec::new() }
+        Self { forced, software: false, strikes: 0, stalled: false, spawner, link: None, warmed: None, last_warm: None, ready: false, next: 0, late: 0, flights: Vec::new(), early: Vec::new(), doomed: false, huge: std::collections::HashMap::new(), adapter: None, scales: BTreeMap::new(), learned: Vec::new(), prepared: None, noted: false, revived: false, starts: BTreeMap::new(), fresh_starts: Vec::new(), launched: None, ready_at: None, early_launch: false, early_generation: 0, early_until: None, early_window: None, moved_now: false, thrown: 0, last_early: None, woke: None, said: Vec::new() }
     }
 
     #[cfg(test)]
@@ -574,21 +590,39 @@ impl Glider {
         self.launched = None;
         self.ready_at = None;
         self.early_launch = false;
+        self.early_until = None;
+        self.early_window = None;
     }
 
     pub fn woke(&mut self, at: Instant) {
         self.woke = Some(at);
     }
 
-    pub fn wake(&mut self, screen: Option<&Screen>) -> Option<u64> {
-        if !self.usable() || self.doomed || self.link.is_some() || self.thrown >= BARE || self.last_early.is_some_and(|at| at.elapsed() < EARLY_EVERY) {
+    fn scales_for(&self, size: [u32; 2]) -> BTreeMap<String, f32> {
+        let suffix = format!("|{}x{}", size[0], size[1]);
+        self.scales.iter().filter_map(|(key, scale)| key.strip_suffix(&suffix).map(|adapter| (adapter.to_string(), *scale))).collect()
+    }
+
+    pub fn wake(&mut self, launch: &Launch) -> Option<u64> {
+        let held = !launch.drag && (self.thrown >= BARE || self.last_early.is_some_and(|at| at.elapsed() < EARLY_EVERY));
+        if !self.usable() || self.doomed || held {
+            return None;
+        }
+        if self.link.is_some() {
+            if self.early_launch {
+                self.top_up(launch);
+            }
             return None;
         }
         let started = Instant::now();
         self.last_early = Some(started);
+        let scales = launch.warm.map(|warm| self.scales_for(warm.size)).unwrap_or_default();
         let launched = self.spawner.spawn().and_then(|mut link| {
-            link.device()?;
-            if let Some(screen) = screen {
+            match launch.warm {
+                Some(warm) => link.warm(&warm.picture, warm.size, warm.canvas.as_deref(), &scales)?,
+                None => link.device()?,
+            }
+            if let Some(screen) = launch.screen {
                 link.window(screen)?;
             }
             Ok(link)
@@ -599,9 +633,21 @@ impl Glider {
                 self.link = Some(link);
                 self.launched = Some(started);
                 self.early_launch = true;
+                self.early_until = Some(started + EARLY_LIFE);
                 self.early_generation += 1;
-                let asked = screen.map_or("device only".to_string(), |screen| format!("device and a window on {}", screen.id));
-                note(&mut self.said, format!("early launch at the wake in {} ms, {asked}", started.elapsed().as_millis()));
+                if let Some(warm) = launch.warm {
+                    self.warmed = Some((warm.picture.clone(), warm.size));
+                    self.last_warm = Some((warm.picture.clone(), warm.size, warm.canvas.clone()));
+                }
+                self.early_window = launch.screen.map(|screen| screen.id.clone());
+                let asked = match (launch.warm.is_some(), launch.screen) {
+                    (true, Some(screen)) => format!("warm and a window on {}", screen.id),
+                    (true, None) => "warm only".to_string(),
+                    (false, Some(screen)) => format!("device and a window on {}", screen.id),
+                    (false, None) => "device only".to_string(),
+                };
+                let when = if launch.drag { "the drag start" } else { "the wake" };
+                note(&mut self.said, format!("early launch at {when} in {} ms, {asked}", started.elapsed().as_millis()));
                 Some(self.early_generation)
             }
             Err(error) => {
@@ -611,11 +657,44 @@ impl Glider {
         }
     }
 
+    fn top_up(&mut self, launch: &Launch) {
+        let wanted = launch.warm.map(|warm| (warm.picture.clone(), warm.size)).filter(|wanted| self.warmed.as_ref() != Some(wanted));
+        let screen = launch.screen.filter(|screen| self.early_window.as_deref() != Some(screen.id.as_str()));
+        let scales = launch.warm.map(|warm| self.scales_for(warm.size)).unwrap_or_default();
+        let Some(link) = self.link.as_mut() else { return };
+        let mut sent = Vec::new();
+        if let (Some(wanted), Some(warm)) = (wanted, launch.warm) {
+            if link.warm(&warm.picture, warm.size, warm.canvas.as_deref(), &scales).is_ok() {
+                self.warmed = Some(wanted);
+                self.last_warm = Some((warm.picture.clone(), warm.size, warm.canvas.clone()));
+                sent.push("a warm".to_string());
+            }
+        }
+        if let Some(screen) = screen {
+            if link.window(screen).is_ok() {
+                self.early_window = Some(screen.id.clone());
+                sent.push(format!("a window on {}", screen.id));
+            }
+        }
+        if !sent.is_empty() {
+            let when = if launch.drag { "the drag start" } else { "the wake" };
+            note(&mut self.said, format!("early helper given {} at {when}", sent.join(" and ")));
+        }
+    }
+
+    pub fn extend_early(&mut self, generation: u64, until: Instant) -> bool {
+        if !self.early_launch || self.early_generation != generation {
+            return false;
+        }
+        self.early_until = Some(until);
+        true
+    }
+
     pub fn after_snapshot(&mut self, moved: bool) {
         self.moved_now = moved;
         if moved {
             self.thrown = 0;
-        } else if self.early_launch && self.launched.is_some_and(|launched| launched.elapsed() >= EARLY_LIFE) {
+        } else if self.early_launch && self.early_until.is_some_and(|until| Instant::now() >= until) {
             self.thrown += 1;
             self.quit_early("nothing moved");
         }
@@ -624,7 +703,7 @@ impl Glider {
     pub fn expire_early(&mut self, generation: u64) {
         if self.early_launch && self.early_generation == generation {
             self.thrown += 1;
-            self.quit_early("nothing moved within 1.5 s of its launch");
+            self.quit_early("nothing moved within 1.5 s of its launch or of the button going up");
         }
     }
 
@@ -700,11 +779,12 @@ impl Glider {
     fn send_warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>) -> Result<()> {
         let wanted = (picture.to_path_buf(), size);
         self.connect()?;
+        self.early_launch = false;
+        self.early_until = None;
         if self.warmed.as_ref() == Some(&wanted) {
             return Ok(());
         }
-        let suffix = format!("|{}x{}", size[0], size[1]);
-        let scales: BTreeMap<String, f32> = self.scales.iter().filter_map(|(key, scale)| key.strip_suffix(&suffix).map(|adapter| (adapter.to_string(), *scale))).collect();
+        let scales = self.scales_for(size);
         self.link.as_mut().ok_or_else(|| anyhow!("no helper"))?.warm(picture, size, canvas, &scales)?;
         note(&mut self.said, format!("warm {} at {}x{} from {}", picture.display(), size[0], size[1], canvas.map_or("the picture".to_string(), |canvas| canvas.display().to_string())));
         self.last_warm = Some((picture.to_path_buf(), size, canvas.map(Path::to_path_buf)));

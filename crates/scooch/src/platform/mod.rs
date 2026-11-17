@@ -43,6 +43,41 @@ impl Format {
 }
 
 pub type Wake = Box<dyn Fn() + Send + Sync>;
+pub type DragStart = Box<dyn Fn((f32, f32)) -> bool + Send + Sync>;
+
+pub const DRAG_SLOP: f32 = 4.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Press {
+    from: Option<(f32, f32)>,
+    started: bool,
+    after: usize,
+}
+
+impl Press {
+    pub fn down(&mut self, at: Option<(f32, f32)>) {
+        *self = Press { from: at, started: false, after: 0 };
+    }
+
+    pub fn dragged(&mut self, at: Option<(f32, f32)>) -> Option<(f32, f32)> {
+        if self.started {
+            self.after += 1;
+            return None;
+        }
+        let (from, to) = (self.from?, at?);
+        if (to.0 - from.0).hypot(to.1 - from.1) < DRAG_SLOP {
+            return None;
+        }
+        self.started = true;
+        Some(from)
+    }
+
+    pub fn up(&mut self) -> Option<usize> {
+        let after = self.started.then_some(self.after);
+        *self = Press::default();
+        after
+    }
+}
 
 pub trait Desktop: Send + Sync {
     fn name(&self) -> String;
@@ -99,6 +134,13 @@ pub trait Desktop: Send + Sync {
     }
     fn pointer(&self) -> Option<(f32, f32)> {
         None
+    }
+    fn drag_starts(&self, _start: DragStart) {}
+    fn desktop_at(&self, _point: (f32, f32)) -> bool {
+        false
+    }
+    fn button_down(&self) -> bool {
+        false
     }
 }
 
@@ -172,6 +214,30 @@ mod tests {
         assert_eq!(disagreement(Some(render), Some(render), ours), None);
         assert_eq!(disagreement(Some(old), Some(newer), ours), None);
         assert_eq!(disagreement(None, None, ours), None);
+    }
+
+    #[test]
+    fn a_click_with_no_move_starts_no_drag() {
+        let mut press = Press::default();
+        press.down(Some((100.0, 100.0)));
+        assert_eq!(press.up(), None);
+        press.down(Some((100.0, 100.0)));
+        assert_eq!(press.dragged(Some((102.0, 101.0))), None);
+        assert_eq!(press.dragged(Some((101.0, 99.0))), None);
+        assert_eq!(press.up(), None);
+        assert_eq!(press.dragged(Some((300.0, 300.0))), None, "a drag event with no press started a drag");
+    }
+
+    #[test]
+    fn a_drag_starts_once_at_its_down_point_and_counts_the_events_after() {
+        let mut press = Press::default();
+        press.down(Some((100.0, 100.0)));
+        assert_eq!(press.dragged(Some((103.0, 103.0))), Some((100.0, 100.0)));
+        assert_eq!(press.dragged(Some((120.0, 110.0))), None);
+        assert_eq!(press.dragged(Some((140.0, 120.0))), None);
+        assert_eq!(press.up(), Some(2));
+        press.down(None);
+        assert_eq!(press.dragged(Some((300.0, 300.0))), None);
     }
 
     #[test]

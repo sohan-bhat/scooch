@@ -1,6 +1,6 @@
 use crate::platform::{Desktop, Format, Screen, Snapshot};
 use crate::state::{display_of, file_safe, parse, same, write_atomic, Entry, Lock, State, Store, Tally};
-use crate::glide::{Glider, Plan, Program};
+use crate::glide::{Glider, Launch, Plan, Program, Warmup};
 use crate::{cache, poke, scene};
 use anyhow::{Context, Result};
 use scooch_core::{Analysis, Options, Placement, Rect, RgbImage, Scene};
@@ -474,17 +474,71 @@ impl Daemon {
         }
         let screens = self.last_screens.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let pointed = self.desktop.pointer().and_then(|point| crate::glide::under(&screens, point).cloned());
+        self.launch(&Launch { screen: pointed.as_ref(), warm: None, drag: false })
+    }
+
+    pub fn drag_starting(self: &Arc<Self>, point: (f32, f32)) -> bool {
+        let on_icon = self.icons.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_deref().is_some_and(|icons| icons.iter().any(|icon| holds(icon, point)));
+        if !on_icon || !self.desktop.desktop_at(point) {
+            return false;
+        }
+        let daemon = self.clone();
+        let _ = std::thread::Builder::new().name("scooch-drag".into()).spawn(move || {
+            daemon.launch_at_drag(point);
+        });
+        true
+    }
+
+    pub fn launch_at_drag(&self, point: (f32, f32)) -> bool {
+        let state = parse(self.store.read().as_deref());
+        if !state.on || state.restoring || self.glide_block(&state).is_some() {
+            return false;
+        }
+        let screens = self.last_screens.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let Some(screen) = crate::glide::under(&screens, point).cloned() else { return false };
+        let Some(entry) = state.screens.get(&screen.id).filter(|entry| entry.output.as_ref().is_some_and(|output| output.is_file())) else { return false };
+        let Ok(key) = tables_key(&entry.source, &state.options) else { return false };
+        let scene = scene::scene(&screen, &[]);
+        let canvas = Some(self.store.canvas_for(&screen.id, key)).filter(|canvas| canvas.is_file());
+        let warm = Warmup { picture: entry.source.clone(), size: [scene.width, scene.height], canvas };
+        self.launch(&Launch { screen: Some(&screen), warm: Some(&warm), drag: true })
+    }
+
+    fn launch(&self, launch: &Launch) -> bool {
         let mut glider = self.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let launched = glider.wake(pointed.as_ref());
+        let launched = glider.wake(launch);
         drop(glider);
         let Some(generation) = launched else { return false };
         self.reap_later();
-        let glider = self.glider.clone();
-        let _ = std::thread::Builder::new().name("scooch-early".into()).spawn(move || {
-            std::thread::sleep(crate::glide::EARLY_LIFE);
-            glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).expire_early(generation);
-        });
+        self.keep_early(generation);
         true
+    }
+
+    fn keep_early(&self, generation: u64) {
+        let (glider, desktop) = (self.glider.clone(), self.desktop.clone());
+        let _ = std::thread::Builder::new().name("scooch-early".into()).spawn(move || {
+            let lock = || glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let launched = Instant::now();
+            let cap = launched + crate::glide::EARLY_CAP;
+            let mut end = launched + crate::glide::EARLY_LIFE;
+            loop {
+                std::thread::sleep(end.saturating_duration_since(Instant::now()));
+                if Instant::now() >= cap || !desktop.button_down() {
+                    break;
+                }
+                if !lock().extend_early(generation, cap) {
+                    return;
+                }
+                while desktop.button_down() && Instant::now() < cap {
+                    std::thread::sleep(crate::glide::PRESS_POLL);
+                }
+                end = (Instant::now() + crate::glide::EARLY_LIFE).min(cap);
+                if !lock().extend_early(generation, end) {
+                    return;
+                }
+            }
+            lock().expire_early(generation);
+        });
     }
 
     fn glide_block(&self, state: &State) -> Option<&'static str> {
@@ -1268,6 +1322,10 @@ pub fn merge(mine: &State, before: &State, fresh: &State) -> State {
 
 pub const QUICK: Duration = Duration::from_millis(60);
 
+pub fn holds(rect: &Rect, (x, y): (f32, f32)) -> bool {
+    x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
+}
+
 pub fn pure_move(before: &[Rect], after: &[Rect]) -> bool {
     let sizes = |icons: &[Rect]| {
         let mut sizes: Vec<[i64; 2]> = icons.iter().map(|icon| [icon.w.round() as i64, icon.h.round() as i64]).collect();
@@ -1494,7 +1552,9 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
         eprintln!("{error}");
     }
     prime(desktop.as_ref(), &signal);
-    let daemon = Daemon::new(desktop.clone(), store.clone());
+    let daemon = Arc::new(Daemon::new(desktop.clone(), store.clone()));
+    let starter = daemon.clone();
+    desktop.drag_starts(Box::new(move |point| starter.drag_starting(point)));
     let worker = signal.clone();
     let tracing = trace();
     std::thread::Builder::new().name("scooch-tick".into()).spawn(move || {
@@ -1577,13 +1637,15 @@ pub mod tests {
         pub drop_seen: Mutex<bool>,
         pub at_once: Mutex<bool>,
         pub pointer: Mutex<Option<(f32, f32)>>,
+        pub button: Mutex<bool>,
+        pub covered: Mutex<bool>,
         pub events: crate::glide::tests::Events,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), events: Arc::new(Mutex::new(Vec::new())) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), events: Arc::new(Mutex::new(Vec::new())) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -1748,6 +1810,14 @@ pub mod tests {
 
         fn pointer(&self) -> Option<(f32, f32)> {
             *self.pointer.lock().unwrap()
+        }
+
+        fn desktop_at(&self, _point: (f32, f32)) -> bool {
+            !*self.covered.lock().unwrap()
+        }
+
+        fn button_down(&self) -> bool {
+            *self.button.lock().unwrap()
         }
 
         fn decode(&self, path: &Path) -> Result<RgbImage> {
@@ -3380,6 +3450,94 @@ pub mod tests {
             let windows: Vec<String> = seen.into_iter().filter(|event| event.starts_with("window")).collect();
             assert_eq!(windows, wanted.map(String::from).into_iter().collect::<Vec<_>>(), "the pointer at {pointer:?}");
         }
+    }
+
+    fn drag_rig(name: &str) -> (Arc<Daemon>, Arc<Fake>, Arc<Mutex<usize>>) {
+        let (daemon, fake, _, spawned) = glide_rig(name, true);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        daemon.glider.lock().unwrap().reset_for_test();
+        fake.events.lock().unwrap().clear();
+        (Arc::new(daemon), fake, spawned)
+    }
+
+    fn center(rect: Rect) -> (f32, f32) {
+        (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
+    }
+
+    fn wait_for(fake: &Fake, start: &str) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if events(fake).iter().any(|event| event.starts_with(start)) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    #[test]
+    fn a_drag_start_on_an_icon_launches_the_helper_with_warm_and_window_and_starts_no_tick() {
+        let (daemon, fake, spawned) = drag_rig("drag-start");
+        let before = (*spawned.lock().unwrap(), fake.snapshots.load(Ordering::SeqCst), fake.sets.load(Ordering::SeqCst));
+        *fake.button.lock().unwrap() = true;
+        assert!(daemon.drag_starting(center(subject())));
+        assert!(wait_for(&fake, "window"), "{:?}", events(&fake));
+        let seen = events(&fake);
+        assert!(seen.iter().any(|event| event.starts_with("warm 320x200")) && seen.contains(&"window main".to_string()), "{seen:?}");
+        assert!(!seen.iter().any(|event| event == "device"), "{seen:?}");
+        assert_eq!((*spawned.lock().unwrap(), fake.snapshots.load(Ordering::SeqCst), fake.sets.load(Ordering::SeqCst)), (before.0 + 1, before.1, before.2), "{seen:?}");
+        assert!(daemon.handed.lock().unwrap().is_none());
+        assert!(daemon.glider.lock().unwrap().said.iter().any(|line| line.starts_with("early launch at the drag start")));
+        *fake.button.lock().unwrap() = false;
+    }
+
+    #[test]
+    fn a_drag_that_begins_off_every_icon_or_under_a_window_launches_nothing() {
+        let (daemon, fake, spawned) = drag_rig("drag-off");
+        let before = *spawned.lock().unwrap();
+        *fake.button.lock().unwrap() = true;
+        assert!(!daemon.drag_starting((140.0, 90.0)));
+        *fake.covered.lock().unwrap() = true;
+        assert!(!daemon.drag_starting(center(subject())));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(*spawned.lock().unwrap(), before);
+        assert!(events(&fake).is_empty(), "{:?}", events(&fake));
+        *fake.button.lock().unwrap() = false;
+    }
+
+    #[test]
+    fn an_early_helper_outlives_its_life_while_the_button_is_down_and_quits_after_it_is_up() {
+        let (daemon, fake, _) = drag_rig("drag-held");
+        *fake.button.lock().unwrap() = true;
+        assert!(daemon.drag_starting(center(subject())));
+        assert!(wait_for(&fake, "window"), "{:?}", events(&fake));
+        std::thread::sleep(crate::glide::EARLY_LIFE + Duration::from_millis(400));
+        assert!(daemon.glider.lock().unwrap().running(), "the helper quit while the button was down");
+        *fake.button.lock().unwrap() = false;
+        let up = Instant::now();
+        std::thread::sleep(crate::glide::EARLY_LIFE - Duration::from_millis(400));
+        assert!(daemon.glider.lock().unwrap().running(), "the helper quit {:?} after the button went up", up.elapsed());
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(!daemon.glider.lock().unwrap().running(), "the helper still ran {:?} after the button went up", up.elapsed());
+        assert!(events(&fake).iter().any(|event| event == "quit"), "{:?}", events(&fake));
+    }
+
+    #[test]
+    fn a_drop_ten_seconds_into_a_drag_finds_its_helper() {
+        let (daemon, fake, spawned) = drag_rig("drag-long");
+        let before = *spawned.lock().unwrap();
+        *fake.button.lock().unwrap() = true;
+        assert!(daemon.drag_starting(center(subject())));
+        assert!(wait_for(&fake, "window"), "{:?}", events(&fake));
+        std::thread::sleep(Duration::from_secs(10));
+        *fake.button.lock().unwrap() = false;
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let seen = events(&fake);
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert_eq!(*spawned.lock().unwrap(), before + 1, "{seen:?} {said:?}");
+        assert!(seen.iter().any(|event| event.starts_with("glide ")) && !seen.iter().any(|event| event == "quit"), "{seen:?} {said:?}");
     }
 
     #[test]
