@@ -351,6 +351,13 @@ fn unix_now() -> u64 {
 }
 
 type MapKey = (u64, (u32, u32), u64);
+type Parts<'a> = (&'a RgbImage, &'a Analysis, &'a Placement, &'a Scene, &'a Options);
+
+struct Finished {
+    bundle: Option<Arc<scooch_core::Bundle>>,
+    encoded: Result<Vec<u8>>,
+    same: bool,
+}
 
 #[derive(Clone, Copy)]
 enum Hold {
@@ -377,6 +384,8 @@ pub struct Daemon {
     quick_hold: Mutex<Option<Hold>>,
     mapped: Mutex<HashMap<String, MapKey>>,
     last_screens: Mutex<Vec<Screen>>,
+    #[cfg(test)]
+    pub marks: Mutex<Option<crate::glide::tests::Events>>,
 }
 
 #[derive(Default)]
@@ -420,8 +429,18 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()), #[cfg(test)] marks: Mutex::new(None) }
     }
+
+    #[cfg(test)]
+    fn mark(&self, what: &str, screen: &str) {
+        if let Some(events) = self.marks.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref() {
+            events.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push((format!("{what} {screen}"), Instant::now()));
+        }
+    }
+
+    #[cfg(not(test))]
+    fn mark(&self, _what: &str, _screen: &str) {}
 
     pub fn quick_look(&self) -> bool {
         let started = Instant::now();
@@ -576,17 +595,25 @@ impl Daemon {
         moved
     }
 
-    fn session_still(&self, screen: &str, key: u64, (image, analysis, placement, scene, options): (&RgbImage, &Analysis, &Placement, &Scene, &Options)) -> (Arc<scooch_core::Bundle>, Arc<RgbImage>) {
+    fn with_session<T>(&self, screen: &str, key: u64, work: impl FnOnce(&mut scooch_core::Session) -> T) -> T {
         let mut sessions = self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let slot = sessions.entry(screen.to_string()).or_insert_with(|| (key, scooch_core::Session::new()));
         if slot.0 != key {
             slot.1.forget();
             slot.0 = key;
         }
-        let made = slot.1.still_shared(image, analysis, placement, scene, options);
+        let made = work(&mut slot.1);
         drop(sessions);
         *self.used.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
         made
+    }
+
+    fn session_still(&self, screen: &str, key: u64, (image, analysis, placement, scene, options): Parts) -> (Arc<scooch_core::Bundle>, Arc<RgbImage>) {
+        self.with_session(screen, key, |session| session.still_shared(image, analysis, placement, scene, options))
+    }
+
+    fn session_tables(&self, screen: &str, key: u64, (image, analysis, placement, scene, options): Parts) -> Arc<scooch_core::Bundle> {
+        self.with_session(screen, key, |session| session.tables_shared(image, analysis, placement, scene, options))
     }
 
     fn bare(&self, entry: &mut Entry, screen: &str, (source, key): (&Path, u64), (image, analysis, scene, options): (&mut Option<RgbImage>, &Analysis, &Scene, &Options), clock: &mut Instant) -> Result<bool> {
@@ -1024,98 +1051,140 @@ impl Daemon {
         };
         lap("decode", &mut clock);
         let format = self.desktop.format();
-        let (picture, bundle) = if glider.is_some() {
+        let shown = output.clone().filter(|_| showing_output);
+        let parts: Parts = (&decoded, &analysis, &placement, scene, options);
+        let finish = |clock: &mut Instant| {
+            self.mark("drawing", &screen.id);
+            let (bundle, picture) = self.session_still(&screen.id, key, parts);
+            self.mark("drawn", &screen.id);
+            lap("render", clock);
+            let encoded = encode(&picture, format, self.desktop.profile().as_deref(), self.desktop.live());
+            drop(picture);
+            lap("encode", clock);
+            let same = encoded.as_ref().is_ok_and(|bytes| shown.as_deref().is_some_and(|output| std::fs::read(output).is_ok_and(|old| old == *bytes)));
+            Finished { bundle: Some(bundle), encoded, same }
+        };
+        let tables_key = if glider.is_some() { tables_key(&source, options).ok() } else { None };
+        let mut flight = None;
+        let mut made = None;
+        let mut finished = None;
+        if let Some(glider) = glider.as_deref_mut() {
             if self.adopt_kept(&screen.id, key) {
                 lap("map", &mut clock);
             }
-            let (bundle, picture) = self.session_still(&screen.id, key, (&decoded, &analysis, &placement, scene, options));
-            lap("render", &mut clock);
-            (picture, Some(bundle))
-        } else {
-            crate::glide::skipped(blocked.unwrap_or("not live"), "");
-            let held = entry.placement.as_ref() == Some(&placement);
-            let picture = if wanted || held {
-                if self.adopt_kept(&screen.id, key) {
-                    lap("map", &mut clock);
-                }
-                self.session_still(&screen.id, key, (&decoded, &analysis, &placement, scene, options)).1
-            } else {
-                self.forget_session(&screen.id);
-                Arc::new(scooch_core::render_with(&decoded, &analysis, &placement, scene, options))
-            };
-            lap("render", &mut clock);
-            (picture, None)
-        };
-        drop(decoded);
-        drop(analysis);
-        let encoded = encode(&picture, format, self.desktop.profile().as_deref(), self.desktop.live());
-        drop(picture);
-        lap("encode", &mut clock);
-        let bytes = match encoded {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                if let Some(glider) = glider.as_deref_mut() {
-                    glider.close_early_for(&screen.id);
-                }
-                return Err(error);
-            }
-        };
-        if let (true, Some(output)) = (showing_output, &output) {
-            if std::fs::read(output).is_ok_and(|old| old == bytes) {
-                if let Some(glider) = glider.as_deref_mut() {
-                    glider.close_early_for(&screen.id);
-                }
-                entry.placement = Some(placement);
-                entry.drawn = Some(drawn);
-                return Ok(Outcome::Kept);
-            }
-        }
-        let tables_key = if bundle.is_some() { tables_key(&source, options).ok() } else { None };
-        let mut flight = None;
-        let mut made = None;
-        if let (Some(glider), Some(bundle), Some(tables_key)) = (glider.as_deref_mut(), bundle.as_ref(), tables_key) {
-            let from = output.as_ref().filter(|_| showing_output).map(|output| self.store.tables_for(output, tables_key)).filter(|from| from.is_file());
-            let stale = from.as_deref().and_then(stale_tables);
-            match (from, output.as_deref().filter(|_| showing_output)) {
-                (Some(_), Some(_)) if stale.is_some() => crate::glide::skipped("old tables", stale.as_deref().unwrap_or_default()),
-                (Some(from), Some(still)) => {
-                    let canvas = self.store.canvas_for(&screen.id, tables_key);
-                    let canvas = canvas.is_file().then_some(canvas);
-                    let prepared = glider.prepare(&Plan { screen, picture: &source, canvas: canvas.as_deref(), size: [scene.width, scene.height], still });
-                    lap("open", &mut clock);
-                    if let Some(id) = prepared {
-                        let (_, next) = self.fresh_name(&screen.id, entry.counter, format.extension(), current);
-                        let target = self.store.tables_for(&next, tables_key);
-                        match std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| crate::state::write_unsynced(&target, &bundle.tables_to_bytes())) {
-                            Ok(()) => {
-                                if glider.go(id, &from, &target) {
-                                    flight = Some(id);
+            let from = tables_key.zip(shown.as_deref()).map(|(tables_key, output)| self.store.tables_for(output, tables_key)).filter(|from| from.is_file());
+            let on_screen = from.as_deref().and_then(|from| std::fs::read(from).ok());
+            let stale = from.as_deref().zip(on_screen.as_deref()).and_then(|(from, bytes)| stale_bytes(from, bytes));
+            match (tables_key, from, shown.as_deref()) {
+                (Some(_), Some(_), Some(_)) if stale.is_some() => crate::glide::skipped("old tables", stale.as_deref().unwrap_or_default()),
+                (Some(tables_key), Some(from), Some(still)) => {
+                    let tables = self.session_tables(&screen.id, key, parts);
+                    self.mark("tables", &screen.id);
+                    lap("bundle", &mut clock);
+                    let fresh = tables.tables_to_bytes();
+                    if on_screen.as_deref() == Some(fresh.as_slice()) {
+                        glider.skip("nothing moves", "the new tables are the tables on screen");
+                    } else {
+                        let canvas = self.store.canvas_for(&screen.id, tables_key);
+                        let canvas = canvas.is_file().then_some(canvas);
+                        let prepared = {
+                            let mut idle = || {
+                                if finished.is_none() {
+                                    lap("open", &mut clock);
+                                    finished = Some(finish(&mut clock));
                                 }
-                                made = Some(target);
-                                lap("tables", &mut clock);
-                            }
-                            Err(error) => {
-                                glider.abort(id);
-                                crate::glide::skipped("tables not written", &format!("{} {error:#}", target.display()));
+                                finished.as_ref().is_some_and(|done: &Finished| done.encoded.is_ok() && !done.same)
+                            };
+                            glider.prepare_while(&Plan { screen, picture: &source, canvas: canvas.as_deref(), size: [scene.width, scene.height], still }, &mut idle)
+                        };
+                        lap("open", &mut clock);
+                        if let Some(id) = prepared {
+                            let (_, next) = self.fresh_name(&screen.id, entry.counter, format.extension(), current);
+                            let target = self.store.tables_for(&next, tables_key);
+                            match std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| crate::state::write_unsynced(&target, &fresh)) {
+                                Ok(()) => {
+                                    if glider.go(id, &from, &target) {
+                                        flight = Some(id);
+                                    }
+                                    made = Some(target);
+                                    lap("tables", &mut clock);
+                                }
+                                Err(error) => {
+                                    glider.abort(id);
+                                    crate::glide::skipped("tables not written", &format!("{} {error:#}", target.display()));
+                                }
                             }
                         }
                     }
                 }
-                (_, None) => crate::glide::skipped("output not shown", ""),
-                (None, _) => crate::glide::skipped("no tables", ""),
+                (_, _, None) => crate::glide::skipped("output not shown", ""),
+                _ => crate::glide::skipped("no tables", ""),
             }
             if flight.is_none() {
                 glider.close_early_for(&screen.id);
             }
         }
+        let Finished { bundle, encoded, same } = match finished {
+            Some(done) => done,
+            None if glider.is_some() => finish(&mut clock),
+            None => {
+                crate::glide::skipped(blocked.unwrap_or("not live"), "");
+                let held = entry.placement.as_ref() == Some(&placement);
+                let picture = if wanted || held {
+                    if self.adopt_kept(&screen.id, key) {
+                        lap("map", &mut clock);
+                    }
+                    self.session_still(&screen.id, key, parts).1
+                } else {
+                    self.forget_session(&screen.id);
+                    Arc::new(scooch_core::render_with(&decoded, &analysis, &placement, scene, options))
+                };
+                lap("render", &mut clock);
+                let encoded = encode(&picture, format, self.desktop.profile().as_deref(), self.desktop.live());
+                drop(picture);
+                lap("encode", &mut clock);
+                let same = encoded.as_ref().is_ok_and(|bytes| shown.as_deref().is_some_and(|output| std::fs::read(output).is_ok_and(|old| old == *bytes)));
+                Finished { bundle: None, encoded, same }
+            }
+        };
+        drop(decoded);
+        drop(analysis);
+        let back = |glider: &mut Glider, why: &str| {
+            if let (Some(id), Some(old)) = (flight, shown.as_deref()) {
+                glider.settle_back(id, old, why);
+            }
+        };
+        let bytes = match encoded {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                if let Some(glider) = glider.as_deref_mut() {
+                    back(glider, &format!("the new picture could not be encoded, {error:#}"));
+                    glider.close_early_for(&screen.id);
+                }
+                return Err(error);
+            }
+        };
+        if same {
+            if let Some(glider) = glider.as_deref_mut() {
+                back(glider, "the new picture is the picture on screen");
+                glider.close_early_for(&screen.id);
+            }
+            entry.placement = Some(placement);
+            entry.drawn = Some(drawn);
+            return Ok(Outcome::Kept);
+        }
         let was = std::mem::replace(&mut entry.painted, painted);
         let published = self.publish(entry, screen, current, seen, format.extension(), |path| write_atomic(path, &bytes));
         if !matches!(published, Ok(true)) {
             entry.painted = was;
+            let settling = published.is_err() && flight.is_some() && shown.is_some();
             if let (Some(glider), Some(id)) = (glider.as_deref_mut(), flight) {
-                glider.abort(id);
+                match &published {
+                    Err(error) if settling => back(glider, &format!("the new picture could not be set, {error:#}")),
+                    _ => glider.abort(id),
+                }
             }
-            if let Some(made) = &made {
+            if let Some(made) = made.as_ref().filter(|_| !settling) {
                 let _ = std::fs::remove_file(made);
             }
         }
@@ -1356,9 +1425,12 @@ fn print_of<'a>(icons: impl Iterator<Item = &'a Rect>) -> u64 {
 }
 
 fn stale_tables(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
+    stale_bytes(path, &std::fs::read(path).ok()?)
+}
+
+fn stale_bytes(path: &Path, bytes: &[u8]) -> Option<String> {
     let empty = scooch_core::Canvas { width: 0, height: 0, pixels: Vec::new() };
-    match scooch_core::Bundle::tables_from_bytes(&bytes, empty) {
+    match scooch_core::Bundle::tables_from_bytes(bytes, empty) {
         Err(error @ (scooch_core::TablesError::Version | scooch_core::TablesError::Magic | scooch_core::TablesError::Checksum | scooch_core::TablesError::Short)) => Some(format!("{} {error}", path.display())),
         _ => None,
     }

@@ -21,6 +21,7 @@ pub const EARLY_LIFE: Duration = Duration::from_millis(1500);
 pub const EARLY_CAP: Duration = Duration::from_secs(30);
 pub const PRESS_POLL: Duration = Duration::from_millis(50);
 const SAMPLES: usize = 3;
+const NOTHING_NEW: &str = "the new picture is the one on screen or could not be made, so nothing glides";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Heard {
@@ -34,6 +35,7 @@ pub trait Link: Send {
     fn device(&mut self) -> Result<()>;
     fn warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>, scales: &BTreeMap<String, f32>) -> Result<()>;
     fn ready(&mut self, timeout: Duration) -> Result<Adapter>;
+    fn answered(&mut self, id: u32) -> bool;
     fn window(&mut self, screen: &Screen) -> Result<()>;
     fn open(&mut self, id: u32, screen: &Screen, still: &Path) -> Result<()>;
     fn shown(&mut self, id: u32, timeout: Duration) -> Result<Instant>;
@@ -212,6 +214,11 @@ impl Link for Real {
         })
     }
 
+    fn answered(&mut self, id: u32) -> bool {
+        while matches!(self.pump(Duration::ZERO), Ok(true)) {}
+        self.shown.iter().any(|(shown, _)| *shown == id) || self.failed.iter().any(|(failed, _)| failed.is_none() || *failed == Some(id))
+    }
+
     fn window(&mut self, screen: &Screen) -> Result<()> {
         self.helper.ask_window(screen)
     }
@@ -221,6 +228,7 @@ impl Link for Real {
     }
 
     fn shown(&mut self, id: u32, timeout: Duration) -> Result<Instant> {
+        while matches!(self.pump(Duration::ZERO), Ok(true)) {}
         self.wait(timeout, |me| {
             if let Some(index) = me.shown.iter().position(|(shown, _)| *shown == id) {
                 return Some(Ok(me.shown.remove(index).1));
@@ -412,6 +420,8 @@ fn reason_of(error: &anyhow::Error) -> &'static str {
         "no room"
     } else if ["was not ready within", "had not started", "would be shown", "no cold start is remembered"].iter().any(|cold| text.contains(cold)) {
         "helper cold"
+    } else if text.contains(NOTHING_NEW) {
+        "nothing new"
     } else if text.contains("did not answer within") {
         "helper budget"
     } else if text.contains("did not settle") {
@@ -857,7 +867,12 @@ impl Glider {
         }
     }
 
+    #[cfg(test)]
     pub fn prepare(&mut self, plan: &Plan) -> Option<u32> {
+        self.prepare_while(plan, &mut || true)
+    }
+
+    pub fn prepare_while(&mut self, plan: &Plan, idle: &mut dyn FnMut() -> bool) -> Option<u32> {
         if !self.usable() {
             self.close_early_for(&plan.screen.id);
             skipped(if self.software { "software adapter" } else { "strikes" }, "");
@@ -885,13 +900,20 @@ impl Glider {
         let opened_at = early.as_ref().filter(|_| reused.is_some()).map(|early| early.at);
         let fresh = self.link.is_none() || !self.ready;
         let mut trace = Trace::default();
-        let result = self.decide(plan, id, (started, opened_at), &mut trace).map_err(|error| if fresh && format!("{error:#}").contains("did not answer within") { anyhow!("the helper was not ready within {} ms of the plain swap, so this move swaps plainly", started.elapsed().as_millis()) } else { error });
+        let mut busy = Duration::ZERO;
+        let mut timed = || {
+            let began = Instant::now();
+            let going = idle();
+            busy += began.elapsed();
+            going
+        };
+        let result = self.decide(plan, id, (started, opened_at), &mut trace, &mut timed).map_err(|error| if fresh && format!("{error:#}").contains("did not answer within") { anyhow!("the helper was not ready within {} ms of the plain swap, so this move swaps plainly", started.elapsed().as_millis()) } else { error });
         let opened = reused.is_some() || trace.opened;
         let launched = self.launched.map(|launched| started.saturating_duration_since(launched));
         note(
             &mut self.said,
             format!(
-                "decision at the set, helper launched {} ms before it, after launch hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, waited {} ms, {}, {}",
+                "decision at the set, helper launched {} ms before it, after launch hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, waited {} ms, {} ms of it on the new picture, {}, {}",
                 shown_ms(launched),
                 shown_ms(trace.hello),
                 shown_ms(trace.device),
@@ -900,6 +922,7 @@ impl Glider {
                 shown_ms(trace.shown),
                 shown_ms(trace.predicted),
                 started.elapsed().as_millis(),
+                busy.as_millis(),
                 if result.is_ok() { "glide" } else { "plain" },
                 drawn_words(trace.drawn.as_ref())
             ),
@@ -917,7 +940,7 @@ impl Glider {
         }
     }
 
-    fn decide(&mut self, plan: &Plan, id: u32, (started, opened_at): (Instant, Option<Instant>), trace: &mut Trace) -> Result<()> {
+    fn decide(&mut self, plan: &Plan, id: u32, (started, opened_at): (Instant, Option<Instant>), trace: &mut Trace, idle: &mut dyn FnMut() -> bool) -> Result<()> {
         self.send_warm(plan.picture, plan.size, plan.canvas)?;
         let launched = self.launched;
         let since = |at: Instant| launched.map(|launched| at.saturating_duration_since(launched));
@@ -972,6 +995,9 @@ impl Glider {
             hold_until(started, woke, Some(started)).unwrap_or(started + PATIENCE)
         };
         if waits_for_ready {
+            if !idle() {
+                return Err(anyhow!(NOTHING_NEW));
+            }
             let waited = self.link.as_mut().ok_or_else(|| anyhow!("no helper"))?.ready(Self::left(deadline));
             let adapter = match waited {
                 Ok(adapter) => adapter,
@@ -985,6 +1011,9 @@ impl Glider {
         if opened_at.is_none() {
             link.open(id, plan.screen, plan.still)?;
             trace.opened = true;
+        }
+        if !link.answered(id) && !idle() {
+            return Err(anyhow!(NOTHING_NEW));
         }
         let shown_at = match link.shown(id, Self::left(deadline)) {
             Ok(shown_at) => shown_at,
@@ -1085,6 +1114,26 @@ impl Glider {
         }
     }
 
+    pub fn skip(&mut self, reason: &str, detail: &str) {
+        skipped(reason, detail);
+        keep(&mut self.said, format!("skipped, {reason}, {detail}"));
+    }
+
+    pub fn settle_back(&mut self, id: u32, still: &Path, why: &str) {
+        let result = match self.link.as_mut() {
+            Some(link) => link.settle(id, still),
+            None => Err(anyhow!("the helper is gone")),
+        };
+        match result {
+            Ok(()) => {
+                let line = format!("settle {id} back on {} because {why}", still.display());
+                eprintln!("{} glide {line}", crate::daemon::stamp());
+                keep(&mut self.said, line);
+            }
+            Err(error) => self.give_up(Some(id), &error),
+        }
+    }
+
     pub fn abort(&mut self, id: u32) {
         if self.prepared.as_ref().is_some_and(|prepared| prepared.id == id) {
             self.prepared = None;
@@ -1109,7 +1158,7 @@ impl Glider {
         if reason == "helper budget" {
             self.late += 1;
         }
-        let normal = matches!(reason, "hidden" | "no room" | "too large" | "helper cold") || (reason == "helper budget" && self.late < LATE);
+        let normal = matches!(reason, "hidden" | "no room" | "too large" | "helper cold" | "nothing new") || (reason == "helper budget" && self.late < LATE);
         if let Some(link) = self.link.as_mut() {
             if let Some(id) = opened.filter(|id| !self.flights.iter().any(|flight| flight.id == *id)) {
                 link.close(id);
@@ -1362,6 +1411,7 @@ pub mod tests {
         pub dies_after_glide: bool,
         pub settle_after: Duration,
         pub slow_hello: Duration,
+        pub shown_after: Duration,
         pub ready_after: Duration,
         pub device_after: Option<Duration>,
         pub canvas_after: Option<Duration>,
@@ -1422,7 +1472,8 @@ pub mod tests {
         }
 
         fn awake(&self, timeout: Duration) -> Result<()> {
-            self.until(self.script().slow_hello, timeout)
+            let script = self.script();
+            self.until(script.slow_hello.max(script.shown_after), timeout)
         }
 
         fn until(&self, at: Duration, timeout: Duration) -> Result<()> {
@@ -1469,6 +1520,11 @@ pub mod tests {
                 return Err(anyhow!("no device"));
             }
             Ok(self.adapter())
+        }
+
+        fn answered(&mut self, _id: u32) -> bool {
+            let script = self.script();
+            self.dead || self.born.elapsed() >= script.slow_hello.max(script.shown_after)
         }
 
         fn window(&mut self, screen: &Screen) -> Result<()> {
