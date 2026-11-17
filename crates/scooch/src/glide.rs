@@ -55,6 +55,7 @@ pub struct Split {
     pub reveal: u32,
     pub make: u32,
     pub present: u32,
+    pub found: bool,
     pub steps: Vec<(String, u32)>,
 }
 
@@ -123,13 +124,13 @@ impl Real {
             Reply::Device { .. } => self.device_after = self.device_after.or(self.helper.since_launch()),
             Reply::Canvas { warm_id, .. } if warm_id.is_some() && warm_id == self.warm_id => self.canvas_after = self.canvas_after.or(self.helper.since_launch()),
             Reply::Canvas { .. } => {}
-            Reply::Drawn { id, window, first, reveal, make, present, steps } => {
+            Reply::Drawn { id, window, first, reveal, make, present, found, steps } => {
                 if self.drawn.len() >= 8 {
                     self.drawn.remove(0);
                 }
                 let part = |ms: u64| u32::try_from(ms).unwrap_or(u32::MAX);
                 let steps = steps.into_iter().map(|(name, took)| (name, part(took))).collect();
-                self.drawn.push((id, Split { window: part(window), first: part(first), reveal: part(reveal), make: part(make), present: part(present), steps }));
+                self.drawn.push((id, Split { window: part(window), first: part(first), reveal: part(reveal), make: part(make), present: part(present), found, steps }));
             }
             Reply::Settled { id } => self.heard.push(Heard::Settled(id)),
             Reply::Glided { id, frames, slow_frames, scale, first_frame_ms, .. } => self.heard.push(Heard::Glided { id, frames, slow: slow_frames, scale, first: first_frame_ms }),
@@ -448,12 +449,13 @@ fn drawn_words(split: Option<&Split>) -> String {
     let known = |value: Option<u32>| value.map_or("unknown".to_string(), |value| value.to_string());
     let steps = split.filter(|split| !split.steps.is_empty()).map_or("unknown".to_string(), |split| split.steps.iter().map(|(name, took)| format!("{name} {took}")).collect::<Vec<_>>().join(", "));
     format!(
-        "the helper made its window in {} ms, drew in {} ms and revealed in {} ms, made it in {} ms and presented it in {} ms, window steps {steps}",
+        "the helper made its window in {} ms, drew in {} ms and revealed in {} ms, made it in {} ms and presented it in {} ms, open found it made {}, window steps {steps}",
         known(split.map(|split| split.window)),
         known(split.map(|split| split.first)),
         known(split.map(|split| split.reveal)),
         known(split.map(|split| split.make)),
-        known(split.map(|split| split.present))
+        known(split.map(|split| split.present)),
+        split.map_or("unknown".to_string(), |split| split.found.to_string())
     )
 }
 

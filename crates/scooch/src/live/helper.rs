@@ -185,6 +185,7 @@ mod running {
         window: u64,
         make: u64,
         present: u64,
+        found: bool,
         steps: Vec<(&'static str, u64)>,
     }
 
@@ -217,11 +218,20 @@ mod running {
         steps: Vec<(&'static str, u64)>,
         make: u64,
         present: u64,
+        asked: Instant,
     }
 
     impl<P: Platform> Pane<P> {
         fn new(screen: Screen, hints: Hints) -> Self {
-            Self { screen, hints, win: Some(Win::Making(None)), steps: Vec::new(), make: 0, present: 0 }
+            Self { screen, hints, win: Some(Win::Making(None)), steps: Vec::new(), make: 0, present: 0, asked: Instant::now() }
+        }
+
+        fn fits(&self, screen: &Screen, hints: &Hints) -> bool {
+            self.screen == *screen && self.hints == *hints
+        }
+
+        fn made(&self) -> bool {
+            matches!(self.win, Some(Win::Made(_)))
         }
 
         fn shown(&self) -> bool {
@@ -302,6 +312,7 @@ mod running {
         still: Option<Decoding>,
         asked: Instant,
         pane: Pane<P>,
+        found: bool,
         window: Option<u64>,
     }
 
@@ -323,6 +334,7 @@ mod running {
         running: Option<Want>,
         queue: VecDeque<Want>,
         pending: Vec<Pending<P>>,
+        early: Option<Pane<P>>,
         layers: BTreeMap<u32, Live<P::Layer>>,
         last: Instant,
         leaving: bool,
@@ -737,13 +749,31 @@ mod running {
             }
         }
 
+        fn make_early(&mut self, screen: Screen) {
+            if let Some(stale) = self.early.take() {
+                self.drop_pane(stale);
+            }
+            if !self.leaving {
+                self.early = Some(Pane::new(screen, self.hints.clone()));
+            }
+        }
+
         fn open(&mut self, id: u32, screen: Screen, still: Option<Decoding>) {
             if self.layers.contains_key(&id) || self.pending.iter().any(|waiting| waiting.id == id) {
                 self.fail(Some(id), format!("layer {id} is already open"));
                 return;
             }
-            let pane = Pane::new(screen, self.hints.clone());
-            self.pending.push(Pending { id, still, asked: Instant::now(), pane, window: None });
+            let pane = match self.early.take() {
+                Some(early) if early.fits(&screen, &self.hints) => early,
+                other => {
+                    if let Some(stale) = other {
+                        self.drop_pane(stale);
+                    }
+                    Pane::new(screen, self.hints.clone())
+                }
+            };
+            let found = pane.made();
+            self.pending.push(Pending { id, still, asked: Instant::now(), pane, found, window: None });
             if self.gpu.is_none() && self.running.is_none() {
                 let hints = self.hints.clone();
                 self.warm(hints, (None, None), None, None, false);
@@ -751,7 +781,9 @@ mod running {
         }
 
         fn pause(&self) -> Duration {
-            self.pending.iter().filter_map(|pending| pending.pane.pause(true)).min().unwrap_or(TICK)
+            let pending = self.pending.iter().filter_map(|pending| pending.pane.pause(true));
+            let early = self.early.iter().filter_map(|early| early.pause(false));
+            pending.chain(early).min().unwrap_or(TICK)
         }
 
         fn advance(&mut self) {
@@ -781,6 +813,13 @@ mod running {
                     }
                 }
             }
+            if !worked {
+                if let Some(early) = self.early.as_mut() {
+                    if early.step(&mut self.platform, false).is_err() {
+                        self.early = None;
+                    }
+                }
+            }
             self.launch_shown();
         }
 
@@ -798,8 +837,8 @@ mod running {
         }
 
         fn launch(&mut self, pending: Pending<P>, gpu: Gpu) {
-            let Pending { id, still, asked, mut pane, window } = pending;
-            let split = Split { window: window.unwrap_or_else(|| spent(asked)), make: pane.make, present: pane.present, steps: std::mem::take(&mut pane.steps) };
+            let Pending { id, still, asked, mut pane, found, window } = pending;
+            let split = Split { window: window.unwrap_or_else(|| spent(asked)), make: pane.make, present: pane.present, found, steps: std::mem::take(&mut pane.steps) };
             let Some(layer) = pane.into_layer() else {
                 self.fail(Some(id), "the layer window is gone");
                 return;
@@ -880,6 +919,7 @@ mod running {
                     }
                     self.warm(hints, (picture, canvas), size, warm_id, true)
                 }
+                Command::Window { screen, rect, scale } => self.make_early(Screen { id: screen, frame: rect, scale }),
                 Command::Open { id, screen, rect, scale, still } => {
                     let still = still.map(Decoding::start::<P>);
                     self.open(id, Screen { id: screen, frame: rect, scale }, still)
@@ -1001,7 +1041,7 @@ mod running {
                                 let ms = live.asked.elapsed().as_millis() as u64;
                                 let split = &live.split;
                                 let steps = split.steps.iter().map(|(name, took)| (String::from(*name), *took)).collect();
-                                let drawn = Reply::Drawn { id, window: split.window, first, reveal: spent(revealing), make: split.make, present: split.present, steps };
+                                let drawn = Reply::Drawn { id, window: split.window, first, reveal: spent(revealing), make: split.make, present: split.present, found: split.found, steps };
                                 self.tell(Reply::Shown { id, ms });
                                 self.tell(drawn);
                             }
@@ -1049,6 +1089,11 @@ mod running {
         fn sweep(&mut self) {
             if self.last.elapsed() > IDLE_EXIT {
                 self.leaving = true;
+            }
+            if self.leaving || self.early.as_ref().is_some_and(|early| early.asked.elapsed() > LAYER_IDLE) {
+                if let Some(early) = self.early.take() {
+                    self.drop_pane(early);
+                }
             }
             if self.leaving {
                 for pending in std::mem::take(&mut self.pending) {
@@ -1110,7 +1155,7 @@ mod running {
             say(&out, &Reply::Failed { id: None, why: "could not start the protocol thread".into() });
             return ExitCode::from(1);
         }
-        let mut helper = Helper { platform, out, events, waker, hints: Hints::default(), scale: 1.0, pinned: None, timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+        let mut helper = Helper { platform, out, events, waker, hints: Hints::default(), scale: 1.0, pinned: None, timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
         loop {
             let pause = helper.pause();
             helper.platform.wait(pause);
@@ -1158,18 +1203,27 @@ mod running {
         struct Fake {
             closed: usize,
             abandoned: usize,
+            made: usize,
+            steps: u32,
+            presented: Vec<String>,
+            gone: Vec<String>,
+            during: Option<Box<dyn FnOnce() + Send>>,
+            watched: Option<Captured>,
+            ready_when_made: Option<bool>,
         }
 
         #[cfg(target_os = "macos")]
         struct Drawn {
             metal: objc2::rc::Retained<objc2_quartz_core::CAMetalLayer>,
             size: (u32, u32),
+            screen: String,
         }
 
         #[cfg(windows)]
         struct Drawn {
             window: isize,
             size: (u32, u32),
+            screen: String,
         }
 
         #[cfg(windows)]
@@ -1196,15 +1250,25 @@ mod running {
                 Ok(false)
             }
 
-            fn make(&mut self, screen: &Screen, _hints: &Hints, _making: Option<u32>) -> Result<Build<u32, Drawn>> {
+            fn make(&mut self, screen: &Screen, _hints: &Hints, making: Option<u32>) -> Result<Build<u32, Drawn>> {
+                if let Some(during) = self.during.take() {
+                    during();
+                }
+                let done = making.unwrap_or(0) + 1;
+                if done < self.steps {
+                    return Ok(Build::Partly(done, "step"));
+                }
+                self.made += 1;
+                self.ready_when_made = self.watched.as_ref().map(|out| out.replies().iter().any(|reply| matches!(reply, Reply::Ready { .. })));
                 let size = (screen.frame.w as u32, screen.frame.h as u32);
                 #[cfg(target_os = "macos")]
-                return Ok(Build::Whole(Drawn { metal: objc2_quartz_core::CAMetalLayer::new(), size }, "window"));
+                return Ok(Build::Whole(Drawn { metal: objc2_quartz_core::CAMetalLayer::new(), size, screen: screen.id.clone() }, "window"));
                 #[cfg(windows)]
-                return Ok(Build::Whole(Drawn { window: window(size.0, size.1)?, size }, "window"));
+                return Ok(Build::Whole(Drawn { window: window(size.0, size.1)?, size, screen: screen.id.clone() }, "window"));
             }
 
-            fn present(&mut self, _layer: &Drawn) -> Result<()> {
+            fn present(&mut self, layer: &Drawn) -> Result<()> {
+                self.presented.push(layer.screen.clone());
                 Ok(())
             }
 
@@ -1226,12 +1290,14 @@ mod running {
             #[cfg(windows)]
             fn close(&mut self, layer: Drawn) {
                 self.closed += 1;
+                self.gone.push(layer.screen);
                 let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(windows::Win32::Foundation::HWND(layer.window as *mut std::ffi::c_void)) };
             }
 
             #[cfg(target_os = "macos")]
             fn close(&mut self, layer: Drawn) {
                 self.closed += 1;
+                self.gone.push(layer.screen);
                 drop(layer.metal);
             }
 
@@ -1316,7 +1382,7 @@ mod running {
             std::fs::write(&first.canvas, damaged).unwrap();
             let (events, inbox) = mpsc::channel();
             let out = Captured::default();
-            let mut helper = Helper { platform: Fake::default(), out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let mut helper = Helper { platform: Fake::default(), out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
             let before = scooch_live::devices_made();
             let screen = |made: &Made| (format!("screen-{}", made.size[0]), Rect { x: 0.0, y: 0.0, w: made.size[0] as f32, h: made.size[1] as f32 });
             for (index, made) in [&first, &second].into_iter().enumerate() {
@@ -1356,7 +1422,7 @@ mod running {
         fn closed_after_stop(stopped: bool) -> (usize, usize, Vec<Reply>) {
             let (events, _inbox) = mpsc::channel();
             let out = Captured::default();
-            let mut helper = Helper { platform: Fake::default(), out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let mut helper = Helper { platform: Fake::default(), out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
             let screen = Screen { id: "stuck".into(), frame: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0 };
             let Ok(Build::Whole(layer, _)) = helper.platform.make(&screen, &Hints::default(), None) else { panic!("the fake made no layer") };
             let (jobs, _receiver) = mpsc::channel();
@@ -1377,6 +1443,105 @@ mod running {
             let (closed, abandoned, replies) = closed_after_stop(true);
             assert_eq!((closed, abandoned), (1, 0));
             assert!(replies.iter().any(|reply| matches!(reply, Reply::Closed { id: 1 })), "{replies:?}");
+        }
+
+        fn waiting(platform: Fake) -> (Helper<Fake>, Receiver<Event>, Captured) {
+            let (events, inbox) = mpsc::channel();
+            let out = Captured::default();
+            let running = Some(Want { key: None, canvas: None, waiters: Vec::new(), composition: false });
+            let helper = Helper { platform, out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            (helper, inbox, out)
+        }
+
+        fn turn(helper: &mut Helper<Fake>, inbox: &Receiver<Event>, times: usize) {
+            for _ in 0..times {
+                while let Ok(event) = inbox.try_recv() {
+                    helper.event(event);
+                }
+                helper.advance();
+                helper.sweep();
+            }
+        }
+
+        fn screen(name: &str, width: f32) -> Screen {
+            Screen { id: name.into(), frame: Rect { x: 0.0, y: 0.0, w: width, h: 48.0 }, scale: 1.0 }
+        }
+
+        fn window_for(screen: &Screen) -> Event {
+            Event::Command(Command::Window { screen: screen.id.clone(), rect: screen.frame, scale: screen.scale })
+        }
+
+        fn open_on(id: u32, screen: &Screen) -> Event {
+            Event::Command(Command::Open { id, screen: screen.id.clone(), rect: screen.frame, scale: screen.scale, still: None })
+        }
+
+        #[test]
+        fn an_early_window_is_made_once_and_the_open_on_its_screen_presents_it() {
+            let (mut helper, inbox, out) = waiting(Fake::default());
+            let one = screen("one", 64.0);
+            helper.event(window_for(&one));
+            turn(&mut helper, &inbox, 3);
+            assert_eq!(helper.platform.made, 1);
+            assert!(helper.platform.presented.is_empty(), "the early window was ordered in before the open");
+            helper.event(open_on(1, &one));
+            turn(&mut helper, &inbox, 3);
+            assert_eq!(helper.platform.made, 1, "the open made a second window");
+            assert_eq!(helper.platform.presented, vec!["one".to_string()]);
+            assert!(helper.early.is_none() && helper.pending.len() == 1 && helper.pending[0].found && helper.pending[0].pane.shown());
+            helper.event(Event::Command(Command::Close { id: 1 }));
+            assert_eq!((helper.platform.made, helper.platform.closed), (1, 1));
+            assert!(out.replies().iter().any(|reply| matches!(reply, Reply::Closed { id: 1 })), "{:?}", out.replies());
+        }
+
+        #[test]
+        fn an_open_on_another_screen_makes_its_own_window_and_closes_the_early_one() {
+            let (mut helper, inbox, _) = waiting(Fake::default());
+            let (one, two) = (screen("one", 64.0), screen("two", 80.0));
+            helper.event(window_for(&one));
+            turn(&mut helper, &inbox, 3);
+            helper.event(open_on(1, &two));
+            turn(&mut helper, &inbox, 3);
+            assert_eq!(helper.platform.gone, vec!["one".to_string()], "the early window was kept");
+            assert_eq!(helper.platform.made, 2);
+            assert_eq!(helper.platform.presented, vec!["two".to_string()]);
+            assert!(!helper.pending[0].found);
+            let wider = Screen { frame: Rect { w: 96.0, ..one.frame }, ..one.clone() };
+            helper.event(window_for(&one));
+            turn(&mut helper, &inbox, 3);
+            helper.event(open_on(2, &wider));
+            turn(&mut helper, &inbox, 3);
+            assert_eq!(helper.platform.gone, vec!["one".to_string(), "one".to_string()], "an early window of another size was kept");
+            assert_eq!(helper.platform.made, 4);
+            assert_eq!(helper.platform.presented, vec!["two".to_string(), "one".to_string()]);
+        }
+
+        #[test]
+        fn an_early_helper_sent_nothing_quits_with_no_window_left() {
+            let (mut helper, inbox, _) = waiting(Fake::default());
+            helper.event(window_for(&screen("one", 64.0)));
+            turn(&mut helper, &inbox, 3);
+            assert_eq!(helper.platform.made, 1);
+            helper.event(Event::Command(Command::Quit));
+            helper.sweep();
+            assert!(helper.leaving && helper.layers.is_empty() && helper.early.is_none(), "the helper would not quit");
+            assert_eq!(helper.platform.closed, 1, "the early window was left behind");
+            assert!(helper.platform.presented.is_empty(), "the early window was ordered in");
+        }
+
+        #[test]
+        fn ready_is_said_before_the_window_is_done_when_the_canvas_is_done_first() {
+            let (mut helper, inbox, out) = waiting(Fake { steps: 3, ..Fake::default() });
+            helper.running = Some(Want { key: None, canvas: None, waiters: vec![Some(1)], composition: false });
+            helper.platform.watched = Some(out.clone());
+            let events = helper.events.clone();
+            helper.platform.during = Some(Box::new(move || {
+                let _ = events.send(Event::Warmed { gpu: None, loaded: None, from: Some("cache".into()), ms: 1 });
+            }));
+            helper.event(window_for(&screen("one", 64.0)));
+            turn(&mut helper, &inbox, 5);
+            assert_eq!(helper.platform.made, 1);
+            assert!(out.replies().iter().any(|reply| matches!(reply, Reply::Ready { warm_id: Some(1), .. })), "{:?}", out.replies());
+            assert_eq!(helper.platform.ready_when_made, Some(true), "the window held Ready back until it was done");
         }
 
         #[test]
