@@ -285,7 +285,7 @@ mod probe {
             "3 Icons" => 9_499,
             "3b Live layer" => 47_610,
             "3c Helper colour and scale" => 5_578,
-            "3d Reveal captures" => 45_000,
+            "3d Reveal captures" => 75_000,
             "4 First run" => 101_164,
             "5 Move to new wallpaper" => 62_364,
             "5b Scenery" => 157_529,
@@ -2392,8 +2392,12 @@ mod probe {
     const REVEAL_WATCH: Duration = Duration::from_millis(150);
     const REVEAL_STRIDE: usize = 4;
 
-    fn helper_window(pid: u32, screen: &Screen) -> Option<i64> {
-        layer::listing().into_iter().find(|window| window.pid == i64::from(pid) && window.bounds.x < screen.frame.x + screen.frame.w && screen.frame.x < window.bounds.x + window.bounds.w && window.bounds.w >= screen.frame.w * 0.9).map(|window| window.number)
+    fn helper_windows(pid: u32) -> Vec<i64> {
+        layer::every_window().into_iter().filter(|window| window.pid == i64::from(pid)).map(|window| window.number).collect()
+    }
+
+    fn new_window(pid: u32, screen: &Screen, before: &[i64]) -> Option<i64> {
+        layer::listing().into_iter().find(|window| window.pid == i64::from(pid) && !before.contains(&window.number) && window.bounds.x < screen.frame.x + screen.frame.w && screen.frame.x < window.bounds.x + window.bounds.w && window.bounds.w >= screen.frame.w * 0.9).map(|window| window.number)
     }
 
     fn sampled(shot: &Shot) -> Vec<[u8; 3]> {
@@ -2417,78 +2421,119 @@ mod probe {
         if !file.is_file() {
             still_file(&file, &test_still(width, height))?;
         }
-        for skip in [false, true] {
-            if let Err(error) = reveal_captures(p, &screen, skip) {
-                p.line(format!("- the reveal captures with the spin {} could not run {error:#}", if skip { "skipped" } else { "kept" }));
+        for (label, env) in [("spin kept", None), ("spin skipped", Some(scooch::live::SKIP_SPIN)), ("transaction present", Some(scooch::live::TRANSACTION))] {
+            if let Err(error) = reveal_captures(p, &screen, label, env) {
+                p.line(format!("- the reveal captures with the {label} could not run {error:#}"));
             }
         }
         Ok(())
     }
 
-    fn reveal_captures(p: &mut Probe, screen: &Screen, skip: bool) -> Result<()> {
-        let (width, height) = pixels(screen);
-        let file = p.home.join(format!("probe-still-{width}x{height}.jpg"));
-        let label = if skip { "spin skipped" } else { "spin kept" };
-        let env: &[(&str, &str)] = if skip { &[(scooch::live::SKIP_SPIN, "1")] } else { &[] };
-        let mut helper = scooch::live::Helper::spawn_with(&p.bin, Duration::from_secs(5), env)?;
-        helper.warm(scooch::live::Hints::default(), None, None, Duration::from_secs(30))?;
-        p.line(format!("- reveal captures with the {label}, {REVEAL_OPENS} opens of the helper's layer over the test still, each captured as the helper's window alone by its number from shown on for {} ms, every {REVEAL_STRIDE}th pixel compared, reported only", REVEAL_WATCH.as_millis()));
-        let (mut bad, mut worst, mut total) = (0, 0u8, 0);
-        for id in 1..=REVEAL_OPENS {
-            helper.ask_open(id, screen, &file)?;
-            let asked = Instant::now();
-            let (mut number, mut shown, mut failed) = (None, None, None);
-            while asked.elapsed() < Duration::from_secs(5) && shown.is_none() && failed.is_none() {
-                if number.is_none() {
-                    number = helper_window(helper.pid, screen);
-                }
-                match helper.next(Duration::from_millis(2)) {
-                    Some(scooch::live::Reply::Shown { id: got, .. }) if got == id => shown = Some(Instant::now()),
-                    Some(scooch::live::Reply::Failed { id: got, why }) if got.is_none_or(|got| got == id) => failed = Some(why),
+    struct Opened {
+        saw: bool,
+        bad: bool,
+        reveal: Option<u64>,
+        shown: Option<u128>,
+    }
+
+    fn reveal_open(p: &mut Probe, helper: &mut scooch::live::Helper, screen: &Screen, file: &Path, id: u32) -> Result<Opened> {
+        let before = helper_windows(helper.pid);
+        helper.ask_open(id, screen, file)?;
+        let asked = Instant::now();
+        let (mut number, mut shown, mut failed, mut drawn) = (None, None::<Instant>, None, None);
+        let mut captures: Vec<(Instant, Option<Vec<[u8; 3]>>)> = Vec::new();
+        while asked.elapsed() < Duration::from_secs(5) && failed.is_none() && shown.is_none_or(|shown| shown.elapsed() < REVEAL_WATCH) {
+            if number.is_none() {
+                number = new_window(helper.pid, screen, &before);
+            }
+            if let Some(number) = number {
+                let at = Instant::now();
+                captures.push((at, grab_window(number).map(|shot| sampled(&shot))));
+            }
+            let wait = if number.is_some() { Duration::ZERO } else { Duration::from_millis(2) };
+            while let Some(reply) = helper.next(wait) {
+                match reply {
+                    scooch::live::Reply::Shown { id: got, .. } if got == id => shown = Some(helper.arrived().unwrap_or_else(Instant::now)),
+                    scooch::live::Reply::Drawn { id: got, reveal, revealing, .. } if got == id => drawn = Some((reveal, revealing)),
+                    scooch::live::Reply::Failed { id: got, why } if got.is_none_or(|got| got == id) => failed = Some(why),
                     _ => {}
                 }
-            }
-            let known = number.is_some();
-            let Some(shown) = shown else {
-                p.line(format!("  - open {id}: no shown within 5 s, {failed:?}"));
-                let _ = helper.close(id, Duration::from_secs(3));
-                continue;
-            };
-            let number = number.or_else(|| helper_window(helper.pid, screen));
-            let mut captures = Vec::new();
-            if let Some(number) = number {
-                while shown.elapsed() < REVEAL_WATCH {
-                    let at = shown.elapsed().as_millis();
-                    captures.push((at, grab_window(number).map(|shot| sampled(&shot))));
+                if wait.is_zero() {
+                    continue;
                 }
+                break;
             }
-            let drawn = helper
+        }
+        if drawn.is_none() && shown.is_some() {
+            drawn = helper
                 .expect(Duration::from_millis(500), |reply| match reply {
                     scooch::live::Reply::Drawn { id: got, reveal, revealing, .. } if *got == id => Some(Ok((*reveal, revealing.clone()))),
                     _ => None,
                 })
                 .ok();
-            std::thread::sleep(Duration::from_millis(400));
-            let settled = number.and_then(grab_window).map(|shot| sampled(&shot));
-            let _ = helper.close(id, Duration::from_secs(3));
-            let empty: Vec<u128> = captures.iter().filter(|(_, shot)| shot.as_ref().is_none_or(Vec::is_empty)).map(|(at, _)| *at).collect();
-            let dark: Vec<u128> = captures.iter().filter(|(_, shot)| shot.as_deref().is_some_and(black)).map(|(at, _)| *at).collect();
-            let gaps: Vec<u8> = captures.iter().filter_map(|(_, shot)| shot.as_deref().zip(settled.as_deref()).and_then(|(shot, settled)| largest_gap(shot, settled))).collect();
-            let largest = gaps.iter().copied().max();
-            total += captures.len();
-            worst = worst.max(largest.unwrap_or(0));
-            if !empty.is_empty() || !dark.is_empty() {
-                bad += 1;
-            }
-            p.line(format!(
-                "  - open {id}: window {number:?} known before shown {known}, {} captures, at {:?} ms after shown, largest difference from the settled layer {largest:?} of 255, empty at {empty:?} ms, black at {dark:?} ms, settled capture black {:?}, reveal and its steps {drawn:?}",
-                captures.len(),
-                captures.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
-                settled.as_deref().map(black)
-            ));
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        let settled = number.and_then(grab_window).map(|shot| sampled(&shot));
+        let _ = helper.close(id, Duration::from_secs(3));
+        let Some(shown) = shown else {
+            p.line(format!("  - open {id}: no shown within 5 s, window {number:?}, {failed:?}"));
+            return Ok(Opened { saw: false, bad: false, reveal: None, shown: None });
+        };
+        let (early, late): (Vec<_>, Vec<_>) = captures.iter().partition(|(at, _)| *at < shown);
+        let empty = |list: &[&(Instant, Option<Vec<[u8; 3]>>)]| list.iter().filter(|(_, shot)| shot.as_ref().is_none_or(Vec::is_empty)).count();
+        let dark = |list: &[&(Instant, Option<Vec<[u8; 3]>>)]| list.iter().filter(|(_, shot)| shot.as_deref().is_some_and(black)).count();
+        let largest = late.iter().filter_map(|(_, shot)| shot.as_deref().zip(settled.as_deref()).and_then(|(shot, settled)| largest_gap(shot, settled))).max();
+        let seen_after = late.len() - empty(&late) - dark(&late);
+        let saw = empty(&early) + dark(&early) > 0 && seen_after > 0;
+        let bad = empty(&late) + dark(&late) > 0;
+        let to_shown = shown.saturating_duration_since(asked).as_millis();
+        let times = |list: &[&(Instant, Option<Vec<[u8; 3]>>)]| list.iter().map(|(at, _)| at.saturating_duration_since(asked).as_millis()).collect::<Vec<_>>();
+        p.line(format!(
+            "  - open {id}: window {number:?}, Open to shown {to_shown} ms, before shown {} captures at {:?} ms after Open with {} black and {} empty, after shown {} captures at {:?} ms with {} black and {} empty, largest difference after shown from the settled layer {largest:?} of 255, settled capture black {:?}, the control saw the hidden layer {saw}, reveal and its steps {drawn:?}",
+            early.len(),
+            times(&early),
+            dark(&early),
+            empty(&early),
+            late.len(),
+            times(&late),
+            dark(&late),
+            empty(&late),
+            settled.as_deref().map(black)
+        ));
+        Ok(Opened { saw, bad, reveal: drawn.map(|(reveal, _)| reveal), shown: Some(to_shown) })
+    }
+
+    fn spread(values: &[u128]) -> String {
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        match (sorted.get(sorted.len() / 2), sorted.first(), sorted.last()) {
+            (Some(middle), Some(low), Some(high)) => format!("median {middle} ms from {low} to {high} ms"),
+            _ => "none".to_string(),
+        }
+    }
+
+    fn reveal_captures(p: &mut Probe, screen: &Screen, label: &str, switch: Option<&str>) -> Result<()> {
+        let (width, height) = pixels(screen);
+        let file = p.home.join(format!("probe-still-{width}x{height}.jpg"));
+        let env: Vec<(&str, &str)> = switch.map(|name| (name, "1")).into_iter().collect();
+        let mut helper = scooch::live::Helper::spawn_with(&p.bin, Duration::from_secs(5), &env)?;
+        helper.warm(scooch::live::Hints::default(), None, None, Duration::from_secs(30))?;
+        p.line(format!("- reveal captures with the {label}, {REVEAL_OPENS} opens of the helper's layer over the test still, the helper's new window captured alone by its number from the moment it is listed until {} ms after shown, every {REVEAL_STRIDE}th pixel compared, the captures before shown are the control, reported only", REVEAL_WATCH.as_millis()));
+        let mut opened = Vec::new();
+        for id in 1..=REVEAL_OPENS {
+            opened.push(reveal_open(p, &mut helper, screen, &file, id)?);
         }
         drop(helper);
-        p.line(format!("  - with the {label}: opens with an empty or black capture {bad} of {REVEAL_OPENS}, captures {total}, largest difference from the settled layer {worst} of 255"));
+        let saw = opened.iter().filter(|open| open.saw).count();
+        let bad = opened.iter().filter(|open| open.bad).count();
+        let reveals: Vec<u128> = opened.iter().filter_map(|open| open.reveal.map(u128::from)).collect();
+        let shown: Vec<u128> = opened.iter().filter_map(|open| open.shown).collect();
+        p.line(format!(
+            "  - with the {label}: the control saw the hidden layer in {saw} of {REVEAL_OPENS} opens, in every open {}, opens with a black or empty capture after shown {bad} of {REVEAL_OPENS}, reveal {}, Open to shown {}",
+            saw == opened.len(),
+            spread(&reveals),
+            spread(&shown)
+        ));
         Ok(())
     }
 
