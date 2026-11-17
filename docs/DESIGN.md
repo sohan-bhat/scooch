@@ -221,6 +221,8 @@ On macOS the layer is a borderless window at the desktop window level, above the
 
 **The early window.** The helper makes the layer's window for the named screen as soon as it is asked, beside the device work, and keeps it hidden and never ordered in, so nothing of it is on screen when nothing moves. When the move is on that screen, the open only shows the window and waits until it is visible. When it is on another screen, the helper makes that screen's window and drops the early one. An early window not opened within 5 s is closed, and it goes with the helper when the helper quits.
 
+**The reveal.** On macOS the layer stays hidden until its first frame, the still the system shows, is on it. That frame is presented inside a Core Animation transaction, which the render thread commits before it reports the frame, and the main thread then unhides the layer in a transaction of its own. Core Animation applies the two in that order, so the layer is never shown empty and nothing waits on a timer. Every later frame is presented at the display's pace. Waiting a fixed 34 ms for the frame instead took 35 to 180 ms on GitHub's virtual Macs, since the run loop that waited ran past its time.
+
 **Tables.** For each output the daemon writes `<output>.<key>.tables` in the cache, where the key is a hash of the picture and the flip setting. Tables of version 3 start with `SCBT` and hold the screen and canvas sizes, the warp maps, the field, look, pad, paint and ramp grids, the canvas fingerprint and a checksum. For a glide the daemon hands the helper the tables of the picture on screen and of the new one.
 
 **The canvas file.** One per screen, `<screen>.<key>.canvas` beside the tables. Its 36 byte header is `SCCV`, then version 2, width, height, 4 channels, colour 1 for sRGB and the number of mip levels as 32 bit numbers, then the canvas fingerprint that the tables also hold. Every mip level follows as RGBA. A 2880 by 1800 canvas makes a file of 27,647,488 bytes. The daemon writes the file after a set when none exists for that picture and those options, and deletes the screen's older canvas files. The helper reads it while it makes the device, uploads the stored levels and checks the fingerprint. When the file is missing or does not match, the helper decodes the picture instead.
@@ -233,7 +235,7 @@ On macOS the layer is a borderless window at the desktop window level, above the
 | Device made | The warm thread | `device` |
 | Canvas loaded | The warm thread | `canvas` |
 | Ready | The main thread | `ready` |
-| Layer shown | The main thread, after the render thread draws the first frame | `shown`, then `drawn` with the window, draw and reveal times, the reveal split into its wait for the first frame to land and the unhide |
+| Layer shown | The main thread, after the render thread draws the first frame | `shown`, then `drawn` with the window, draw and reveal times |
 
 The first glide runs at the scale remembered for that GPU and screen size, or at 1.0 on a discrete GPU and 0.6 on any other. Once no layer is open the helper draws two test frames and sets the scale for the next glide from the time the second one took.
 
