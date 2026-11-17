@@ -51,9 +51,7 @@ try {
   const entryChunks = await closure(entry);
   const stageChunks = [...(await closure(stage))].filter((name) => !entryChunks.has(name));
   const scene = [
-    `<link rel="preload" as="image" href="/scooch/stills/hero-desktop.webp" media="${wide}" fetchpriority="high" />`,
-    `<link rel="preload" as="image" href="/scooch/stills/hero-square.webp" media="${square}" fetchpriority="high" />`,
-    `<link rel="preload" as="image" href="/scooch/stills/hero-phone.webp" media="${tall}" fetchpriority="high" />`,
+    ...[['desktop', wide], ['square', square], ['phone', tall]].map(([name, media]) => `<link rel="preload" as="image" type="image/avif" imagesrcset="/scooch/stills/hero-${name}-1x.avif 1x, /scooch/stills/hero-${name}-2x.avif 2x" media="${media}" fetchpriority="high" />`),
     ...stageChunks.map((name) => `<link rel="modulepreload" crossorigin href="/scooch/assets/${name}" media="${story}" fetchpriority="high" />`),
     `<script>if(!/[?&]stills/.test(location.search)&&matchMedia('${story}').matches){var e=window.__early=new Map(),g=window.__got={};${JSON.stringify(early)}.forEach(function(f){var u=new URL(f[0],location.href).href;e.set(u,fetch(u,{credentials:'same-origin',priority:f[1]}).then(function(r){if(!r.ok||!r.body)return r;var k=r.body.getReader(),c=[];g[f[0]]=0;return(function p(){return k.read().then(function(x){if(x.done)return new Response(new Blob(c),{status:r.status,statusText:r.statusText,headers:r.headers});c.push(x.value);g[f[0]]+=x.value.length;return p()})})()}).catch(function(){return null}))})}</script>`,
     ...images.map((file) => `<link rel="preload" as="image" crossorigin href="/scooch/demo/${file}" media="${story}" fetchpriority="low" />`),
