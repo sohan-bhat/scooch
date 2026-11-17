@@ -5,7 +5,7 @@ const only = query.get('sharp');
 const chosen = query.get('heroset');
 const hero = chosen === null ? heroset.hero : chosen.split(',');
 const NAMES = ['television', 'desk', 'laptop', 'lamp', 'clock', 'cassette', 'plant', 'stapler', 'glasses', 'gamepad', 'main', 'gallery', 'labels'];
-const group = (name: string) => (NAMES.includes(name) ? name : 'gallery');
+export const group = (name: string) => (NAMES.includes(name) ? name : 'gallery');
 
 export function sharpAllowed(name: string) {
   return only === null || only.split(',').includes(name);

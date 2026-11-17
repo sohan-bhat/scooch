@@ -35,7 +35,7 @@ import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
 import { still as native } from './still';
 import { budget, calm, finished, firstReady, heroReady, level, memory, pause, prefetch, stillsPlanned, upgrades } from './budget';
-import { firstMove, inHeroSet, restOrder, sharpAllowed } from './sharpset';
+import { firstMove, group, inHeroSet, restOrder, sharpAllowed } from './sharpset';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
 import { rendererCaughtUp, stripUpload } from './upload';
@@ -259,11 +259,6 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       const main = sharpAllowed('main') ? screens.main.sharpUrl() : null;
       const moves = amount === 'none' ? [] : firstMove();
       if (main && moves.includes('main')) prefetch([main]);
-      await wait(() => runtime.props && runtime.painted && runtime.gallery);
-      if (amount === 'none') {
-        finished();
-        return;
-      }
       const pictures = amount === 'all' && sharpAllowed('gallery');
       const labelsUp = async () => {
         if (memory() < 4) return;
@@ -310,12 +305,24 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         else if (heroModels.has(name) ? heroesWhen() : extrasWhen()) await sharpenModel(gl, scene, name, () => stopped).catch(() => false);
         performance.mark(`scooch:rest-${name}`);
       };
-      await wait(() => native.off || !stillsPlanned() || native.ready);
+      const reachable = (name: string) => {
+        if (native.off || !stillsPlanned()) return true;
+        if (name === 'main') return native.ready && runtime.scenery;
+        if (group(name) === 'gallery') return runtime.gallery;
+        return runtime.props && runtime.painted && native.ready;
+      };
       for (const name of moves) {
+        await wait(() => reachable(name));
         if (stopped) return;
         await one(name);
       }
       firstReady();
+      await wait(() => runtime.props && runtime.painted && runtime.gallery);
+      if (stopped) return;
+      if (amount === 'none') {
+        finished();
+        return;
+      }
       await wait(() => native.off || !stillsPlanned() || (native.ready && (amount === 'main' || budget.stage >= 2 || !desktop())));
       if (stopped) return;
       if (main && inHeroSet('main')) prefetch([main]);
