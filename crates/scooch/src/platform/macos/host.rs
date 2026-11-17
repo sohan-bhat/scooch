@@ -34,8 +34,7 @@ impl Platform for Host {
         let making = match making {
             Some(making) => making,
             None if !self.app => {
-                NSApplication::sharedApplication(self.marker).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-                self.app = true;
+                self.begin();
                 return Ok(Build::Partly(layer::Making::Start, "app"));
             }
             None => layer::Making::Start,
@@ -44,12 +43,21 @@ impl Platform for Host {
     }
 
     fn present(&mut self, layer: &layer::Layer) -> Result<()> {
-        layer.order();
+        objc2::rc::autoreleasepool(|_| layer.order());
         Ok(())
     }
 
     fn visible(&mut self, layer: &layer::Layer, waited: Duration) -> Result<bool> {
-        layer.waited(waited)
+        objc2::rc::autoreleasepool(|_| layer.waited(waited))
+    }
+
+    fn begin(&mut self) {
+        if !self.app {
+            objc2::rc::autoreleasepool(|_| {
+                NSApplication::sharedApplication(self.marker).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            });
+            self.app = true;
+        }
     }
 
     fn target(&self, layer: &layer::Layer) -> Target {
@@ -83,7 +91,7 @@ impl Platform for Host {
     }
 
     fn wait(&mut self, timeout: Duration) {
-        layer::wait(timeout);
+        objc2::rc::autoreleasepool(|_| layer::wait(timeout));
     }
 
     fn waker(&self) -> Waker {
