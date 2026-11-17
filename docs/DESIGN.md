@@ -175,7 +175,9 @@ On each change, after 250 ms of quiet, for each screen
 2. Skip when the source, screen, icons and options match the last render.
 3. Take the analysis from cache, solve, render at most once, write `out/<screen>-<n>` and set it. Delete older outputs.
 
-On macOS a mouse up over the desktop with Finder in front gets a second look after 60 ms, and when that look shows icons moved the tick runs at once.
+A wake is read at once where that read can be trusted. On macOS a mouse up over the desktop with Finder in front is read at once and, when that read shows no move, again after 60 ms. On Windows, KDE and Xfce every wake is read at once, and the tick runs at once only when the read shows a pure move, the same icons at other places. Icons that came or went and a read that shows no change wait for the 250 ms of quiet, so a copy of many files is still one change, and so do wakes in the 250 ms after a quick move. When a read shows icons moved, the tick runs at once with that read. GNOME, Cinnamon and MATE keep each icon's place in that file's own gvfs metadata, so a move of several icons arrives as several writes and an early read could show it half done. Those desktops always wait for the quiet.
+
+Where scenery belongs is kept per screen in the cache as `<screen>.<key>.map`. A new session takes it, so the first move after the daemon freed its render data or started again does not work the map out again. The file carries the picture key, the source size, the scenery stamp, the map version and a checksum, and a map that does not fit is worked out again and replaces the file.
 
 State lives in the per-user data folder as `state.json`, with the source per screen, the last placement, and the wallpaper to restore. The file is written to a temporary name and renamed, so a crash never leaves half a file. A file that cannot be read is moved aside and never overwritten. One daemon runs at a time, held by a lock file.
 
