@@ -301,6 +301,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         ['gallery', galleryUp],
       ] as const;
       const one = async (name: string) => {
+        await calm();
+        if (stopped) return;
         if (name === 'labels') await labelsUp();
         else if (name === 'main') await mainUp();
         else if (name === 'gallery') for (const id of Object.keys(gallery.current)) await pictureUp(id);
