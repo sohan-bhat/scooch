@@ -23,6 +23,7 @@ export function Stills() {
                   <source media="(max-width: 767px), (orientation: portrait)" srcSet={asset(`stills/phone-${index + 1}.webp`)} width={780} height={940} />
                   <img
                     src={asset(`stills/desktop-${index + 1}.webp`)}
+                    srcSet={`${asset(`stills/desktop-${index + 1}.webp`)} 1x, ${asset(`stills/desktop-${index + 1}-2x.webp`)} 2x`}
                     alt={content.stills.alt[index]}
                     width={1600}
                     height={1000}

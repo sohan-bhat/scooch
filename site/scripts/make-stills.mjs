@@ -9,6 +9,7 @@ const out = join(site, 'public', 'stills');
 const BEATS = 11;
 const sizes = [
   { name: 'desktop', width: 1600, height: 1000, scale: 1, crop: null },
+  { name: 'desktop', suffix: '-2x', width: 1600, height: 1000, scale: 2, crop: null },
   { name: 'phone', width: 390, height: 844, scale: 2, crop: { width: 780, height: 940 } },
 ];
 
@@ -22,7 +23,7 @@ try {
       await context.close();
       let image = sharp(shot);
       if (size.crop) image = image.extract({ left: 0, top: 0, ...size.crop });
-      const file = join(out, `${size.name}-${beat + 1}.webp`);
+      const file = join(out, `${size.name}-${beat + 1}${size.suffix ?? ''}.webp`);
       await writeFile(file, await image.webp({ quality: 78, effort: 6 }).toBuffer());
       console.log('wrote', file);
     }
