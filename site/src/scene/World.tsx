@@ -33,10 +33,10 @@ import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
 import { still as native } from './still';
-import { advance, budget, calm, finished, level, memory, prefetch, stillsPlanned, upgrades } from './budget';
+import { advance, budget, calm, finished, level, memory, pause, prefetch, stillsPlanned, upgrades } from './budget';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
-import { stripUpload } from './upload';
+import { rendererCaughtUp, stripUpload } from './upload';
 import { Tumbler } from './Tumbler';
 import { CHANNELS, hooks, live } from './touch';
 import { BULB, DESK_TOP, Desk, LAMP, type Console, type Screens } from './Desk';
@@ -242,7 +242,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     let stopped = false;
     let timer = 0;
     const wait = async (test: () => boolean) => {
-      while (!stopped && !test()) await new Promise((resolve) => (timer = window.setTimeout(resolve, 500)));
+      while (!stopped && !test()) await pause(500);
     };
     const sharpen = async () => {
       const amount = level();
@@ -330,6 +330,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       const upload = async (textures: Texture[]) => {
         for (const texture of textures) {
           await quiet();
+          await rendererCaughtUp(gl);
           if (stopped) return;
           gl.initTexture(texture);
         }

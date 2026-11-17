@@ -10,7 +10,8 @@ import { changed, clockSweeping, runtime, story, wallClock } from '@/story/state
 import { beats, TOTAL } from '@/story/timeline';
 import { quality, type Toggle } from './quality';
 import { allocate, freeze, inView, nativeAllowed, nativeOff, screenBox, still, thaw } from './still';
-import { budget, covered, grant, release } from './budget';
+import { budget, covered, grant, pause, release } from './budget';
+import { gpuQuiet } from './upload';
 import { animating, hooks, live, things } from './touch';
 import { precompile } from './warm';
 
@@ -308,12 +309,11 @@ export function Post({ phone }: { phone: boolean }) {
   useEffect(() => {
     if (runtime.still >= 0 || quality.stillScale >= 0.999) return;
     let stopped = false;
-    let timer = 0;
     const wait = () => {
       if (stopped) return;
       const ready = performance.getEntriesByName('scooch:ready')[0]?.startTime;
       if (ready === undefined || performance.now() - ready < READY_FOR) {
-        timer = window.setTimeout(wait, 500);
+        void pause(500).then(wait);
         return;
       }
       if (!nativeAllowed(gl)) {
@@ -325,10 +325,9 @@ export function Post({ phone }: { phone: boolean }) {
       if (quality.liveScale < 0.999) setNative(true);
       else switchWanted.current = true;
     };
-    timer = window.setTimeout(wait, 500);
+    void pause(500).then(wait);
     return () => {
       stopped = true;
-      window.clearTimeout(timer);
     };
   }, [gl]);
 
@@ -826,8 +825,9 @@ export function Post({ phone }: { phone: boolean }) {
         if (still.phase !== 'live') still.inputAt = now;
       }
     }
-    if (switchWanted.current && !moving && !live.pressing && still.phase === 'live') turnNative();
-    else if (warming.current > 0 && !moving && still.phase === 'live') warm();
+    if (switchWanted.current && !moving && !live.pressing && still.phase === 'live') {
+      if (!covered() || gpuQuiet(gl.getContext() as WebGL2RenderingContext)) turnNative();
+    } else if (warming.current > 0 && !moving && still.phase === 'live') warm();
     settle(now, moving, state.clock.elapsedTime - runtime.timeShift);
     grant(still.phase === 'still' && still.pass >= JITTER.length - 1 && !still.tick && !still.refresh);
     if (still.phase === 'show') {

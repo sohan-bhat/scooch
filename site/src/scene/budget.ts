@@ -54,8 +54,28 @@ export function level(): Level {
 const HEADROOM = 600;
 const PATIENCE = 4000;
 
+export function posterCovers() {
+  return runtime.posterUp && runtime.still < 0;
+}
+
 export function covered() {
-  return runtime.posterUp && runtime.ready && runtime.still < 0;
+  return posterCovers() && runtime.ready;
+}
+
+const FRAME = 16;
+const wakers = new Set<() => void>();
+
+export function pause(slow: number) {
+  const fast = posterCovers();
+  return new Promise<void>((resolve) => {
+    const wake = () => {
+      wakers.delete(wake);
+      window.clearTimeout(timer);
+      resolve();
+    };
+    const timer = window.setTimeout(wake, fast ? FRAME : slow);
+    if (fast) wakers.add(wake);
+  });
 }
 
 export async function calm() {
@@ -81,6 +101,7 @@ export async function calm() {
 export function advance(to: number) {
   if (to > budget.stage) performance.mark(`scooch:stage-${to}`);
   budget.stage = Math.max(budget.stage, to);
+  for (const wake of [...wakers]) wake();
 }
 
 export const upgrades = new Set<(wait: () => Promise<void>) => Promise<unknown>>();
