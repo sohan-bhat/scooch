@@ -9,6 +9,9 @@ const file = join(site, 'src', 'scene', 'heroset.json');
 const names = ['television', 'desk', 'laptop', 'lamp', 'clock', 'cassette', 'plant', 'stapler', 'glasses', 'gamepad', 'main', 'gallery', 'labels'];
 const view = { width: 1440, height: 900, scale: 2 };
 const GAIN = 0.1;
+const EARLY = 0.2;
+const WIDE = 0.5;
+const OVER = 1.5;
 const REGION = 2;
 
 async function settled(browser, query) {
@@ -108,6 +111,7 @@ async function storyOrder(browser, names) {
   await page.goto(`${origin}?poster&scan&v=${Date.now()}`, { waitUntil: 'load' });
   await page.waitForFunction(() => performance.getEntriesByName('scooch:settled').length > 0, null, { timeout: 120000, polling: 100 });
   const first = {};
+  const early = {};
   const bases = Object.fromEntries(await Promise.all(names.map(async (name) => [name, await baseSize(name)])));
   for (let i = 0; i <= 200; i++) {
     const place = i / 200;
@@ -163,11 +167,15 @@ async function storyOrder(browser, names) {
       }
       return out;
     }, families);
-    for (const name of names) if (first[name] === undefined && (seen[name] ?? 0) > bases[name]) first[name] = place;
+    for (const name of names) {
+      if (first[name] === undefined && (seen[name] ?? 0) > bases[name]) first[name] = place;
+      if (place < EARLY) early[name] = Math.max(early[name] ?? 0, seen[name] ?? 0);
+    }
   }
   await context.close();
   console.log('heroset bases', JSON.stringify(bases));
-  return [...names].sort((a, b) => (first[a] ?? 2) - (first[b] ?? 2)).map((name) => ({ name, first: first[name] ?? null }));
+  const width = view.width * view.scale;
+  return [...names].sort((a, b) => (first[a] ?? 2) - (first[b] ?? 2)).map((name) => ({ name, first: first[name] ?? null, move: (early[name] ?? 0) > width * WIDE && (early[name] ?? 0) > bases[name] * OVER, early: Math.round(early[name] ?? 0) }));
 }
 
 const previous = JSON.parse(await readFile(file, 'utf8').catch(() => '{"hero":[]}'));
@@ -198,8 +206,11 @@ try {
   console.log('heroset order', story.map(({ name, first }) => `${name} ${first ?? 'never'}`).join(', '));
   const restOrder = story.map(({ name }) => name);
   const firsts = Object.fromEntries(story.map(({ name, first }) => [name, first]));
-  await writeFile(file, `${JSON.stringify({ hero, order: restOrder, measured, firsts, view: `${view.width}x${view.height}@${view.scale}` }, null, 2)}\n`);
-  if ([...previous.hero].sort().join(',') !== [...hero].sort().join(',')) {
+  const move = story.filter((entry) => entry.move).map(({ name }) => name);
+  console.log('heroset first move', move.join(',') || 'none', JSON.stringify(Object.fromEntries(story.map(({ name, early }) => [name, early]))));
+  await writeFile(file, `${JSON.stringify({ hero, move, order: restOrder, measured, firsts, view: `${view.width}x${view.height}@${view.scale}` }, null, 2)}\n`);
+  const same = (a, b) => [...(a ?? [])].sort().join(',') === [...(b ?? [])].sort().join(',');
+  if (!same(previous.hero, hero) || !same(previous.move, move) || (previous.order ?? []).join(',') !== restOrder.join(',')) {
     console.log('heroset changed, build again before the posters');
     process.exitCode = 2;
   }
