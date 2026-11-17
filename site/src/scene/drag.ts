@@ -24,6 +24,7 @@ export const held = {
   opening: 0,
   from: 0,
   span: 0,
+  moved: false,
 };
 
 const OPENING = 300;
@@ -37,6 +38,11 @@ export function begin(frame: Frame, place: number) {
   held.base = { from: frame.states[s >= 1 ? to : from], to: frame.states[to], s: from === to || s >= 1 ? 0 : s };
   held.next = null;
   held.lastAt = 0;
+  held.moved = false;
+}
+
+export function dragged() {
+  held.moved = true;
 }
 
 export async function ask(rects: Float32Array, index: number, final: boolean) {
@@ -74,7 +80,8 @@ export async function ask(rects: Float32Array, index: number, final: boolean) {
 export function step(delta: number) {
   if (!held.active) return;
   const now = performance.now();
-  if (held.base && held.next) {
+  if (held.base) {
+    if (!held.next || !held.moved) return;
     const { from, to, s } = held.base;
     held.base = null;
     held.a = from;

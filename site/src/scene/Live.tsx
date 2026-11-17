@@ -4,7 +4,7 @@ import { Box3, Mesh, Object3D, Plane, Raycaster, Vector2, Vector3 } from 'three'
 import content from '@/content.json';
 import { runtime } from '@/story/state';
 import { DESK_TOP } from './layout';
-import { ask, begin, end } from './drag';
+import { ask, begin, dragged, end } from './drag';
 import { warm } from './engine';
 import { CHANNELS, hooks, live, liveId, obstacles, release, rimOf, things } from './touch';
 import { hush, prepare } from './sound';
@@ -199,6 +199,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
         }
         if (!press.moved) return;
         if (press.id === 'icon' && press.mesh) {
+          dragged();
           const rect = (element.parentElement ?? element).getBoundingClientRect();
           tools.ndc.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
           tools.ray.setFromCamera(tools.ndc, camera);
