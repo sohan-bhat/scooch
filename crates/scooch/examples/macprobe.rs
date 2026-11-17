@@ -2945,6 +2945,7 @@ mod probe {
         launched_at: Option<String>,
         launched_from_drop: Option<f64>,
         start_after: Option<String>,
+        go: Option<f64>,
         line: String,
     }
 
@@ -2990,6 +2991,7 @@ mod probe {
             launched_at: early_line.and_then(|line| line.split("glide early launch at ").nth(1)).and_then(|rest| rest.split(" in ").next()).map(str::to_string),
             launched_from_drop: early_line.and_then(|line| stamp_of(line)).map(after_drop),
             start_after: log.iter().find(|line| line.contains(" drag start at ")).and_then(|line| line.split(" found ").nth(1)).and_then(|rest| rest.split(" ms after the down").next()).map(str::to_string),
+            go: gliding.map(after_drop),
             made: decision.and_then(|line| number_after(line, "made it in ")).filter(|_| early),
             found: decision.and_then(|line| line.split("open found it made ").nth(1)).and_then(|rest| rest.split(',').next()).and_then(|word| word.trim().parse::<bool>().ok()),
             line: String::new(),
@@ -3008,7 +3010,7 @@ mod probe {
             tick: log.iter().find(|line| line.contains(" tick ") && line.contains("Rendered")).map(|line| {
                 let took = line.split(" tick ").nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()).unwrap_or(0.0);
                 let began = stamp_of(line).map(|ended| ((ended - took / 1000.0 - dropped) * 1000.0).round());
-                format!("began {began:?} ms after the drop, took {took} ms, {}", line.split(")] ").nth(1).unwrap_or_default().chars().take(150).collect::<String>())
+                format!("began {began:?} ms after the drop, took {took} ms, {}", line.split(")] ").nth(1).unwrap_or_default().chars().take(400).collect::<String>())
             }),
             set,
             glided: gliding.is_some(),
@@ -3041,7 +3043,7 @@ mod probe {
                 _ => "none".to_string(),
             };
             let line = format!(
-                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}, launch took {} ms, the early window took {} ms, open found it made {:?}, early launch came {came}, drag start found {} ms after the down",
+                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}, launch took {} ms, the early window took {} ms, open found it made {:?}, early launch came {came}, drag start found {} ms after the down, drop to go {} ms beside drop to set {} ms by the daemon's laps",
                 index + 1,
                 cold.glided,
                 cold.skip,
@@ -3066,7 +3068,9 @@ mod probe {
                 rounded(cold.took),
                 rounded(cold.made),
                 cold.found,
-                cold.start_after.as_deref().unwrap_or("never")
+                cold.start_after.as_deref().unwrap_or("never"),
+                rounded(cold.go),
+                rounded(cold.tick.as_deref().and_then(set_by_laps))
             );
             p.line(line.clone());
             Cold { line, ..cold }
@@ -3145,6 +3149,18 @@ mod probe {
         let began = rest.split(')').next()?.parse::<f64>().ok()?;
         let laps = rest.split(" ms after the drop, took ").nth(1)?.split(", sessions hold").next()?;
         Some((began, laps.split(", ").skip(1).filter_map(|lap| lap.rsplit_once(' ').and_then(|(name, value)| Some((name.to_string(), value.parse::<f64>().ok()?)))).collect()))
+    }
+
+    fn set_by_laps(tick: &str) -> Option<f64> {
+        let (began, laps) = laps_of(tick)?;
+        let mut at = began;
+        for (name, value) in laps {
+            at += value;
+            if name == "set" {
+                return Some(at);
+            }
+        }
+        None
     }
 
     fn daemon_clock(line: &str) -> Option<f64> {
