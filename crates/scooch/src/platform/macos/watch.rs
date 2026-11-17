@@ -1,24 +1,27 @@
 use super::sys::{self, Ref, StreamContext};
-use super::Wake;
+use super::{DragStart, Wake};
+use crate::platform::Press;
 use anyhow::{bail, Context, Result};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{msg_send, MainThreadMarker};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification, NSEvent, NSEventMask, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWorkspaceApplicationKey, NSWorkspaceDidLaunchApplicationNotification,
-    NSWorkspaceDidMountNotification, NSWorkspaceDidUnmountNotification, NSWorkspaceDidWakeNotification,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification, NSEvent, NSEventMask, NSEventType, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWorkspaceApplicationKey,
+    NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidMountNotification, NSWorkspaceDidUnmountNotification, NSWorkspaceDidWakeNotification,
 };
 use objc2_foundation::{NSArray, NSNotification, NSNotificationCenter, NSNotificationName, NSString};
+use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, NonNull};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 type Shared = Arc<dyn Fn() + Send + Sync>;
 
 pub static DROPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static DRAG: OnceLock<DragStart> = OnceLock::new();
 
 const STREAM_LATENCY: f64 = 0.05;
 const FINDER: &str = "com.apple.finder";
@@ -123,17 +126,39 @@ extern "C" fn changed(_stream: Ref, info: *mut c_void, count: usize, paths: *con
 
 fn mouse(wake: Shared) {
     let traced = crate::daemon::trace();
-    let on_up = RcBlock::new(move |_: NonNull<NSEvent>| {
-        let front = finder_in_front();
-        if traced {
-            eprintln!("{} mouse up, Finder in front {front}", crate::daemon::stamp());
-        }
-        if front {
-            DROPPED.store(true, std::sync::atomic::Ordering::SeqCst);
-            wake();
+    let press = RefCell::new(Press::default());
+    let on_mouse = RcBlock::new(move |event: NonNull<NSEvent>| {
+        let kind = unsafe { event.as_ref() }.r#type();
+        if kind == NSEventType::LeftMouseDown {
+            press.borrow_mut().down(super::pointer_now());
+        } else if kind == NSEventType::LeftMouseDragged {
+            let started = press.borrow_mut().dragged(super::pointer_now());
+            if let Some(from) = started {
+                drag_started(from, traced);
+            }
+        } else if kind == NSEventType::LeftMouseUp {
+            let after = press.borrow_mut().up();
+            let front = finder_in_front();
+            if traced {
+                let after = after.map_or("none".to_string(), |after| after.to_string());
+                eprintln!("{} mouse up, Finder in front {front}, dragged events after the drag start {after}", crate::daemon::stamp());
+            }
+            if front {
+                DROPPED.store(true, std::sync::atomic::Ordering::SeqCst);
+                wake();
+            }
         }
     });
-    std::mem::forget(NSEvent::addGlobalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseUp, &on_up));
+    let mask = NSEventMask::LeftMouseDown | NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp;
+    std::mem::forget(NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &on_mouse));
+}
+
+fn drag_started(from: (f32, f32), traced: bool) {
+    let front = finder_in_front();
+    let started = front && DRAG.get().is_some_and(|start| start(from));
+    if traced {
+        eprintln!("{} drag start at {:.0},{:.0}, Finder in front {front}, an icon drag {started}", crate::daemon::stamp(), from.0, from.1);
+    }
 }
 
 unsafe fn on_finder_launch(center: &NSNotificationCenter, wake: Shared) {
