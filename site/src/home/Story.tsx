@@ -47,13 +47,14 @@ const vignette = `radial-gradient(100% 100% at 50% 50%, ${Array.from({ length: 1
 }).join(', ')})`;
 
 const posters = [
-  { name: 'phone', media: '(max-width: 767px), (orientation: portrait)', widths: [792, 1188, 1584], sizes: 'calc(100svh * 0.85)' },
-  { name: 'square', media: '(max-aspect-ratio: 16/10)', widths: [1440, 2048, 2880], sizes: '100vw' },
-  { name: 'desktop', media: undefined, widths: [2765, 4608, 5530], sizes: 'calc(min(100svh, 62.5vw) * 2.56)' },
+  { name: 'phone', media: '(max-width: 767px), (orientation: portrait)', ratios: [2] },
+  { name: 'square', media: '(max-aspect-ratio: 1599/1000)', ratios: [1, 2] },
+  { name: 'desktop-900', media: '(max-height: 990px)', ratios: [1, 2] },
+  { name: 'desktop-1080', media: undefined, ratios: [1, 2] },
 ];
 
-function posterSet(name: string, widths: number[], type: string) {
-  return widths.map((width) => `${asset(`stills/hero-${name}-${width}.${type}`)} ${width}w`).join(', ');
+function posterSet(name: string, ratios: number[], type: string) {
+  return ratios.map((ratio) => `${asset(`stills/hero-${name}-${ratio}x.${type}`)} ${ratio}x`).join(', ');
 }
 
 class Fallback extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -96,10 +97,10 @@ export function Story({ live, beats, canvas, still, section, onReady }: Props) {
           ) : null}
         </div>
         <picture ref={still} className="stage-still pointer-events-none absolute inset-0" aria-hidden>
-          {posters.map(({ name, media, widths, sizes }) =>
-            ['avif', 'webp'].map((type) => <source key={`${name}-${type}`} media={media} type={`image/${type}`} srcSet={posterSet(name, widths, type)} sizes={sizes} />),
+          {posters.map(({ name, media, ratios }) =>
+            ['avif', 'webp'].map((type) => <source key={`${name}-${type}`} media={media} type={`image/${type}`} srcSet={posterSet(name, ratios, type)} />),
           )}
-          <img src={asset('stills/hero-desktop-2765.webp')} srcSet={posterSet('desktop', posters[2].widths, 'webp')} sizes={posters[2].sizes} alt="" width={2765} height={1080} fetchPriority="high" decoding="sync" {...{ elementtiming: 'hero' }} />
+          <img src={asset('stills/hero-desktop-1080-1x.webp')} srcSet={posterSet('desktop-1080', [1, 2], 'webp')} alt="" width={2765} height={1080} fetchPriority="high" decoding="sync" {...{ elementtiming: 'hero' }} />
         </picture>
         <Juice />
         <div aria-hidden className="stage-vignette pointer-events-none absolute inset-0" style={{ backgroundImage: vignette }} />

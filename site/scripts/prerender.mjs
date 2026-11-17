@@ -21,8 +21,8 @@ try {
   const manifest = JSON.parse(await readFile(join(dist, 'demo', 'manifest.json'), 'utf8'));
   const stage = assets.find((name) => /^Stage-.*\.js$/.test(name));
   const story = '(prefers-reduced-motion: no-preference)';
-  const wide = '(min-width: 768px) and (orientation: landscape) and (min-aspect-ratio: 1601/1000)';
-  const square = '(min-width: 768px) and (orientation: landscape) and (max-aspect-ratio: 16/10)';
+  const wide = '(min-width: 768px) and (orientation: landscape) and (min-aspect-ratio: 16/10)';
+  const square = '(min-width: 768px) and (orientation: landscape) and (max-aspect-ratio: 1599/1000)';
   const tall = '(max-width: 767px), (orientation: portrait)';
   const early = [
     ['/scooch/demo/manifest.json', 'high'],
@@ -52,10 +52,11 @@ try {
   const stageChunks = [...(await closure(stage))].filter((name) => !entryChunks.has(name));
   const scene = [
     ...[
-      ['desktop', wide, [2765, 4608, 5530], 'calc(min(100svh, 62.5vw) * 2.56)'],
-      ['square', square, [1440, 2048, 2880], '100vw'],
-      ['phone', tall, [792, 1188, 1584], 'calc(100svh * 0.85)'],
-    ].map(([name, media, widths, sizes]) => `<link rel="preload" as="image" type="image/avif" imagesrcset="${widths.map((width) => `/scooch/stills/hero-${name}-${width}.avif ${width}w`).join(', ')}" imagesizes="${sizes}" media="${media}" fetchpriority="high" />`),
+      ['desktop-1080', `${wide} and (min-height: 991px)`, [1, 2]],
+      ['desktop-900', `${wide} and (max-height: 990px)`, [1, 2]],
+      ['square', square, [1, 2]],
+      ['phone', tall, [2]],
+    ].map(([name, media, ratios]) => `<link rel="preload" as="image" type="image/avif" imagesrcset="${ratios.map((ratio) => `/scooch/stills/hero-${name}-${ratio}x.avif ${ratio}x`).join(', ')}" media="${media}" fetchpriority="high" />`),
     ...stageChunks.map((name) => `<link rel="modulepreload" crossorigin href="/scooch/assets/${name}" media="${story}" fetchpriority="high" />`),
     `<script>if(!/[?&]stills/.test(location.search)&&matchMedia('${story}').matches){var e=window.__early=new Map(),g=window.__got={};${JSON.stringify(early)}.forEach(function(f){var u=new URL(f[0],location.href).href;e.set(u,fetch(u,{credentials:'same-origin',priority:f[1]}).then(function(r){if(!r.ok||!r.body)return r;var k=r.body.getReader(),c=[];g[f[0]]=0;return(function p(){return k.read().then(function(x){if(x.done)return new Response(new Blob(c),{status:r.status,statusText:r.statusText,headers:r.headers});c.push(x.value);g[f[0]]+=x.value.length;return p()})})()}).catch(function(){return null}))})}</script>`,
     ...images.map((file) => `<link rel="preload" as="image" crossorigin href="/scooch/demo/${file}" media="${story}" fetchpriority="low" />`),
