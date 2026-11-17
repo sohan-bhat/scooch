@@ -1194,6 +1194,8 @@ mod running {
         use scooch_core::Rect;
         use std::io::Write;
 
+        static DEVICE: Mutex<()> = Mutex::new(());
+
         #[derive(Clone, Default)]
         struct Captured(Arc<Mutex<Vec<u8>>>);
 
@@ -1396,6 +1398,7 @@ mod running {
 
         #[test]
         fn two_screens_of_different_sizes_warm_and_glide_on_one_device() {
+            let _device = DEVICE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let folder = std::env::temp_dir().join(format!("scooch-helper-{}", std::process::id()));
             std::fs::create_dir_all(&folder).unwrap();
             let paint = |width: u32, height: u32, step: u32| RgbImage::from_raw(width, height, (0..height).flat_map(|y| (0..width).flat_map(move |x| [((x * step + y) % 256) as u8, ((y * 2) % 256) as u8, ((x + y * step) % 256) as u8])).collect()).unwrap();
@@ -1444,6 +1447,7 @@ mod running {
         }
 
         fn first_frame(transaction: bool) -> Option<Vec<String>> {
+            let _device = DEVICE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let folder = std::env::temp_dir().join(format!("scooch-commit-{}-{transaction}", std::process::id()));
             std::fs::create_dir_all(&folder).unwrap();
             let still = folder.join("still.png");
