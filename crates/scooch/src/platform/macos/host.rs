@@ -1,6 +1,6 @@
 use super::{layer, picture};
 use crate::live::helper::{self, Build, Commit, Platform, Waker};
-use crate::live::Hints;
+use crate::live::{Hints, Reveal};
 use crate::platform::Screen;
 use anyhow::Result;
 use objc2::MainThreadMarker;
@@ -20,8 +20,7 @@ pub struct Host {
     marker: MainThreadMarker,
     busy: Option<super::Busy>,
     app: bool,
-    spin: bool,
-    transaction: bool,
+    reveal: Reveal,
     revealed: Vec<(&'static str, u64)>,
 }
 
@@ -47,7 +46,7 @@ impl Platform for Host {
 
     fn present(&mut self, layer: &layer::Layer) -> Result<()> {
         objc2::rc::autoreleasepool(|_| {
-            if self.transaction {
+            if self.reveal == Reveal::Transaction {
                 layer.transact(true);
             }
             layer.order()
@@ -86,14 +85,19 @@ impl Platform for Host {
 
     fn show(&mut self, layer: &layer::Layer) -> Result<()> {
         let started = Instant::now();
-        if self.transaction {
-            layer.transact(false);
-        } else if self.spin {
-            layer::spin(SETTLE_IN.as_secs_f64());
+        match self.reveal {
+            Reveal::Transaction => {
+                layer.transact(false);
+                layer.reveal();
+                self.revealed = vec![("unhide", started.elapsed().as_millis() as u64)];
+            }
+            Reveal::Spin => {
+                layer::spin(SETTLE_IN.as_secs_f64());
+                let spun = started.elapsed();
+                layer.reveal();
+                self.revealed = vec![("spin", spun.as_millis() as u64), ("unhide", started.elapsed().saturating_sub(spun).as_millis() as u64)];
+            }
         }
-        let spun = started.elapsed();
-        layer.reveal();
-        self.revealed = vec![("spin", spun.as_millis() as u64), ("unhide", started.elapsed().saturating_sub(spun).as_millis() as u64)];
         Ok(())
     }
 
@@ -102,7 +106,7 @@ impl Platform for Host {
     }
 
     fn committer(&self) -> Option<Commit> {
-        self.transaction.then(|| Box::new(layer::commit) as Commit)
+        (self.reveal == Reveal::Transaction).then(|| Box::new(layer::commit) as Commit)
     }
 
     fn close(&mut self, layer: layer::Layer) {
@@ -142,6 +146,5 @@ pub fn serve() -> ExitCode {
     let Some(marker) = MainThreadMarker::new() else {
         return helper::refuse("the helper has to run on the main thread");
     };
-    let on = |name: &str| std::env::var(name).is_ok_and(|value| value == "1");
-    helper::serve(Host { marker, busy: None, app: false, spin: !on(crate::live::SKIP_SPIN), transaction: on(crate::live::TRANSACTION), revealed: Vec::new() })
+    helper::serve(Host { marker, busy: None, app: false, reveal: Reveal::chosen(), revealed: Vec::new() })
 }

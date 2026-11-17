@@ -1234,7 +1234,7 @@ mod running {
             during: Option<Box<dyn FnOnce() + Send>>,
             watched: Option<Captured>,
             ready_when_made: Option<bool>,
-            transaction: bool,
+            reveal: crate::live::Reveal,
             log: Arc<Mutex<Vec<String>>>,
             failed_at_close: Option<bool>,
         }
@@ -1311,13 +1311,17 @@ mod running {
             }
 
             fn show(&mut self, _layer: &Drawn) -> Result<()> {
-                self.log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push("show".into());
+                let mut log = self.log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if self.reveal == crate::live::Reveal::Spin {
+                    log.push("spin".into());
+                }
+                log.push("show".into());
                 Ok(())
             }
 
             fn committer(&self) -> Option<Commit> {
                 let log = self.log.clone();
-                self.transaction.then(|| Box::new(move || log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push("commit".into())) as Commit)
+                (self.reveal == crate::live::Reveal::Transaction).then(|| Box::new(move || log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push("commit".into())) as Commit)
             }
 
             #[cfg(windows)]
@@ -1455,41 +1459,66 @@ mod running {
             let _ = std::fs::remove_dir_all(&folder);
         }
 
-        fn first_frame(transaction: bool) -> Option<Vec<String>> {
+        fn opening(reveal: crate::live::Reveal, decodable: bool) -> Option<(Vec<Reply>, Vec<String>, usize)> {
             let _device = DEVICE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            let folder = std::env::temp_dir().join(format!("scooch-commit-{}-{transaction}", std::process::id()));
+            let folder = std::env::temp_dir().join(format!("scooch-commit-{}-{reveal:?}-{decodable}", std::process::id()));
             std::fs::create_dir_all(&folder).unwrap();
             let still = folder.join("still.png");
-            std::fs::write(&still, scooch_core::encode_png(&RgbImage::from_pixel(64, 48, [90, 120, 200].into())).unwrap()).unwrap();
+            if decodable {
+                std::fs::write(&still, scooch_core::encode_png(&RgbImage::from_pixel(64, 48, [90, 120, 200].into())).unwrap()).unwrap();
+            }
             let (events, inbox) = mpsc::channel();
             let out = Captured::default();
             let log = Arc::new(Mutex::new(Vec::new()));
-            let platform = Fake { transaction, log: log.clone(), ..Fake::default() };
+            let platform = Fake { reveal, log: log.clone(), ..Fake::default() };
             let mut helper = Helper { platform, out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
             helper.event(Event::Command(Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: Some(1), canvas: None, scales: BTreeMap::new() }));
             helper.event(Event::Command(Command::Open { id: 1, screen: "main".into(), rect: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0, still: Some(still) }));
-            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Shown { .. })));
+            let started = Instant::now();
+            let mut replies = Vec::new();
+            while started.elapsed() < Duration::from_secs(90) {
+                while let Ok(event) = inbox.try_recv() {
+                    helper.event(event);
+                }
+                helper.advance();
+                replies = out.replies();
+                let shown = replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 1, .. }));
+                let failed = replies.iter().any(|reply| matches!(reply, Reply::Failed { .. }));
+                if shown || (failed && helper.layers.is_empty() && helper.pending.is_empty()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
             let _ = std::fs::remove_dir_all(&folder);
             if replies.iter().any(|reply| matches!(reply, Reply::Failed { why, .. } if why.contains("no device"))) {
                 assert!(std::env::var_os("SCOOCH_NEED_ADAPTER").is_none(), "no adapter, and this runner must have one");
                 println!("skipped: no adapter");
                 return None;
             }
-            assert!(replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 1, .. })), "{replies:?}");
             let seen = log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-            Some(seen)
+            Some((replies, seen, helper.platform.closed))
         }
 
         #[test]
-        fn the_switch_off_leaves_the_reveal_path_as_it_is() {
-            let Some(seen) = first_frame(false) else { return };
-            assert_eq!(seen, vec!["show".to_string()]);
-        }
-
-        #[test]
-        fn the_switch_on_sends_presented_only_after_the_first_frames_transaction_is_committed() {
-            let Some(seen) = first_frame(true) else { return };
+        fn the_default_commits_the_first_frames_transaction_before_presented_and_shows_with_no_spin() {
+            let Some((replies, seen, _)) = opening(crate::live::Reveal::from(None), true) else { return };
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 1, .. })), "{replies:?}");
             assert_eq!(seen, vec!["commit".to_string(), "show".to_string()]);
+        }
+
+        #[test]
+        fn the_spin_switch_gives_the_old_order_show_after_presented_with_no_commit() {
+            let Some((replies, seen, _)) = opening(crate::live::Reveal::from(Some("1")), true) else { return };
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 1, .. })), "{replies:?}");
+            assert_eq!(seen, vec!["spin".to_string(), "show".to_string()]);
+        }
+
+        #[test]
+        fn a_first_frame_that_fails_closes_its_layer_with_no_commit_and_no_show() {
+            let Some((replies, seen, closed)) = opening(crate::live::Reveal::from(None), false) else { return };
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Failed { id: Some(1), .. })) && !replies.iter().any(|reply| matches!(reply, Reply::Shown { .. })), "{replies:?}");
+            assert!(seen.is_empty(), "{seen:?}");
+            assert_eq!(closed, 1, "{replies:?}");
         }
 
         #[test]

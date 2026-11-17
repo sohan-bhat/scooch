@@ -15,9 +15,29 @@ use std::time::{Duration, Instant};
 pub const HELPER: &str = "--live-helper";
 pub const VERSION: u32 = 3;
 pub const SLOW_HELLO: &str = "SCOOCH_HELPER_SLOW_HELLO_MS";
-pub const SKIP_SPIN: &str = "SCOOCH_HELPER_SKIP_SPIN";
-pub const TRANSACTION: &str = "SCOOCH_HELPER_TRANSACTION";
+pub const SPIN: &str = "SCOOCH_HELPER_SPIN";
 const QUIT_WAIT: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Reveal {
+    #[default]
+    Transaction,
+    Spin,
+}
+
+impl Reveal {
+    pub fn from(value: Option<&str>) -> Reveal {
+        if value == Some("1") {
+            Reveal::Spin
+        } else {
+            Reveal::Transaction
+        }
+    }
+
+    pub fn chosen() -> Reveal {
+        Reveal::from(std::env::var(SPIN).ok().as_deref())
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Hints {
