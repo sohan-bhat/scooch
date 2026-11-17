@@ -1,6 +1,6 @@
 import { useGLTF } from '@react-three/drei';
 import { useFrame, useThree } from '@react-three/fiber';
-import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { Box3, Group, HalfFloatType, Mesh, MeshStandardMaterial, Object3D, Vector3, WebGLRenderTarget, type Material, type Texture, type WebGLRenderer } from 'three';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
@@ -10,10 +10,11 @@ import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
 import { still as native } from './still';
-import { advance, budget, calm, level, prefetch, upgrades } from './budget';
+import { advance, budget, calm, covered, level, pause, prefetch, upgrades } from './budget';
 import { labelProps } from './labels';
 import { live, makeLive, obstacles, rimmed } from './touch';
 import { quiet } from '@/lib/idle';
+import { rendererCaughtUp } from './upload';
 import { settle, warmDraw } from './warm';
 import { windowLit } from './window';
 
@@ -91,6 +92,7 @@ async function swapTextures(gl: WebGLRenderer, scene: Object3D, source: Object3D
     if (uploaded.has(texture)) continue;
     uploaded.add(texture);
     await calm();
+    await rendererCaughtUp(gl);
     if (cancelled()) return false;
     gl.initTexture(texture);
   }
@@ -121,28 +123,30 @@ function Sharpen({ url, onDone }: { url: string; onDone: () => void }) {
 }
 
 function whenReady(start: () => void, test: () => boolean) {
-  let timer = 0;
-  const check = () => {
-    if (test()) start();
-    else timer = window.setTimeout(check, 200);
+  let stopped = false;
+  void (async () => {
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    while (!stopped && !test()) await pause(200);
+    if (!stopped) start();
+  })();
+  return () => {
+    stopped = true;
   };
-  timer = window.setTimeout(check, 0);
-  return () => window.clearTimeout(timer);
 }
 
 function Sharpener({ list, when, done }: { list: string[]; when: () => boolean; done: () => void }) {
   const [index, setIndex] = useState(-1);
-  const next = useCallback(() => void calm().then(() => setIndex((value) => value + 1)), []);
-  useEffect(() => whenReady(() => void calm().then(() => setIndex(0)), when), [when]);
+  const step = useCallback(() => {
+    const go = () => setIndex((value) => value + 1);
+    if (covered()) startTransition(go);
+    else go();
+  }, []);
+  const next = useCallback(() => void calm().then(step), [step]);
+  useEffect(() => whenReady(() => void calm().then(step), when), [when, step]);
   useEffect(() => {
     if (index >= list.length) done();
   }, [index, list, done]);
-  if (index < 0 || index >= list.length) return null;
-  return (
-    <Suspense fallback={null}>
-      <Sharpen key={list[index]} url={list[index]} onDone={next} />
-    </Suspense>
-  );
+  return <Suspense fallback={null}>{index >= 0 && index < list.length ? <Sharpen key={list[index]} url={list[index]} onDone={next} /> : null}</Suspense>;
 }
 
 const desktop = () => layoutFor(window.innerWidth, window.innerHeight) !== 'phone';
@@ -331,6 +335,7 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
         await labels.ready(gl);
         for (const texture of textures) {
           await quiet();
+          await rendererCaughtUp(gl);
           if (stopped) return;
           gl.initTexture(texture);
         }
