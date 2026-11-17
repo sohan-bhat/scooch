@@ -3883,9 +3883,9 @@ mod probe {
                 pump(Duration::from_millis(2500));
                 let (last, _) = spots(&automation, view.list);
                 let place = |found: &Option<Spots>, name: &String| found.as_ref().and_then(|found| found.iter().find(|(seen, _)| seen == name).map(|(_, spot)| *spot));
-                let finals: Vec<usize> = reads.iter().map(|(_, _, _, found)| moving.iter().filter(|name| place(found, *name).is_some() && place(found, *name) == place(&last, *name)).count()).collect();
+                let finals: Vec<usize> = reads.iter().map(|(_, _, _, found)| moving.iter().filter(|name| place(found, name).is_some() && place(found, name) == place(&last, name)).count()).collect();
                 let wakes: Vec<f64> = log_lines(&log).into_iter().skip(lines).filter(|line| line.contains(" wake ")).filter_map(|line| stamp_of(&line)).map(|stamp| ((stamp - dropped_at) * 1000.0).round()).collect();
-                let moved = moving.iter().filter(|name| place(&before, *name) != place(&last, *name)).count();
+                let moved = moving.iter().filter(|name| place(&before, name) != place(&last, name)).count();
                 if finals.first() == Some(&moving.len()) {
                     if kind == "single" {
                         whole.0 += 1;
