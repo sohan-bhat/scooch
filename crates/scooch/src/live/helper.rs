@@ -1226,6 +1226,8 @@ mod running {
             during: Option<Box<dyn FnOnce() + Send>>,
             watched: Option<Captured>,
             ready_when_made: Option<bool>,
+            transaction: bool,
+            log: Arc<Mutex<Vec<String>>>,
         }
 
         #[cfg(target_os = "macos")]
@@ -1300,7 +1302,13 @@ mod running {
             }
 
             fn show(&mut self, _layer: &Drawn) -> Result<()> {
+                self.log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push("show".into());
                 Ok(())
+            }
+
+            fn committer(&self) -> Option<Commit> {
+                let log = self.log.clone();
+                self.transaction.then(|| Box::new(move || log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push("commit".into())) as Commit)
             }
 
             #[cfg(windows)]
@@ -1433,6 +1441,42 @@ mod running {
             assert_eq!(scooch_live::devices_made() - before, 1, "the helper made more than one device");
             assert_eq!(helper.pictures.len(), 2);
             let _ = std::fs::remove_dir_all(&folder);
+        }
+
+        fn first_frame(transaction: bool) -> Option<Vec<String>> {
+            let folder = std::env::temp_dir().join(format!("scooch-commit-{}-{transaction}", std::process::id()));
+            std::fs::create_dir_all(&folder).unwrap();
+            let still = folder.join("still.png");
+            std::fs::write(&still, scooch_core::encode_png(&RgbImage::from_pixel(64, 48, [90, 120, 200].into())).unwrap()).unwrap();
+            let (events, inbox) = mpsc::channel();
+            let out = Captured::default();
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let platform = Fake { transaction, log: log.clone(), ..Fake::default() };
+            let mut helper = Helper { platform, out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            helper.event(Event::Command(Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: Some(1), canvas: None, scales: BTreeMap::new() }));
+            helper.event(Event::Command(Command::Open { id: 1, screen: "main".into(), rect: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0, still: Some(still) }));
+            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Shown { .. })));
+            let _ = std::fs::remove_dir_all(&folder);
+            if replies.iter().any(|reply| matches!(reply, Reply::Failed { why, .. } if why.contains("no device"))) {
+                assert!(std::env::var_os("SCOOCH_NEED_ADAPTER").is_none(), "no adapter, and this runner must have one");
+                println!("skipped: no adapter");
+                return None;
+            }
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 1, .. })), "{replies:?}");
+            let seen = log.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+            Some(seen)
+        }
+
+        #[test]
+        fn the_switch_off_leaves_the_reveal_path_as_it_is() {
+            let Some(seen) = first_frame(false) else { return };
+            assert_eq!(seen, vec!["show".to_string()]);
+        }
+
+        #[test]
+        fn the_switch_on_sends_presented_only_after_the_first_frames_transaction_is_committed() {
+            let Some(seen) = first_frame(true) else { return };
+            assert_eq!(seen, vec!["commit".to_string(), "show".to_string()]);
         }
 
         fn closed_after_stop(stopped: bool) -> (usize, usize, Vec<Reply>) {
