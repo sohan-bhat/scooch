@@ -32,6 +32,7 @@ pub trait Link: Send {
     fn device(&mut self) -> Result<()>;
     fn warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>, scales: &BTreeMap<String, f32>) -> Result<()>;
     fn ready(&mut self, timeout: Duration) -> Result<Adapter>;
+    fn window(&mut self, screen: &Screen) -> Result<()>;
     fn open(&mut self, id: u32, screen: &Screen, still: &Path) -> Result<()>;
     fn shown(&mut self, id: u32, timeout: Duration) -> Result<Instant>;
     fn drawn(&mut self, id: u32) -> Option<Split>;
@@ -207,6 +208,10 @@ impl Link for Real {
         })
     }
 
+    fn window(&mut self, screen: &Screen) -> Result<()> {
+        self.helper.ask_window(screen)
+    }
+
     fn open(&mut self, id: u32, screen: &Screen, still: &Path) -> Result<()> {
         self.helper.ask_open(id, screen, still)
     }
@@ -321,6 +326,10 @@ pub fn software(adapter: &Adapter) -> bool {
     }
     let name = adapter.name.to_lowercase();
     SOFTWARE.iter().any(|known| name.contains(known))
+}
+
+pub fn under(screens: &[Screen], (x, y): (f32, f32)) -> Option<&Screen> {
+    screens.iter().find(|screen| x >= screen.frame.x && x < screen.frame.x + screen.frame.w && y >= screen.frame.y && y < screen.frame.y + screen.frame.h)
 }
 
 pub fn hold_until(started: Instant, woke: Option<Instant>, predicted: Option<Instant>) -> Option<Instant> {
@@ -571,20 +580,28 @@ impl Glider {
         self.woke = Some(at);
     }
 
-    pub fn wake(&mut self) -> Option<u64> {
+    pub fn wake(&mut self, screen: Option<&Screen>) -> Option<u64> {
         if !self.usable() || self.doomed || self.link.is_some() || self.thrown >= BARE || self.last_early.is_some_and(|at| at.elapsed() < EARLY_EVERY) {
             return None;
         }
         let started = Instant::now();
         self.last_early = Some(started);
-        match self.spawner.spawn().and_then(|mut link| link.device().map(|()| link)) {
+        let launched = self.spawner.spawn().and_then(|mut link| {
+            link.device()?;
+            if let Some(screen) = screen {
+                link.window(screen)?;
+            }
+            Ok(link)
+        });
+        match launched {
             Ok(link) => {
                 self.drop_link();
                 self.link = Some(link);
                 self.launched = Some(started);
                 self.early_launch = true;
                 self.early_generation += 1;
-                note(&mut self.said, format!("early launch at the wake in {} ms, device only", started.elapsed().as_millis()));
+                let asked = screen.map_or("device only".to_string(), |screen| format!("device and a window on {}", screen.id));
+                note(&mut self.said, format!("early launch at the wake in {} ms, {asked}", started.elapsed().as_millis()));
                 Some(self.early_generation)
             }
             Err(error) => {
@@ -1267,6 +1284,12 @@ pub mod tests {
                 return Err(anyhow!("no device"));
             }
             Ok(self.adapter())
+        }
+
+        fn window(&mut self, screen: &Screen) -> Result<()> {
+            self.living()?;
+            self.say(format!("window {}", screen.id));
+            Ok(())
         }
 
         fn open(&mut self, id: u32, _screen: &Screen, still: &Path) -> Result<()> {
