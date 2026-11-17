@@ -40,7 +40,7 @@ pub fn main() -> ExitCode {
 }
 
 #[cfg(any(windows, target_os = "macos"))]
-pub use running::{serve, Platform};
+pub use running::{serve, Build, Platform};
 
 #[cfg(any(windows, target_os = "macos"))]
 mod running {
@@ -65,11 +65,22 @@ mod running {
     const SETTLE: u32 = 100;
     const FLUSH: usize = 2;
     const COMPOSE_WAIT: Duration = Duration::from_secs(1);
+    const POLL: Duration = Duration::from_millis(10);
+
+    pub enum Build<M, L> {
+        Partly(M, &'static str),
+        Whole(L, &'static str),
+    }
 
     pub trait Platform: 'static {
         type Layer;
+        type Making;
         fn composition(&self, hints: &Hints) -> Result<bool>;
-        fn open(&mut self, screen: &Screen, hints: &Hints) -> Result<Self::Layer>;
+        fn make(&mut self, screen: &Screen, hints: &Hints, making: Option<Self::Making>) -> Result<Build<Self::Making, Self::Layer>>;
+        fn present(&mut self, layer: &Self::Layer) -> Result<()>;
+        fn visible(&mut self, _layer: &Self::Layer, _waited: Duration) -> Result<bool> {
+            Ok(true)
+        }
         fn target(&self, layer: &Self::Layer) -> Target;
         fn pixels(&self, layer: &Self::Layer) -> (u32, u32);
         fn period(&self, _layer: &Self::Layer) -> Duration {
@@ -169,10 +180,18 @@ mod running {
         Stopped { id: u32 },
     }
 
+    #[derive(Default)]
+    struct Split {
+        window: u64,
+        make: u64,
+        present: u64,
+        steps: Vec<(&'static str, u64)>,
+    }
+
     struct Live<L> {
         layer: Option<L>,
         jobs: Sender<Job>,
-        window: u64,
+        split: Split,
         asked: Instant,
         touched: Instant,
         shown: bool,
@@ -180,13 +199,110 @@ mod running {
         closing: Option<(Instant, bool)>,
     }
 
-    struct Pending<L> {
-        id: u32,
+    fn spent(since: Instant) -> u64 {
+        since.elapsed().as_millis() as u64
+    }
+
+    enum Win<P: Platform> {
+        Making(Option<P::Making>),
+        Made(P::Layer),
+        Presenting(P::Layer, Instant),
+        Shown(P::Layer),
+    }
+
+    struct Pane<P: Platform> {
         screen: Screen,
+        hints: Hints,
+        win: Option<Win<P>>,
+        steps: Vec<(&'static str, u64)>,
+        make: u64,
+        present: u64,
+    }
+
+    impl<P: Platform> Pane<P> {
+        fn new(screen: Screen, hints: Hints) -> Self {
+            Self { screen, hints, win: Some(Win::Making(None)), steps: Vec::new(), make: 0, present: 0 }
+        }
+
+        fn shown(&self) -> bool {
+            matches!(self.win, Some(Win::Shown(_)))
+        }
+
+        fn pause(&self, present: bool) -> Option<Duration> {
+            match &self.win {
+                Some(Win::Making(_)) => Some(Duration::ZERO),
+                Some(Win::Made(_)) if present => Some(Duration::ZERO),
+                Some(Win::Presenting(..)) => Some(POLL),
+                _ => None,
+            }
+        }
+
+        fn into_layer(self) -> Option<P::Layer> {
+            match self.win {
+                Some(Win::Made(layer) | Win::Presenting(layer, _) | Win::Shown(layer)) => Some(layer),
+                Some(Win::Making(_)) | None => None,
+            }
+        }
+
+        fn step(&mut self, platform: &mut P, present: bool) -> Result<bool> {
+            let started = Instant::now();
+            let (win, worked) = match self.win.take() {
+                Some(Win::Making(making)) => {
+                    let made = platform.make(&self.screen, &self.hints, making)?;
+                    let took = spent(started);
+                    self.make += took;
+                    match made {
+                        Build::Partly(next, name) => {
+                            self.steps.push((name, took));
+                            (Win::Making(Some(next)), true)
+                        }
+                        Build::Whole(layer, name) => {
+                            self.steps.push((name, took));
+                            (Win::Made(layer), true)
+                        }
+                    }
+                }
+                Some(Win::Made(layer)) if present => {
+                    if let Err(error) = platform.present(&layer) {
+                        platform.close(layer);
+                        return Err(error);
+                    }
+                    let took = spent(started);
+                    self.present += took;
+                    self.steps.push(("order", took));
+                    (self.watch(platform, layer, Instant::now())?, true)
+                }
+                Some(Win::Presenting(layer, since)) => (self.watch(platform, layer, since)?, false),
+                Some(other) => (other, false),
+                None => return Ok(false),
+            };
+            self.win = Some(win);
+            Ok(worked)
+        }
+
+        fn watch(&mut self, platform: &mut P, layer: P::Layer, since: Instant) -> Result<Win<P>> {
+            match platform.visible(&layer, since.elapsed()) {
+                Ok(true) => {
+                    let waited = spent(since);
+                    self.present += waited;
+                    self.steps.push(("visible", waited));
+                    Ok(Win::Shown(layer))
+                }
+                Ok(false) => Ok(Win::Presenting(layer, since)),
+                Err(error) => {
+                    platform.close(layer);
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    struct Pending<P: Platform> {
+        id: u32,
         still: Option<Decoding>,
         asked: Instant,
-        layer: Option<L>,
-        window: u64,
+        pane: Pane<P>,
+        window: Option<u64>,
     }
 
     struct Helper<P: Platform> {
@@ -206,7 +322,7 @@ mod running {
         uploads: u32,
         running: Option<Want>,
         queue: VecDeque<Want>,
-        pending: Vec<Pending<P::Layer>>,
+        pending: Vec<Pending<P>>,
         layers: BTreeMap<u32, Live<P::Layer>>,
         last: Instant,
         leaving: bool,
@@ -615,41 +731,80 @@ mod running {
             }
         }
 
-        fn open(&mut self, mut pending: Pending<P::Layer>) {
-            let id = pending.id;
+        fn drop_pane(&mut self, pane: Pane<P>) {
+            if let Some(layer) = pane.into_layer() {
+                self.platform.close(layer);
+            }
+        }
+
+        fn open(&mut self, id: u32, screen: Screen, still: Option<Decoding>) {
             if self.layers.contains_key(&id) || self.pending.iter().any(|waiting| waiting.id == id) {
                 self.fail(Some(id), format!("layer {id} is already open"));
                 return;
             }
-            let opening = Instant::now();
-            let layer = match pending.layer.take() {
-                Some(layer) => Ok(layer),
-                None => {
-                    let opened = self.platform.open(&pending.screen, &self.hints);
-                    pending.window = opening.elapsed().as_millis() as u64;
-                    opened
+            let pane = Pane::new(screen, self.hints.clone());
+            self.pending.push(Pending { id, still, asked: Instant::now(), pane, window: None });
+            if self.gpu.is_none() && self.running.is_none() {
+                let hints = self.hints.clone();
+                self.warm(hints, (None, None), None, None, false);
+            }
+        }
+
+        fn pause(&self) -> Duration {
+            self.pending.iter().filter_map(|pending| pending.pane.pause(true)).min().unwrap_or(TICK)
+        }
+
+        fn advance(&mut self) {
+            if self.leaving {
+                return;
+            }
+            let mut worked = false;
+            let mut index = 0;
+            while index < self.pending.len() {
+                let pending = &mut self.pending[index];
+                if worked && pending.pane.pause(true) == Some(Duration::ZERO) {
+                    index += 1;
+                    continue;
                 }
-            };
-            let layer = match layer {
-                Ok(layer) => layer,
-                Err(error) => {
-                    self.fail(Some(id), format!("{error:#}"));
-                    return;
-                }
-            };
-            let gpu = match &self.gpu {
-                Some((gpu, _)) => gpu.clone(),
-                None => {
-                    pending.layer = Some(layer);
-                    self.pending.push(pending);
-                    if self.running.is_none() {
-                        let hints = self.hints.clone();
-                        self.warm(hints, (None, None), None, None, false);
+                match pending.pane.step(&mut self.platform, true) {
+                    Ok(did) => {
+                        worked |= did;
+                        if pending.window.is_none() && pending.pane.shown() {
+                            pending.window = Some(spent(pending.asked));
+                        }
+                        index += 1;
                     }
-                    return;
+                    Err(error) => {
+                        let id = pending.id;
+                        self.pending.remove(index);
+                        self.fail(Some(id), format!("{error:#}"));
+                    }
                 }
+            }
+            self.launch_shown();
+        }
+
+        fn launch_shown(&mut self) {
+            let Some(gpu) = self.gpu.as_ref().map(|(gpu, _)| gpu.clone()) else { return };
+            let mut index = 0;
+            while index < self.pending.len() {
+                if self.pending[index].pane.shown() {
+                    let pending = self.pending.remove(index);
+                    self.launch(pending, gpu.clone());
+                } else {
+                    index += 1;
+                }
+            }
+        }
+
+        fn launch(&mut self, pending: Pending<P>, gpu: Gpu) {
+            let Pending { id, still, asked, mut pane, window } = pending;
+            let split = Split { window: window.unwrap_or_else(|| spent(asked)), make: pane.make, present: pane.present, steps: std::mem::take(&mut pane.steps) };
+            let Some(layer) = pane.into_layer() else {
+                self.fail(Some(id), "the layer window is gone");
+                return;
             };
-            let start = Start { id, gpu, surface: Surface(self.platform.target(&layer)), still: pending.still, size: self.platform.pixels(&layer), period: self.platform.period(&layer) };
+            let start = Start { id, gpu, surface: Surface(self.platform.target(&layer)), still, size: self.platform.pixels(&layer), period: self.platform.period(&layer) };
             let (jobs, receiver) = mpsc::channel();
             let (events, waker) = (self.events.clone(), self.waker.clone());
             let spawned = std::thread::Builder::new().name(format!("scooch-live-render-{id}")).spawn(move || render::<P>(start, receiver, events, waker));
@@ -659,14 +814,13 @@ mod running {
                 return;
             }
             let now = Instant::now();
-            self.layers.insert(id, Live { layer: Some(layer), jobs, window: pending.window, asked: pending.asked, touched: now, shown: false, stopped: false, closing: None });
+            self.layers.insert(id, Live { layer: Some(layer), jobs, split, asked, touched: now, shown: false, stopped: false, closing: None });
         }
 
         fn begin_close(&mut self, id: u32, answer: bool) {
             if let Some(index) = self.pending.iter().position(|pending| pending.id == id) {
-                if let Some(layer) = self.pending.remove(index).layer {
-                    self.platform.close(layer);
-                }
+                let pending = self.pending.remove(index);
+                self.drop_pane(pending.pane);
                 if answer {
                     self.tell(Reply::Closed { id });
                 }
@@ -728,7 +882,7 @@ mod running {
                 }
                 Command::Open { id, screen, rect, scale, still } => {
                     let still = still.map(Decoding::start::<P>);
-                    self.open(Pending { id, screen: Screen { id: screen, frame: rect, scale }, still, asked: Instant::now(), layer: None, window: 0 })
+                    self.open(id, Screen { id: screen, frame: rect, scale }, still)
                 }
                 Command::Glide { id, a, b, ms } => {
                     let loaded = self.pictures.iter().rev().map(|(_, loaded)| loaded.clone()).collect();
@@ -780,14 +934,13 @@ mod running {
                     None => self.ready(waiter, ms, from.clone()),
                 }
             }
-            for mut pending in std::mem::take(&mut self.pending) {
-                if self.gpu.is_some() {
-                    self.open(pending);
-                } else {
-                    if let Some(layer) = pending.layer.take() {
-                        self.platform.close(layer);
-                    }
-                    self.fail(Some(pending.id), problem.clone().unwrap_or_else(|| "no device".into()));
+            if self.gpu.is_some() {
+                self.launch_shown();
+            } else {
+                for pending in std::mem::take(&mut self.pending) {
+                    let id = pending.id;
+                    self.drop_pane(pending.pane);
+                    self.fail(Some(id), problem.clone().unwrap_or_else(|| "no device".into()));
                 }
             }
             while let Some(next) = self.queue.pop_front() {
@@ -819,9 +972,7 @@ mod running {
                             self.scale = self.first_scale(&gpu);
                         }
                         self.gpu = Some((gpu, composition));
-                        for pending in std::mem::take(&mut self.pending) {
-                            self.open(pending);
-                        }
+                        self.launch_shown();
                     }
                 }
                 Event::Timed { timed } => {
@@ -848,9 +999,11 @@ mod running {
                                 live.shown = true;
                                 live.touched = Instant::now();
                                 let ms = live.asked.elapsed().as_millis() as u64;
-                                let window = live.window;
+                                let split = &live.split;
+                                let steps = split.steps.iter().map(|(name, took)| (String::from(*name), *took)).collect();
+                                let drawn = Reply::Drawn { id, window: split.window, first, reveal: spent(revealing), make: split.make, present: split.present, steps };
                                 self.tell(Reply::Shown { id, ms });
-                                self.tell(Reply::Drawn { id, window, first, reveal: revealing.elapsed().as_millis() as u64 });
+                                self.tell(drawn);
                             }
                         }
                         Err(why) => {
@@ -896,6 +1049,11 @@ mod running {
         fn sweep(&mut self) {
             if self.last.elapsed() > IDLE_EXIT {
                 self.leaving = true;
+            }
+            if self.leaving {
+                for pending in std::mem::take(&mut self.pending) {
+                    self.drop_pane(pending.pane);
+                }
             }
             if self.untimed.is_some() && !self.leaving {
                 self.time_later();
@@ -954,10 +1112,12 @@ mod running {
         }
         let mut helper = Helper { platform, out, events, waker, hints: Hints::default(), scale: 1.0, pinned: None, timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
         loop {
-            helper.platform.wait(TICK);
+            let pause = helper.pause();
+            helper.platform.wait(pause);
             while let Ok(event) = inbox.try_recv() {
                 helper.event(event);
             }
+            helper.advance();
             helper.sweep();
             if helper.leaving && helper.layers.is_empty() {
                 break;
@@ -1030,17 +1190,22 @@ mod running {
 
         impl Platform for Fake {
             type Layer = Drawn;
+            type Making = u32;
 
             fn composition(&self, _hints: &Hints) -> Result<bool> {
                 Ok(false)
             }
 
-            fn open(&mut self, screen: &Screen, _hints: &Hints) -> Result<Drawn> {
+            fn make(&mut self, screen: &Screen, _hints: &Hints, _making: Option<u32>) -> Result<Build<u32, Drawn>> {
                 let size = (screen.frame.w as u32, screen.frame.h as u32);
                 #[cfg(target_os = "macos")]
-                return Ok(Drawn { metal: objc2_quartz_core::CAMetalLayer::new(), size });
+                return Ok(Build::Whole(Drawn { metal: objc2_quartz_core::CAMetalLayer::new(), size }, "window"));
                 #[cfg(windows)]
-                return Ok(Drawn { window: window(size.0, size.1)?, size });
+                return Ok(Build::Whole(Drawn { window: window(size.0, size.1)?, size }, "window"));
+            }
+
+            fn present(&mut self, _layer: &Drawn) -> Result<()> {
+                Ok(())
             }
 
             fn target(&self, layer: &Drawn) -> Target {
@@ -1129,6 +1294,7 @@ mod running {
                 while let Ok(event) = inbox.try_recv() {
                     helper.event(event);
                 }
+                helper.advance();
                 let replies = out.replies();
                 if done(&replies) || replies.iter().any(|reply| matches!(reply, Reply::Failed { .. })) {
                     return replies;
@@ -1192,9 +1358,9 @@ mod running {
             let out = Captured::default();
             let mut helper = Helper { platform: Fake::default(), out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), layers: BTreeMap::new(), last: Instant::now(), leaving: false };
             let screen = Screen { id: "stuck".into(), frame: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0 };
-            let layer = helper.platform.open(&screen, &Hints::default()).unwrap();
+            let Ok(Build::Whole(layer, _)) = helper.platform.make(&screen, &Hints::default(), None) else { panic!("the fake made no layer") };
             let (jobs, _receiver) = mpsc::channel();
-            helper.layers.insert(1, Live { layer: Some(layer), jobs, window: 0, asked: Instant::now(), touched: Instant::now(), shown: true, stopped, closing: None });
+            helper.layers.insert(1, Live { layer: Some(layer), jobs, split: Split::default(), asked: Instant::now(), touched: Instant::now(), shown: true, stopped, closing: None });
             helper.begin_close(1, true);
             if let Some(live) = helper.layers.get_mut(&1) {
                 live.closing = Instant::now().checked_sub(STOP_WAIT + Duration::from_millis(50)).map(|since| (since, true));

@@ -1,5 +1,5 @@
 use super::com;
-use crate::live::helper::{Platform, Waker};
+use crate::live::helper::{Build, Platform, Waker};
 use crate::live::Hints;
 use crate::platform::Screen;
 use anyhow::{bail, Context, Result};
@@ -317,9 +317,6 @@ fn make_window(layout: Layout, area: RECT, method: Method) -> Result<HWND> {
         unsafe { SetWindowLongPtrW(window, GWL_STYLE, (style & !(WS_POPUP.0 as isize)) | WS_CHILD.0 as isize) };
         let after = layout.above().map(hwnd);
         unsafe { SetWindowPos(window, after, area.left, area.top, width, height, SWP_NOACTIVATE | SWP_FRAMECHANGED) }?;
-        if method == Method::Bare {
-            let _ = unsafe { ShowWindow(window, SW_SHOWNA) };
-        }
         Ok(())
     })();
     if let Err(error) = built {
@@ -375,12 +372,20 @@ fn release(layer: Window) -> HWND {
 
 impl Platform for Host {
     type Layer = Window;
+    type Making = ();
 
     fn composition(&self, hints: &Hints) -> Result<bool> {
         Ok(Method::from_hints(hints)? != Method::Window)
     }
 
-    fn open(&mut self, screen: &Screen, hints: &Hints) -> Result<Window> {
+    fn present(&mut self, layer: &Window) -> Result<()> {
+        if layer.method == Method::Bare {
+            let _ = unsafe { ShowWindow(layer.window, SW_SHOWNA) };
+        }
+        Ok(())
+    }
+
+    fn make(&mut self, screen: &Screen, hints: &Hints, _making: Option<()>) -> Result<Build<(), Window>> {
         if covered(screen) {
             bail!("windows cover the whole desktop, so Windows never reported the live layer as visible");
         }
@@ -393,7 +398,7 @@ impl Platform for Host {
             ORDERED.with(|ordered| ordered.borrow_mut().push((window.0 as isize, icons)));
         }
         let hook = unsafe { SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_REORDER, None, Some(reordered), layout.explorer(), 0, WINEVENT_OUTOFCONTEXT) };
-        Ok(Window { window, icons, hook, method })
+        Ok(Build::Whole(Window { window, icons, hook, method }, "window"))
     }
 
     fn target(&self, layer: &Window) -> Target {

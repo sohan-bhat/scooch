@@ -34,7 +34,7 @@ pub trait Link: Send {
     fn ready(&mut self, timeout: Duration) -> Result<Adapter>;
     fn open(&mut self, id: u32, screen: &Screen, still: &Path) -> Result<()>;
     fn shown(&mut self, id: u32, timeout: Duration) -> Result<Instant>;
-    fn drawn(&mut self, id: u32) -> Option<[u32; 3]>;
+    fn drawn(&mut self, id: u32) -> Option<Split>;
     fn glide(&mut self, id: u32, a: &Path, b: &Path, ms: u32) -> Result<()>;
     fn settle(&mut self, id: u32, still: &Path) -> Result<()>;
     fn hear(&mut self, timeout: Duration) -> Result<Heard>;
@@ -46,6 +46,16 @@ pub trait Link: Send {
     fn device_ready(&mut self) -> Option<Duration>;
     fn canvas_ready(&mut self) -> Option<Duration>;
     fn ready_after(&mut self) -> Option<Adapter>;
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Split {
+    pub window: u32,
+    pub first: u32,
+    pub reveal: u32,
+    pub make: u32,
+    pub present: u32,
+    pub steps: Vec<(String, u32)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -88,7 +98,7 @@ struct Real {
     warm_id: Option<u32>,
     answered: Option<Adapter>,
     hello: Option<Duration>,
-    drawn: Vec<(u32, [u32; 3])>,
+    drawn: Vec<(u32, Split)>,
     device_after: Option<Duration>,
     canvas_after: Option<Duration>,
 }
@@ -113,12 +123,13 @@ impl Real {
             Reply::Device { .. } => self.device_after = self.device_after.or(self.helper.since_launch()),
             Reply::Canvas { warm_id, .. } if warm_id.is_some() && warm_id == self.warm_id => self.canvas_after = self.canvas_after.or(self.helper.since_launch()),
             Reply::Canvas { .. } => {}
-            Reply::Drawn { id, window, first, reveal } => {
+            Reply::Drawn { id, window, first, reveal, make, present, steps } => {
                 if self.drawn.len() >= 8 {
                     self.drawn.remove(0);
                 }
                 let part = |ms: u64| u32::try_from(ms).unwrap_or(u32::MAX);
-                self.drawn.push((id, [part(window), part(first), part(reveal)]));
+                let steps = steps.into_iter().map(|(name, took)| (name, part(took))).collect();
+                self.drawn.push((id, Split { window: part(window), first: part(first), reveal: part(reveal), make: part(make), present: part(present), steps }));
             }
             Reply::Settled { id } => self.heard.push(Heard::Settled(id)),
             Reply::Glided { id, frames, slow_frames, scale, first_frame_ms, .. } => self.heard.push(Heard::Glided { id, frames, slow: slow_frames, scale, first: first_frame_ms }),
@@ -208,8 +219,8 @@ impl Link for Real {
         })
     }
 
-    fn drawn(&mut self, id: u32) -> Option<[u32; 3]> {
-        let found = |me: &Self| me.drawn.iter().rev().find(|(drawn, _)| *drawn == id).map(|(_, split)| *split);
+    fn drawn(&mut self, id: u32) -> Option<Split> {
+        let found = |me: &Self| me.drawn.iter().rev().find(|(drawn, _)| *drawn == id).map(|(_, split)| split.clone());
         while found(self).is_none() && matches!(self.pump(Duration::ZERO), Ok(true)) {}
         found(self)
     }
@@ -430,7 +441,20 @@ struct Trace {
     shown: Option<Duration>,
     predicted: Option<Duration>,
     opened: bool,
-    drawn: Option<[u32; 3]>,
+    drawn: Option<Split>,
+}
+
+fn drawn_words(split: Option<&Split>) -> String {
+    let known = |value: Option<u32>| value.map_or("unknown".to_string(), |value| value.to_string());
+    let steps = split.filter(|split| !split.steps.is_empty()).map_or("unknown".to_string(), |split| split.steps.iter().map(|(name, took)| format!("{name} {took}")).collect::<Vec<_>>().join(", "));
+    format!(
+        "the helper made its window in {} ms, drew in {} ms and revealed in {} ms, made it in {} ms and presented it in {} ms, window steps {steps}",
+        known(split.map(|split| split.window)),
+        known(split.map(|split| split.first)),
+        known(split.map(|split| split.reveal)),
+        known(split.map(|split| split.make)),
+        known(split.map(|split| split.present))
+    )
 }
 
 fn ms(duration: Duration) -> u32 {
@@ -763,7 +787,7 @@ impl Glider {
         note(
             &mut self.said,
             format!(
-                "decision at the set, helper launched {} ms before it, after launch hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, waited {} ms, {}, the helper made its window in {} ms, drew in {} ms and revealed in {} ms",
+                "decision at the set, helper launched {} ms before it, after launch hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, waited {} ms, {}, {}",
                 shown_ms(launched),
                 shown_ms(trace.hello),
                 shown_ms(trace.device),
@@ -773,9 +797,7 @@ impl Glider {
                 shown_ms(trace.predicted),
                 started.elapsed().as_millis(),
                 if result.is_ok() { "glide" } else { "plain" },
-                trace.drawn.map_or("unknown".to_string(), |split| split[0].to_string()),
-                trace.drawn.map_or("unknown".to_string(), |split| split[1].to_string()),
-                trace.drawn.map_or("unknown".to_string(), |split| split[2].to_string())
+                drawn_words(trace.drawn.as_ref())
             ),
         );
         match result {
@@ -857,7 +879,7 @@ impl Glider {
         let opened = opened_at.unwrap_or(open_at);
         let cold = device_at.is_some_and(|device| device > opened);
         let canvas = device_at.zip(canvas_at).map(|(device, canvas)| canvas.saturating_duration_since(device.max(opened)));
-        let drawn = trace.drawn;
+        let drawn = trace.drawn.clone();
         if let Some(adapter) = self.adapter.clone() {
             self.learn(&adapter, |start| {
                 if cold {
@@ -866,10 +888,10 @@ impl Glider {
                 if let Some(canvas) = canvas {
                     keep_last(&mut start.canvases, ms(canvas));
                 }
-                if let Some([window, draw, reveal]) = drawn {
-                    keep_last(&mut start.windows, window);
-                    keep_last(&mut start.draws, draw);
-                    keep_last(&mut start.reveals, reveal);
+                if let Some(split) = drawn {
+                    keep_last(&mut start.windows, split.window);
+                    keep_last(&mut start.draws, split.first);
+                    keep_last(&mut start.reveals, split.reveal);
                 }
             });
         }
@@ -1251,8 +1273,8 @@ pub mod tests {
             Ok(())
         }
 
-        fn drawn(&mut self, _id: u32) -> Option<[u32; 3]> {
-            Some([1, 1, 1])
+        fn drawn(&mut self, _id: u32) -> Option<Split> {
+            Some(Split { window: 1, first: 1, reveal: 1, ..Split::default() })
         }
 
         fn shown(&mut self, id: u32, timeout: Duration) -> Result<Instant> {
