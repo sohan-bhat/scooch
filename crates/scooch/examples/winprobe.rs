@@ -4168,8 +4168,12 @@ mod probe {
         let rest_skips: Vec<String> = rested.log.iter().filter(|line| line.contains("glide skipped")).map(|line| line.chars().take(200).collect()).collect();
         let cold = stamp(" glide early launch").or_else(|| stamp(" glide helper launched")).zip(stamp(" glide ready")).map(|(started, ready)| ((ready - started) * 1000.0).round());
         let shown = stamp(" glide open after snapshot").zip(rested.log.iter().find(|line| gliding(line)).and_then(|line| stamp_of(line))).map(|(asked, shown)| ((shown - asked) * 1000.0).round());
+        let decided = rested.log.iter().find(|line| line.contains("glide decision at the set"));
+        let launched_early = rested.log.iter().any(|line| line.contains("glide early launch"));
+        let early_window = decided.and_then(|line| line.split("made it in ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<u64>().ok()).filter(|_| launched_early);
+        let found_made = decided.and_then(|line| line.split("open found it made ").nth(1)).and_then(|rest| rest.split(',').next()).and_then(|word| word.trim().parse::<bool>().ok());
         p.line(format!(
-            "- the first drag after the helper went away, to {},{} and now at {:?}: glided {rest_glided}, skip reasons {rest_skips:?}, helper start to ready {cold:?} ms, open after the snapshot to shown {shown:?} ms, wallpaper set {:?} ms after the drop, log {:?}",
+            "- the first drag after the helper went away, to {},{} and now at {:?}: glided {rest_glided}, skip reasons {rest_skips:?}, helper start to ready {cold:?} ms, open after the snapshot to shown {shown:?} ms, wallpaper set {:?} ms after the drop, the early window took {early_window:?} ms, open found it made {found_made:?}, log {:?}",
             rest_target.x,
             rest_target.y,
             icon_spot(name, folder),
