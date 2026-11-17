@@ -10,9 +10,23 @@ type Source = HTMLCanvasElement | ImageBitmap | Pixels;
 const AHEAD = 3;
 const fences = new WeakMap<WebGL2RenderingContext, WebGLSync[]>();
 const nextTask = () => new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+const generations = new WeakMap<WebGL2RenderingContext, number>();
+
+function generation(context: WebGL2RenderingContext) {
+  const known = generations.get(context);
+  if (known !== undefined) return known;
+  generations.set(context, 0);
+  context.canvas.addEventListener('webglcontextlost', () => {
+    generations.set(context, (generations.get(context) ?? 0) + 1);
+    fences.delete(context);
+    probes.delete(context);
+  });
+  return 0;
+}
 
 export async function caughtUp(context: WebGL2RenderingContext) {
   if (context.isContextLost()) return;
+  const started = generation(context);
   const queue = fences.get(context) ?? [];
   fences.set(context, queue);
   const sync = context.fenceSync(context.SYNC_GPU_COMMANDS_COMPLETE, 0);
@@ -21,7 +35,7 @@ export async function caughtUp(context: WebGL2RenderingContext) {
     queue.push(sync);
   }
   for (;;) {
-    if (context.isContextLost()) {
+    if (context.isContextLost() || generation(context) !== started) {
       queue.length = 0;
       return;
     }
@@ -35,6 +49,7 @@ const probes = new WeakMap<WebGL2RenderingContext, WebGLSync>();
 
 export function gpuQuiet(context: WebGL2RenderingContext) {
   if (context.isContextLost()) return false;
+  generation(context);
   const probe = probes.get(context);
   if (!probe) {
     const sync = context.fenceSync(context.SYNC_GPU_COMMANDS_COMPLETE, 0);
