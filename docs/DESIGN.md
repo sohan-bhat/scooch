@@ -155,11 +155,11 @@ autostart(exe or none)        -> add or remove the login item
 |---|---|---|---|
 | macOS | Finder, by Apple Events | NSWorkspace | Desktop folder events, mouse up over the desktop, the wallpaper store, screen and space changes |
 | Windows | The shell's IFolderView, read on one single threaded apartment thread | IDesktopWallpaper, as PNG | Shell change notifications, capture end on the desktop thread, create through hide on the icon list, setting and display messages |
-| GNOME | Desktop Icons NG positions in gvfs metadata | gsettings | The gvfs metadata signal, the dconf signal, the Desktop folder |
+| GNOME | Desktop Icons NG positions in gvfs metadata | gsettings | The gvfs metadata save call, the gvfs metadata signal, the dconf signal, the Desktop folder |
 | KDE Plasma | Folder view positions in the applet config | Plasma scripting | The config folder, the Desktop folder |
 | Xfce | The xfdesktop positions file | xfconf | The positions folder, the xfconf signal, the Desktop folder |
-| Cinnamon | Nemo positions in gvfs metadata, on Nemo's desktop grid | gsettings | The gvfs metadata signal, the dconf signal, Nemo's desktop file, the Desktop folder |
-| MATE | Caja positions in gvfs metadata | gsettings | The gvfs metadata signal, the dconf signal, Caja's desktop file, the Desktop folder |
+| Cinnamon | Nemo positions in gvfs metadata, on Nemo's desktop grid | gsettings | The gvfs metadata save call, the gvfs metadata signal, the dconf signal, Nemo's desktop file, the Desktop folder |
+| MATE | Caja positions in gvfs metadata | gsettings | The gvfs metadata save call, the gvfs metadata signal, the dconf signal, Caja's desktop file, the Desktop folder |
 
 Windows builds two programs from the same code. `scooch.exe` is the console command. `scoochw.exe` is the same program with no console, which is what runs at login. No code is injected into Explorer and no input is hooked. Scooch does not run as administrator while Explorer runs as a normal user, because Windows would then block Explorer's messages to it.
 
@@ -175,7 +175,9 @@ On each change, after 250 ms of quiet, for each screen
 2. Skip when the source, screen, icons and options match the last render.
 3. Take the analysis from cache, solve, render at most once, write `out/<screen>-<n>` and set it. Delete older outputs.
 
-A wake is read at once where that read can be trusted. On macOS a mouse up over the desktop with Finder in front is read at once and, when that read shows no move, again after 60 ms. On Windows, KDE and Xfce every wake is read at once, and the tick runs at once only when the read shows a pure move, the same icons at other places. Icons that came or went and a read that shows no change wait for the 250 ms of quiet, so a copy of many files is still one change, and so do wakes in the 250 ms after a quick move. When a read shows icons moved, the tick runs at once with that read. GNOME, Cinnamon and MATE keep each icon's place in that file's own gvfs metadata, so a move of several icons arrives as several writes and an early read could show it half done. Those desktops always wait for the quiet.
+A wake is read at once where that read can be trusted. On macOS a mouse up over the desktop with Finder in front is read at once and, when that read shows no move, again after 60 ms. On Windows, KDE and Xfce every wake is read at once, and the tick runs at once only when the read shows a pure move, the same icons at other places. Icons that came or went and a read that shows no change wait for the 250 ms of quiet, so a copy of many files is still one change, and so do wakes in the 250 ms after a quick move. When a read shows icons moved, the tick runs at once with that read.
+
+GNOME, Cinnamon and MATE keep each icon's place in that file's own gvfs metadata. The file manager saves a place with a call to gvfsd-metadata the moment the icon lands, and gvfsd-metadata announces the change only about a second later. So on those desktops Scooch opens a second connection to the session bus and makes it a monitor with one match rule, method calls of `org.gtk.vfs.Metadata` named `Set`. From each call it reads only which file the place belongs to, and it wakes when that file sits on the desktop or is the home folder. A move of several icons arrives as several calls, so the read waits until 20 ms pass with no further call, and the tick then runs at once with that one read. Every other wake on those desktops still waits for the quiet. The monitor never sends anything on its connection. When the bus refuses it, Scooch logs that once and waits for the desktop's own notice as before.
 
 Where scenery belongs is kept per screen in the cache as `<screen>.<key>.map`. A new session takes it, so the first move after the daemon freed its render data or started again does not work the map out again. The file carries the picture key, the source size, the scenery stamp, the map version and a checksum, and a map that does not fit is worked out again and replaces the file.
 
