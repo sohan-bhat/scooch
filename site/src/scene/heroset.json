@@ -9,12 +9,16 @@
   ],
   "order": [
     "labels",
-    "gallery",
     "gamepad",
     "glasses",
     "main",
+    "wide",
     "laptop",
-    "stapler"
+    "city",
+    "moon",
+    "canoe",
+    "stapler",
+    "tall"
   ],
   "measured": {
     "television": 88.5,
@@ -33,12 +37,16 @@
   },
   "firsts": {
     "labels": 0,
-    "gallery": 0.075,
     "gamepad": 0.08,
     "glasses": 0.085,
     "main": 0.165,
+    "wide": 0.575,
     "laptop": 0.69,
-    "stapler": 0.795
+    "city": 0.725,
+    "moon": 0.735,
+    "canoe": 0.75,
+    "stapler": 0.795,
+    "tall": null
   },
   "view": "1440x900@2"
 }
