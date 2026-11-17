@@ -86,6 +86,7 @@ extern "C" {
     pub fn CGImageGetHeight(image: Ref) -> usize;
     pub fn CGEventCreate(source: Ref) -> Ref;
     pub fn CGEventGetLocation(event: Ref) -> CGPoint;
+    pub fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
 }
 
 #[link(name = "ImageIO", kind = "framework")]

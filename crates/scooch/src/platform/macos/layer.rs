@@ -282,6 +282,12 @@ pub fn covered(seen: &[Seen], screen: &Rect, ours: i64) -> bool {
     })
 }
 
+pub fn desktop_at(seen: &[Seen], (x, y): (f32, f32), desktop: i64, icons: i64) -> bool {
+    let here = |window: &&Seen| x >= window.bounds.x && x < window.bounds.x + window.bounds.w && y >= window.bounds.y && y < window.bounds.y + window.bounds.h;
+    let covered = seen.iter().filter(here).any(|window| APP_LEVELS.contains(&window.layer) && window.alpha > 0.0);
+    !covered && seen.iter().filter(here).any(|window| window.owner == "Finder" && window.layer > desktop && window.layer <= icons)
+}
+
 pub fn choose(seen: &[Seen], screen: &Rect, desktop: i64, ours: i64) -> Option<i64> {
     let here = |window: &&Seen| window.pid != ours && overlaps(&window.bounds, screen);
     let picture = seen.iter().filter(here).any(|window| window.layer < desktop && is_picture(window));
@@ -418,16 +424,24 @@ pub fn open(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
 }
 
 fn build(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
-    let mut making = Making::Start;
-    let layer = loop {
-        match step(marker, screen, making)? {
-            Build::Partly(next, _) => making = next,
-            Build::Whole(layer, _) => break layer,
-        }
-    };
+    let layer = built(marker, screen)?;
     layer.order();
     layer.shown_after().context(HIDDEN)?;
     Ok(layer)
+}
+
+pub fn make(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
+    objc2::rc::autoreleasepool(|_| built(marker, screen))
+}
+
+fn built(marker: MainThreadMarker, screen: &Screen) -> Result<Layer> {
+    let mut making = Making::Start;
+    loop {
+        match step(marker, screen, making)? {
+            Build::Partly(next, _) => making = next,
+            Build::Whole(layer, _) => return Ok(layer),
+        }
+    }
 }
 
 pub enum Making {
@@ -593,6 +607,18 @@ mod tests {
         assert_eq!(choose(&owner_mac, &SCREEN, DESKTOP, 99), Some(DESKTOP));
         let runner = [window("Finder", -2147483603, ""), window("Dock", -2147483624, "Wallpaper-A4BD"), window("Wallpaper", -2147483625, "Offscreen Wallpaper Window")];
         assert_eq!(choose(&runner, &SCREEN, DESKTOP, 99), Some(DESKTOP));
+    }
+
+    #[test]
+    fn a_press_on_the_desktop_is_one_only_where_finder_icons_lie_uncovered() {
+        let icons = window("Finder", -2147483603, "");
+        assert!(desktop_at(std::slice::from_ref(&icons), (100.0, 100.0), DESKTOP, -2147483603));
+        let browser = Seen { bounds: Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 }, ..window("Finder", 0, "") };
+        assert!(!desktop_at(&[browser.clone(), icons.clone()], (100.0, 100.0), DESKTOP, -2147483603));
+        assert!(desktop_at(&[browser, icons.clone()], (600.0, 500.0), DESKTOP, -2147483603));
+        let clear = Seen { alpha: 0.0, ..window("Overlay", 3, "") };
+        assert!(desktop_at(&[clear, icons], (100.0, 100.0), DESKTOP, -2147483603));
+        assert!(!desktop_at(&[window("Dock", -2147483624, "")], (100.0, 100.0), DESKTOP, -2147483603));
     }
 
     #[test]

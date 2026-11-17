@@ -43,6 +43,44 @@ impl Format {
 }
 
 pub type Wake = Box<dyn Fn() + Send + Sync>;
+pub type DragStart = Box<dyn Fn((f32, f32)) -> bool + Send + Sync>;
+
+pub struct DragHooks {
+    pub on_icon: DragStart,
+    pub start: DragStart,
+}
+
+pub const DRAG_SLOP: f32 = 4.0;
+pub const PRESS_CAP: Duration = Duration::from_secs(30);
+const FAST_POLLS: Duration = Duration::from_millis(300);
+
+pub fn pressed(at: Option<(f32, f32)>, on_icon: impl Fn((f32, f32)) -> bool) -> Option<(f32, f32)> {
+    at.filter(|at| on_icon(*at))
+}
+
+pub fn poll_gap(since: Duration) -> Duration {
+    if since < FAST_POLLS {
+        Duration::from_millis(20)
+    } else {
+        Duration::from_millis(100)
+    }
+}
+
+pub fn follow(from: (f32, f32), mut poll: impl FnMut(Duration) -> Option<(bool, Option<(f32, f32)>)>) -> Option<Duration> {
+    let mut since = Duration::ZERO;
+    while since < PRESS_CAP {
+        let gap = poll_gap(since);
+        since += gap;
+        let (held, at) = poll(gap)?;
+        if !held {
+            return None;
+        }
+        if at.is_some_and(|to| (to.0 - from.0).hypot(to.1 - from.1) >= DRAG_SLOP) {
+            return Some(since);
+        }
+    }
+    None
+}
 
 pub trait Desktop: Send + Sync {
     fn name(&self) -> String;
@@ -99,6 +137,13 @@ pub trait Desktop: Send + Sync {
     }
     fn pointer(&self) -> Option<(f32, f32)> {
         None
+    }
+    fn drag_starts(&self, _hooks: DragHooks) {}
+    fn desktop_at(&self, _point: (f32, f32)) -> bool {
+        false
+    }
+    fn button_down(&self) -> bool {
+        false
     }
 }
 
@@ -172,6 +217,42 @@ mod tests {
         assert_eq!(disagreement(Some(render), Some(render), ours), None);
         assert_eq!(disagreement(Some(old), Some(newer), ours), None);
         assert_eq!(disagreement(None, None, ours), None);
+    }
+
+    type Read = Option<(bool, Option<(f32, f32)>)>;
+
+    fn scripted(steps: Vec<Read>) -> (Option<Duration>, Vec<Duration>) {
+        let mut gaps = Vec::new();
+        let mut steps = steps.into_iter();
+        let found = follow((100.0, 100.0), |gap| {
+            gaps.push(gap);
+            steps.next().unwrap_or(Some((true, Some((100.0, 100.0)))))
+        });
+        (found, gaps)
+    }
+
+    #[test]
+    fn a_click_with_no_move_starts_no_drag() {
+        let (found, gaps) = scripted(vec![Some((true, Some((100.0, 100.0)))), Some((true, Some((102.0, 101.0)))), Some((false, Some((140.0, 100.0))))]);
+        assert_eq!((found, gaps.len()), (None, 3));
+        let (found, gaps) = scripted(vec![Some((true, Some((101.0, 99.0)))), None, Some((true, Some((140.0, 100.0))))]);
+        assert_eq!((found, gaps.len()), (None, 2), "a press that ended went on being polled");
+    }
+
+    #[test]
+    fn a_drag_starts_once_at_the_first_poll_four_points_away() {
+        let (found, gaps) = scripted(vec![Some((true, Some((100.0, 100.0)))), Some((true, Some((103.0, 103.0)))), Some((true, Some((150.0, 100.0))))]);
+        assert_eq!((found, gaps.len()), (Some(Duration::from_millis(40)), 2));
+        assert_eq!(pressed(None, |_| true), None);
+    }
+
+    #[test]
+    fn a_held_press_is_polled_every_20_ms_then_every_100_ms_until_30_s() {
+        let (found, gaps) = scripted(Vec::new());
+        assert_eq!(found, None);
+        assert_eq!(gaps.iter().filter(|gap| **gap == Duration::from_millis(20)).count(), 15);
+        assert_eq!(gaps.iter().filter(|gap| **gap == Duration::from_millis(100)).count(), 297);
+        assert_eq!(gaps.iter().sum::<Duration>(), PRESS_CAP);
     }
 
     #[test]

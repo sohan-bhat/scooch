@@ -18,6 +18,8 @@ pub const SHOWN_AFTER_WAKE: Duration = Duration::from_millis(450);
 pub const BARE: u32 = 2;
 pub const EARLY_EVERY: Duration = Duration::from_secs(10);
 pub const EARLY_LIFE: Duration = Duration::from_millis(1500);
+pub const EARLY_CAP: Duration = Duration::from_secs(30);
+pub const PRESS_POLL: Duration = Duration::from_millis(50);
 const SAMPLES: usize = 3;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -288,6 +290,18 @@ impl Link for Real {
     }
 }
 
+pub struct Warmup {
+    pub picture: PathBuf,
+    pub size: [u32; 2],
+    pub canvas: Option<PathBuf>,
+}
+
+pub struct Launch<'a> {
+    pub screen: Option<&'a Screen>,
+    pub warm: Option<&'a Warmup>,
+    pub drag: bool,
+}
+
 pub struct Plan<'a> {
     pub screen: &'a Screen,
     pub picture: &'a Path,
@@ -435,6 +449,9 @@ pub struct Glider {
     ready_at: Option<Instant>,
     early_launch: bool,
     early_generation: u64,
+    early_until: Option<Instant>,
+    early_window: Option<String>,
+    missed: Option<u32>,
     moved_now: bool,
     thrown: u32,
     last_early: Option<Instant>,
@@ -517,7 +534,7 @@ fn keep(said: &mut Vec<String>, line: String) {
 impl Glider {
     pub fn new(spawner: Box<dyn Spawn>) -> Self {
         let forced = std::env::var_os(FORCE).is_some_and(|value| !value.is_empty() && value != "0");
-        Self { forced, software: false, strikes: 0, stalled: false, spawner, link: None, warmed: None, last_warm: None, ready: false, next: 0, late: 0, flights: Vec::new(), early: Vec::new(), doomed: false, huge: std::collections::HashMap::new(), adapter: None, scales: BTreeMap::new(), learned: Vec::new(), prepared: None, noted: false, revived: false, starts: BTreeMap::new(), fresh_starts: Vec::new(), launched: None, ready_at: None, early_launch: false, early_generation: 0, moved_now: false, thrown: 0, last_early: None, woke: None, said: Vec::new() }
+        Self { forced, software: false, strikes: 0, stalled: false, spawner, link: None, warmed: None, last_warm: None, ready: false, next: 0, late: 0, flights: Vec::new(), early: Vec::new(), doomed: false, huge: std::collections::HashMap::new(), adapter: None, scales: BTreeMap::new(), learned: Vec::new(), prepared: None, noted: false, revived: false, starts: BTreeMap::new(), fresh_starts: Vec::new(), launched: None, ready_at: None, early_launch: false, early_generation: 0, early_until: None, early_window: None, missed: None, moved_now: false, thrown: 0, last_early: None, woke: None, said: Vec::new() }
     }
 
     #[cfg(test)]
@@ -574,21 +591,39 @@ impl Glider {
         self.launched = None;
         self.ready_at = None;
         self.early_launch = false;
+        self.early_until = None;
+        self.early_window = None;
     }
 
     pub fn woke(&mut self, at: Instant) {
         self.woke = Some(at);
     }
 
-    pub fn wake(&mut self, screen: Option<&Screen>) -> Option<u64> {
-        if !self.usable() || self.doomed || self.link.is_some() || self.thrown >= BARE || self.last_early.is_some_and(|at| at.elapsed() < EARLY_EVERY) {
+    fn scales_for(&self, size: [u32; 2]) -> BTreeMap<String, f32> {
+        let suffix = format!("|{}x{}", size[0], size[1]);
+        self.scales.iter().filter_map(|(key, scale)| key.strip_suffix(&suffix).map(|adapter| (adapter.to_string(), *scale))).collect()
+    }
+
+    pub fn wake(&mut self, launch: &Launch) -> Option<u64> {
+        let held = !launch.drag && (self.thrown >= BARE || self.last_early.is_some_and(|at| at.elapsed() < EARLY_EVERY));
+        if !self.usable() || self.doomed || held {
+            return None;
+        }
+        if self.link.is_some() {
+            if self.early_launch {
+                self.top_up(launch);
+            }
             return None;
         }
         let started = Instant::now();
         self.last_early = Some(started);
+        let scales = launch.warm.map(|warm| self.scales_for(warm.size)).unwrap_or_default();
         let launched = self.spawner.spawn().and_then(|mut link| {
-            link.device()?;
-            if let Some(screen) = screen {
+            match launch.warm {
+                Some(warm) => link.warm(&warm.picture, warm.size, warm.canvas.as_deref(), &scales)?,
+                None => link.device()?,
+            }
+            if let Some(screen) = launch.screen {
                 link.window(screen)?;
             }
             Ok(link)
@@ -599,9 +634,21 @@ impl Glider {
                 self.link = Some(link);
                 self.launched = Some(started);
                 self.early_launch = true;
+                self.early_until = Some(started + EARLY_LIFE);
                 self.early_generation += 1;
-                let asked = screen.map_or("device only".to_string(), |screen| format!("device and a window on {}", screen.id));
-                note(&mut self.said, format!("early launch at the wake in {} ms, {asked}", started.elapsed().as_millis()));
+                if let Some(warm) = launch.warm {
+                    self.warmed = Some((warm.picture.clone(), warm.size));
+                    self.last_warm = Some((warm.picture.clone(), warm.size, warm.canvas.clone()));
+                }
+                self.early_window = launch.screen.map(|screen| screen.id.clone());
+                let asked = match (launch.warm.is_some(), launch.screen) {
+                    (true, Some(screen)) => format!("warm and a window on {}", screen.id),
+                    (true, None) => "warm only".to_string(),
+                    (false, Some(screen)) => format!("device and a window on {}", screen.id),
+                    (false, None) => "device only".to_string(),
+                };
+                let when = if launch.drag { "the drag start" } else { "the wake" };
+                note(&mut self.said, format!("early launch at {when} in {} ms, {asked}", started.elapsed().as_millis()));
                 Some(self.early_generation)
             }
             Err(error) => {
@@ -611,11 +658,44 @@ impl Glider {
         }
     }
 
+    fn top_up(&mut self, launch: &Launch) {
+        let wanted = launch.warm.map(|warm| (warm.picture.clone(), warm.size)).filter(|wanted| self.warmed.as_ref() != Some(wanted));
+        let screen = launch.screen.filter(|screen| self.early_window.as_deref() != Some(screen.id.as_str()));
+        let scales = launch.warm.map(|warm| self.scales_for(warm.size)).unwrap_or_default();
+        let Some(link) = self.link.as_mut() else { return };
+        let mut sent = Vec::new();
+        if let (Some(wanted), Some(warm)) = (wanted, launch.warm) {
+            if link.warm(&warm.picture, warm.size, warm.canvas.as_deref(), &scales).is_ok() {
+                self.warmed = Some(wanted);
+                self.last_warm = Some((warm.picture.clone(), warm.size, warm.canvas.clone()));
+                sent.push("a warm".to_string());
+            }
+        }
+        if let Some(screen) = screen {
+            if link.window(screen).is_ok() {
+                self.early_window = Some(screen.id.clone());
+                sent.push(format!("a window on {}", screen.id));
+            }
+        }
+        if !sent.is_empty() {
+            let when = if launch.drag { "the drag start" } else { "the wake" };
+            note(&mut self.said, format!("early helper given {} at {when}", sent.join(" and ")));
+        }
+    }
+
+    pub fn extend_early(&mut self, generation: u64, until: Instant) -> bool {
+        if !self.early_launch || self.early_generation != generation {
+            return false;
+        }
+        self.early_until = Some(until);
+        true
+    }
+
     pub fn after_snapshot(&mut self, moved: bool) {
         self.moved_now = moved;
         if moved {
             self.thrown = 0;
-        } else if self.early_launch && self.launched.is_some_and(|launched| launched.elapsed() >= EARLY_LIFE) {
+        } else if self.early_launch && self.early_until.is_some_and(|until| Instant::now() >= until) {
             self.thrown += 1;
             self.quit_early("nothing moved");
         }
@@ -624,7 +704,7 @@ impl Glider {
     pub fn expire_early(&mut self, generation: u64) {
         if self.early_launch && self.early_generation == generation {
             self.thrown += 1;
-            self.quit_early("nothing moved within 1.5 s of its launch");
+            self.quit_early("nothing moved within 1.5 s of its launch or of the button going up");
         }
     }
 
@@ -700,11 +780,12 @@ impl Glider {
     fn send_warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>) -> Result<()> {
         let wanted = (picture.to_path_buf(), size);
         self.connect()?;
+        self.early_launch = false;
+        self.early_until = None;
         if self.warmed.as_ref() == Some(&wanted) {
             return Ok(());
         }
-        let suffix = format!("|{}x{}", size[0], size[1]);
-        let scales: BTreeMap<String, f32> = self.scales.iter().filter_map(|(key, scale)| key.strip_suffix(&suffix).map(|adapter| (adapter.to_string(), *scale))).collect();
+        let scales = self.scales_for(size);
         self.link.as_mut().ok_or_else(|| anyhow!("no helper"))?.warm(picture, size, canvas, &scales)?;
         note(&mut self.said, format!("warm {} at {}x{} from {}", picture.display(), size[0], size[1], canvas.map_or("the picture".to_string(), |canvas| canvas.display().to_string())));
         self.last_warm = Some((picture.to_path_buf(), size, canvas.map(Path::to_path_buf)));
@@ -856,21 +937,28 @@ impl Glider {
         trace.canvas = self.link.as_mut().and_then(|link| link.canvas_ready());
         let waits_for_ready = !self.ready;
         let woke = self.woke;
+        let open = opened_at.unwrap_or(started);
+        let missed = remembered.missed.or(self.missed).map(|sample| Duration::from_millis(sample.into()));
+        let mut guessed = false;
         let deadline = if waits_for_ready {
-            let open = opened_at.unwrap_or(started);
             let device = launched.zip(trace.device).map(|(launched, device)| launched + device);
             let canvas = launched.zip(trace.canvas).map(|(launched, canvas)| launched + canvas);
             let show = device.and_then(|device| Some(device.max(open + median(&remembered.windows)?) + median(&remembered.draws)? + median(&remembered.reveals)?));
             let ready = canvas.or_else(|| device.zip(median(&remembered.canvases)).map(|(device, canvas)| device.max(open) + canvas));
-            let predicted = match (show, median(&remembered.colds)) {
+            let predicted = match (show, median(&remembered.colds).or(missed)) {
                 (Some(show), _) => Some(ready.map_or(show, |ready| show.max(ready))),
                 (None, Some(cold)) => Some(open + cold),
                 (None, None) => None,
             };
             trace.predicted = predicted.and_then(since);
+            let greeted_by_open = launched.zip(trace.hello).is_some_and(|(launched, hello)| launched + hello <= open);
             match (hold_until(started, woke, predicted), predicted) {
                 (Some(deadline), _) => deadline,
-                (None, None) => return Err(anyhow!("no cold start is remembered for this adapter yet, so this move swaps plainly")),
+                (None, None) if greeted_by_open => {
+                    guessed = true;
+                    hold_until(started, woke, Some(started)).unwrap_or(started + PATIENCE)
+                }
+                (None, None) => return Err(anyhow!("no cold start is remembered for this adapter yet and the helper said hello after the open, so this move swaps plainly")),
                 (None, Some(predicted)) => {
                     let allowed = hold_until(started, woke, Some(started)).map_or(PATIENCE, |deadline| deadline.saturating_duration_since(started));
                     return Err(anyhow!("the helper would be shown {} ms after the plain swap was ready, past the {} ms it may wait, so this move swaps plainly", predicted.saturating_duration_since(started).as_millis(), allowed.as_millis()));
@@ -880,7 +968,11 @@ impl Glider {
             hold_until(started, woke, Some(started)).unwrap_or(started + PATIENCE)
         };
         if waits_for_ready {
-            let adapter = self.link.as_mut().ok_or_else(|| anyhow!("no helper"))?.ready(Self::left(deadline))?;
+            let waited = self.link.as_mut().ok_or_else(|| anyhow!("no helper"))?.ready(Self::left(deadline));
+            let adapter = match waited {
+                Ok(adapter) => adapter,
+                Err(error) => return Err(self.missed_wait(guessed, open, deadline, error)),
+            };
             self.heard_ready(adapter)?;
         }
         trace.ready = self.ready_at.and_then(since);
@@ -890,7 +982,10 @@ impl Glider {
             link.open(id, plan.screen, plan.still)?;
             trace.opened = true;
         }
-        let shown_at = link.shown(id, Self::left(deadline))?;
+        let shown_at = match link.shown(id, Self::left(deadline)) {
+            Ok(shown_at) => shown_at,
+            Err(error) => return Err(self.missed_wait(guessed, open, deadline, error)),
+        };
         trace.drawn = link.drawn(id);
         trace.shown = since(shown_at);
         let device_at = launched.zip(link.device_ready()).map(|(launched, device)| launched + device);
@@ -899,10 +994,14 @@ impl Glider {
         let cold = device_at.is_some_and(|device| device > opened);
         let canvas = device_at.zip(canvas_at).map(|(device, canvas)| canvas.saturating_duration_since(device.max(opened)));
         let drawn = trace.drawn.clone();
+        if cold {
+            self.missed = None;
+        }
         if let Some(adapter) = self.adapter.clone() {
             self.learn(&adapter, |start| {
                 if cold {
                     keep_last(&mut start.colds, ms(shown_at.saturating_duration_since(opened)));
+                    start.missed = None;
                 }
                 if let Some(canvas) = canvas {
                     keep_last(&mut start.canvases, ms(canvas));
@@ -915,6 +1014,18 @@ impl Glider {
             });
         }
         Ok(())
+    }
+
+    fn missed_wait(&mut self, guessed: bool, open: Instant, deadline: Instant, error: anyhow::Error) -> anyhow::Error {
+        if guessed && format!("{error:#}").contains("did not answer within") {
+            let sample = ms(deadline.saturating_duration_since(open) + SHOWN_AFTER_WAKE);
+            self.missed = Some(sample);
+            if let Some(adapter) = self.adapter.clone() {
+                self.learn(&adapter, |start| start.missed = Some(sample));
+            }
+            note(&mut self.said, format!("no cold start was remembered and the helper missed the wait, so {sample} ms is kept and the next cold drag swaps plainly at once"));
+        }
+        error
     }
 
     fn heard_ready(&mut self, adapter: Adapter) -> Result<()> {
@@ -1160,6 +1271,76 @@ pub mod tests {
         let woke = Instant::now();
         assert_eq!(hold_until(after(woke, 200), Some(woke), None), None);
         assert_eq!(hold_until(after(woke, 200), None, None), None);
+    }
+
+    fn lone_screen() -> Screen {
+        Screen { id: "main".into(), frame: scooch_core::Rect { x: 0.0, y: 0.0, w: 160.0, h: 100.0 }, scale: 1.0 }
+    }
+
+    fn cold_drag(glider: &mut Glider, screen: &Screen) -> Option<u32> {
+        glider.open_early(screen, Path::new("p.jpg"), [160, 100], Path::new("s.png"), None);
+        glider.prepare(&Plan { screen, picture: Path::new("p.jpg"), canvas: None, size: [160, 100], still: Path::new("s.png") })
+    }
+
+    fn ready_waits(waits: &Waits) -> usize {
+        waits.lock().unwrap().iter().filter(|(what, wait)| *what == "ready" && !wait.is_zero()).count()
+    }
+
+    #[test]
+    fn a_first_drag_with_no_memory_waits_and_learns() {
+        let spawner = FakeSpawner::new(Arc::new(Mutex::new(Vec::new())));
+        let (script, waits) = (spawner.script.clone(), spawner.waits.clone());
+        {
+            let mut script = script.lock().unwrap();
+            script.ready_after = Duration::from_millis(60);
+            script.device_after = Some(Duration::from_millis(20));
+        }
+        let mut glider = Glider::new(Box::new(spawner));
+        let screen = lone_screen();
+        assert!(cold_drag(&mut glider, &screen).is_some(), "{:?}", glider.said);
+        assert_eq!(ready_waits(&waits), 1, "{:?}", waits.lock().unwrap());
+        let starts = glider.learned_starts();
+        assert!(starts.iter().any(|(name, start)| name == "Fake GPU" && start.colds.len() == 1 && start.missed.is_none()), "{starts:?}");
+    }
+
+    #[test]
+    fn a_missed_first_wait_is_not_repeated_and_a_helper_ready_first_learns_the_true_time() {
+        let spawner = FakeSpawner::new(Arc::new(Mutex::new(Vec::new())));
+        let (script, waits) = (spawner.script.clone(), spawner.waits.clone());
+        let mut glider = Glider::new(Box::new(spawner));
+        let screen = lone_screen();
+        script.lock().unwrap().slow_hello = Duration::from_secs(1);
+        let started = Instant::now();
+        assert!(cold_drag(&mut glider, &screen).is_none());
+        assert!(started.elapsed() < PATIENCE && ready_waits(&waits) == 0, "a helper with its hello a second late held the set {:?}", started.elapsed());
+        glider.reset_for_test();
+        {
+            let mut script = script.lock().unwrap();
+            script.slow_hello = Duration::ZERO;
+            script.ready_after = Duration::from_secs(2);
+        }
+        let started = Instant::now();
+        assert!(cold_drag(&mut glider, &screen).is_none());
+        assert!(started.elapsed() >= PATIENCE - Duration::from_millis(20) && ready_waits(&waits) == 1, "the first drag with no memory did not wait, {:?}", started.elapsed());
+        assert!(glider.missed.is_some() && glider.said.iter().any(|line| line.contains("missed the wait")), "{:?}", glider.said);
+        glider.reset_for_test();
+        let started = Instant::now();
+        assert!(cold_drag(&mut glider, &screen).is_none());
+        assert!(started.elapsed() < PATIENCE && ready_waits(&waits) == 1, "the missed wait was repeated, {:?}", started.elapsed());
+        assert!(glider.said.iter().any(|line| line.contains("would be shown")), "{:?}", glider.said);
+        glider.reset_for_test();
+        {
+            let mut script = script.lock().unwrap();
+            script.ready_after = Duration::from_millis(40);
+            script.device_after = Some(Duration::from_millis(10));
+        }
+        glider.open_early(&screen, Path::new("p.jpg"), [160, 100], Path::new("s.png"), None);
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(glider.prepare(&Plan { screen: &screen, picture: Path::new("p.jpg"), canvas: None, size: [160, 100], still: Path::new("s.png") }).is_some(), "{:?}", glider.said);
+        assert!(glider.missed.is_none());
+        let starts = glider.learned_starts();
+        let learned = starts.iter().find(|(name, _)| name == "Fake GPU").map(|(_, start)| start.clone()).unwrap_or_default();
+        assert!(learned.colds.len() == 1 && learned.colds[0] >= 40 && learned.colds[0] < 1000 && learned.missed.is_none(), "{starts:?}");
     }
 
     #[derive(Clone, Default)]

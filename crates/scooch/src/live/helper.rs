@@ -111,6 +111,7 @@ mod running {
         {
         }
         fn prepare(&mut self) {}
+        fn begin(&mut self) {}
     }
 
     pub fn ease(t: f32) -> f32 {
@@ -734,7 +735,10 @@ mod running {
                 waker();
             });
             match spawned {
-                Ok(_) => self.running = Some(want),
+                Ok(_) => {
+                    self.running = Some(want);
+                    self.platform.begin();
+                }
                 Err(error) => {
                     for waiter in want.waiters {
                         self.fail(None, warm_failed(waiter, &format!("could not start the thread that makes the device {error}")));

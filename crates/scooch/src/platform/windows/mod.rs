@@ -25,7 +25,7 @@ use super::Wake;
 #[cfg(target_os = "windows")]
 mod system {
     use super::{com, layout, picture, shell, sta, startup, wakes, watch, Wake};
-    use crate::platform::{Desktop, Format, Screen, Snapshot};
+    use crate::platform::{Desktop, DragHooks, Format, Screen, Snapshot};
     use anyhow::{anyhow, Result};
     use scooch_core::RgbImage;
     use std::path::{Path, PathBuf};
@@ -138,6 +138,26 @@ mod system {
             let mut point = POINT::default();
             unsafe { GetCursorPos(&mut point) }.ok()?;
             Some((point.x as f32, point.y as f32))
+        }
+
+        fn drag_starts(&self, hooks: DragHooks) {
+            let _ = watch::DRAG.set(hooks);
+        }
+
+        fn desktop_at(&self, (x, y): (f32, f32)) -> bool {
+            use windows::Win32::Foundation::POINT;
+            use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+            let found = unsafe { WindowFromPoint(POINT { x: x as i32, y: y as i32 }) };
+            if found.is_invalid() {
+                return false;
+            }
+            let root = unsafe { GetAncestor(found, GA_ROOT) };
+            let class = super::layer::class_of(if root.is_invalid() { found } else { root });
+            class == "Progman" || class == "WorkerW"
+        }
+
+        fn button_down(&self) -> bool {
+            watch::primary_down()
         }
     }
 
