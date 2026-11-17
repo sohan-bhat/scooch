@@ -87,7 +87,7 @@ const environment = { id: 'studio_small_08', resolution: '1k', file: 'studio.hdr
 
 const variants = [
   { name: 'full', folder: out, scale: 1 },
-  { name: 'lite', folder: joinPath(out, 'lite'), scale: 0.5 },
+  { name: 'lite', folder: joinPath(out, 'lite'), scale: 0.5, webp: { color: 80, data: 80, normal: 90 } },
   { name: 'sharp', folder: joinPath(out, 'sharp'), scale: 4, detail: 2, resolution: '2k' },
 ];
 const only = process.argv.find((arg) => arg.startsWith('--variant='))?.slice(10);
@@ -214,6 +214,10 @@ function resized(slots, size) {
   return textureCompress({ encoder: sharp, targetFormat: 'png', slots, resize: [size, size] });
 }
 
+function webp(slots, size, quality) {
+  return textureCompress({ encoder: sharp, targetFormat: 'webp', slots, resize: [size, size], quality, effort: 6 });
+}
+
 const color = { isUASTC: false, qualityLevel: 210, compressionLevel: 3, isSetKTX2SRGBTransferFunc: true, isPerceptual: true, generateMipmap: true, imageDecoder };
 const data = { isUASTC: false, qualityLevel: 190, compressionLevel: 3, isSetKTX2SRGBTransferFunc: false, isPerceptual: false, generateMipmap: true, imageDecoder };
 const normal = { isUASTC: true, needSupercompression: true, enableRDO: true, rdoQualityLevel: 2.5, isSetKTX2SRGBTransferFunc: false, isPerceptual: false, generateMipmap: true, imageDecoder };
@@ -227,7 +231,14 @@ async function buildModel(io, model, variant) {
   shareOcclusion(document);
   const steps = [prune(), dedup()];
   if (model.merge) steps.push(flatten(), join());
-  steps.push(
+  if (variant.webp) steps.push(
+    weld(),
+    webp(/baseColor/, model.textures.color * variant.scale, variant.webp.color),
+    webp(/normal/, model.textures.normal * (variant.detail ?? variant.scale), variant.webp.normal),
+    webp(/metallicRoughness|occlusion/, model.textures.arm * (variant.detail ?? variant.scale), variant.webp.data),
+    meshopt({ encoder: MeshoptEncoder, level: 'medium' }),
+  );
+  else steps.push(
     weld(),
     resized(/baseColor/, model.textures.color * variant.scale),
     resized(/normal/, model.textures.normal * (variant.detail ?? variant.scale)),
