@@ -2386,6 +2386,93 @@ mod probe {
         Ok(())
     }
 
+    const REVEAL_OPENS: u32 = 20;
+    const REVEAL_WATCH: Duration = Duration::from_millis(150);
+    const REVEAL_STRIDE: usize = 4;
+
+    fn helper_window(pid: u32, screen: &Screen) -> Option<i64> {
+        layer::listing().into_iter().find(|window| window.pid == i64::from(pid) && window.bounds.x < screen.frame.x + screen.frame.w && screen.frame.x < window.bounds.x + window.bounds.w && window.bounds.w >= screen.frame.w * 0.9).map(|window| window.number)
+    }
+
+    fn sampled(shot: &Shot) -> Vec<[u8; 3]> {
+        (0..shot.height).step_by(REVEAL_STRIDE).flat_map(|y| (0..shot.width).step_by(REVEAL_STRIDE).map(move |x| (x, y))).map(|(x, y)| shot.at(x, y)).collect()
+    }
+
+    fn black(pixels: &[[u8; 3]]) -> bool {
+        !pixels.is_empty() && pixels.iter().filter(|pixel| pixel.iter().all(|channel| *channel <= 8)).count() * 100 >= pixels.len() * 95
+    }
+
+    fn largest_gap(a: &[[u8; 3]], b: &[[u8; 3]]) -> Option<u8> {
+        (a.len() == b.len() && !a.is_empty()).then(|| a.iter().zip(b).map(|(one, two)| (0..3).map(|channel| one[channel].abs_diff(two[channel])).max().unwrap_or(0)).max().unwrap_or(0))
+    }
+
+    fn reveal_captures(p: &mut Probe, screen: &Screen, skip: bool) -> Result<()> {
+        let (width, height) = pixels(screen);
+        let file = p.home.join(format!("probe-still-{width}x{height}.jpg"));
+        let label = if skip { "spin skipped" } else { "spin kept" };
+        let env: &[(&str, &str)] = if skip { &[(scooch::live::SKIP_SPIN, "1")] } else { &[] };
+        let mut helper = scooch::live::Helper::spawn_with(&p.bin, Duration::from_secs(5), env)?;
+        helper.warm(scooch::live::Hints::default(), None, None, Duration::from_secs(30))?;
+        p.line(format!("- reveal captures with the {label}, {REVEAL_OPENS} opens of the helper's layer over the test still, each captured as the helper's window alone by its number from shown on for {} ms, every {REVEAL_STRIDE}th pixel compared, reported only", REVEAL_WATCH.as_millis()));
+        let (mut bad, mut worst, mut total) = (0, 0u8, 0);
+        for id in 1..=REVEAL_OPENS {
+            helper.ask_open(id, screen, &file)?;
+            let asked = Instant::now();
+            let (mut number, mut shown, mut failed) = (None, None, None);
+            while asked.elapsed() < Duration::from_secs(5) && shown.is_none() && failed.is_none() {
+                if number.is_none() {
+                    number = helper_window(helper.pid, screen);
+                }
+                match helper.next(Duration::from_millis(2)) {
+                    Some(scooch::live::Reply::Shown { id: got, .. }) if got == id => shown = Some(Instant::now()),
+                    Some(scooch::live::Reply::Failed { id: got, why }) if got.is_none_or(|got| got == id) => failed = Some(why),
+                    _ => {}
+                }
+            }
+            let known = number.is_some();
+            let Some(shown) = shown else {
+                p.line(format!("  - open {id}: no shown within 5 s, {failed:?}"));
+                let _ = helper.close(id, Duration::from_secs(3));
+                continue;
+            };
+            let number = number.or_else(|| helper_window(helper.pid, screen));
+            let mut captures = Vec::new();
+            if let Some(number) = number {
+                while shown.elapsed() < REVEAL_WATCH {
+                    let at = shown.elapsed().as_millis();
+                    captures.push((at, grab_window(number).map(|shot| sampled(&shot))));
+                }
+            }
+            let drawn = helper
+                .expect(Duration::from_millis(500), |reply| match reply {
+                    scooch::live::Reply::Drawn { id: got, reveal, revealing, .. } if *got == id => Some(Ok((*reveal, revealing.clone()))),
+                    _ => None,
+                })
+                .ok();
+            std::thread::sleep(Duration::from_millis(400));
+            let settled = number.and_then(grab_window).map(|shot| sampled(&shot));
+            let _ = helper.close(id, Duration::from_secs(3));
+            let empty: Vec<u128> = captures.iter().filter(|(_, shot)| shot.as_ref().is_none_or(Vec::is_empty)).map(|(at, _)| *at).collect();
+            let dark: Vec<u128> = captures.iter().filter(|(_, shot)| shot.as_deref().is_some_and(black)).map(|(at, _)| *at).collect();
+            let gaps: Vec<u8> = captures.iter().filter_map(|(_, shot)| shot.as_deref().zip(settled.as_deref()).and_then(|(shot, settled)| largest_gap(shot, settled))).collect();
+            let largest = gaps.iter().copied().max();
+            total += captures.len();
+            worst = worst.max(largest.unwrap_or(0));
+            if !empty.is_empty() || !dark.is_empty() {
+                bad += 1;
+            }
+            p.line(format!(
+                "  - open {id}: window {number:?} known before shown {known}, {} captures, at {:?} ms after shown, largest difference from the settled layer {largest:?} of 255, empty at {empty:?} ms, black at {dark:?} ms, settled capture black {:?}, reveal and its steps {drawn:?}",
+                captures.len(),
+                captures.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+                settled.as_deref().map(black)
+            ));
+        }
+        drop(helper);
+        p.line(format!("  - with the {label}: opens with an empty or black capture {bad} of {REVEAL_OPENS}, captures {total}, largest difference from the settled layer {worst} of 255"));
+        Ok(())
+    }
+
     fn modes(display: u32) -> Vec<(usize, usize, usize, usize, bool, *const c_void)> {
         unsafe {
             let keys = [kCGDisplayShowDuplicateLowResolutionModes];
@@ -2425,6 +2512,11 @@ mod probe {
         let screen = desktop.screens()?.into_iter().next().context("no screen")?;
         let recorded = desktop.wallpaper(&screen).ok().flatten();
         still_through_helper(p, &screen, "native mode")?;
+        for skip in [false, true] {
+            if let Err(error) = reveal_captures(p, &screen, skip) {
+                p.line(format!("- the reveal captures with the spin {} could not run {error:#}", if skip { "skipped" } else { "kept" }));
+            }
+        }
         let (_, display) = picture::screen_for(marker, &screen.id)?;
         let current = unsafe { CGDisplayCopyDisplayMode(display) };
         let listed = modes(display);

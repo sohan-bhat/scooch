@@ -129,7 +129,11 @@ pub struct Helper {
 
 impl Helper {
     pub fn spawn(program: &Path, timeout: Duration) -> Result<Helper> {
-        let mut helper = Self::launch(program)?;
+        Self::spawn_with(program, timeout, &[])
+    }
+
+    pub fn spawn_with(program: &Path, timeout: Duration, env: &[(&str, &str)]) -> Result<Helper> {
+        let mut helper = Self::launch_with(program, env)?;
         helper.expect(timeout, |reply| match reply {
             Reply::Hello { version, .. } if *version == VERSION => Some(Ok(())),
             Reply::Hello { version, .. } => Some(Err(anyhow!("the helper speaks version {version}, not {VERSION}"))),
@@ -140,9 +144,13 @@ impl Helper {
     }
 
     pub fn launch(program: &Path) -> Result<Helper> {
+        Self::launch_with(program, &[])
+    }
+
+    pub fn launch_with(program: &Path, env: &[(&str, &str)]) -> Result<Helper> {
         let launched = Instant::now();
         let mut command = std::process::Command::new(program);
-        command.arg(HELPER).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        command.arg(HELPER).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).envs(env.iter().copied());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
