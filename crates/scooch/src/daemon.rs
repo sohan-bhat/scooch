@@ -1713,13 +1713,14 @@ pub mod tests {
         pub pointer: Mutex<Option<(f32, f32)>>,
         pub button: Mutex<bool>,
         pub covered: Mutex<bool>,
+        pub bad_profile: Mutex<bool>,
         pub events: crate::glide::tests::Events,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), events: Arc::new(Mutex::new(Vec::new())) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), bad_profile: Mutex::new(false), events: Arc::new(Mutex::new(Vec::new())) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -1892,6 +1893,10 @@ pub mod tests {
 
         fn button_down(&self) -> bool {
             *self.button.lock().unwrap()
+        }
+
+        fn profile(&self) -> Option<Vec<u8>> {
+            self.bad_profile.lock().unwrap().then(|| vec![0; 17 << 20])
         }
 
         fn decode(&self, path: &Path) -> Result<RgbImage> {
@@ -3388,6 +3393,145 @@ pub mod tests {
         *fake.reduce.lock().unwrap() = true;
         assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
         std::fs::read(fake.showing("main")).unwrap()
+    }
+
+    fn marked_rig(name: &str) -> Rigged {
+        let rigged = glide_rig(name, true);
+        *rigged.0.marks.lock().unwrap() = Some(rigged.1.events.clone());
+        rigged
+    }
+
+    fn moved_again(daemon: &Daemon, fake: &Fake) -> (Report, Vec<String>) {
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        let report = daemon.tick();
+        (report, events(fake))
+    }
+
+    fn name_of(path: &Path) -> String {
+        path.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn the_glide_command_goes_out_before_the_still_is_drawn() {
+        let (daemon, fake, _, _) = marked_rig("glide-first");
+        let (report, events) = moved_again(&daemon, &fake);
+        assert_eq!(outcome(&report), Outcome::Rendered);
+        let (tables, glide, drawing, set) = (at(&events, "tables main"), at(&events, "glide "), at(&events, "drawing main"), at(&events, "set "));
+        assert!(tables < glide && glide < drawing && drawing < set, "{events:?}");
+    }
+
+    #[test]
+    fn the_settle_carries_the_new_picture_and_the_wallpaper_is_set_to_it() {
+        let (daemon, fake, _, _) = marked_rig("glide-settle-new");
+        let old = daemon.store.output("main", 1, "jpg");
+        let (report, events) = moved_again(&daemon, &fake);
+        assert_eq!(outcome(&report), Outcome::Rendered);
+        let new = fake.showing("main");
+        assert!(new != old && daemon.store.load().screens["main"].output.as_ref() == Some(&new), "{new:?}");
+        let (set, settle, settled) = (at(&events, "set "), at(&events, "settle "), at(&events, "settled 1"));
+        assert!(at(&events, "glide ") < set && set < settle && settle < settled, "{events:?}");
+        assert_eq!((events[set].clone(), events[settle].clone()), (format!("set {}", name_of(&new)), format!("settle 1 {}", name_of(&new))));
+        assert_eq!(std::fs::read(&new).unwrap(), today("glide-settle-new-today"));
+    }
+
+    #[test]
+    fn a_failed_encode_after_the_glide_started_ends_on_the_old_picture_with_nothing_of_the_helper_left() {
+        let (daemon, fake, _, _) = marked_rig("glide-bad-encode");
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let old = fake.showing("main");
+        fake.events.lock().unwrap().clear();
+        *fake.bad_profile.lock().unwrap() = true;
+        fake.place(vec![moved_subject()]);
+        let report = daemon.tick();
+        let events = events(&fake);
+        assert!(report.problem.is_some() && report.outcomes.iter().all(|(_, outcome)| *outcome == Outcome::Skipped), "{report:?} {events:?}");
+        let (glide, settle, settled, close) = (at(&events, "glide "), at(&events, "settle "), at(&events, "settled 1"), at(&events, "close 1"));
+        assert!(glide < settle && settle < settled && settled < close, "{events:?}");
+        assert_eq!(events[settle], format!("settle 1 {}", name_of(&old)), "{events:?}");
+        assert!(!events.iter().any(|event| event.starts_with("set ")), "{events:?}");
+        assert_eq!(fake.showing("main"), old);
+        assert_eq!(daemon.store.load().screens["main"].output.as_ref(), Some(&old));
+        let opened = events.iter().filter(|event| event.starts_with("open ")).count();
+        let closed = events.iter().filter(|event| event.starts_with("close ")).count();
+        assert!(opened == 1 && closed == 1 && !daemon.glider.lock().unwrap().in_flight(), "{events:?}");
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.starts_with("settle 1 back on") && line.contains("could not be encoded")), "{said:?}");
+    }
+
+    #[test]
+    fn a_move_that_changes_nothing_starts_no_glide() {
+        let mut seen = Vec::new();
+        for (name, picture, scenery) in [("unmoved-sample", None, false), ("unmoved-sample-on", None, true), ("unmoved-navy-on", Some(navy_image(480, 100)), true)] {
+            let (daemon, fake, _, _) = glide_rig(name, true);
+            let mut state = daemon.store.load();
+            state.options.pads = 0.7;
+            state.options.scenery = if scenery { scooch_core::Scenery::Auto } else { scooch_core::Scenery::Off };
+            daemon.store.save(&state).unwrap();
+            if let Some(image) = &picture {
+                let path = daemon.store.out().parent().unwrap().join(format!("{name}.png"));
+                std::fs::write(&path, scooch_core::encode_png(image).unwrap()).unwrap();
+                fake.show("main", &path);
+            }
+            fake.place(vec![subject(), calm()]);
+            assert_eq!(outcome(&daemon.tick()), Outcome::Rendered, "{name}");
+            for (step, icons) in [("calm", vec![subject(), calm_moved()]), ("subject", vec![moved_subject(), calm_moved()])] {
+                fake.events.lock().unwrap().clear();
+                daemon.glider.lock().unwrap().said.clear();
+                let before = fake.showing("main");
+                fake.place(icons);
+                let ticked = outcome(&daemon.tick());
+                let events = events(&fake);
+                let said = daemon.glider.lock().unwrap().said.clone();
+                let glided = events.iter().any(|event| event.starts_with("glide "));
+                let unmoved = said.iter().any(|line| line.starts_with("skipped, nothing moves"));
+                let same = fake.showing("main") == before;
+                assert_eq!((ticked == Outcome::Kept, same), (unmoved, unmoved), "{name} {step}: the tables check and the equal bytes check disagree, {ticked:?} {events:?} {said:?}");
+                assert_eq!(glided, !unmoved, "{name} {step} {ticked:?} {events:?} {said:?}");
+                seen.push((name, step, unmoved));
+            }
+        }
+        assert!(seen.iter().any(|(_, _, unmoved)| *unmoved) && seen.iter().any(|(_, _, unmoved)| !unmoved) && seen.iter().all(|(_, step, unmoved)| *step == "calm" || !unmoved), "{seen:?}");
+    }
+
+    #[test]
+    fn two_screens_that_both_change_each_start_their_glide_at_their_own_tables() {
+        let (daemon, fake, _) = two_screen_rig("glide-two-first");
+        *daemon.marks.lock().unwrap() = Some(fake.events.clone());
+        fake.place(vec![subject(), right(subject())]);
+        daemon.tick();
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject(), right(moved_subject())]);
+        let report = daemon.tick();
+        assert_eq!(report.outcomes.iter().map(|(_, outcome)| *outcome).collect::<Vec<_>>(), vec![Outcome::Rendered, Outcome::Rendered]);
+        let events = events(&fake);
+        let place = |start: &str| at(&events, start);
+        let set_of = |screen: &str| events.iter().position(|event| event.starts_with(&format!("set {screen}-"))).unwrap_or_else(|| panic!("{events:?}"));
+        let (left, right) = ((place("tables left"), place("glide 1 "), place("drawing left"), set_of("left")), (place("tables right"), place("glide 2 "), place("drawing right"), set_of("right")));
+        for (tables, glide, drawing, set) in [left, right] {
+            assert!(tables < glide && glide < drawing && drawing < set, "{events:?}");
+        }
+        assert!(left.1 < right.0 && left.3 < right.0, "{events:?}");
+    }
+
+    #[test]
+    fn with_a_helper_shown_after_100_ms_the_still_is_drawn_before_the_helper_is_shown() {
+        let (daemon, fake, script, _) = marked_rig("glide-beside");
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        script.lock().unwrap().shown_after = Duration::from_millis(100);
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let events = events(&fake);
+        let (tables, drawn, shown, glide, set) = (at(&events, "tables main"), at(&events, "drawn main"), at(&events, "shown 1"), at(&events, "glide "), at(&events, "set "));
+        assert!(tables < drawn && drawn < shown && shown < glide && glide < set, "{events:?}");
+        assert_eq!(events.iter().filter(|event| event.starts_with("drawing ")).count(), 1, "{events:?}");
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.contains(" ms of it on the new picture, glide")), "{said:?}");
     }
 
     #[test]
