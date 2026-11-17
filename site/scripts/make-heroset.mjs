@@ -119,7 +119,17 @@ async function storyOrder(browser, names) {
       const story = document.getElementById('story');
       window.scrollTo(0, story.offsetTop + f * (story.offsetHeight - innerHeight));
     }, place);
-    await page.waitForTimeout(600);
+    await page.waitForTimeout(300);
+    await page.evaluate(async () => {
+      const { camera } = window.__scan;
+      let last = '';
+      for (let k = 0; k < 40; k++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const now = camera.matrixWorld.elements.map((value) => value.toFixed(4)).join(',');
+        if (now === last) return;
+        last = now;
+      }
+    });
     const seen = await page.evaluate((families) => {
       const { scene, camera, gallery, main } = window.__scan;
       camera.updateMatrixWorld();
