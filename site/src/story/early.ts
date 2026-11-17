@@ -10,6 +10,19 @@ export function takeEarly(url: string): Promise<Response | null> | null {
   return found.then((response) => (response && response.ok ? response : null));
 }
 
+const AGAIN_AFTER = 500;
+
+const pause = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
 export async function fetchEarly(url: string) {
-  return (await takeEarly(url)) ?? fetch(url);
+  const early = takeEarly(url);
+  if (early) {
+    const response = await early;
+    if (response) return response;
+  } else {
+    const response = await fetch(url).catch(() => null);
+    if (response && response.status < 500) return response;
+  }
+  await pause(AGAIN_AFTER);
+  return fetch(url);
 }
