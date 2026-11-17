@@ -2848,6 +2848,8 @@ mod probe {
         predicted: Option<f64>,
         split: Option<String>,
         took: Option<f64>,
+        made: Option<f64>,
+        found: Option<bool>,
         line: String,
     }
 
@@ -2886,10 +2888,13 @@ mod probe {
         let launch = decided.zip(decision.and_then(|line| number_after(line, "helper launched "))).map(|(at, before)| at - before);
         let later_ready = log.iter().find(|line| line.contains("glide helper ready ")).and_then(|line| number_after(line, "glide helper ready "));
         let from_launch = |key: &str| launch.zip(decision.and_then(|line| number_after(line, key))).map(|(at, after)| at + after);
+        let early = log.iter().any(|line| line.contains("glide early launch"));
         Cold {
             took: log.iter().find_map(|line| line.split("early launch at the wake in ").nth(1).or_else(|| line.split("helper launched in ").nth(1))).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()),
+            made: decision.and_then(|line| number_after(line, "made it in ")).filter(|_| early),
+            found: decision.and_then(|line| line.split("open found it made ").nth(1)).and_then(|rest| rest.split(',').next()).and_then(|word| word.trim().parse::<bool>().ok()),
             line: String::new(),
-            early: log.iter().any(|line| line.contains("glide early launch")),
+            early,
             wake: log.iter().find(|line| line.contains(" wake ") && !line.contains(" glide ")).and_then(|line| stamp_of(line)).map(after_drop),
             launch,
             hello: from_launch("hello "),
@@ -2932,7 +2937,7 @@ mod probe {
             let cold = cold_drag(p, screen, name, places);
             *last = Instant::now();
             let line = format!(
-                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}, launch took {} ms",
+                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}, launch took {} ms, the early window took {} ms, open found it made {:?}",
                 index + 1,
                 cold.glided,
                 cold.skip,
@@ -2954,7 +2959,9 @@ mod probe {
                 cold.split,
                 cold.from,
                 cold.tick,
-                rounded(cold.took)
+                rounded(cold.took),
+                rounded(cold.made),
+                cold.found
             );
             p.line(line.clone());
             Cold { line, ..cold }
