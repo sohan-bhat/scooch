@@ -1062,8 +1062,8 @@ mod running {
                                 let split = &live.split;
                                 let steps = split.steps.iter().map(|(name, took)| (String::from(*name), *took)).collect();
                                 let drawn = Reply::Drawn { id, window: split.window, first, reveal: spent(revealing), make: split.make, present: split.present, found: split.found, steps, revealing: revealing_steps };
-                                self.tell(Reply::Shown { id, ms });
                                 self.tell(drawn);
+                                self.tell(Reply::Shown { id, ms });
                             }
                         }
                         Err(why) => {
@@ -1511,6 +1511,14 @@ mod running {
             let Some((replies, seen, _)) = opening(crate::live::Reveal::from(Some("1")), true) else { return };
             assert!(replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 1, .. })), "{replies:?}");
             assert_eq!(seen, vec!["spin".to_string(), "show".to_string()]);
+        }
+
+        #[test]
+        fn the_drawn_reply_goes_out_before_shown_so_the_daemon_holds_it_at_shown() {
+            let Some((replies, _, _)) = opening(crate::live::Reveal::from(None), true) else { return };
+            let drawn = replies.iter().position(|reply| matches!(reply, Reply::Drawn { id: 1, .. }));
+            let shown = replies.iter().position(|reply| matches!(reply, Reply::Shown { id: 1, .. }));
+            assert!(drawn.zip(shown).is_some_and(|(drawn, shown)| drawn < shown), "{replies:?}");
         }
 
         #[test]
