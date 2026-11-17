@@ -15,8 +15,14 @@ export function inHeroSet(name: string) {
   return hero.includes(name);
 }
 
+const moves = (heroset as { move?: string[] }).move ?? [];
+
+export function firstMove() {
+  return moves.filter((name) => !inHeroSet(group(name)) && sharpAllowed(group(name)));
+}
+
 export function restOrder() {
   const order = (heroset as { order?: string[] }).order ?? [];
   const known = [...order, ...NAMES.filter((name) => !order.includes(name))];
-  return known.filter((name) => !inHeroSet(group(name)) && sharpAllowed(group(name)));
+  return known.filter((name) => !moves.includes(name) && !inHeroSet(group(name)) && sharpAllowed(group(name)));
 }

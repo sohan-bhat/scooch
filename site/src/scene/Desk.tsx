@@ -183,7 +183,7 @@ function Sharpener({ list, when, done, width = 1 }: { list: string[]; when: () =
 const desktop = () => layoutFor(window.innerWidth, window.innerHeight) !== 'phone';
 export const heroesWhen = () => lite && runtime.props && (quality.tier === 'full' || native.ready) && desktop() && level() === 'all';
 export const extrasWhen = () => runtime.painted && native.ready && desktop() && level() === 'all';
-const heroesFirstWhen = () => heroesWhen();
+const heroesFirstWhen = () => heroesWhen() && budget.first;
 const extrasFirstWhen = () => extrasWhen() && budget.stage >= 1;
 const FIRST_WIDTH = 1;
 const heroesFirstDone = () => advance(1);

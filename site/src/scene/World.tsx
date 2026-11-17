@@ -33,8 +33,8 @@ import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
 import { still as native } from './still';
-import { budget, calm, finished, heroReady, level, memory, pause, prefetch, stillsPlanned, upgrades } from './budget';
-import { inHeroSet, restOrder, sharpAllowed } from './sharpset';
+import { budget, calm, finished, firstReady, heroReady, level, memory, pause, prefetch, stillsPlanned, upgrades } from './budget';
+import { firstMove, inHeroSet, restOrder, sharpAllowed } from './sharpset';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
 import { rendererCaughtUp, stripUpload } from './upload';
@@ -255,14 +255,14 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const sharpen = async () => {
       const amount = level();
       await wait(() => runtime.shown);
+      const main = sharpAllowed('main') ? screens.main.sharpUrl() : null;
+      const moves = amount === 'none' ? [] : firstMove();
+      if (main && moves.includes('main')) prefetch([main]);
       await wait(() => runtime.props && runtime.painted && runtime.gallery);
       if (amount === 'none') {
         finished();
         return;
       }
-      await wait(() => native.off || !stillsPlanned() || (native.ready && (amount === 'main' || budget.stage >= 2 || !desktop())));
-      if (stopped) return;
-      const main = sharpAllowed('main') ? screens.main.sharpUrl() : null;
       const pictures = amount === 'all' && sharpAllowed('gallery');
       const labelsUp = async () => {
         if (memory() < 4) return;
@@ -299,21 +299,32 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
         ['main', mainUp],
         ['gallery', galleryUp],
       ] as const;
-      if (main && inHeroSet('main')) prefetch([main]);
-      for (const [name, run] of steps) if (inHeroSet(name)) await run();
-      if (stopped) return;
-      heroReady();
-      if (main && !inHeroSet('main')) prefetch([main]);
-      if (pictures && !inHeroSet('gallery')) prefetch(Object.values(gallery.current).flatMap((frame) => frame.sharpUrl() ?? []));
-      await wait(() => runtime.swapReady || !runtime.posterUp);
-      for (const name of restOrder()) {
-        if (stopped) return;
+      const one = async (name: string) => {
         if (name === 'labels') await labelsUp();
         else if (name === 'main') await mainUp();
         else if (name === 'gallery') for (const id of Object.keys(gallery.current)) await pictureUp(id);
         else if (gallery.current[name]) await pictureUp(name);
         else if (heroModels.has(name) ? heroesWhen() : extrasWhen()) await sharpenModel(gl, scene, name, () => stopped).catch(() => false);
         performance.mark(`scooch:rest-${name}`);
+      };
+      await wait(() => native.off || !stillsPlanned() || native.ready);
+      for (const name of moves) {
+        if (stopped) return;
+        await one(name);
+      }
+      firstReady();
+      await wait(() => native.off || !stillsPlanned() || (native.ready && (amount === 'main' || budget.stage >= 2 || !desktop())));
+      if (stopped) return;
+      if (main && inHeroSet('main')) prefetch([main]);
+      for (const [name, run] of steps) if (inHeroSet(name)) await run();
+      if (stopped) return;
+      heroReady();
+      if (main && !inHeroSet('main') && !moves.includes('main')) prefetch([main]);
+      if (pictures && !inHeroSet('gallery')) prefetch(Object.values(gallery.current).flatMap((frame) => frame.sharpUrl() ?? []));
+      await wait(() => runtime.swapReady || !runtime.posterUp);
+      for (const name of restOrder()) {
+        if (stopped) return;
+        await one(name);
       }
       if (stopped) return;
       finished();

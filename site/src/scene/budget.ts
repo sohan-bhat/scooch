@@ -6,7 +6,7 @@ import { still } from './still';
 type Connection = { saveData?: boolean; effectiveType?: string };
 type Level = 'none' | 'main' | 'all';
 
-export const budget = { stage: 0, busy: true, hero: false, heroAt: 0, steps: 0, lastStepAt: 0 };
+export const budget = { stage: 0, busy: true, first: false, hero: false, heroAt: 0, steps: 0, lastStepAt: 0 };
 
 const waiting: (() => void)[] = [];
 
@@ -26,6 +26,12 @@ export function release() {
   for (const resume of waiting.splice(0)) resume();
 }
 
+export function firstReady() {
+  if (budget.first) return;
+  performance.mark('scooch:first');
+  budget.first = true;
+}
+
 export function heroReady() {
   if (budget.hero) return;
   performance.mark('scooch:hero');
@@ -34,6 +40,7 @@ export function heroReady() {
 }
 
 export function finished() {
+  firstReady();
   heroReady();
   if (budget.busy) performance.mark('scooch:uploads');
   budget.busy = false;
