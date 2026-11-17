@@ -78,7 +78,7 @@ function check(set, whole) {
 }
 
 const families = {
-  desk: ['metal_office_desk'], laptop: ['classic_laptop'], lamp: ['desk_lamp_arm_01'], television: ['television_02'], clock: ['alarm_clock_01'], cassette: ['cassette_player'], plant: ['potted_plant_04'], stapler: ['vintage_stapler'], glasses: ['round_spectacles'], gamepad: ['gamepad'], labels: ['alarm_clock_01', 'office_notepads'],
+  desk: ['metal_office_desk'], laptop: ['classic_laptop'], lamp: ['desk_lamp_arm_01'], television: ['television_02'], clock: ['alarm_clock_01'], cassette: ['cassette_player'], plant: ['potted_plant_04'], stapler: ['vintage_stapler'], glasses: ['round_spectacles'], gamepad: ['gamepad'], notepads: ['office_notepads'],
 };
 const heroModels = ['television', 'desk', 'laptop', 'lamp'];
 
@@ -165,6 +165,7 @@ async function storyOrder(browser, names) {
         const h = Math.min(height, e.y1) - Math.max(0, e.y0);
         if (w > 0 && h > 0) out[name] = Math.max(w, h);
       }
+      out.labels = Math.max(out.clock ?? 0, out.notepads ?? 0);
       return out;
     }, families);
     for (const name of names) {
