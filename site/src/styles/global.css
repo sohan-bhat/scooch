@@ -358,6 +358,13 @@ html.poster-shot #desk-controls {
   visibility: hidden;
 }
 
+html.poster-shot .beats *,
+html.poster-shot .stage-vignette,
+html.still-shot [data-overlay="hint"],
+html.still-shot .stage-vignette {
+  visibility: hidden !important;
+}
+
 html.still-shot .stage-glass,
 html:not(.loading):not(.story-mode) .stage-glass {
   visibility: hidden;
