@@ -30,7 +30,6 @@ try {
     [`/scooch/demo/${manifest.scenery.folder}/${manifest.scenery.canvas.file}`, 'low'],
     ...['laptop', 'desk', 'lamp', 'television'].map((model) => [`/scooch/models/lite/${model}.glb`, 'high']),
     ['/scooch/models/tumbler.glb', 'high'],
-    ...['basis_transcoder.js', 'basis_transcoder.wasm'].map((file) => [`/scooch/basis/${file}`, 'high']),
     ['/scooch/hdri/studio.hdr', 'low'],
   ];
   const images = [manifest.photo.saliency, 'atlas.png', 'shade.png'];
