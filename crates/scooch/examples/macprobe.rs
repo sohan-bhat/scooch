@@ -3331,10 +3331,14 @@ mod probe {
         let on = cold_round(p, &screen, name, places, "cold");
         let glided = on.iter().filter(|cold| cold.glided).count();
         let found = on.iter().filter(|cold| cold.found == Some(true)).count();
+        let read = on.iter().filter(|cold| cold.found.is_some()).count();
+        let missed: Vec<usize> = on.iter().enumerate().filter(|(_, cold)| cold.found == Some(false) && cold.glided && cold.early).map(|(index, _)| index + 1).collect();
         let before_drop = on.iter().filter(|cold| cold.launched_from_drop.is_some_and(|at| at < 0.0)).count();
-        p.line(format!("- cold drags where open found the early window made {found} of 10, early launches before the drop {before_drop} of 10"));
-        if found < 8 {
-            p.fail("open found the early window made in fewer than eight of ten cold drags");
+        p.line(format!("- cold drags where open found the early window made {found} of the {read} whose helper line the probe could read, {} not read, glided early launches read as not found {missed:?}, early launches before the drop {before_drop} of 10", on.len() - read));
+        if read < 8 {
+            p.fail(format!("the probe could read the helper's line in only {read} of ten cold drags, so whether open found the early window cannot be judged"));
+        } else if found * 10 < read * 8 {
+            p.fail("open found the early window made in fewer than eight of ten cold drags it could read");
         }
         let (slow, off) = if restart_daemon(p, true)? {
             p.line(format!("- the daemon restarted with {}={SLOW_HELLO_MS}, so each helper answers hello {} s late, after the drop even when it was launched at the drag start, then one drag to settle the new daemon that is not counted, then ten pairs, each a drag with the glide on and the slow helper followed by a drag with the glide off, both after 35 s at rest so they meet the same runner load, and before each pair one uncounted drag with the glide on so the slow drag finds glide tables", scooch::live::SLOW_HELLO, SLOW_HELLO_MS / 1000));
