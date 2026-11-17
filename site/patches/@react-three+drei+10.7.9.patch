@@ -1,0 +1,12 @@
+diff --git a/node_modules/@react-three/drei/core/ContactShadows.js b/node_modules/@react-three/drei/core/ContactShadows.js
+index 5ed8543..3e6e5ac 100644
+--- a/node_modules/@react-three/drei/core/ContactShadows.js
++++ b/node_modules/@react-three/drei/core/ContactShadows.js
+@@ -57,6 +57,7 @@ const ContactShadows = /* @__PURE__ */React.forwardRef(({
+   }, [resolution, width, height, scale, color]);
+   const blurShadows = blur => {
+     blurPlane.visible = true;
++    shadowCamera.current.getWorldDirection(blurPlane.position).multiplyScalar((near + far) / 2).add(shadowCamera.current.getWorldPosition(new THREE.Vector3()));
+     blurPlane.material = horizontalBlurMaterial;
+     horizontalBlurMaterial.uniforms.tDiffuse.value = renderTarget.texture;
+     horizontalBlurMaterial.uniforms.h.value = blur * 1 / 256;
