@@ -1,4 +1,4 @@
-import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
@@ -27,12 +27,14 @@ async function shoot(browser, strip, empty, ratio) {
   return { shot, shape };
 }
 
+const only = process.argv.find((arg) => arg.startsWith('--only='))?.slice(7).split(',');
+const chosen = strips.filter((strip) => !only || only.includes(strip.name));
 await mkdir(out, { recursive: true });
-for (const name of await readdir(out)) if (/^hero-/.test(name)) await rm(join(out, name));
+for (const name of await readdir(out)) if (/^hero-/.test(name) && chosen.some((strip) => name.startsWith(`hero-${strip.name}-`))) await rm(join(out, name));
 const browser = await launch();
-const juice = {};
+const juice = only ? JSON.parse(await readFile(join(site, 'src', 'home', 'juice.json'), 'utf8')) : {};
 try {
-  for (const strip of strips) {
+  for (const strip of chosen) {
     let shape = null;
     for (const ratio of strip.ratios) {
       const empty = await shoot(browser, strip, true, ratio);
