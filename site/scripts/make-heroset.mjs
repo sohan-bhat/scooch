@@ -97,7 +97,10 @@ try {
   if (!result.pass) process.exitCode = 1;
   const measured = Object.fromEntries(names.map((name) => [name, Math.round(gains[name] * 1000) / 10]));
   await writeFile(file, `${JSON.stringify({ hero, measured, view: `${view.width}x${view.height}@${view.scale}` }, null, 2)}\n`);
-  if (previous.hero.join(',') !== hero.join(',')) console.log('heroset changed, build again before the posters');
+  if ([...previous.hero].sort().join(',') !== [...hero].sort().join(',')) {
+    console.log('heroset changed, build again before the posters');
+    process.exitCode = 2;
+  }
 } finally {
   await browser.close();
 }
