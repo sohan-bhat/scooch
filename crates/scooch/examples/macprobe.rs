@@ -2992,7 +2992,7 @@ mod probe {
         let mut command = Command::new(&p.bin);
         command.arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
         if slow {
-            command.env(scooch::live::SLOW_HELLO, "1000");
+            command.env(scooch::live::SLOW_HELLO, SLOW_HELLO_MS.to_string());
         } else {
             command.env_remove(scooch::live::SLOW_HELLO);
         }
@@ -3003,6 +3003,7 @@ mod probe {
     }
 
     const SLOW_LIMIT: f64 = 60.0;
+    const SLOW_HELLO_MS: u64 = 5000;
 
     struct Slowness {
         direct: Vec<Option<f64>>,
@@ -3147,7 +3148,7 @@ mod probe {
             p.fail("open found the early window made in fewer than eight of ten cold drags");
         }
         let (slow, off) = if restart_daemon(p, true)? {
-            p.line(format!("- the daemon restarted with {}=1000, so each helper answers hello a second late, then one drag to settle the new daemon that is not counted, then ten pairs, each a drag with the glide on and the slow helper followed by a drag with the glide off, both after 35 s at rest so they meet the same runner load, and before each pair one uncounted drag with the glide on so the slow drag finds glide tables", scooch::live::SLOW_HELLO));
+            p.line(format!("- the daemon restarted with {}={SLOW_HELLO_MS}, so each helper answers hello {} s late, after the drop even when it was launched at the drag start, then one drag to settle the new daemon that is not counted, then ten pairs, each a drag with the glide on and the slow helper followed by a drag with the glide off, both after 35 s at rest so they meet the same runner load, and before each pair one uncounted drag with the glide on so the slow drag finds glide tables", scooch::live::SLOW_HELLO, SLOW_HELLO_MS / 1000));
             let mut last = Instant::now();
             cold_one(p, &screen, name, places, ("settling", 0), &mut last);
             let (mut slow, mut off) = (Vec::new(), Vec::new());
