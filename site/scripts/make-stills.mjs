@@ -13,10 +13,11 @@ const sizes = [
 ];
 
 const heroes = [
-  { name: 'desktop', file: 'hero-desktop', width: 2304, height: 900, scale: 1.5, quality: 80 },
-  { name: 'square', file: 'hero-square', width: 1280, height: 1278, scale: 1.5, quality: 80 },
-  { name: 'phone', file: 'hero-phone', width: 720, height: 847, scale: 2, quality: 80 },
+  { name: 'desktop', file: 'hero-desktop', width: 2304, height: 900 },
+  { name: 'square', file: 'hero-square', width: 1280, height: 1278 },
+  { name: 'phone', file: 'hero-phone', width: 720, height: 847 },
 ];
+const ratios = [1, 2];
 
 const heroOnly = process.argv.includes('--hero');
 
@@ -103,16 +104,21 @@ const browser = await launch();
 const juice = {};
 try {
   for (const hero of heroes) {
-    const empty = await openStill(browser, { beat: 0, hero: true, ...hero });
-    const shot = await empty.page.screenshot({ type: 'png' });
-    const shape = await empty.page.evaluate(() => window.__juice());
-    await empty.context.close();
-    const file = join(out, `${hero.file}.webp`);
-    await writeFile(file, await sharp(shot).webp({ quality: hero.quality, effort: 6 }).toBuffer());
-    const full = await openStill(browser, { beat: 0, hero: true, juice: true, ...hero });
+    let shape = null;
+    for (const ratio of ratios) {
+      const empty = await openStill(browser, { beat: 0, hero: true, ...hero, scale: ratio });
+      const shot = await empty.page.screenshot({ type: 'png' });
+      shape = await empty.page.evaluate(() => window.__juice());
+      await empty.context.close();
+      const base = join(out, `${hero.file}-${ratio}x`);
+      await writeFile(`${base}.avif`, await sharp(shot).avif({ quality: 50, effort: 6 }).toBuffer());
+      await writeFile(`${base}.webp`, await sharp(shot).webp({ quality: 82, effort: 6 }).toBuffer());
+      console.log('wrote', `${base}.avif`, `${base}.webp`);
+    }
+    const scale = ratios.at(-1);
+    const full = await openStill(browser, { beat: 0, hero: true, juice: true, ...hero, scale });
     const reference = await full.page.screenshot({ type: 'png' });
     await full.context.close();
-    const scale = hero.scale;
     const colors = await juiceColors(reference, shape, scale);
     const hull = simplify(shape.hull.map(([x, y]) => [x * scale, y * scale]), 0.6).map(([x, y]) => `${Math.round(x)} ${Math.round(y)}`);
     const top = { cx: round(shape.top.cx * scale), cy: round(shape.top.cy * scale), rx: round(shape.top.rx * scale), ry: round(shape.top.ry * scale) };
@@ -129,7 +135,7 @@ try {
       drop: round(bottom - (top.cy - top.ry)),
       ...colors,
     };
-    console.log('wrote', file, JSON.stringify(colors));
+    console.log('juice', hero.name, JSON.stringify(colors));
   }
   await writeFile(join(site, 'src', 'home', 'juice.json'), `${JSON.stringify(juice, null, 2)}\n`);
   for (const size of heroOnly ? [] : sizes) {
