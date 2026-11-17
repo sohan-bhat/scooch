@@ -41,6 +41,7 @@ export const live = {
   look: { x: 0, y: 0, tx: 0, ty: 0 },
   sway: { x: 0, z: 0, vx: 0, vz: 0 },
   icon: { index: -1, x: 0, y: 0 },
+  fadeUntil: 0,
 };
 
 export type Live = typeof live;
@@ -57,7 +58,8 @@ export function animating(now: number) {
     now - live.onAt < 1100 ||
     now - live.offAt < 700 ||
     now - live.sipAt < 1600 ||
-    now - live.stapleAt < 500
+    now - live.stapleAt < 500 ||
+    now < live.fadeUntil
   );
 }
 

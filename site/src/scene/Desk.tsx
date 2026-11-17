@@ -1,7 +1,7 @@
 import { useGLTF } from '@react-three/drei';
 import { useFrame, useThree } from '@react-three/fiber';
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
-import { Box3, Group, HalfFloatType, Mesh, MeshStandardMaterial, Object3D, Vector3, WebGLRenderTarget, type Texture, type WebGLRenderer } from 'three';
+import { Box3, Group, HalfFloatType, Mesh, MeshStandardMaterial, Object3D, Vector3, WebGLRenderTarget, type Material, type Texture, type WebGLRenderer } from 'three';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { asset } from '@/lib/base';
@@ -12,7 +12,7 @@ import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
 import { still as native } from './still';
 import { advance, budget, calm, level, prefetch, upgrades } from './budget';
 import { labelProps } from './labels';
-import { makeLive, obstacles, rimmed } from './touch';
+import { live, makeLive, obstacles, rimmed } from './touch';
 import { quiet } from '@/lib/idle';
 import { settle, warmDraw } from './warm';
 import { windowLit } from './window';
@@ -202,6 +202,44 @@ function placeOnDesk(object: Object3D, placement: Placement, top: number) {
 
 export type Console = { mesh: Mesh; frame: Object3D };
 
+const FADE_IN = 200;
+const fadeState = { start: 0, opaque: new Map<Material, boolean>(), opacity: new Map<Material, number>() };
+
+function materialsOf(root: Object3D) {
+  const found = new Set<Material>();
+  root.traverse((child) => {
+    const mesh = child as Mesh;
+    if (!mesh.isMesh) return;
+    for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+      found.add(material);
+      if (!fadeState.opaque.has(material)) {
+        fadeState.opaque.set(material, !material.transparent);
+        fadeState.opacity.set(material, material.opacity);
+      }
+    }
+  });
+  return found;
+}
+
+function fadeIn(root: Object3D) {
+  for (const material of materialsOf(root)) {
+    material.transparent = true;
+    material.opacity = 0;
+  }
+  fadeState.start = performance.now();
+  live.fadeUntil = fadeState.start + FADE_IN + 50;
+}
+
+function stepFade(root: Object3D) {
+  if (!fadeState.start) return;
+  const t = Math.min((performance.now() - fadeState.start) / FADE_IN, 1);
+  for (const material of materialsOf(root)) {
+    material.opacity = (fadeState.opacity.get(material) ?? 1) * t;
+    if (t >= 1) material.transparent = fadeState.opaque.get(material) === false;
+  }
+  if (t >= 1) fadeState.start = 0;
+}
+
 function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () => void; onConsole: (found: Console) => void }) {
   const gl = useThree((state) => state.gl);
   const scene = useThree((state) => state.scene);
@@ -246,7 +284,10 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
     });
     if (holder && screen) onConsole({ mesh: screen, frame: holder });
   }, [group, onConsole]);
-  useFrame(() => labels.update(story.typed));
+  useFrame(() => {
+    labels.update(story.typed);
+    stepFade(group);
+  });
 
   useLayoutEffect(() => {
     for (const child of group.children) child.visible = !phone || child.userData.phone;
@@ -263,15 +304,18 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
       group.traverse((child) => {
         if ((child as Mesh).isMesh) meshes.push(child as Mesh);
       });
-      for (const mesh of meshes) {
-        await quiet();
-        if (stopped) return;
-        const previous = gl.getRenderTarget();
-        gl.setRenderTarget(target);
-        waits.push(gl.compileAsync(mesh, camera, scene));
-        gl.setRenderTarget(previous);
+      for (const see of [true, false]) {
+        for (const material of materialsOf(group)) material.transparent = see || fadeState.opaque.get(material) === false;
+        for (const mesh of meshes) {
+          await quiet();
+          if (stopped) return;
+          const previous = gl.getRenderTarget();
+          gl.setRenderTarget(target);
+          waits.push(gl.compileAsync(mesh, camera, scene));
+          gl.setRenderTarget(previous);
+        }
+        await Promise.all(waits);
       }
-      await Promise.all(waits);
       await settle(gl, group);
     };
     const pending = compileEach();
@@ -298,6 +342,7 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
         }
         if (stopped) return;
         upgrades.add(sharpLabels);
+        if (!runtime.posterUp) fadeIn(group);
         group.visible = true;
         runtime.props = true;
         onExtras();
