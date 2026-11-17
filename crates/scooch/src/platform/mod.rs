@@ -219,7 +219,9 @@ mod tests {
         assert_eq!(disagreement(None, None, ours), None);
     }
 
-    fn scripted(steps: Vec<Option<(bool, Option<(f32, f32)>)>>) -> (Option<Duration>, Vec<Duration>) {
+    type Read = Option<(bool, Option<(f32, f32)>)>;
+
+    fn scripted(steps: Vec<Read>) -> (Option<Duration>, Vec<Duration>) {
         let mut gaps = Vec::new();
         let mut steps = steps.into_iter();
         let found = follow((100.0, 100.0), |gap| {
