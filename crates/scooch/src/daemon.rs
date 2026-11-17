@@ -1,4 +1,4 @@
-use crate::platform::{Desktop, Format, Screen, Snapshot};
+use crate::platform::{Desktop, DragHooks, Format, Screen, Snapshot};
 use crate::state::{display_of, file_safe, parse, same, write_atomic, Entry, Lock, State, Store, Tally};
 use crate::glide::{Glider, Launch, Plan, Program, Warmup};
 use crate::{cache, poke, scene};
@@ -477,9 +477,12 @@ impl Daemon {
         self.launch(&Launch { screen: pointed.as_ref(), warm: None, drag: false })
     }
 
+    pub fn over_icon(&self, point: (f32, f32)) -> bool {
+        self.icons.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_deref().is_some_and(|icons| icons.iter().any(|icon| holds(icon, point)))
+    }
+
     pub fn drag_starting(self: &Arc<Self>, point: (f32, f32)) -> bool {
-        let on_icon = self.icons.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_deref().is_some_and(|icons| icons.iter().any(|icon| holds(icon, point)));
-        if !on_icon || !self.desktop.desktop_at(point) {
+        if !self.over_icon(point) || !self.desktop.desktop_at(point) {
             return false;
         }
         let daemon = self.clone();
@@ -1552,8 +1555,8 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     }
     prime(desktop.as_ref(), &signal);
     let daemon = Arc::new(Daemon::new(desktop.clone(), store.clone()));
-    let starter = daemon.clone();
-    desktop.drag_starts(Box::new(move |point| starter.drag_starting(point)));
+    let (looker, starter) = (daemon.clone(), daemon.clone());
+    desktop.drag_starts(DragHooks { on_icon: Box::new(move |point| looker.over_icon(point)), start: Box::new(move |point| starter.drag_starting(point)) });
     let worker = signal.clone();
     let tracing = trace();
     std::thread::Builder::new().name("scooch-tick".into()).spawn(move || {
@@ -3489,6 +3492,13 @@ pub mod tests {
         assert!(daemon.handed.lock().unwrap().is_none());
         assert!(daemon.glider.lock().unwrap().said.iter().any(|line| line.starts_with("early launch at the drag start")));
         *fake.button.lock().unwrap() = false;
+    }
+
+    #[test]
+    fn a_down_outside_every_icon_rect_starts_no_polling() {
+        let (daemon, _fake, _) = drag_rig("drag-down");
+        assert_eq!(crate::platform::pressed(Some((140.0, 90.0)), |point| daemon.over_icon(point)), None);
+        assert_eq!(crate::platform::pressed(Some(center(subject())), |point| daemon.over_icon(point)), Some(center(subject())));
     }
 
     #[test]

@@ -8,7 +8,7 @@ pub mod store;
 mod sys;
 mod watch;
 
-use super::{Desktop, DragStart, Format, Screen, Seen, Snapshot, Wake};
+use super::{Desktop, DragHooks, Format, Screen, Seen, Snapshot, Wake};
 use anyhow::{anyhow, Result};
 use objc2::rc::autoreleasepool;
 use objc2::MainThreadMarker;
@@ -28,6 +28,10 @@ fn pointer_now() -> Option<(f32, f32)> {
     let event = sys::Owned::new(unsafe { sys::CGEventCreate(std::ptr::null()) })?;
     let point = unsafe { sys::CGEventGetLocation(event.0) };
     Some((point.x as f32, point.y as f32))
+}
+
+fn button_held() -> bool {
+    unsafe { sys::CGEventSourceButtonState(COMBINED_SESSION, LEFT_BUTTON) }
 }
 const GALLERY: [&str; 2] = ["/System/Library/Desktop Pictures", "/Library/Desktop Pictures"];
 const CONSENT_HINT: &str = "If macOS asks to let scooch control Finder, choose Allow.";
@@ -228,8 +232,8 @@ impl Desktop for Mac {
         pointer_now()
     }
 
-    fn drag_starts(&self, start: DragStart) {
-        let _ = watch::DRAG.set(start);
+    fn drag_starts(&self, hooks: DragHooks) {
+        let _ = watch::DRAG.set(hooks);
     }
 
     fn desktop_at(&self, point: (f32, f32)) -> bool {
@@ -238,7 +242,7 @@ impl Desktop for Mac {
     }
 
     fn button_down(&self) -> bool {
-        unsafe { sys::CGEventSourceButtonState(COMBINED_SESSION, LEFT_BUTTON) }
+        button_held()
     }
 
     fn reduce_motion(&self) -> bool {

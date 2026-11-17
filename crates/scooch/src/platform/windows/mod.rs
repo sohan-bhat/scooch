@@ -25,7 +25,7 @@ use super::Wake;
 #[cfg(target_os = "windows")]
 mod system {
     use super::{com, layout, picture, shell, sta, startup, wakes, watch, Wake};
-    use crate::platform::{Desktop, DragStart, Format, Screen, Snapshot};
+    use crate::platform::{Desktop, DragHooks, Format, Screen, Snapshot};
     use anyhow::{anyhow, Result};
     use scooch_core::RgbImage;
     use std::path::{Path, PathBuf};
@@ -140,8 +140,8 @@ mod system {
             Some((point.x as f32, point.y as f32))
         }
 
-        fn drag_starts(&self, start: DragStart) {
-            let _ = watch::DRAG.set(start);
+        fn drag_starts(&self, hooks: DragHooks) {
+            let _ = watch::DRAG.set(hooks);
         }
 
         fn desktop_at(&self, (x, y): (f32, f32)) -> bool {

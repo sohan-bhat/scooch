@@ -2852,7 +2852,7 @@ mod probe {
         found: Option<bool>,
         launched_at: Option<String>,
         launched_from_drop: Option<f64>,
-        after_start: Option<String>,
+        start_after: Option<String>,
         line: String,
     }
 
@@ -2897,7 +2897,7 @@ mod probe {
             took: log.iter().find_map(|line| line.split("early launch at the wake in ").nth(1).or_else(|| line.split("early launch at the drag start in ").nth(1)).or_else(|| line.split("helper launched in ").nth(1))).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<f64>().ok()),
             launched_at: early_line.and_then(|line| line.split("glide early launch at ").nth(1)).and_then(|rest| rest.split(" in ").next()).map(str::to_string),
             launched_from_drop: early_line.and_then(|line| stamp_of(line)).map(after_drop),
-            after_start: log.iter().find(|line| line.contains(" mouse up,")).and_then(|line| line.split("dragged events after the drag start ").nth(1)).map(|rest| rest.trim().to_string()),
+            start_after: log.iter().find(|line| line.contains(" drag start at ")).and_then(|line| line.split(" found ").nth(1)).and_then(|rest| rest.split(" ms after the down").next()).map(str::to_string),
             made: decision.and_then(|line| number_after(line, "made it in ")).filter(|_| early),
             found: decision.and_then(|line| line.split("open found it made ").nth(1)).and_then(|rest| rest.split(',').next()).and_then(|word| word.trim().parse::<bool>().ok()),
             line: String::new(),
@@ -2949,7 +2949,7 @@ mod probe {
                 _ => "none".to_string(),
             };
             let line = format!(
-                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}, launch took {} ms, the early window took {} ms, open found it made {:?}, early launch came {came}, {} dragged events after the drag start",
+                "  - {label} {}: helper gone before {rested}, glided {}, skip {:?}, early launch {}, after the drop in ms wake {}, launch {}, hello {}, device {}, canvas {}, ready {}, shown {}, predicted shown {}, ready to set {}, waited {}, first moving frame {:?}, set {:?}, launch to ready {:?} ms, open to shown {:?} ms, helper {:?}, canvas from {:?}, tick laps {:?}, launch took {} ms, the early window took {} ms, open found it made {:?}, early launch came {came}, drag start found {} ms after the down",
                 index + 1,
                 cold.glided,
                 cold.skip,
@@ -2974,7 +2974,7 @@ mod probe {
                 rounded(cold.took),
                 rounded(cold.made),
                 cold.found,
-                cold.after_start.as_deref().unwrap_or("unknown")
+                cold.start_after.as_deref().unwrap_or("never")
             );
             p.line(line.clone());
             Cold { line, ..cold }

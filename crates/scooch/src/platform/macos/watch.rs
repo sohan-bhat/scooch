@@ -1,6 +1,5 @@
 use super::sys::{self, Ref, StreamContext};
-use super::{DragStart, Wake};
-use crate::platform::Press;
+use super::{DragHooks, Wake};
 use anyhow::{bail, Context, Result};
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -11,17 +10,19 @@ use objc2_app_kit::{
     NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidMountNotification, NSWorkspaceDidUnmountNotification, NSWorkspaceDidWakeNotification,
 };
 use objc2_foundation::{NSArray, NSNotification, NSNotificationCenter, NSNotificationName, NSString};
-use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, NonNull};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 type Shared = Arc<dyn Fn() + Send + Sync>;
 
 pub static DROPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-pub static DRAG: OnceLock<DragStart> = OnceLock::new();
+pub static DRAG: OnceLock<DragHooks> = OnceLock::new();
+static PRESSED: AtomicU64 = AtomicU64::new(0);
 
 const STREAM_LATENCY: f64 = 0.05;
 const FINDER: &str = "com.apple.finder";
@@ -126,38 +127,44 @@ extern "C" fn changed(_stream: Ref, info: *mut c_void, count: usize, paths: *con
 
 fn mouse(wake: Shared) {
     let traced = crate::daemon::trace();
-    let press = RefCell::new(Press::default());
     let on_mouse = RcBlock::new(move |event: NonNull<NSEvent>| {
         let kind = unsafe { event.as_ref() }.r#type();
+        let press = PRESSED.fetch_add(1, Ordering::SeqCst) + 1;
         if kind == NSEventType::LeftMouseDown {
-            press.borrow_mut().down(super::pointer_now());
-        } else if kind == NSEventType::LeftMouseDragged {
-            let started = press.borrow_mut().dragged(super::pointer_now());
-            if let Some(from) = started {
-                drag_started(from, traced);
-            }
+            pressed_down(press, traced);
         } else if kind == NSEventType::LeftMouseUp {
-            let after = press.borrow_mut().up();
             let front = finder_in_front();
             if traced {
-                let after = after.map_or("none".to_string(), |after| after.to_string());
-                eprintln!("{} mouse up, Finder in front {front}, dragged events after the drag start {after}", crate::daemon::stamp());
+                eprintln!("{} mouse up, Finder in front {front}", crate::daemon::stamp());
             }
             if front {
-                DROPPED.store(true, std::sync::atomic::Ordering::SeqCst);
+                DROPPED.store(true, Ordering::SeqCst);
                 wake();
             }
         }
     });
-    let mask = NSEventMask::LeftMouseDown | NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp;
-    std::mem::forget(NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &on_mouse));
+    std::mem::forget(NSEvent::addGlobalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp, &on_mouse));
 }
 
-fn drag_started(from: (f32, f32), traced: bool) {
-    let front = finder_in_front();
-    let started = front && DRAG.get().is_some_and(|start| start(from));
+fn pressed_down(press: u64, traced: bool) {
+    let Some(hooks) = DRAG.get() else { return };
+    let Some(from) = crate::platform::pressed(super::pointer_now(), &hooks.on_icon) else { return };
+    let _ = std::thread::Builder::new().name("scooch-press".into()).spawn(move || {
+        let found = crate::platform::follow(from, |gap| {
+            std::thread::sleep(gap);
+            (PRESSED.load(Ordering::SeqCst) == press).then(|| (super::button_held(), super::pointer_now()))
+        });
+        if let Some(after) = found {
+            drag_started(from, after, traced);
+        }
+    });
+}
+
+fn drag_started(from: (f32, f32), after: Duration, traced: bool) {
+    let front = super::on_main(|_| finder_in_front());
+    let started = front && DRAG.get().is_some_and(|hooks| (hooks.start)(from));
     if traced {
-        eprintln!("{} drag start at {:.0},{:.0}, Finder in front {front}, an icon drag {started}", crate::daemon::stamp(), from.0, from.1);
+        eprintln!("{} drag start at {:.0},{:.0} found {} ms after the down, Finder in front {front}, an icon drag {started}", crate::daemon::stamp(), from.0, from.1, after.as_millis());
     }
 }
 

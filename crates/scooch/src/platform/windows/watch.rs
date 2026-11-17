@@ -1,5 +1,5 @@
 use super::{com, shell, sta, startup, wakes, Wake};
-use crate::platform::DragStart;
+use crate::platform::DragHooks;
 use anyhow::{bail, Context, Result};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -63,7 +63,7 @@ thread_local! {
 static RETRY: Mutex<wakes::Retry> = Mutex::new(wakes::Retry::new());
 static ATTACHED: AtomicBool = AtomicBool::new(false);
 static DRAGGING: AtomicBool = AtomicBool::new(false);
-pub static DRAG: OnceLock<DragStart> = OnceLock::new();
+pub static DRAG: OnceLock<DragHooks> = OnceLock::new();
 
 fn wake(cause: &str) {
     if crate::daemon::trace() {
@@ -263,7 +263,7 @@ fn dragging() -> bool {
     if unsafe { ::windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point) }.is_err() {
         return false;
     }
-    let started = DRAG.get().is_some_and(|start| start((point.x as f32, point.y as f32)));
+    let started = DRAG.get().is_some_and(|hooks| (hooks.start)((point.x as f32, point.y as f32)));
     DRAGGING.store(started, Ordering::SeqCst);
     if crate::daemon::trace() {
         eprintln!("{} drag start at {},{}, an icon drag {started}", crate::daemon::stamp(), point.x, point.y);
