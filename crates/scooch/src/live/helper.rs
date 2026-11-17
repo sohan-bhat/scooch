@@ -206,6 +206,7 @@ mod running {
         shown: bool,
         stopped: bool,
         closing: Option<(Instant, bool)>,
+        told: Option<String>,
     }
 
     fn spent(since: Instant) -> u64 {
@@ -868,7 +869,7 @@ mod running {
                 return;
             }
             let now = Instant::now();
-            self.layers.insert(id, Live { layer: Some(layer), jobs, split, asked, touched: now, shown: false, stopped: false, closing: None });
+            self.layers.insert(id, Live { layer: Some(layer), jobs, split, asked, touched: now, shown: false, stopped: false, closing: None, told: None });
         }
 
         fn begin_close(&mut self, id: u32, answer: bool) {
@@ -903,6 +904,9 @@ mod running {
                 } else {
                     self.platform.abandon(layer);
                 }
+            }
+            if let Some(why) = live.told.take() {
+                self.fail(Some(id), why);
             }
             if live.closing.is_some_and(|(_, answer)| answer) {
                 self.tell(Reply::Closed { id });
@@ -1127,7 +1131,9 @@ mod running {
                     Some(_) => {}
                     None if self.leaving => self.begin_close(id, false),
                     None if shown && touched.elapsed() > LAYER_IDLE => {
-                        self.fail(Some(id), format!("layer {id} closed after {} s without a command", LAYER_IDLE.as_secs()));
+                        if let Some(live) = self.layers.get_mut(&id) {
+                            live.told = Some(format!("layer {id} closed after {} s without a command", LAYER_IDLE.as_secs()));
+                        }
                         self.begin_close(id, false);
                     }
                     None => {}
@@ -1230,6 +1236,7 @@ mod running {
             ready_when_made: Option<bool>,
             transaction: bool,
             log: Arc<Mutex<Vec<String>>>,
+            failed_at_close: Option<bool>,
         }
 
         #[cfg(target_os = "macos")]
@@ -1315,6 +1322,7 @@ mod running {
 
             #[cfg(windows)]
             fn close(&mut self, layer: Drawn) {
+                self.failed_at_close = self.watched.as_ref().map(|out| out.replies().iter().any(|reply| matches!(reply, Reply::Failed { .. })));
                 self.closed += 1;
                 self.gone.push(layer.screen);
                 let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(windows::Win32::Foundation::HWND(layer.window as *mut std::ffi::c_void)) };
@@ -1322,6 +1330,7 @@ mod running {
 
             #[cfg(target_os = "macos")]
             fn close(&mut self, layer: Drawn) {
+                self.failed_at_close = self.watched.as_ref().map(|out| out.replies().iter().any(|reply| matches!(reply, Reply::Failed { .. })));
                 self.closed += 1;
                 self.gone.push(layer.screen);
                 drop(layer.metal);
@@ -1483,6 +1492,24 @@ mod running {
             assert_eq!(seen, vec!["commit".to_string(), "show".to_string()]);
         }
 
+        #[test]
+        fn a_layer_closed_by_the_five_second_rule_is_reported_only_after_its_window_is_gone() {
+            let (events, _inbox) = mpsc::channel();
+            let out = Captured::default();
+            let platform = Fake { watched: Some(out.clone()), ..Fake::default() };
+            let mut helper = Helper { platform, out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let screen = Screen { id: "idle".into(), frame: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0 };
+            let Ok(Build::Whole(layer, _)) = helper.platform.make(&screen, &Hints::default(), None) else { panic!("the fake made no layer") };
+            let (jobs, _receiver) = mpsc::channel();
+            let idle = Instant::now().checked_sub(LAYER_IDLE + Duration::from_millis(50)).unwrap_or_else(Instant::now);
+            helper.layers.insert(7, Live { layer: Some(layer), jobs, split: Split::default(), asked: idle, touched: idle, shown: true, stopped: true, closing: None, told: None });
+            helper.sweep();
+            let replies = out.replies();
+            assert_eq!(helper.platform.closed, 1, "{replies:?}");
+            assert_eq!(helper.platform.failed_at_close, Some(false), "{replies:?}");
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Failed { id: Some(7), why } if why.starts_with("layer 7 closed after"))), "{replies:?}");
+        }
+
         fn closed_after_stop(stopped: bool) -> (usize, usize, Vec<Reply>) {
             let (events, _inbox) = mpsc::channel();
             let out = Captured::default();
@@ -1490,7 +1517,7 @@ mod running {
             let screen = Screen { id: "stuck".into(), frame: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0 };
             let Ok(Build::Whole(layer, _)) = helper.platform.make(&screen, &Hints::default(), None) else { panic!("the fake made no layer") };
             let (jobs, _receiver) = mpsc::channel();
-            helper.layers.insert(1, Live { layer: Some(layer), jobs, split: Split::default(), asked: Instant::now(), touched: Instant::now(), shown: true, stopped, closing: None });
+            helper.layers.insert(1, Live { layer: Some(layer), jobs, split: Split::default(), asked: Instant::now(), touched: Instant::now(), shown: true, stopped, closing: None, told: None });
             helper.begin_close(1, true);
             if let Some(live) = helper.layers.get_mut(&1) {
                 live.closing = Instant::now().checked_sub(STOP_WAIT + Duration::from_millis(50)).map(|since| (since, true));
