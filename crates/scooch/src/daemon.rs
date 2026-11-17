@@ -522,22 +522,22 @@ impl Daemon {
         let _ = std::thread::Builder::new().name("scooch-early".into()).spawn(move || {
             let launched = Instant::now();
             let cap = launched + crate::glide::EARLY_CAP;
-            let mut end = launched + crate::glide::EARLY_LIFE;
+            let (mut up, mut kept) = (None, None);
             loop {
-                std::thread::sleep(end.saturating_duration_since(Instant::now()));
-                if Instant::now() >= cap || !desktop.button_down() {
+                let down = desktop.button_down();
+                let now = Instant::now();
+                up = if down { None } else { up.or(Some(now)) };
+                let end = up.map_or(cap, |up| (up + crate::glide::EARLY_LIFE).min(cap));
+                if now >= end {
                     break;
                 }
-                if !glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).extend_early(generation, cap) {
-                    return;
+                if kept != Some(end) {
+                    if !glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).extend_early(generation, end) {
+                        return;
+                    }
+                    kept = Some(end);
                 }
-                while desktop.button_down() && Instant::now() < cap {
-                    std::thread::sleep(crate::glide::PRESS_POLL);
-                }
-                end = (Instant::now() + crate::glide::EARLY_LIFE).min(cap);
-                if !glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).extend_early(generation, end) {
-                    return;
-                }
+                std::thread::sleep(crate::glide::PRESS_POLL.min(end.saturating_duration_since(now)));
             }
             glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).expire_early(generation);
         });
@@ -3547,6 +3547,48 @@ pub mod tests {
         let said = daemon.glider.lock().unwrap().said.clone();
         assert_eq!(*spawned.lock().unwrap(), before + 1, "{seen:?} {said:?}");
         assert!(seen.iter().any(|event| event.starts_with("glide ")) && !seen.iter().any(|event| event == "quit"), "{seen:?} {said:?}");
+    }
+
+    fn drop_after_a_drag_start(name: &str, after: Duration) {
+        let (daemon, fake, spawned) = drag_rig(name);
+        let before = *spawned.lock().unwrap();
+        *fake.button.lock().unwrap() = true;
+        assert!(daemon.drag_starting(center(subject())));
+        assert!(wait_for(&fake, "window"), "{:?}", events(&fake));
+        std::thread::sleep((when(&fake, "spawn") + after).saturating_duration_since(Instant::now()));
+        *fake.button.lock().unwrap() = false;
+        std::thread::sleep(Duration::from_millis(250));
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let seen = events(&fake);
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert_eq!(*spawned.lock().unwrap(), before + 1, "{seen:?} {said:?}");
+        assert!(seen.iter().any(|event| event.starts_with("glide ")) && !seen.iter().any(|event| event == "quit"), "{seen:?} {said:?}");
+    }
+
+    #[test]
+    fn a_drop_1_45_s_after_a_drag_start_launch_finds_its_helper() {
+        drop_after_a_drag_start("drag-drop-early", Duration::from_millis(1450));
+    }
+
+    #[test]
+    fn a_drop_1_55_s_after_a_drag_start_launch_finds_its_helper() {
+        drop_after_a_drag_start("drag-drop-late", Duration::from_millis(1550));
+    }
+
+    #[test]
+    fn a_helper_whose_button_went_up_quits_1_5_s_after_the_up_and_not_before() {
+        let (daemon, fake, _) = drag_rig("drag-up");
+        *fake.button.lock().unwrap() = true;
+        assert!(daemon.drag_starting(center(subject())));
+        assert!(wait_for(&fake, "window"), "{:?}", events(&fake));
+        std::thread::sleep((when(&fake, "spawn") + Duration::from_millis(700)).saturating_duration_since(Instant::now()));
+        let up = Instant::now();
+        *fake.button.lock().unwrap() = false;
+        assert!(wait_for(&fake, "quit"), "{:?}", events(&fake));
+        let lived = when(&fake, "quit").saturating_duration_since(up);
+        assert!(lived >= crate::glide::EARLY_LIFE && lived < crate::glide::EARLY_LIFE + Duration::from_millis(400), "the helper quit {lived:?} after the button went up");
+        assert!(!daemon.glider.lock().unwrap().running(), "{:?}", events(&fake));
     }
 
     #[test]
