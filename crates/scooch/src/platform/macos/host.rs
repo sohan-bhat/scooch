@@ -1,6 +1,6 @@
 use super::{layer, picture};
-use crate::live::helper::{self, Build, Platform, Waker};
-use crate::live::Hints;
+use crate::live::helper::{self, Build, Commit, Platform, Waker};
+use crate::live::{Hints, Reveal};
 use crate::platform::Screen;
 use anyhow::Result;
 use objc2::MainThreadMarker;
@@ -10,7 +10,7 @@ use scooch_live::Target;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const PERIOD: Duration = Duration::from_micros(16_667);
 const SETTLE_IN: Duration = Duration::from_millis(34);
@@ -20,6 +20,8 @@ pub struct Host {
     marker: MainThreadMarker,
     busy: Option<super::Busy>,
     app: bool,
+    reveal: Reveal,
+    revealed: Vec<(&'static str, u64)>,
 }
 
 impl Platform for Host {
@@ -43,7 +45,12 @@ impl Platform for Host {
     }
 
     fn present(&mut self, layer: &layer::Layer) -> Result<()> {
-        objc2::rc::autoreleasepool(|_| layer.order());
+        objc2::rc::autoreleasepool(|_| {
+            if self.reveal == Reveal::Transaction {
+                layer.transact(true);
+            }
+            layer.order()
+        });
         Ok(())
     }
 
@@ -77,9 +84,29 @@ impl Platform for Host {
     }
 
     fn show(&mut self, layer: &layer::Layer) -> Result<()> {
-        layer::spin(SETTLE_IN.as_secs_f64());
-        layer.reveal();
+        let started = Instant::now();
+        match self.reveal {
+            Reveal::Transaction => {
+                layer.transact(false);
+                layer.reveal();
+                self.revealed = vec![("unhide", started.elapsed().as_millis() as u64)];
+            }
+            Reveal::Spin => {
+                layer::spin(SETTLE_IN.as_secs_f64());
+                let spun = started.elapsed();
+                layer.reveal();
+                self.revealed = vec![("spin", spun.as_millis() as u64), ("unhide", started.elapsed().saturating_sub(spun).as_millis() as u64)];
+            }
+        }
         Ok(())
+    }
+
+    fn revealed(&mut self) -> Vec<(&'static str, u64)> {
+        std::mem::take(&mut self.revealed)
+    }
+
+    fn committer(&self) -> Option<Commit> {
+        (self.reveal == Reveal::Transaction).then(|| Box::new(layer::commit) as Commit)
     }
 
     fn close(&mut self, layer: layer::Layer) {
@@ -119,5 +146,5 @@ pub fn serve() -> ExitCode {
     let Some(marker) = MainThreadMarker::new() else {
         return helper::refuse("the helper has to run on the main thread");
     };
-    helper::serve(Host { marker, busy: None, app: false })
+    helper::serve(Host { marker, busy: None, app: false, reveal: Reveal::chosen(), revealed: Vec::new() })
 }

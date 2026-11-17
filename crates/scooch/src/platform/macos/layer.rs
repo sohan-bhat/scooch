@@ -354,6 +354,10 @@ impl Layer {
         CATransaction::flush();
     }
 
+    pub fn transact(&self, on: bool) {
+        self.metal.setPresentsWithTransaction(on);
+    }
+
     pub fn reveal(&self) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
@@ -413,6 +417,10 @@ impl Drop for Layer {
             CATransaction::flush();
         });
     }
+}
+
+pub fn commit() {
+    objc2::rc::autoreleasepool(|_| CATransaction::flush());
 }
 
 pub fn present<T>(work: impl FnOnce() -> T) -> T {
