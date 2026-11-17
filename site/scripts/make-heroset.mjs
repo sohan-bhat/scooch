@@ -74,6 +74,101 @@ function check(set, whole) {
   return { loss, region, pass: loss <= GAIN && region <= REGION };
 }
 
+const families = {
+  desk: ['metal_office_desk'], laptop: ['classic_laptop'], lamp: ['desk_lamp_arm_01'], television: ['television_02'], clock: ['alarm_clock_01'], cassette: ['cassette_player'], plant: ['potted_plant_04'], stapler: ['vintage_stapler'], glasses: ['round_spectacles'], gamepad: ['gamepad'], labels: ['alarm_clock_01', 'office_notepads'],
+};
+const heroModels = ['television', 'desk', 'laptop', 'lamp'];
+
+function imageSizes(buffer) {
+  const length = buffer.readUInt32LE(12);
+  const doc = JSON.parse(buffer.subarray(20, 20 + length).toString());
+  const binary = buffer.subarray(20 + length + 8);
+  return (doc.images ?? []).map((image) => {
+    const view = doc.bufferViews[image.bufferView];
+    const blob = binary.subarray(view.byteOffset ?? 0, (view.byteOffset ?? 0) + view.byteLength);
+    return image.mimeType === 'image/ktx2' ? Promise.resolve(blob.readUInt32LE(20)) : sharp(blob).metadata().then((meta) => Math.max(meta.width, meta.height));
+  });
+}
+
+async function baseSize(name) {
+  if (name === 'main' || name === 'gallery') {
+    const manifest = JSON.parse(await readFile(join(site, 'public', 'demo', 'manifest.json'), 'utf8'));
+    const canvases = name === 'main' ? [manifest.scenery.canvas] : manifest.pictures.map((picture) => picture.scenery.canvas);
+    return Math.min(...canvases.map((canvas) => Math.max(canvas.width, canvas.height)));
+  }
+  if (name === 'labels') return 768;
+  const path = heroModels.includes(name) ? join(site, 'public', 'models', 'lite', `${name}.glb`) : join(site, 'public', 'models', `${name}.glb`);
+  return Math.max(...(await Promise.all(imageSizes(await readFile(path)))));
+}
+
+async function storyOrder(browser, names) {
+  const context = await browser.newContext({ viewport: { width: view.width, height: view.height }, deviceScaleFactor: view.scale });
+  const page = await context.newPage();
+  await page.goto(`${origin}?poster&scan&v=${Date.now()}`, { waitUntil: 'load' });
+  await page.waitForFunction(() => performance.getEntriesByName('scooch:settled').length > 0, null, { timeout: 120000, polling: 100 });
+  const first = {};
+  const bases = Object.fromEntries(await Promise.all(names.map(async (name) => [name, await baseSize(name)])));
+  for (let i = 0; i <= 200; i++) {
+    const place = i / 200;
+    await page.evaluate((f) => {
+      const story = document.getElementById('story');
+      window.scrollTo(0, story.offsetTop + f * (story.offsetHeight - innerHeight));
+    }, place);
+    await page.waitForTimeout(600);
+    const seen = await page.evaluate((families) => {
+      const { scene, camera, gallery, main } = window.__scan;
+      camera.updateMatrixWorld();
+      scene.updateMatrixWorld(true);
+      const width = innerWidth * devicePixelRatio;
+      const height = innerHeight * devicePixelRatio;
+      const boxes = {};
+      const visible = (object) => { for (let at = object; at; at = at.parent) if (!at.visible) return false; return true; };
+      const add = (name, mesh) => {
+        if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+        const b = mesh.geometry.boundingBox;
+        const e = boxes[name] ?? { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+        for (let k = 0; k < 8; k++) {
+          const p = b.min.clone().set(k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z).applyMatrix4(mesh.matrixWorld);
+          if (p.clone().applyMatrix4(camera.matrixWorldInverse).z > -camera.near) return;
+          p.project(camera);
+          e.x0 = Math.min(e.x0, (p.x * 0.5 + 0.5) * width);
+          e.x1 = Math.max(e.x1, (p.x * 0.5 + 0.5) * width);
+          e.y0 = Math.min(e.y0, (0.5 - p.y * 0.5) * height);
+          e.y1 = Math.max(e.y1, (0.5 - p.y * 0.5) * height);
+        }
+        boxes[name] = e;
+      };
+      scene.traverse((object) => {
+        if (!object.isMesh || !visible(object)) return;
+        const material = Array.isArray(object.material) ? object.material[0] : object.material;
+        const label = material?.name ?? '';
+        for (const [name, prefixes] of Object.entries(families)) if (prefixes.some((prefix) => label.startsWith(prefix)) && !/screen/.test(label)) add(name, object);
+        const uniforms = material?.uniforms;
+        if (uniforms?.uFrame) {
+          const bound = [uniforms.uFrame.value];
+          if (uniforms.uFrameB && (uniforms.uBlend?.value ?? 0) > 0) bound.push(uniforms.uFrameB.value);
+          for (const texture of bound) {
+            if (!texture) continue;
+            if (texture === main.texture) add('main', object);
+            for (const frame of Object.values(gallery)) if (frame.texture === texture) add('gallery', object);
+          }
+        }
+      });
+      const out = {};
+      for (const [name, e] of Object.entries(boxes)) {
+        const w = Math.min(width, e.x1) - Math.max(0, e.x0);
+        const h = Math.min(height, e.y1) - Math.max(0, e.y0);
+        if (w > 0 && h > 0) out[name] = Math.max(w, h);
+      }
+      return out;
+    }, families);
+    for (const name of names) if (first[name] === undefined && (seen[name] ?? 0) > bases[name]) first[name] = place;
+  }
+  await context.close();
+  console.log('heroset bases', JSON.stringify(bases));
+  return [...names].sort((a, b) => (first[a] ?? 2) - (first[b] ?? 2)).map((name) => ({ name, first: first[name] ?? null }));
+}
+
 const previous = JSON.parse(await readFile(file, 'utf8').catch(() => '{"hero":[]}'));
 const browser = await launch();
 try {
@@ -96,7 +191,11 @@ try {
   console.log('heroset', hero.join(','), `largest energy loss ${(result.loss * 100).toFixed(1)} percent, worst region ${result.region.toFixed(2)}, ${result.pass ? 'pass' : 'fail'}`);
   if (!result.pass) process.exitCode = 1;
   const measured = Object.fromEntries(names.map((name) => [name, Math.round(gains[name] * 1000) / 10]));
-  await writeFile(file, `${JSON.stringify({ hero, measured, view: `${view.width}x${view.height}@${view.scale}` }, null, 2)}\n`);
+  const story = await storyOrder(browser, names.filter((name) => !hero.includes(name)));
+  console.log('heroset order', story.map(({ name, first }) => `${name} ${first ?? 'never'}`).join(', '));
+  const restOrder = story.map(({ name }) => name);
+  const firsts = Object.fromEntries(story.map(({ name, first }) => [name, first]));
+  await writeFile(file, `${JSON.stringify({ hero, order: restOrder, measured, firsts, view: `${view.width}x${view.height}@${view.scale}` }, null, 2)}\n`);
   if ([...previous.hero].sort().join(',') !== [...hero].sort().join(',')) {
     console.log('heroset changed, build again before the posters');
     process.exitCode = 2;
