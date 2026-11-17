@@ -384,6 +384,7 @@ pub struct Daemon {
     quick_hold: Mutex<Option<Hold>>,
     mapped: Mutex<HashMap<String, MapKey>>,
     last_screens: Mutex<Vec<Screen>>,
+    stills: Mutex<HashMap<String, Duration>>,
     #[cfg(test)]
     pub marks: Mutex<Option<crate::glide::tests::Events>>,
 }
@@ -429,7 +430,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()), #[cfg(test)] marks: Mutex::new(None) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()), stills: Mutex::new(HashMap::new()), #[cfg(test)] marks: Mutex::new(None) }
     }
 
     #[cfg(test)]
@@ -1054,6 +1055,7 @@ impl Daemon {
         let shown = output.clone().filter(|_| showing_output);
         let parts: Parts = (&decoded, &analysis, &placement, scene, options);
         let finish = |clock: &mut Instant| {
+            let started = Instant::now();
             self.mark("drawing", &screen.id);
             let (bundle, picture) = self.session_still(&screen.id, key, parts);
             self.mark("drawn", &screen.id);
@@ -1062,6 +1064,7 @@ impl Daemon {
             drop(picture);
             lap("encode", clock);
             let same = encoded.as_ref().is_ok_and(|bytes| shown.as_deref().is_some_and(|output| std::fs::read(output).is_ok_and(|old| old == *bytes)));
+            self.stills.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(screen.id.clone(), started.elapsed());
             Finished { bundle: Some(bundle), encoded, same }
         };
         let tables_key = if glider.is_some() { tables_key(&source, options).ok() } else { None };
@@ -1087,6 +1090,7 @@ impl Daemon {
                     } else {
                         let canvas = self.store.canvas_for(&screen.id, tables_key);
                         let canvas = canvas.is_file().then_some(canvas);
+                        let ahead = self.stills.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&screen.id).copied();
                         let prepared = {
                             let mut idle = || {
                                 if finished.is_none() {
@@ -1095,7 +1099,7 @@ impl Daemon {
                                 }
                                 finished.as_ref().is_some_and(|done: &Finished| done.encoded.is_ok() && !done.same)
                             };
-                            glider.prepare_while(&Plan { screen, picture: &source, canvas: canvas.as_deref(), size: [scene.width, scene.height], still }, &mut idle)
+                            glider.prepare_while(&Plan { screen, picture: &source, canvas: canvas.as_deref(), size: [scene.width, scene.height], still }, ahead, &mut idle)
                         };
                         lap("open", &mut clock);
                         if let Some(id) = prepared {
@@ -3517,11 +3521,19 @@ pub mod tests {
         assert!(left.1 < right.0 && left.3 < right.0, "{events:?}");
     }
 
+    fn remember_start(daemon: &Daemon, shown: u32, still: u64) {
+        let mut state = daemon.store.load();
+        state.starts.insert("Fake GPU".into(), crate::state::Start { windows: vec![shown / 2], draws: vec![shown / 4], reveals: vec![shown - shown / 2 - shown / 4], at: 1, ..Default::default() });
+        daemon.store.save(&state).unwrap();
+        daemon.stills.lock().unwrap().insert("main".into(), Duration::from_millis(still));
+    }
+
     #[test]
     fn with_a_helper_shown_after_100_ms_the_still_is_drawn_before_the_helper_is_shown() {
         let (daemon, fake, script, _) = marked_rig("glide-beside");
         fake.place(vec![subject()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        remember_start(&daemon, 100, 5);
         script.lock().unwrap().shown_after = Duration::from_millis(100);
         fake.events.lock().unwrap().clear();
         fake.place(vec![moved_subject()]);
@@ -3532,6 +3544,23 @@ pub mod tests {
         assert_eq!(events.iter().filter(|event| event.starts_with("drawing ")).count(), 1, "{events:?}");
         let said = daemon.glider.lock().unwrap().said.clone();
         assert!(said.iter().any(|line| line.contains(" ms of it on the new picture, glide")), "{said:?}");
+    }
+
+    #[test]
+    fn a_helper_due_before_the_still_would_be_drawn_is_not_kept_waiting_for_it() {
+        let (daemon, fake, script, _) = marked_rig("glide-due");
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        remember_start(&daemon, 30, 500);
+        script.lock().unwrap().shown_after = Duration::from_millis(30);
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let events = events(&fake);
+        let (shown, glide, drawing, set) = (at(&events, "shown 1"), at(&events, "glide "), at(&events, "drawing main"), at(&events, "set "));
+        assert!(shown < glide && glide < drawing && drawing < set, "{events:?}");
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.contains(" 0 ms of it on the new picture, glide")), "{said:?}");
     }
 
     #[test]

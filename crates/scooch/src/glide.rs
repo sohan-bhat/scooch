@@ -869,10 +869,10 @@ impl Glider {
 
     #[cfg(test)]
     pub fn prepare(&mut self, plan: &Plan) -> Option<u32> {
-        self.prepare_while(plan, &mut || true)
+        self.prepare_while(plan, None, &mut || true)
     }
 
-    pub fn prepare_while(&mut self, plan: &Plan, idle: &mut dyn FnMut() -> bool) -> Option<u32> {
+    pub fn prepare_while(&mut self, plan: &Plan, ahead: Option<Duration>, idle: &mut dyn FnMut() -> bool) -> Option<u32> {
         if !self.usable() {
             self.close_early_for(&plan.screen.id);
             skipped(if self.software { "software adapter" } else { "strikes" }, "");
@@ -907,7 +907,7 @@ impl Glider {
             busy += began.elapsed();
             going
         };
-        let result = self.decide(plan, id, (started, opened_at), &mut trace, &mut timed).map_err(|error| if fresh && format!("{error:#}").contains("did not answer within") { anyhow!("the helper was not ready within {} ms of the plain swap, so this move swaps plainly", started.elapsed().as_millis()) } else { error });
+        let result = self.decide(plan, id, (started, opened_at), &mut trace, (ahead, &mut timed)).map_err(|error| if fresh && format!("{error:#}").contains("did not answer within") { anyhow!("the helper was not ready within {} ms of the plain swap, so this move swaps plainly", started.elapsed().as_millis()) } else { error });
         let opened = reused.is_some() || trace.opened;
         let launched = self.launched.map(|launched| started.saturating_duration_since(launched));
         note(
@@ -940,7 +940,7 @@ impl Glider {
         }
     }
 
-    fn decide(&mut self, plan: &Plan, id: u32, (started, opened_at): (Instant, Option<Instant>), trace: &mut Trace, idle: &mut dyn FnMut() -> bool) -> Result<()> {
+    fn decide(&mut self, plan: &Plan, id: u32, (started, opened_at): (Instant, Option<Instant>), trace: &mut Trace, (ahead, idle): (Option<Duration>, &mut dyn FnMut() -> bool)) -> Result<()> {
         self.send_warm(plan.picture, plan.size, plan.canvas)?;
         let launched = self.launched;
         let since = |at: Instant| launched.map(|launched| at.saturating_duration_since(launched));
@@ -967,6 +967,7 @@ impl Glider {
         let open = opened_at.unwrap_or(started);
         let missed = remembered.missed.or(self.missed).map(|sample| Duration::from_millis(sample.into()));
         let mut guessed = false;
+        let mut showing = None;
         let deadline = if waits_for_ready {
             let device = launched.zip(trace.device).map(|(launched, device)| launched + device);
             let canvas = launched.zip(trace.canvas).map(|(launched, canvas)| launched + canvas);
@@ -978,6 +979,7 @@ impl Glider {
                 (None, None) => None,
             };
             trace.predicted = predicted.and_then(since);
+            showing = predicted;
             let greeted_by_open = launched.zip(trace.hello).is_some_and(|(launched, hello)| launched + hello <= open);
             match (hold_until(started, woke, predicted), predicted) {
                 (Some(deadline), _) => deadline,
@@ -994,8 +996,9 @@ impl Glider {
         } else {
             hold_until(started, woke, Some(started)).unwrap_or(started + PATIENCE)
         };
+        let worth = |showing: Option<Instant>| ahead.zip(showing).is_some_and(|(ahead, showing)| showing > Instant::now() + ahead);
         if waits_for_ready {
-            if !idle() {
+            if worth(showing) && !idle() {
                 return Err(anyhow!(NOTHING_NEW));
             }
             let waited = self.link.as_mut().ok_or_else(|| anyhow!("no helper"))?.ready(Self::left(deadline));
@@ -1012,7 +1015,8 @@ impl Glider {
             link.open(id, plan.screen, plan.still)?;
             trace.opened = true;
         }
-        if !link.answered(id) && !idle() {
+        let showing = showing.or_else(|| Some(opened_at.unwrap_or(open_at) + median(&remembered.windows)? + median(&remembered.draws)? + median(&remembered.reveals)?));
+        if !link.answered(id) && worth(showing) && !idle() {
             return Err(anyhow!(NOTHING_NEW));
         }
         let shown_at = match link.shown(id, Self::left(deadline)) {
