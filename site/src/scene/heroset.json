@@ -1,3 +1,26 @@
 {
-  "hero": ["television", "cassette", "desk", "plant", "clock", "lamp"]
+  "hero": [
+    "desk",
+    "television",
+    "cassette",
+    "plant",
+    "lamp",
+    "clock"
+  ],
+  "measured": {
+    "television": 88.5,
+    "desk": 102.7,
+    "laptop": 5.8,
+    "lamp": 22.3,
+    "clock": 11.4,
+    "cassette": 56.9,
+    "plant": 44.8,
+    "stapler": 1.8,
+    "glasses": 0.1,
+    "gamepad": 0.6,
+    "main": 4.5,
+    "gallery": 2.2,
+    "labels": 0
+  },
+  "view": "1440x900@2"
 }
