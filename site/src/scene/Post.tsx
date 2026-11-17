@@ -30,6 +30,7 @@ function holding() {
 }
 
 const arrived = { mark: '' };
+const firstStill = { marked: false };
 
 function arrival() {
   const mark = `${runtime.props}${runtime.gallery}${runtime.painted}${runtime.inside}`;
@@ -823,7 +824,13 @@ export function Post({ phone }: { phone: boolean }) {
     else if (warming.current > 0 && !moving && still.phase === 'live') warm();
     settle(now, moving, state.clock.elapsedTime - runtime.timeShift);
     grant(still.phase === 'still' && still.pass >= JITTER.length - 1 && !still.tick && !still.refresh);
-    if (still.phase === 'show') still.showing = true;
+    if (still.phase === 'show') {
+      still.showing = true;
+      if (!firstStill.marked) {
+        firstStill.marked = true;
+        performance.mark('scooch:still');
+      }
+    }
     place(still.showing && !still.held);
     if (still.phase === 'show') show(now);
   });
