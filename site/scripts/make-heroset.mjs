@@ -13,6 +13,7 @@ const EARLY = 0.2;
 const WIDE = 0.5;
 const OVER = 1.5;
 const REGION = 2;
+const LABELS = { dial: 512, typed: 680 };
 
 async function settled(browser, query) {
   const context = await browser.newContext({ viewport: { width: view.width, height: view.height }, deviceScaleFactor: view.scale });
@@ -78,7 +79,7 @@ function check(set, whole) {
 }
 
 const families = {
-  desk: ['metal_office_desk'], laptop: ['classic_laptop'], lamp: ['desk_lamp_arm_01'], television: ['television_02'], clock: ['alarm_clock_01'], cassette: ['cassette_player'], plant: ['potted_plant_04'], stapler: ['vintage_stapler'], glasses: ['round_spectacles'], gamepad: ['gamepad'], notepads: ['office_notepads'],
+  desk: ['metal_office_desk'], laptop: ['classic_laptop'], lamp: ['desk_lamp_arm_01'], television: ['television_02'], clock: ['alarm_clock_01'], cassette: ['cassette_player'], plant: ['potted_plant_04'], stapler: ['vintage_stapler'], glasses: ['round_spectacles'], gamepad: ['gamepad'],
 };
 const heroModels = ['television', 'desk', 'laptop', 'lamp'];
 
@@ -100,7 +101,7 @@ async function baseSize(name) {
     const canvas = picture ? picture.scenery.canvas : manifest.scenery.canvas;
     return Math.max(canvas.width, canvas.height);
   }
-  if (name === 'labels') return 768;
+  if (name === 'labels') return Math.min(...Object.values(LABELS));
   const path = heroModels.includes(name) ? join(site, 'public', 'models', 'lite', `${name}.glb`) : join(site, 'public', 'models', `${name}.glb`);
   return Math.max(...(await Promise.all(imageSizes(await readFile(path)))));
 }
@@ -112,6 +113,8 @@ async function storyOrder(browser, names) {
   await page.waitForFunction(() => performance.getEntriesByName('scooch:settled').length > 0, null, { timeout: 120000, polling: 100 });
   const first = {};
   const early = {};
+  const moves = {};
+  const width = view.width * view.scale;
   const bases = Object.fromEntries(await Promise.all(names.map(async (name) => [name, await baseSize(name)])));
   for (let i = 0; i <= 200; i++) {
     const place = i / 200;
@@ -131,66 +134,130 @@ async function storyOrder(browser, names) {
       }
     });
     const seen = await page.evaluate((families) => {
-      const { scene, camera, gallery, main } = window.__scan;
-      camera.updateMatrixWorld();
-      scene.updateMatrixWorld(true);
-      const width = innerWidth * devicePixelRatio;
-      const height = innerHeight * devicePixelRatio;
-      const boxes = {};
-      const visible = (object) => { for (let at = object; at; at = at.parent) if (!at.visible) return false; return true; };
-      const add = (name, mesh) => {
-        if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
-        const b = mesh.geometry.boundingBox;
-        const e = boxes[name] ?? { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
-        for (let k = 0; k < 8; k++) {
-          const p = b.min.clone().set(k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z).applyMatrix4(mesh.matrixWorld);
-          if (p.clone().applyMatrix4(camera.matrixWorldInverse).z > -camera.near) return;
-          p.project(camera);
-          e.x0 = Math.min(e.x0, (p.x * 0.5 + 0.5) * width);
-          e.x1 = Math.max(e.x1, (p.x * 0.5 + 0.5) * width);
-          e.y0 = Math.min(e.y0, (0.5 - p.y * 0.5) * height);
-          e.y1 = Math.max(e.y1, (0.5 - p.y * 0.5) * height);
+      const { gl, scene, camera, gallery, main, three } = window.__scan;
+      const W = innerWidth;
+      const H = innerHeight;
+      const scale = devicePixelRatio;
+      window.__ids ??= { target: new three.WebGLRenderTarget(W, H), pixels: new Uint8Array(W * H * 4), materials: new Map() };
+      const { target, pixels, materials } = window.__ids;
+      const ids = [];
+      const paint = (name, side) => {
+        let index = ids.indexOf(name);
+        if (index < 0) index = ids.push(name) - 1;
+        const key = `${index + 1}/${side}`;
+        if (!materials.has(key)) {
+          const material = new three.MeshBasicMaterial({ fog: false, toneMapped: false, side });
+          material.color.setRGB((index + 1) / 255, 0, 0);
+          materials.set(key, material);
         }
-        boxes[name] = e;
+        return materials.get(key);
       };
-      scene.traverse((object) => {
-        if (!object.isMesh || !visible(object)) return;
-        const material = Array.isArray(object.material) ? object.material[0] : object.material;
-        const label = material?.name ?? '';
-        for (const [name, prefixes] of Object.entries(families)) if (prefixes.some((prefix) => label.startsWith(prefix)) && !/screen/.test(label)) add(name, object);
+      const within = (object, name) => { for (let at = object; at; at = at.parent) if (at.name === name) return true; return false; };
+      const family = (object, material) => {
+        if (object.name === 'caption') {
+          if ((gl.properties.get(material).uniforms?.uReveal?.value ?? 1) <= 0) return null;
+          return within(object, 'clock_whole') ? 'dial' : within(object, 'notepads_office_notepads_yellow_pad') ? 'typed' : null;
+        }
         const uniforms = material?.uniforms;
         if (uniforms?.uFrame) {
-          const bound = [uniforms.uFrame.value];
-          if (uniforms.uFrameB && (uniforms.uBlend?.value ?? 0) > 0) bound.push(uniforms.uFrameB.value);
-          for (const texture of bound) {
+          for (const texture of [uniforms.uFrame.value, uniforms.uFrameB?.value]) {
             if (!texture) continue;
-            if (texture === main.texture) add('main', object);
-            for (const [id, frame] of Object.entries(gallery)) if (frame.texture === texture) add(id, object);
+            if (texture === main.texture) return 'main';
+            for (const [id, frame] of Object.entries(gallery)) if (frame.texture === texture) return id;
           }
+          return null;
         }
+        const label = material?.name ?? '';
+        if (/screen/.test(label)) return null;
+        for (const [name, prefixes] of Object.entries(families)) if (prefixes.some((prefix) => label.startsWith(prefix))) return name;
+        return null;
+      };
+      const clear = (material) => /glass/i.test(material?.name ?? '') || material?.depthWrite === false || (material?.transparent && material.opacity < 0.99) || (material?.transmission ?? 0) > 0;
+      const swapped = [];
+      const hidden = [];
+      scene.traverseVisible((object) => {
+        if (object.isLine || object.isPoints || object.isSprite) {
+          hidden.push(object);
+          return;
+        }
+        if (!object.isMesh) return;
+        const material = Array.isArray(object.material) ? object.material[0] : object.material;
+        const name = family(object, material);
+        if (object.name !== 'caption' && !material?.uniforms?.uFrame && clear(material)) {
+          hidden.push(object);
+          return;
+        }
+        swapped.push([object, object.material]);
+        object.material = paint(name ?? 'other', material?.side ?? 0);
       });
-      const out = {};
-      for (const [name, e] of Object.entries(boxes)) {
-        const w = Math.min(width, e.x1) - Math.max(0, e.x0);
-        const h = Math.min(height, e.y1) - Math.max(0, e.y0);
-        if (w > 0 && h > 0) out[name] = Math.max(w, h);
+      for (const object of hidden) object.visible = false;
+      const background = scene.background;
+      const alpha = gl.getClearAlpha();
+      const auto = gl.shadowMap.autoUpdate;
+      const previous = gl.getRenderTarget();
+      scene.background = null;
+      gl.shadowMap.autoUpdate = false;
+      try {
+        gl.setRenderTarget(target);
+        gl.setClearAlpha(0);
+        gl.clear();
+        gl.render(scene, camera);
+        gl.readRenderTargetPixels(target, 0, 0, W, H, pixels);
+      } finally {
+        gl.setRenderTarget(previous);
+        gl.setClearAlpha(alpha);
+        gl.shadowMap.autoUpdate = auto;
+        scene.background = background;
+        for (const object of hidden) object.visible = true;
+        for (const [object, material] of swapped) object.material = material;
       }
-      out.labels = Math.max(out.clock ?? 0, out.notepads ?? 0);
+      const extents = ids.map(() => ({ x0: Infinity, x1: -Infinity, y0: Infinity, y1: -Infinity, n: 0 }));
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const k = (y * W + x) * 4;
+        if (pixels[k + 3] < 255 || pixels[k] === 0) continue;
+        const e = extents[pixels[k] - 1];
+        if (!e) continue;
+        e.n += 1;
+        if (x < e.x0) e.x0 = x;
+        if (x > e.x1) e.x1 = x;
+        if (y < e.y0) e.y0 = y;
+        if (y > e.y1) e.y1 = y;
+      }
+      const out = {};
+      ids.forEach((name, index) => {
+        const e = extents[index];
+        if (name === 'other' || e.n === 0) return;
+        const wide = (e.x1 - e.x0 + 1) * scale;
+        out[name] = { size: Math.max(wide, (e.y1 - e.y0 + 1) * scale), wide, pixels: e.n };
+      });
       return out;
     }, families);
     for (const name of names) {
-      if (first[name] === undefined && (seen[name] ?? 0) > bases[name]) first[name] = place;
-      if (place < EARLY) early[name] = Math.max(early[name] ?? 0, seen[name] ?? 0);
+      const parts = name === 'labels' ? Object.entries(LABELS) : [[name, bases[name]]];
+      for (const [part, base] of parts) {
+        const shown = seen[part] ?? { size: 0, wide: 0 };
+        if (first[name] === undefined && shown.size > base) first[name] = place;
+        if (place >= EARLY) continue;
+        if (moves[name] === undefined && shown.wide > width * WIDE && shown.size > base * OVER) moves[name] = place;
+        if (shown.wide > (early[name]?.wide ?? 0)) early[name] = { part, wide: Math.round(shown.wide), size: Math.round(shown.size), place };
+      }
     }
   }
   await context.close();
   console.log('heroset bases', JSON.stringify(bases));
-  const width = view.width * view.scale;
-  return [...names].sort((a, b) => (first[a] ?? 2) - (first[b] ?? 2)).map((name) => ({ name, first: first[name] ?? null, move: (early[name] ?? 0) > width * WIDE && (early[name] ?? 0) > bases[name] * OVER, early: Math.round(early[name] ?? 0) }));
+  return [...names].sort((a, b) => (first[a] ?? 2) - (first[b] ?? 2)).map((name) => ({ name, first: first[name] ?? null, move: moves[name] !== undefined, early: { ...(early[name] ?? { wide: 0, size: 0 }), base: bases[name], at: moves[name] } }));
 }
 
 const previous = JSON.parse(await readFile(file, 'utf8').catch(() => '{"hero":[]}'));
 const browser = await launch();
+if (process.argv.includes('--scan')) {
+  const manifest = JSON.parse(await readFile(join(site, 'public', 'demo', 'manifest.json'), 'utf8'));
+  const later = names.filter((name) => !previous.hero.includes(name)).flatMap((name) => (name === 'gallery' ? manifest.pictures.map((picture) => picture.id) : [name]));
+  const story = await storyOrder(browser, later);
+  for (const { name, first, move, early } of story) console.log('heroset scan', name, `first ${first ?? 'never'}`, move ? 'move' : '-', JSON.stringify(early));
+  await browser.close();
+  process.exit(0);
+}
 try {
   const none = measure(await settled(browser, 'sharp='));
   const whole = measure(await settled(browser, ''));

@@ -10,6 +10,7 @@ import {
   HalfFloatType,
   Matrix4,
   Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
   PerspectiveCamera,
@@ -243,8 +244,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   const pads = useMemo(() => (built ? { laptop: built.laptop, console: consoleGlass } : null), [built, consoleGlass]);
   const gallery = useRef<Record<string, Frame>>({});
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).has('scan')) (window as unknown as { __scan: unknown }).__scan = { scene, camera, gallery: gallery.current, main: screens.main };
-  }, [scene, camera, screens]);
+    if (new URLSearchParams(window.location.search).has('scan')) (window as unknown as { __scan: unknown }).__scan = { gl, scene, camera, gallery: gallery.current, main: screens.main, three: { MeshBasicMaterial, WebGLRenderTarget } };
+  }, [gl, scene, camera, screens]);
 
   useEffect(() => {
     let stopped = false;
