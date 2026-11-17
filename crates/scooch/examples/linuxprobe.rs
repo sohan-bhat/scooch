@@ -12,8 +12,8 @@ fn main() -> std::process::ExitCode {
 mod probe {
     use anyhow::{anyhow, bail, Context, Result};
     use scooch::platform::linux::parse::desktop::{Kind, Session};
-    use scooch::platform::linux::parse::geometry::Insets;
-    use scooch::platform::linux::parse::{caja, ding, gio, kde as kde_rules, keyfile, nemo, record, wakes, xfce as xfce_rules};
+    use scooch::platform::linux::parse::geometry::{intersect, Insets};
+    use scooch::platform::linux::parse::{caja, ding, gio, gvariant, kde as kde_rules, keyfile, nemo, record, wakes, xfce as xfce_rules};
     use scooch::platform::linux::settings::{self, Gsettings, Plasma, Xfconf};
     use scooch::platform::linux::{bus, cinnamon, decode, gnome, gvfs, kde, mate, screens, tool, xfce, Linux};
     use scooch::platform::{Desktop, Screen};
@@ -906,11 +906,18 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         holder: Node,
     }
 
+    struct Lattice {
+        grids: Vec<(Rect, xfce_rules::Grid)>,
+        insets: Insets,
+        file: &'static str,
+    }
+
     struct Bench<'a> {
         linux: &'a Linux,
         log: PathBuf,
         stamps: Stamps,
         live: Option<Live>,
+        lattice: Option<Lattice>,
         steady: bool,
         scale: f32,
     }
@@ -935,6 +942,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         partly: [usize; 2],
         rule: [[usize; 3]; 2],
         cost: Vec<u128>,
+        predicted: [usize; 2],
+        last_clicked: usize,
+        pressed_only: usize,
         live_firsts: Vec<u128>,
     }
 
@@ -961,11 +971,16 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let stamps = releases();
         let kde = p.kind == Some(Kind::Kde);
         let live = if kde { open_live(p) } else { None };
+        let lattice = if p.kind == Some(Kind::Xfce) { xfce_lattice(&linux) } else { None };
+        if p.kind == Some(Kind::Xfce) {
+            let described = lattice.as_ref().map_or_else(|| "nothing, since the probe could not rebuild the grid".to_string(), Lattice::describe);
+            p.line(format!("- the XFCE prediction snaps to {described}"));
+        }
         let steady = matches!(p.kind, Some(Kind::Cinnamon | Kind::Mate));
         let scale = factor(p);
         let frame = physical(&screen.frame, scale);
         let at = |x: f32, y: f32| ((frame.x + frame.w * x) as i16, (frame.y + frame.h * y) as i16);
-        let bench = Bench { linux: &linux, log: p.out.join("drop.log"), stamps, live, steady, scale };
+        let bench = Bench { linux: &linux, log: p.out.join("drop.log"), stamps, live, lattice, steady, scale };
         let back = if steady { ", back to back for the first 400 ms on this desktop" } else { "" };
         p.line(format!("- ten drags of the probe icon, each to whichever of two spots lies farther from it, then five drags of the same three icons from the leftmost column, selected by three control clicks after a click on empty desktop, each by XTest, with reads at 0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600 and 2000 ms after the drop{back}, against the places read 2.5 s after the drop, each read printed as began+took:moved places it shows"));
         let mut tally = Tally::default();
@@ -1073,6 +1088,25 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 shown_ms(first_live.map(|taken| taken.took.as_millis() as f64))
             ));
         }
+        if let Some(lattice) = bench.lattice.as_ref() {
+            let to = (f32::from(plan.to.0) / bench.scale, f32::from(plan.to.1) / bench.scale);
+            let pressed = plan.moving.first().copied();
+            let full = pressed.and_then(|anchor| lattice.predict(&plan.before, &plan.moving, anchor, to));
+            let right = full.as_deref() == Some(last.as_slice());
+            tally.predicted[slot] += usize::from(right);
+            let wrong: Rects = full.as_ref().map(|full| full.iter().filter(|rect| !last.contains(rect)).copied().collect::<Rects>()).unwrap_or_default();
+            if plan.group {
+                let clicked = plan.moving.last().copied().and_then(|anchor| lattice.predict(&plan.before, &plan.moving, anchor, to));
+                let by_last = clicked.as_deref() == Some(last.as_slice());
+                tally.last_clicked += usize::from(by_last);
+                let alone = pressed.and_then(|anchor| lattice.predict(&plan.before, &[anchor], anchor, to));
+                let misses = alone.as_ref().map_or(changed.len(), |alone| last.iter().filter(|rect| !alone.contains(rect)).count());
+                tally.pressed_only += usize::from(misses == 0);
+                p.line(format!("    - prediction from the press anchored at the pressed icon equal to the final places {right}, anchored at the last clicked icon {by_last}, knowing only the pressed icon it misses {misses} of the {} moved places, wrong places {wrong:?}", changed.len()));
+            } else {
+                p.line(format!("    - prediction from the press equal to the final places {right}, wrong places {wrong:?}"));
+            }
+        }
         changed
     }
 
@@ -1129,6 +1163,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 tally.rule[1][2],
                 shown_ms(median(&costs)),
                 shown_ms(tally.cost.iter().max().map(|cost| *cost as f64))
+            ));
+        }
+        if bench.lattice.is_some() {
+            p.line(format!(
+                "- the prediction from the press equalled the final places in {} single drags and {} group drags, anchored at the last clicked icon in {} group drags, and knowing only the pressed icon in {} group drags",
+                tally.predicted[0], tally.predicted[1], tally.last_clicked, tally.pressed_only
             ));
         }
         if bench.live.is_some() {
@@ -1300,6 +1340,61 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 .collect();
             found.sort();
             found
+        }
+    }
+
+    fn xfce_lattice(linux: &Linux) -> Option<Lattice> {
+        let icon = settings::xfconf("/desktop-icons/icon-size").and_then(|text| text.trim().parse::<i64>().ok()).map_or(xfce_rules::DEFAULT_ICON_SIZE, |size| size as f64);
+        let factor = xfce::scale() as f32;
+        let shrink = |rect: Rect| Rect { x: (rect.x / factor).trunc(), y: (rect.y / factor).trunc(), w: (rect.w / factor).trunc(), h: (rect.h / factor).trunc() };
+        let work = xfce::workarea(Session::X11, true).map(shrink);
+        let screens: Vec<Screen> = linux.all_screens().ok()?.into_iter().map(|found| found.screen).collect();
+        if kde::config_folder().join("xfce4").join("desktop").join(xfce_rules::YAML_FILE).is_file() {
+            let grids = screens
+                .iter()
+                .filter_map(|screen| {
+                    let area = work.and_then(|work| intersect(&work, &screen.frame)).unwrap_or(screen.frame);
+                    xfce_rules::grid(&area, icon, &xfce_rules::STYLE).map(|grid| (screen.frame, grid))
+                })
+                .collect();
+            return Some(Lattice { grids, insets: xfce_rules::INSETS_4_20, file: xfce_rules::YAML_FILE });
+        }
+        let primary_only = settings::xfconf("/desktop-icons/primary").and_then(|text| gvariant::boolean(&text)).unwrap_or(false);
+        let single = xfce::workarea(Session::X11, false).map(|work| xfce_rules::inset_area(&work, xfce::scale()));
+        let first = screens.first()?;
+        let area = match (primary_only, single) {
+            (true, _) => work.and_then(|work| intersect(&work, &first.frame)).unwrap_or(first.frame),
+            (false, Some(single)) => single,
+            (false, None) => first.frame,
+        };
+        let grid = xfce_rules::grid(&area, icon, &xfce_rules::STYLE)?;
+        Some(Lattice { grids: vec![(area, grid)], insets: xfce_rules::INSETS, file: xfce_rules::LATEST_RC })
+    }
+
+    impl Lattice {
+        fn describe(&self) -> String {
+            let first = self.grids.first().map_or_else(String::new, |(area, grid)| format!(", the first over {} with {} rows by {} columns of {:.1} px slots", show(area), grid.rows, grid.cols, grid.slot));
+            format!("{} grids rebuilt the way the adapter reads {}{first}", self.grids.len(), self.file)
+        }
+
+        fn cell(grid: &xfce_rules::Grid, point: (f32, f32)) -> Option<(i64, i64)> {
+            let column = ((f64::from(point.0) - (grid.origin.0 + grid.xmargin) as f64) / (grid.slot + grid.xspacing as f64)).floor() as i64;
+            let row = ((f64::from(point.1) - (grid.origin.1 + grid.ymargin) as f64) / (grid.slot + grid.yspacing as f64)).floor() as i64;
+            grid.rect(row, column).map(|_| (row, column))
+        }
+
+        fn predict(&self, before: &[[i64; 4]], moving: &[[i64; 4]], anchor: [i64; 4], to: (f32, f32)) -> Option<Rects> {
+            let grid = self.grids.iter().find(|(frame, _)| inside(frame, to)).or(self.grids.first()).map(|(_, grid)| grid)?;
+            let start = Self::cell(grid, center(&anchor))?;
+            let end = Self::cell(grid, to)?;
+            let mut placed: Rects = before.iter().filter(|rect| !moving.contains(rect)).copied().collect();
+            for rect in moving {
+                let (row, column) = Self::cell(grid, center(rect))?;
+                let landed = grid.rect(row + end.0 - start.0, column + end.1 - start.1)?;
+                placed.push(rounded(&self.insets.apply(landed)));
+            }
+            placed.sort_unstable();
+            Some(placed)
         }
     }
 
