@@ -208,18 +208,18 @@ html.hero-shot .stage-scrim {
   max-width: none;
   width: auto;
   height: min(100cqh, 100cqw / 1.6);
-  aspect-ratio: 3456 / 1350;
-  left: calc((100cqw - min(100cqh, 100cqw / 1.6) * 2.56) * 0.74);
-  top: calc((100cqh - min(100cqh, 100cqw / 1.6)) * 0.5);
+  aspect-ratio: 2765 / 1080;
+  left: calc((100cqw - min(100cqh, 100cqw / 1.6) * 2765 / 1080) * 0.74);
+  top: calc((100cqh - min(100cqh, 100cqw / 1.6)) * 0.49);
 }
 
 @media (max-aspect-ratio: 16/10) {
   .stage-still img {
     width: 100cqw;
     height: auto;
-    aspect-ratio: 1280 / 1278;
+    aspect-ratio: 1440 / 1500;
     left: 0;
-    top: calc((100cqh - 100cqw * 1278 / 1280) * 0.5);
+    top: calc((100cqh - 100cqw * 1500 / 1440) * 0.49);
   }
 }
 
@@ -227,8 +227,8 @@ html.hero-shot .stage-scrim {
   .stage-still img {
     width: auto;
     height: 100cqh;
-    aspect-ratio: 1440 / 1694;
-    left: calc((100cqw - 100cqh * 0.85) * 0.5);
+    aspect-ratio: 792 / 932;
+    left: calc((100cqw - 100cqh * 792 / 932) * 0.5);
     top: 0;
   }
 }
@@ -309,9 +309,9 @@ html.loading {
   display: block;
   width: auto;
   height: min(100cqh, 100cqw / 1.6);
-  aspect-ratio: 3456 / 1350;
-  left: calc((100cqw - min(100cqh, 100cqw / 1.6) * 2.56) * 0.74);
-  top: calc((100cqh - min(100cqh, 100cqw / 1.6)) * 0.5);
+  aspect-ratio: 2765 / 1080;
+  left: calc((100cqw - min(100cqh, 100cqw / 1.6) * 2765 / 1080) * 0.74);
+  top: calc((100cqh - min(100cqh, 100cqw / 1.6)) * 0.49);
 }
 
 .juice-level {
@@ -327,9 +327,9 @@ html.loading {
     display: block;
     width: 100cqw;
     height: auto;
-    aspect-ratio: 1920 / 1917;
+    aspect-ratio: 1440 / 1500;
     left: 0;
-    top: calc((100cqh - 100cqw * 1278 / 1280) * 0.5);
+    top: calc((100cqh - 100cqw * 1500 / 1440) * 0.49);
   }
 }
 
@@ -343,10 +343,19 @@ html.loading {
     display: block;
     width: auto;
     height: 100cqh;
-    aspect-ratio: 1440 / 1694;
-    left: calc((100cqw - 100cqh * 0.85) * 0.5);
+    aspect-ratio: 792 / 932;
+    left: calc((100cqw - 100cqh * 792 / 932) * 0.5);
     top: 0;
   }
+}
+
+html.poster-shot header,
+html.poster-shot .beats,
+html.poster-shot .stage-still,
+html.poster-shot .stage-glass,
+html.poster-shot .stage-scrim,
+html.poster-shot #desk-controls {
+  visibility: hidden;
 }
 
 html.still-shot .stage-glass,

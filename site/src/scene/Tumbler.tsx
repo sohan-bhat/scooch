@@ -129,7 +129,7 @@ export function Tumbler() {
   }, [gltf]);
 
   useEffect(() => {
-    if (runtime.still < 0) return;
+    if (runtime.still < 0 && !query.has('poster')) return;
     const hook = window as Window & { __juice?: () => ReturnType<typeof outline> };
     hook.__juice = () => outline(built.holder, built.profile, built.floor, camera, size.width, size.height);
     return () => {
@@ -170,7 +170,7 @@ export function Tumbler() {
     const moving = Math.hypot(live.glass.x - holder.position.x, live.glass.z - holder.position.z) > 0.002;
     holder.position.y = DESK_TOP + lift * 0.09 + (moving ? 0.005 : 0) * (1 - lift);
     holder.rotation.set(lean.x + tip, 0, lean.z);
-    const target = runtime.still >= 0 ? (emptyStill ? 0 : 1) : live.juice / 4;
+    const target = emptyStill ? 0 : runtime.still >= 0 ? 1 : live.juice / 4;
     const settled = !sipping || t > 0.75;
     if (settled) {
       const rate = target > shown.current ? 2.4 : 5;

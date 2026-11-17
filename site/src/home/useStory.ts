@@ -203,6 +203,8 @@ export function introduce(refs: Refs, still: number) {
   if (runtime.abandoned) return;
   runtime.ready = true;
   performance.mark('scooch:ready');
+  const shoot = new URLSearchParams(window.location.search).has('poster');
+  if (shoot) document.documentElement.classList.add('poster-shot');
   const load = loader();
   load?.done();
   const glass = document.getElementById('glass');
@@ -220,7 +222,7 @@ export function introduce(refs: Refs, still: number) {
       duration: 0.15,
       ease: 'none',
       onComplete: () => {
-        releaseClock();
+        if (!shoot) releaseClock();
         performance.mark('scooch:swap');
         glass?.removeAttribute('role');
       },

@@ -11,6 +11,7 @@
     "demo": "node scripts/make-demo.mjs",
     "models": "node scripts/make-models.mjs",
     "stills": "node scripts/make-stills.mjs",
+    "posters": "node scripts/make-posters.mjs",
     "brand": "node scripts/make-brand.mjs",
     "atlas": "node scripts/make-atlas.mjs",
     "readme": "node scripts/make-readme.mjs"

@@ -40,13 +40,13 @@ function Juice() {
 const Stage = lazy(() => import('@/scene/Stage'));
 
 const posters = [
-  { name: 'phone', media: '(max-width: 767px), (orientation: portrait)', width: 1440, height: 1694 },
-  { name: 'square', media: '(max-aspect-ratio: 16/10)', width: 2560, height: 2556 },
-  { name: 'desktop', media: undefined, width: 4608, height: 1800 },
+  { name: 'phone', media: '(max-width: 767px), (orientation: portrait)', widths: [792, 1188, 1584], sizes: 'calc(100svh * 0.85)' },
+  { name: 'square', media: '(max-aspect-ratio: 16/10)', widths: [1440, 2048, 2880], sizes: '100vw' },
+  { name: 'desktop', media: undefined, widths: [2765, 4608, 5530], sizes: 'calc(min(100svh, 62.5vw) * 2.56)' },
 ];
 
-function posterSet(name: string, type: string) {
-  return `${asset(`stills/hero-${name}-1x.${type}`)} 1x, ${asset(`stills/hero-${name}-2x.${type}`)} 2x`;
+function posterSet(name: string, widths: number[], type: string) {
+  return widths.map((width) => `${asset(`stills/hero-${name}-${width}.${type}`)} ${width}w`).join(', ');
 }
 
 class Fallback extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -89,12 +89,10 @@ export function Story({ live, beats, canvas, still, section, onReady }: Props) {
           ) : null}
         </div>
         <picture ref={still} className="stage-still pointer-events-none absolute inset-0" aria-hidden>
-          {posters.map(({ name, media, width, height }) =>
-            ['avif', 'webp'].map((type) => (
-              <source key={`${name}-${type}`} media={media} type={`image/${type}`} srcSet={posterSet(name, type)} width={width} height={height} />
-            )),
+          {posters.map(({ name, media, widths, sizes }) =>
+            ['avif', 'webp'].map((type) => <source key={`${name}-${type}`} media={media} type={`image/${type}`} srcSet={posterSet(name, widths, type)} sizes={sizes} />),
           )}
-          <img src={asset('stills/hero-desktop-2x.webp')} srcSet={posterSet('desktop', 'webp')} alt="" width={4608} height={1800} fetchPriority="high" decoding="sync" {...{ elementtiming: 'hero' }} />
+          <img src={asset('stills/hero-desktop-2765.webp')} srcSet={posterSet('desktop', posters[2].widths, 'webp')} sizes={posters[2].sizes} alt="" width={2765} height={1080} fetchPriority="high" decoding="sync" {...{ elementtiming: 'hero' }} />
         </picture>
         <Juice />
         <div aria-hidden className="stage-scrim pointer-events-none absolute inset-x-0 bottom-0 h-[46svh] bg-gradient-to-t from-room via-room/85 to-transparent wide:h-[16svh] wide:via-room/40" />
