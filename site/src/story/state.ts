@@ -51,6 +51,9 @@ export const runtime = {
   clockOrigin: Date.now() - performance.now(),
   clockHold: true,
   clockSweepAt: 0,
+  posterUp: true,
+  restReady: false,
+  dropPoster: null as (() => void) | null,
 };
 
 export function changed() {

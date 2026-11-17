@@ -603,7 +603,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     }
     const time = runtime.frozen ?? state.clock.elapsedTime - runtime.timeShift;
     const idle = runtime.idle;
-    const motion = idle ? 1 : 0;
+    const motion = idle && !runtime.posterUp ? 1 : 0;
     const lookX = pointer.x * motion + live.look.x;
     const lookY = pointer.y * motion + live.look.y;
     rig.apply(camera as PerspectiveCamera, story.camera, time, lookX, lookY, Math.min(delta, 0.1), size.width, size.height, idle, runtime.frozen !== null);

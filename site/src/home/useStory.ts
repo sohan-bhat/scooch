@@ -193,7 +193,7 @@ export function introduce(refs: Refs, still: number) {
   if (still >= 0) {
     let frames = 0;
     const wait = () => {
-      if (runtime.posed && ((runtime.props && runtime.scenery && runtime.gallery && runtime.painted) || runtime.hero)) frames += 1;
+      if (runtime.posed && runtime.props && runtime.scenery && runtime.gallery && runtime.painted) frames += 1;
       if (frames < 30) requestAnimationFrame(wait);
       else (window as Window & { __stillReady?: boolean }).__stillReady = true;
     };
@@ -206,19 +206,32 @@ export function introduce(refs: Refs, still: number) {
   const load = loader();
   load?.done();
   const glass = document.getElementById('glass');
-  const fade = () => {
-    load?.release();
+  load?.release();
+  runtime.shown = true;
+  performance.mark('scooch:shown');
+  const inputs = ['wheel', 'touchstart', 'keydown', 'pointerdown', 'scroll'] as const;
+  const swap = () => {
+    if (!runtime.posterUp) return;
+    runtime.posterUp = false;
+    runtime.dropPoster = null;
+    for (const name of inputs) window.removeEventListener(name, swap);
     gsap.to([picture, glass], {
       autoAlpha: 0,
-      duration: 0.3,
-      ease: 'power2.out',
+      duration: 0.15,
+      ease: 'none',
       onComplete: () => {
         releaseClock();
-        runtime.shown = true;
-        performance.mark('scooch:shown');
+        performance.mark('scooch:swap');
         glass?.removeAttribute('role');
       },
     });
   };
-  fade();
+  runtime.dropPoster = swap;
+  for (const name of inputs) window.addEventListener(name, swap, { passive: true });
+  const watch = () => {
+    if (!runtime.posterUp) return;
+    if (runtime.restReady) swap();
+    else requestAnimationFrame(watch);
+  };
+  requestAnimationFrame(watch);
 }

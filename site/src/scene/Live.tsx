@@ -189,7 +189,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       return tools.ray.ray.intersectPlane(tools.plane, tools.hit);
     };
     const onMove = (event: PointerEvent, movementX: number, movementY: number) => {
-      if (!live.quiet || !runtime.ready) return;
+      if (!live.quiet || !runtime.ready || runtime.posterUp) return;
       if (press.id) {
         const dx = event.clientX - press.x;
         const dy = event.clientY - press.y;
@@ -243,6 +243,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
     };
     const onDown = (event: PointerEvent) => {
       if (!live.quiet || !runtime.ready || event.button > 0) return;
+      runtime.dropPoster?.();
       const found = pick(event);
       press.id = found.id || (event.pointerType === 'mouse' ? 'space' : '');
       live.pressing = !!press.id;
