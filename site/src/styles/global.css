@@ -290,8 +290,7 @@ html.still-shot.share-shot .share-only {
 }
 
 html.loading {
-  overflow: hidden;
-  scrollbar-gutter: stable;
+  overflow-y: scroll;
 }
 
 .stage-glass {
