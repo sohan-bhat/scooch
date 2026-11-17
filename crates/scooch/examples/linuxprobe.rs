@@ -18,7 +18,7 @@ mod probe {
     use scooch::platform::linux::{bus, cinnamon, decode, gnome, gvfs, kde, mate, screens, tool, xfce, Linux};
     use scooch::platform::{Desktop, Screen};
     use scooch_core::{Rect, RgbImage};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
     use std::ffi::OsString;
     use std::fs;
     use std::io::Write as _;
@@ -887,8 +887,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     const OFFSETS: [u64; 16] = [0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600, 2000];
     const STEADY: Duration = Duration::from_millis(400);
     const TRUTH: Duration = Duration::from_millis(2500);
+    const LIVE_UNTIL: Duration = Duration::from_millis(2300);
+    const PREFIX: &str = "scooch-probe";
 
     type Rects = Vec<[i64; 4]>;
+    type Named = Vec<(String, [i64; 4])>;
+    type Node = (String, String);
     type Stamps = Arc<Mutex<Vec<(Instant, &'static str)>>>;
 
     struct Taken<T> {
@@ -897,10 +901,16 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         seen: T,
     }
 
+    struct Live {
+        bus: zbus::blocking::Connection,
+        holder: Node,
+    }
+
     struct Bench<'a> {
         linux: &'a Linux,
         log: PathBuf,
         stamps: Stamps,
+        live: Option<Live>,
         steady: bool,
         scale: f32,
     }
@@ -925,6 +935,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         partly: [usize; 2],
         rule: [[usize; 3]; 2],
         cost: Vec<u128>,
+        live_firsts: Vec<u128>,
     }
 
     fn after_drop(p: &mut Probe) -> Result<()> {
@@ -948,11 +959,13 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let first = wait_until(Duration::from_secs(60), || rendered(&home));
         p.line(format!("- the daemon {process} rendered after {:?} ms, its wakes and wallpaper sets are read from drop.log, and the probe reads the places itself through the adapter", first.map(|time| time.as_millis())));
         let stamps = releases();
+        let kde = p.kind == Some(Kind::Kde);
+        let live = if kde { open_live(p) } else { None };
         let steady = matches!(p.kind, Some(Kind::Cinnamon | Kind::Mate));
         let scale = factor(p);
         let frame = physical(&screen.frame, scale);
         let at = |x: f32, y: f32| ((frame.x + frame.w * x) as i16, (frame.y + frame.h * y) as i16);
-        let bench = Bench { linux: &linux, log: p.out.join("drop.log"), stamps, steady, scale };
+        let bench = Bench { linux: &linux, log: p.out.join("drop.log"), stamps, live, steady, scale };
         let back = if steady { ", back to back for the first 400 ms on this desktop" } else { "" };
         p.line(format!("- ten drags of the probe icon, each to whichever of two spots lies farther from it, then five drags of the same three icons from the leftmost column, selected by three control clicks after a click on empty desktop, each by XTest, with reads at 0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600 and 2000 ms after the drop{back}, against the places read 2.5 s after the drop, each read printed as began+took:moved places it shows"));
         let mut tally = Tally::default();
@@ -986,6 +999,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         let _ = clicks(&[at(0.92, 0.92)]);
         summary(p, &bench, &tally);
+        if kde {
+            let _ = screen_reader(false);
+        }
         if let Some(mut child) = p.daemon.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -997,13 +1013,19 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let (kind, slot) = if plan.group { ("group", 1) } else { ("single", 0) };
         let log_mark = log_lines(&bench.log).len();
         let stamp_mark = bench.stamps.lock().map(|list| list.len()).unwrap_or(0);
+        let live_before = bench.live.as_ref().map(Live::read);
         let sent = drag(plan.from, plan.to).is_ok();
         let dropped = Instant::now();
         let dropped_wall = wall();
         let read = || places(bench.linux);
-        let reads = series(&read, dropped, bench.steady);
+        let (reads, lives) = std::thread::scope(|scope| {
+            let watcher = bench.live.as_ref().map(|live| scope.spawn(move || live_series(live, dropped)));
+            let reads = series(&read, dropped, bench.steady);
+            (reads, watcher.and_then(|handle| handle.join().ok()).unwrap_or_default())
+        });
         std::thread::sleep(TRUTH.saturating_sub(dropped.elapsed()));
         let last = places(bench.linux);
+        let live_last = bench.live.as_ref().map(Live::read);
         let changed: Rects = last.iter().filter(|rect| !plan.before.contains(rect)).copied().collect();
         let first_final = reads.iter().find(|taken| !changed.is_empty() && taken.seen == last).map(|taken| taken.began.as_millis());
         if !changed.is_empty() && reads.first().is_some_and(|taken| taken.seen == last) {
@@ -1038,6 +1060,18 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         p.line(format!("    - reads {}", shown.join(" ")));
         if bench.steady {
             steady_lines(p, tally, &plan, &reads, &last, slot);
+        }
+        if let (Some(before), Some(after)) = (live_before, live_last) {
+            let moved: Named = after.iter().filter(|item| !before.contains(item)).cloned().collect();
+            let first_live = lives.iter().find(|taken| !moved.is_empty() && moved.iter().all(|item| taken.seen.contains(item)));
+            tally.live_firsts.extend(first_live.map(|taken| taken.began.as_millis()));
+            p.line(format!(
+                "    - live reads of Plasma's accessibility tree {}, items that moved {}, first final live read began at {} ms and took {} ms",
+                lives.len(),
+                moved.len(),
+                shown_ms(first_live.map(|taken| taken.began.as_millis() as f64)),
+                shown_ms(first_live.map(|taken| taken.took.as_millis() as f64))
+            ));
         }
         changed
     }
@@ -1097,6 +1131,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 shown_ms(tally.cost.iter().max().map(|cost| *cost as f64))
             ));
         }
+        if bench.live.is_some() {
+            p.line(format!("- the live accessibility read was final first at {} ms after the drop", sorted(&tally.live_firsts)));
+        }
     }
 
     fn series(read: &impl Fn() -> Rects, dropped: Instant, steady: bool) -> Vec<Taken<Rects>> {
@@ -1114,6 +1151,17 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let began = dropped.elapsed();
             let seen = read();
             taken.push(Taken { began, took: dropped.elapsed().saturating_sub(began), seen });
+        }
+        taken
+    }
+
+    fn live_series(live: &Live, dropped: Instant) -> Vec<Taken<Named>> {
+        let mut taken = Vec::new();
+        while dropped.elapsed() < LIVE_UNTIL {
+            let began = dropped.elapsed();
+            let seen = live.read();
+            taken.push(Taken { began, took: dropped.elapsed().saturating_sub(began), seen });
+            std::thread::sleep(Duration::from_millis(5));
         }
         taken
     }
@@ -1152,6 +1200,107 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             }
         });
         stamps
+    }
+
+    fn screen_reader(on: bool) -> Result<()> {
+        bus::session()?.call_method(Some("org.a11y.Bus"), "/org/a11y/bus", Some("org.freedesktop.DBus.Properties"), "Set", &("org.a11y.Status", "ScreenReaderEnabled", zvariant::Value::from(on)))?;
+        Ok(())
+    }
+
+    fn open_live(p: &mut Probe) -> Option<Live> {
+        let set = screen_reader(true);
+        p.line(format!(
+            "- live read, ScreenReaderEnabled set to true on the accessibility bus launcher before anything else asks it, so Qt finds it on when the launcher appears, {}",
+            set.as_ref().map_or_else(|error| format!("refused with {error:#}"), |_| "accepted".to_string())
+        ));
+        let address = match bus::call::<_, String>("org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus", "GetAddress", &()) {
+            Ok(address) => address,
+            Err(error) => {
+                p.line(format!("- live read, no accessibility bus in this session, {error:#}"));
+                return None;
+            }
+        };
+        let a11y = match zbus::blocking::connection::Builder::address(address.as_str()).and_then(|builder| builder.method_timeout(Duration::from_secs(2)).build()) {
+            Ok(a11y) => a11y,
+            Err(error) => {
+                p.line(format!("- live read, the accessibility bus at {address} took no connection, {error}"));
+                return None;
+            }
+        };
+        let registry: Node = ("org.a11y.atspi.Registry".to_string(), "/org/a11y/atspi/accessible/root".to_string());
+        let started = Instant::now();
+        let mut shell = None;
+        while shell.is_none() && started.elapsed() < Duration::from_secs(15) {
+            shell = a11y_children(&a11y, &registry).into_iter().find(|app| a11y_name(&a11y, app).as_deref() == Some("plasmashell"));
+            if shell.is_none() {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+        let Some(shell) = shell else {
+            let apps: Vec<String> = a11y_children(&a11y, &registry).iter().filter_map(|app| a11y_name(&a11y, app)).collect();
+            p.line(format!("- live read, plasmashell did not join the accessibility bus within 15 s, the applications there {apps:?}"));
+            return None;
+        };
+        p.line(format!("- live read, plasmashell on the accessibility bus after {} ms", started.elapsed().as_millis()));
+        let mut queue: VecDeque<(Node, usize)> = VecDeque::from([(shell, 0)]);
+        let mut holders: BTreeMap<Node, usize> = BTreeMap::new();
+        let mut walked = 0usize;
+        while let Some((node, depth)) = queue.pop_front() {
+            walked += 1;
+            if walked > 3000 {
+                break;
+            }
+            for child in a11y_children(&a11y, &node) {
+                if a11y_name(&a11y, &child).is_some_and(|name| name.starts_with(PREFIX)) {
+                    *holders.entry(node.clone()).or_default() += 1;
+                }
+                if depth < 16 {
+                    queue.push_back((child, depth + 1));
+                }
+            }
+        }
+        let best = holders.into_iter().max_by_key(|(_, count)| *count);
+        let most = best.as_ref().map_or(0, |(_, count)| *count);
+        let Some((holder, _)) = best.filter(|_| most >= 2) else {
+            p.line(format!("- live read, {walked} accessible nodes walked and no node holds two probe icons by name, at most {most}"));
+            return None;
+        };
+        p.line(format!("- live read, {walked} accessible nodes walked, the folder view's items sit under one node with {most} probe icons, and each live read takes their names and screen extents"));
+        Some(Live { bus: a11y, holder })
+    }
+
+    fn a11y_children(bus: &zbus::blocking::Connection, node: &Node) -> Vec<Node> {
+        bus.call_method(Some(node.0.as_str()), node.1.as_str(), Some("org.a11y.atspi.Accessible"), "GetChildren", &())
+            .ok()
+            .and_then(|reply| reply.body().deserialize::<Vec<(String, zvariant::OwnedObjectPath)>>().ok())
+            .map(|list| list.into_iter().map(|(name, path)| (name, path.as_str().to_string())).collect())
+            .unwrap_or_default()
+    }
+
+    fn a11y_name(bus: &zbus::blocking::Connection, node: &Node) -> Option<String> {
+        let reply = bus.call_method(Some(node.0.as_str()), node.1.as_str(), Some("org.freedesktop.DBus.Properties"), "Get", &("org.a11y.atspi.Accessible", "Name")).ok()?;
+        let value = reply.body().deserialize::<zvariant::OwnedValue>().ok()?;
+        String::try_from(value).ok()
+    }
+
+    fn a11y_extents(bus: &zbus::blocking::Connection, node: &Node) -> Option<[i64; 4]> {
+        let reply = bus.call_method(Some(node.0.as_str()), node.1.as_str(), Some("org.a11y.atspi.Component"), "GetExtents", &(0u32,)).ok()?;
+        let (x, y, w, h) = reply.body().deserialize::<(i32, i32, i32, i32)>().ok()?;
+        Some([i64::from(x), i64::from(y), i64::from(w), i64::from(h)])
+    }
+
+    impl Live {
+        fn read(&self) -> Named {
+            let mut found: Named = a11y_children(&self.bus, &self.holder)
+                .iter()
+                .filter_map(|node| {
+                    let name = a11y_name(&self.bus, node).filter(|name| name.starts_with(PREFIX))?;
+                    Some((name, a11y_extents(&self.bus, node)?))
+                })
+                .collect();
+            found.sort();
+            found
+        }
     }
 
     fn rounded(rect: &Rect) -> [i64; 4] {
