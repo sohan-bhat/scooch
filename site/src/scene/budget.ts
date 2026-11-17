@@ -6,7 +6,7 @@ import { still } from './still';
 type Connection = { saveData?: boolean; effectiveType?: string };
 type Level = 'none' | 'main' | 'all';
 
-export const budget = { stage: 0, busy: true, hero: false, steps: 0, lastStepAt: 0 };
+export const budget = { stage: 0, busy: true, hero: false, heroAt: 0, steps: 0, lastStepAt: 0 };
 
 const waiting: (() => void)[] = [];
 
@@ -27,14 +27,20 @@ export function release() {
 }
 
 export function heroReady() {
-  if (!budget.hero) performance.mark('scooch:hero');
+  if (budget.hero) return;
+  performance.mark('scooch:hero');
   budget.hero = true;
+  budget.heroAt = performance.now();
 }
 
 export function finished() {
   heroReady();
   if (budget.busy) performance.mark('scooch:uploads');
   budget.busy = false;
+  if (!runtime.restLoaded) {
+    runtime.restLoaded = true;
+    window.dispatchEvent(new Event('scooch:rest'));
+  }
 }
 
 export function network() {
@@ -69,11 +75,11 @@ export function covered() {
 }
 
 export function restHeld() {
-  return !runtime.posterUp && budget.hero && still.phase === 'still' && !quality.moving;
+  return budget.hero && still.phase === 'still' && !quality.moving;
 }
 
 export function fastPath() {
-  return covered() || restHeld();
+  return (covered() && !budget.hero) || restHeld();
 }
 
 const FRAME = 16;
@@ -94,7 +100,7 @@ export function pause(slow: number) {
 
 export async function calm() {
   if (fastPath()) {
-    if (!covered()) budget.lastStepAt = performance.now();
+    if (budget.hero) budget.lastStepAt = performance.now();
     await quiet();
     return;
   }

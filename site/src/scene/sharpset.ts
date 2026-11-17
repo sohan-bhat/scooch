@@ -4,6 +4,7 @@ const query = new URLSearchParams(window.location.search);
 const only = query.get('sharp');
 const chosen = query.get('heroset');
 const hero = chosen === null ? heroset.hero : chosen.split(',');
+const NAMES = ['television', 'desk', 'laptop', 'lamp', 'clock', 'cassette', 'plant', 'stapler', 'glasses', 'gamepad', 'main', 'gallery', 'labels'];
 
 export function sharpAllowed(name: string) {
   return only === null || only.split(',').includes(name);
@@ -11,4 +12,10 @@ export function sharpAllowed(name: string) {
 
 export function inHeroSet(name: string) {
   return hero.includes(name);
+}
+
+export function restOrder() {
+  const order = (heroset as { order?: string[] }).order ?? [];
+  const known = [...order, ...NAMES.filter((name) => !order.includes(name))];
+  return known.filter((name) => !inHeroSet(name) && sharpAllowed(name));
 }

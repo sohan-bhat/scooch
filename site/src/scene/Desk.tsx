@@ -17,7 +17,8 @@ import { quiet } from '@/lib/idle';
 import { rendererCaughtUp } from './upload';
 import { settle, warmDraw } from './warm';
 import { windowLit } from './window';
-import { inHeroSet, sharpAllowed } from './sharpset';
+import { inHeroSet, restOrder, sharpAllowed } from './sharpset';
+import { GLTFLoader } from 'three-stdlib';
 
 export { BULB, DESK_TOP, LAMP, LAPTOP, TELEVISION } from './layout';
 
@@ -39,9 +40,9 @@ const extraUrls = pick(extras, 'models');
 const sharpExtras = ['clock', 'cassette', 'plant', 'stapler', 'glasses', 'gamepad'] as const;
 const ordered = <T extends string>(names: readonly T[], first: boolean) => names.filter((name) => sharpAllowed(name) && inHeroSet(name) === first);
 const heroFirst = ordered(heroes, true).map((name) => full[name]);
-const heroLater = ordered(heroes, false).map((name) => full[name]);
 const sharpFirst = Object.values(pick(ordered(sharpExtras, true), 'models/sharp'));
-const sharpLater = Object.values(pick(ordered(sharpExtras, false), 'models/sharp'));
+const sharpModels = pick(sharpExtras, 'models/sharp');
+const laterUrl = (name: string) => (heroes.includes(name as Hero) ? (lite ? full[name as Hero] : null) : sharpExtras.includes(name as (typeof sharpExtras)[number]) ? sharpModels[name as (typeof sharpExtras)[number]] : null);
 
 const ktx2 = new KTX2Loader().setTranscoderPath(asset('basis/'));
 
@@ -110,6 +111,16 @@ async function swapTextures(gl: WebGLRenderer, scene: Object3D, source: Object3D
   return true;
 }
 
+export async function sharpenModel(gl: WebGLRenderer, scene: Object3D, name: string, cancelled: () => boolean) {
+  const url = laterUrl(name);
+  if (!url) return false;
+  const loader = new GLTFLoader();
+  extend(loader as never);
+  const gltf = await loader.loadAsync(url);
+  if (cancelled()) return false;
+  return swapTextures(gl, scene, gltf.scene, cancelled);
+}
+
 function Sharpen({ url, onDone }: { url: string; onDone: () => void }) {
   const gl = useThree((state) => state.gl);
   const scene = useThree((state) => state.scene);
@@ -170,17 +181,13 @@ function Sharpener({ list, when, done, width = 1 }: { list: string[]; when: () =
 }
 
 const desktop = () => layoutFor(window.innerWidth, window.innerHeight) !== 'phone';
-const heroesWhen = () => lite && runtime.props && (quality.tier === 'full' || native.ready) && desktop() && level() === 'all';
-const extrasWhen = () => runtime.painted && native.ready && desktop() && level() === 'all';
+export const heroesWhen = () => lite && runtime.props && (quality.tier === 'full' || native.ready) && desktop() && level() === 'all';
+export const extrasWhen = () => runtime.painted && native.ready && desktop() && level() === 'all';
 const heroesFirstWhen = () => heroesWhen();
 const extrasFirstWhen = () => extrasWhen() && budget.stage >= 1;
-const heroesLaterWhen = () => heroesWhen() && !runtime.posterUp && (budget.stage >= 3 || !budget.busy);
-const extrasLaterWhen = () => extrasWhen() && !runtime.posterUp && budget.stage >= 4;
 const FIRST_WIDTH = 1;
 const heroesFirstDone = () => advance(1);
 const extrasFirstDone = () => advance(2);
-const heroesLaterDone = () => advance(4);
-const extrasLaterDone = () => advance(5);
 
 function prepare(root: Object3D) {
   root.traverse((child) => {
@@ -432,9 +439,9 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
     () =>
       whenReady(
         () => {
-          if (desktop() && level() === 'all') prefetch([...(lite ? heroLater : []), ...sharpLater]);
+          if (desktop() && level() === 'all') prefetch(restOrder().flatMap((name) => laterUrl(name) ?? []));
         },
-        () => runtime.shown && !runtime.posterUp,
+        () => runtime.shown && budget.hero,
       ),
     [],
   );
@@ -498,8 +505,6 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
       <LateExtras phone={phone} onExtras={onExtras} onConsole={onConsole} />
       <Sharpener list={heroFirst} when={heroesFirstWhen} done={heroesFirstDone} width={FIRST_WIDTH} />
       <Sharpener list={sharpFirst} when={extrasFirstWhen} done={extrasFirstDone} width={FIRST_WIDTH} />
-      <Sharpener list={heroLater} when={heroesLaterWhen} done={heroesLaterDone} />
-      <Sharpener list={sharpLater} when={extrasLaterWhen} done={extrasLaterDone} />
     </group>
   );
 }

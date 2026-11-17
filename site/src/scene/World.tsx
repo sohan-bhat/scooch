@@ -33,14 +33,14 @@ import type { DemoManifest } from '@/story/demo';
 import { pointer, runtime, story } from '@/story/state';
 import { STREET, blindsTexture, projector } from './Blinds';
 import { still as native } from './still';
-import { advance, budget, calm, finished, heroReady, level, memory, pause, prefetch, stillsPlanned, upgrades } from './budget';
-import { inHeroSet, sharpAllowed } from './sharpset';
+import { budget, calm, finished, heroReady, level, memory, pause, prefetch, stillsPlanned, upgrades } from './budget';
+import { inHeroSet, restOrder, sharpAllowed } from './sharpset';
 import { fontsReady, osdPainter, paintedTexture, wallTexture } from './captions';
 import { stickyNote } from './labels';
 import { rendererCaughtUp, stripUpload } from './upload';
 import { Tumbler } from './Tumbler';
 import { CHANNELS, hooks, live } from './touch';
-import { BULB, DESK_TOP, Desk, LAMP, type Console, type Screens } from './Desk';
+import { BULB, DESK_TOP, Desk, LAMP, extrasWhen, heroesWhen, sharpenModel, type Console, type Screens } from './Desk';
 import { createCrtMaterial } from './screen/crt';
 import { INSIDE_LAYER, useInside, type Stage } from './Inside';
 import { updateWindow, windowLight } from './window';
@@ -53,6 +53,7 @@ import { keys, layoutFor } from './shots';
 import { applyEnvironment, environmentReady, precompile, settle, warmDraw } from './warm';
 
 const Lively = lazy(() => import('./Lively'));
+const heroModels = new Set(['television', 'desk', 'laptop', 'lamp']);
 
 const SPOT = 4;
 const BULB_GLOW = 7;
@@ -241,6 +242,9 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
   );
   const pads = useMemo(() => (built ? { laptop: built.laptop, console: consoleGlass } : null), [built, consoleGlass]);
   const gallery = useRef<Record<string, Frame>>({});
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).has('scan')) (window as unknown as { __scan: unknown }).__scan = { scene, camera, gallery: gallery.current, main: screens.main };
+  }, [scene, camera, screens]);
 
   useEffect(() => {
     let stopped = false;
@@ -290,23 +294,18 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       for (const [name, run] of steps) if (inHeroSet(name)) await run();
       if (stopped) return;
       heroReady();
-      await wait(() => !runtime.posterUp);
-      if (stopped) return;
       if (main && !inHeroSet('main')) prefetch([main]);
       if (pictures && !inHeroSet('gallery')) prefetch(Object.values(gallery.current).flatMap((frame) => frame.sharpUrl() ?? []));
-      if (!inHeroSet('labels')) await labelsUp();
-      if (native.off || !stillsPlanned()) {
-        finished();
-        return;
+      await wait(() => runtime.swapReady || !runtime.posterUp);
+      for (const name of restOrder()) {
+        if (stopped) return;
+        if (name === 'labels') await labelsUp();
+        else if (name === 'main') await mainUp();
+        else if (name === 'gallery') await galleryUp();
+        else if (heroModels.has(name) ? heroesWhen() : extrasWhen()) await sharpenModel(gl, scene, name, () => stopped).catch(() => false);
+        performance.mark(`scooch:rest-${name}`);
       }
-      if (!inHeroSet('main')) await mainUp();
-      advance(3);
-      if (amount !== 'all') {
-        finished();
-        return;
-      }
-      await wait(() => budget.stage >= 5 || native.off || !stillsPlanned() || !desktop());
-      if (!inHeroSet('gallery')) await galleryUp();
+      if (stopped) return;
       finished();
     };
     timer = window.setTimeout(() => void sharpen(), 0);
@@ -314,7 +313,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [gl, screens]);
+  }, [gl, screens, scene]);
 
   useEffect(() => {
     const restored = () => {

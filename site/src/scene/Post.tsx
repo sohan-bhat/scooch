@@ -851,6 +851,7 @@ export function Post({ phone }: { phone: boolean }) {
     }
     place(still.showing && !still.held);
     runtime.restReady = still.phase === 'still' && !still.stale && !still.refresh && !still.tick && runtime.props && runtime.painted && runtime.gallery && runtime.scenery;
+    if (!runtime.swapReady && budget.hero && still.phase === 'still' && still.builtAt >= budget.heroAt && runtime.props && runtime.painted && runtime.gallery && runtime.scenery) runtime.swapReady = true;
     if (runtime.restReady && !budget.busy && !firstStill.settled) {
       firstStill.settled = true;
       performance.mark('scooch:settled');
