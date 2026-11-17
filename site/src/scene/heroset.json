@@ -7,6 +7,15 @@
     "lamp",
     "clock"
   ],
+  "order": [
+    "labels",
+    "gallery",
+    "gamepad",
+    "glasses",
+    "main",
+    "laptop",
+    "stapler"
+  ],
   "measured": {
     "television": 88.5,
     "desk": 102.7,
@@ -17,10 +26,19 @@
     "plant": 44.8,
     "stapler": 1.8,
     "glasses": 0.1,
-    "gamepad": 0.6,
+    "gamepad": 0,
     "main": 4.5,
     "gallery": 2.2,
     "labels": 0
+  },
+  "firsts": {
+    "labels": 0,
+    "gallery": 0.075,
+    "gamepad": 0.08,
+    "glasses": 0.085,
+    "main": 0.165,
+    "laptop": 0.69,
+    "stapler": 0.795
   },
   "view": "1440x900@2"
 }
