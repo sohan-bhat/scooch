@@ -1025,6 +1025,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         pressed_only: usize,
         guessed: [usize; 2],
         held: [usize; 2],
+        guessed_sets: Vec<f64>,
         live_firsts: Vec<u128>,
     }
 
@@ -1164,8 +1165,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         if bench.lattice.is_some() {
             let (guessed, verdict) = guessed(&wakes, lines.get(log_mark..).unwrap_or_default());
             tally.guessed[slot] += usize::from(guessed);
+            if guessed && slot == 0 {
+                tally.guessed_sets.extend(set);
+            }
             tally.held[slot] += usize::from(verdict == "agreed");
-            p.line(format!("    - the daemon predicted a move {guessed}, its net found {verdict}"));
+            let why = unguessed(lines.get(log_mark..).unwrap_or_default());
+            p.line(format!("    - the daemon predicted a move {guessed}{why}, its net found {verdict}"));
         }
         if bench.steady {
             steady_lines(p, tally, &plan, &reads, &last, slot);
@@ -1204,14 +1209,34 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         changed
     }
 
+    fn quick_limit(p: &Probe) -> Option<&'static str> {
+        match p.kind {
+            Some(kind) if kind.hears_saves() => Some("a desktop that saves places through gvfs"),
+            Some(Kind::Kde) if p.session == Session::X11 && kde::plasma6() => Some("Plasma 6 with the pointer wake"),
+            _ => None,
+        }
+    }
+
+    fn set_limit(p: &mut Probe, what: &str, sets: &[f64], limit: f64) {
+        match median(sets) {
+            None => p.fail(format!("{what} measured no time from the drop to the wallpaper set, so the limit of {limit:.0} ms cannot be checked")),
+            Some(ms) if ms >= limit => p.fail(format!("{what} took a median {ms:.0} ms from the drop to the wallpaper set, over the limit of {limit:.0} ms")),
+            Some(_) => {}
+        }
+    }
+
+    fn unguessed(lines: &[String]) -> String {
+        lines.iter().find_map(|line| line.split_once("drop not predicted, ").map(|(_, why)| format!(", not predicted since {why}"))).unwrap_or_default()
+    }
+
     fn guessed(wakes: &[String], lines: &[String]) -> (bool, &'static str) {
         let guessed = wakes.iter().any(|wake| wake.starts_with("predicted drop "));
-        let said = [("predicted drop agreed", "agreed"), ("predicted drop missed", "missed"), ("predicted no move and the file showed none", "a guess of no move, and the file showed none"), ("predicted no move and the file showed a move", "a guess of no move, but the file showed a move")];
-        let verdict = lines.iter().find_map(|line| said.iter().find(|(needle, _)| line.contains(needle)).map(|(_, verdict)| *verdict)).unwrap_or("not judged");
+        let said = [("predicted drop agreed", "agreed"), ("predicted drop missed", "missed")];
+        let verdict = lines.iter().find_map(|line| said.iter().find(|(needle, _)| line.contains(needle)).map(|(_, verdict)| *verdict)).unwrap_or("nothing to judge");
         (guessed, verdict)
     }
 
-    fn special(p: &mut Probe, bench: &Bench, name: &str, act: impl FnOnce() -> Result<String>) {
+    fn special(p: &mut Probe, bench: &Bench, name: &str, act: impl FnOnce() -> Result<String>) -> (bool, usize, bool) {
         let before = places(bench.linux);
         let mark = log_lines(&bench.log).len();
         let detail = act().unwrap_or_else(|error| format!("failed with {error:#}"));
@@ -1224,28 +1249,39 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let sets = fresh.iter().filter(|line| line.split_whitespace().nth(1) == Some("set")).count();
         let (guessed, verdict) = guessed(&wakes, fresh);
         let woke = if wakes.is_empty() { "none".to_string() } else { wakes.join(", ") };
-        p.line(format!("  - {name}: {detail}, the daemon predicted a move {guessed}, its net found {verdict}, wakes after the drop {woke}, the daemon set the wallpaper {sets} times, first at {} ms, places unchanged 2.5 s after the drop {}", shown_ms(set), after == before));
+        let why = unguessed(fresh);
+        p.line(format!("  - {name}: {detail}, the daemon predicted a move {guessed}{why}, its net found {verdict}, wakes after the drop {woke}, the daemon set the wallpaper {sets} times, first at {} ms, places unchanged 2.5 s after the drop {}", shown_ms(set), after == before));
+        (guessed, sets, after == before)
+    }
+
+    fn untouched(p: &mut Probe, name: &str, (guessed, sets, unchanged): (bool, usize, bool), moves: bool) {
+        if guessed {
+            p.fail(format!("the daemon predicted the {name}, which it must never do"));
+        } else if unchanged && sets != 0 {
+            p.fail(format!("the {name} changed no place and yet the daemon set the wallpaper {sets} times"));
+        } else if !unchanged && !moves {
+            p.fail(format!("the {name} changed the places, where it must change nothing"));
+        }
     }
 
     fn specials(p: &mut Probe, bench: &Bench, point: (f32, f32), at: &dyn Fn(f32, f32) -> (i16, i16)) {
         let scale = bench.scale;
         let before = places(bench.linux);
         let Some(icon) = nearest(&before, point) else { return };
-        let Some(other) = before.iter().copied().filter(|rect| *rect != icon).min_by(|a, b| {
-            let away = |rect: &[i64; 4]| (center(rect).0 - point.0).hypot(center(rect).1 - point.1);
-            away(a).total_cmp(&away(b))
-        }) else {
+        let plain = p.measures.iter().find(|measure| measure.name == PROBES[2].0).and_then(|measure| measure.adapter).map(|rect| ((rect.x + rect.w / 2.0) / scale, (rect.y + rect.h / 2.0) / scale));
+        let Some(other) = plain.and_then(|spot| nearest(&before, spot)).filter(|rect| *rect != icon) else {
+            p.line(format!("  - no plain file icon to drop onto, {} was not found", PROBES[2].0));
             return;
         };
         let (from, onto) = (grab(&icon, scale), grab(&other, scale));
         let _ = clicks(&[from]);
-        special(p, bench, "occupied drag", || {
+        special(p, bench, "drag onto a taken slot, which gives no guess", || {
             drag(from, onto)?;
-            Ok(format!("the probe icon from {},{} onto the icon at {},{}", from.0, from.1, onto.0, onto.1))
+            Ok(format!("the probe icon from {},{} onto {} at {},{}", from.0, from.1, PROBES[2].0, onto.0, onto.1))
         });
         let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
         let _ = clicks(&[from]);
-        special(p, bench, "drag after a Control click", || {
+        let control = special(p, bench, "drag after a Control click", || {
             control_click(onto)?;
             drag(from, free)?;
             Ok(format!("a Control click on the icon at {},{}, then the probe icon from {},{} to {},{}", onto.0, onto.1, from.0, from.1, free.0, free.1))
@@ -1256,11 +1292,13 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let from = grab(&icon, scale);
         let _ = clicks(&[from]);
         let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
-        special(p, bench, "drag ended with Escape", || {
+        let escape = special(p, bench, "drag ended with Escape", || {
             drag_ending(from, free, true)?;
             Ok(format!("the probe icon from {},{} toward {},{}, Escape before the release", from.0, from.1, free.0, free.1))
         });
         let _ = clicks(&[at(0.92, 0.92)]);
+        untouched(p, "drag after a Control click", control, true);
+        untouched(p, "drag ended with Escape", escape, false);
     }
 
     fn steady_lines(p: &mut Probe, tally: &mut Tally, plan: &Plan, reads: &[Taken<Rects>], last: &[[i64; 4]], slot: usize) {
@@ -1303,6 +1341,20 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             tally.poll.len()
         ));
         p.line(format!("- the daemon set the wallpaper at a median {} ms after the drop, in {} of 15 drags", shown_ms(median(&tally.sets)), tally.sets.len()));
+        if let Some(why) = quick_limit(p) {
+            set_limit(p, &format!("section 7b on {why}"), &tally.sets, 600.0);
+        }
+        if bench.lattice.is_some() {
+            let limit = if bench.scale > 1.0 { 900.0 } else { 700.0 };
+            set_limit(p, "the predicted single drags of section 7b on XFCE", &tally.guessed_sets, limit);
+            let (guessed, held) = (tally.guessed[0] + tally.guessed[1], tally.held[0] + tally.held[1]);
+            if held < guessed {
+                p.fail(format!("{} of {guessed} guesses of a move on XFCE did not agree with the file", guessed - held));
+            }
+            if tally.guessed[0] < 6 {
+                p.fail(format!("the daemon predicted only {} of 10 single drags on XFCE, where at least 6 must be predicted", tally.guessed[0]));
+            }
+        }
         if bench.steady {
             let costs: Vec<f64> = tally.cost.iter().map(|cost| *cost as f64).collect();
             p.line(format!("- a read showed the move partly done in {} of 10 single drags and in {} of 5 group drags", tally.partly[0], tally.partly[1]));
@@ -2040,6 +2092,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         times.sort_unstable();
         p.line(format!("- median move to new wallpaper {:?} ms", times.get(times.len() / 2)));
         p.line(format!("- the daemon set the wallpaper at a median {} ms after the drop, in {} of 5 moves", shown_ms(median(&sets)), sets.len()));
+        if let Some(why) = quick_limit(p) {
+            set_limit(p, &format!("section 6 on {why}"), &sets, 600.0);
+        }
         heard_saves(p);
         switch_check(p, &linux, &screen, (&program, process))?;
         std::thread::sleep(Duration::from_secs(3));
