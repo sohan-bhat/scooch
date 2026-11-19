@@ -6,6 +6,8 @@ pub mod autostart;
 #[cfg(target_os = "linux")]
 pub mod cinnamon;
 #[cfg(target_os = "linux")]
+pub mod drops;
+#[cfg(target_os = "linux")]
 pub mod gnome;
 #[cfg(target_os = "linux")]
 pub mod gvfs;
@@ -270,6 +272,10 @@ mod system {
             super::saves::SAVES.last()
         }
 
+        fn predicted(&self) -> Option<Snapshot> {
+            super::drops::PREDICTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+        }
+
         fn name(&self) -> String {
             format!("{} on {}", self.kind.name(), self.session_name())
         }
@@ -297,7 +303,13 @@ mod system {
         }
 
         fn run(&self, wake: Wake) -> Result<()> {
-            watch::run(wake, self.shell.watches(), &self.desktop, self.session, self.kind.hears_saves())
+            let wake: screens::Shared = std::sync::Arc::from(wake);
+            if self.kind == Kind::Xfce && self.session == Session::X11 {
+                let (predicted, net) = (watch::tagged(&wake, "predicted drop"), watch::tagged(&wake, "drop net"));
+                let _ = std::thread::Builder::new().name("scooch-drops".into()).spawn(move || super::drops::run(&predicted, &net));
+            }
+            let shared = wake.clone();
+            watch::run(Box::new(move || shared()), self.shell.watches(), &self.desktop, self.session, self.kind.hears_saves())
         }
 
         fn autostart(&self, exe: Option<&Path>) -> Result<()> {
