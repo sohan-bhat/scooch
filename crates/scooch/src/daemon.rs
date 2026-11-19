@@ -1128,41 +1128,44 @@ impl Daemon {
             match (tables_key, from, shown.as_deref()) {
                 (Some(_), Some(_), Some(_)) if stale.is_some() => crate::glide::skipped("old tables", stale.as_deref().unwrap_or_default()),
                 (Some(tables_key), Some(from), Some(still)) => {
-                    let tables = self.session_tables(&screen.id, key, parts);
-                    self.mark("tables", &screen.id);
-                    lap("bundle", &mut clock);
-                    let fresh = tables.tables_to_bytes();
-                    if on_screen.as_deref() == Some(fresh.as_slice()) {
-                        glider.skip("nothing moves", "the new tables are the tables on screen");
-                    } else {
-                        let canvas = self.store.canvas_for(&screen.id, tables_key);
-                        let canvas = canvas.is_file().then_some(canvas);
-                        let ahead = self.stills.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&screen.id).copied();
-                        let prepared = {
-                            let mut idle = || {
-                                if finished.is_none() {
-                                    lap("open", &mut clock);
-                                    finished = Some(finish(&mut clock));
-                                }
-                                finished.as_ref().is_some_and(|done: &Finished| done.encoded.is_ok() && !done.same)
-                            };
-                            glider.prepare_while(&Plan { screen, picture: &source, canvas: canvas.as_deref(), size: [scene.width, scene.height], still }, ahead, &mut idle)
-                        };
-                        lap("open", &mut clock);
-                        if let Some(id) = prepared {
-                            let (_, next) = self.fresh_name(&screen.id, entry.counter, format.extension(), current);
-                            let target = self.store.tables_for(&next, tables_key);
-                            match std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| crate::state::write_unsynced(&target, &fresh)) {
-                                Ok(()) => {
-                                    if glider.go(id, &from, &target) {
-                                        flight = Some(id);
+                    let canvas = self.store.canvas_for(&screen.id, tables_key);
+                    let canvas = canvas.is_file().then_some(canvas);
+                    let plan = Plan { screen, picture: &source, canvas: canvas.as_deref(), size: [scene.width, scene.height], still };
+                    if !glider.cannot_glide(&plan) {
+                        let tables = self.session_tables(&screen.id, key, parts);
+                        self.mark("tables", &screen.id);
+                        lap("bundle", &mut clock);
+                        let fresh = tables.tables_to_bytes();
+                        if on_screen.as_deref() == Some(fresh.as_slice()) {
+                            glider.skip("nothing moves", "the new tables are the tables on screen");
+                        } else {
+                            let ahead = self.stills.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&screen.id).copied();
+                            let prepared = {
+                                let mut idle = || {
+                                    if finished.is_none() {
+                                        lap("open", &mut clock);
+                                        finished = Some(finish(&mut clock));
                                     }
-                                    made = Some(target);
-                                    lap("tables", &mut clock);
-                                }
-                                Err(error) => {
-                                    glider.abort(id);
-                                    crate::glide::skipped("tables not written", &format!("{} {error:#}", target.display()));
+                                    finished.as_ref().is_some_and(|done: &Finished| done.encoded.is_ok() && !done.same)
+                                };
+                                glider.prepare_while(&plan, ahead, &mut idle)
+                            };
+                            lap("open", &mut clock);
+                            if let Some(id) = prepared {
+                                let (_, next) = self.fresh_name(&screen.id, entry.counter, format.extension(), current);
+                                let target = self.store.tables_for(&next, tables_key);
+                                match std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| crate::state::write_unsynced(&target, &fresh)) {
+                                    Ok(()) => {
+                                        if glider.go(id, &from, &target) {
+                                            flight = Some(id);
+                                        }
+                                        made = Some(target);
+                                        lap("tables", &mut clock);
+                                    }
+                                    Err(error) => {
+                                        glider.abort(id);
+                                        crate::glide::skipped("tables not written", &format!("{} {error:#}", target.display()));
+                                    }
                                 }
                             }
                         }
@@ -1185,9 +1188,13 @@ impl Daemon {
                     if self.adopt_kept(&screen.id, key) {
                         lap("map", &mut clock);
                     }
-                    self.session_still(&screen.id, key, parts).1
+                    self.mark("drawing", &screen.id);
+                    let still = self.session_still(&screen.id, key, parts).1;
+                    self.mark("drawn", &screen.id);
+                    still
                 } else {
                     self.forget_session(&screen.id);
+                    self.mark("rendering", &screen.id);
                     Arc::new(scooch_core::render_with(&decoded, &analysis, &placement, scene, options))
                 };
                 lap("render", &mut clock);
@@ -3670,6 +3677,104 @@ pub mod tests {
         assert!(!events(&fake).iter().any(|event| event.starts_with("glide ")), "a torn tables file glided");
         let fresh = tables_of(&daemon);
         assert!(fresh != torn && fresh.is_file() && stale_tables(&fresh).is_none(), "{fresh:?}");
+    }
+
+    fn engine(events: &[String]) -> Vec<String> {
+        events.iter().filter(|event| ["tables ", "drawing ", "drawn ", "rendering "].iter().any(|call| event.starts_with(call))).cloned().collect()
+    }
+
+    fn cold_skip(name: &str, scenery: bool) -> (Daemon, Arc<Fake>, Arc<Mutex<crate::glide::tests::Script>>, Vec<String>) {
+        let (daemon, fake, script, _) = marked_rig(name);
+        set_scenery(&daemon, scenery);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        script.lock().unwrap().slow_hello = Duration::from_secs(60);
+        daemon.glider.lock().unwrap().reset_for_test();
+        assert!(daemon.wake_early());
+        std::thread::sleep(crate::glide::HELLO_GRACE + Duration::from_millis(50));
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let events = events(&fake);
+        (daemon, fake, script, events)
+    }
+
+    fn glide_off_move(name: &str, scenery: bool) -> Vec<String> {
+        let (daemon, fake, _, _) = glide_rig(name, false);
+        *daemon.marks.lock().unwrap() = Some(fake.events.clone());
+        set_scenery(&daemon, scenery);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        events(&fake)
+    }
+
+    #[test]
+    fn a_cold_helper_with_no_hello_builds_no_tables_before_the_still_and_sets() {
+        let (daemon, _, _, events) = cold_skip("cold-skip-tables", true);
+        assert!(!events.iter().any(|event| event.starts_with("tables ")), "{events:?}");
+        let set = events.iter().position(|event| event.starts_with("set ")).unwrap_or_else(|| panic!("{events:?}"));
+        assert!(at(&events, "drawing main") < set, "{events:?}");
+        assert!(!events.iter().any(|event| event.starts_with("glide ")), "{events:?}");
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.contains("skipped, helper cold, the helper had not started")), "{said:?}");
+    }
+
+    #[test]
+    fn a_cold_helper_and_the_glide_off_make_the_same_engine_calls_with_scenery() {
+        let (_, _, _, cold) = cold_skip("cold-skip-same", true);
+        let off = glide_off_move("cold-skip-same-off", true);
+        assert_eq!(engine(&cold), engine(&off), "{cold:?} against {off:?}");
+        assert_eq!(engine(&cold), vec!["drawing main".to_string(), "drawn main".to_string()]);
+    }
+
+    #[test]
+    fn without_scenery_a_changed_placement_draws_a_session_still_on_the_skip_path_for_the_next_tables() {
+        let off = glide_off_move("cold-skip-plain-off", false);
+        assert_eq!(engine(&off), vec!["rendering main".to_string()], "{off:?}");
+        let (daemon, fake, _, cold) = cold_skip("cold-skip-plain", false);
+        assert_eq!(engine(&cold), vec!["drawing main".to_string(), "drawn main".to_string()], "{cold:?}");
+        let name = name_of(&fake.showing("main"));
+        let tables: Vec<String> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+        assert!(tables.iter().any(|file| file.starts_with(&format!("{name}.")) && file.ends_with(".tables")), "{tables:?}");
+    }
+
+    #[test]
+    fn a_warm_helper_still_gets_its_tables_before_the_still_and_glides() {
+        let (daemon, fake, _, _) = marked_rig("cold-skip-warm");
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let events = events(&fake);
+        assert!(at(&events, "tables main") < at(&events, "drawing main"), "{events:?}");
+        assert!(events.iter().any(|event| event.starts_with("glide ")), "{events:?}");
+    }
+
+    #[test]
+    fn after_a_skip_the_new_picture_has_its_tables_and_the_next_move_glides_from_them() {
+        let (daemon, fake, script, _) = cold_skip("cold-skip-next", true);
+        let name = name_of(&fake.showing("main"));
+        let tables: Vec<String> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+        assert!(tables.iter().any(|file| file.starts_with(&format!("{name}.")) && file.ends_with(".tables")), "{tables:?}");
+        script.lock().unwrap().slow_hello = Duration::ZERO;
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![Rect { x: 66.0, y: 42.0, w: 28.0, h: 28.0 }]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let events = events(&fake);
+        assert!(events.iter().any(|event| event.starts_with("glide ") && event.ends_with(" true true")), "{events:?}");
+    }
+
+    #[test]
+    fn the_early_window_is_closed_after_a_skip() {
+        let (_, _, _, events) = cold_skip("cold-skip-window", true);
+        let open = at(&events, "open ");
+        let id = events[open].split(' ').nth(1).unwrap().to_string();
+        let closed = events.iter().position(|event| *event == format!("close {id}")).unwrap_or_else(|| panic!("{events:?}"));
+        assert!(open < closed && closed < at(&events, "drawing main"), "{events:?}");
     }
 
     #[test]
