@@ -106,13 +106,36 @@ jobs:
 
       - name: Packages
         if: ${{ !matrix.container }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dbus dbus-x11 dbus-user-session xdg-user-dirs procps
-          sudo apt-get install -y ${{ matrix.packages }}
-          for extra in ${{ matrix.extras }}; do
-            sudo apt-get install -y --no-install-recommends "$extra" || echo "skipped $extra"
-          done
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          on_retry_command: sudo dpkg --configure -a
+          command: |
+            set -e
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends dbus dbus-x11 dbus-user-session xdg-user-dirs procps
+            sudo apt-get install -y ${{ matrix.packages }}
+            for extra in ${{ matrix.extras }}; do
+              sudo apt-get install -y --no-install-recommends "$extra" || echo "skipped $extra"
+            done
+
+      - name: Packages
+        if: ${{ matrix.container }}
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
+        env:
+          PACKAGES: ${{ matrix.packages }}
+          EXTRAS: ${{ matrix.extras }}
+          IMAGE: ${{ matrix.container }}
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          on_retry_command: docker rm -f packages
+          command: |
+            set -e
+            docker run --name packages -v "$PWD:/work" -w /work -v "$RUNNER_TEMP/packages:/var/cache/pacman/pkg" -v "$RUNNER_TEMP/packages:/var/cache/apt/archives" -e PACKAGES -e EXTRAS "$IMAGE" bash .github/linux/container.sh install
+            docker commit packages scooch-probe:local
+            docker rm packages
 
       - name: Build
         run: cargo build --release -p scooch --bins --examples
@@ -132,7 +155,7 @@ jobs:
           SCRIPT: ${{ matrix.script || matrix.desktop }}
         run: |
           if [ -n "$IMAGE" ]; then
-            docker run --rm --cap-add SYS_NICE -v "$PWD:/work" -w /work -e SCOOCH_SCALE -e SCOOCH_MONITORS -e PACKAGES -e EXTRAS -e HOST_UID="$(id -u)" "$IMAGE" bash .github/linux/container.sh "$SCRIPT"
+            docker run --rm --pull never --cap-add SYS_NICE -v "$PWD:/work" -w /work -e SCOOCH_SCALE -e SCOOCH_MONITORS -e PACKAGES -e EXTRAS -e HOST_UID="$(id -u)" scooch-probe:local bash .github/linux/container.sh "$SCRIPT"
           else
             XDG_RUNTIME_DIR="$(mktemp -d)"
             chmod 700 "$XDG_RUNTIME_DIR"

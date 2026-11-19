@@ -34,17 +34,20 @@ versions() {
     fi
 }
 
-if command -v pacman >/dev/null 2>&1; then
-    installer=install_arch
-else
-    installer=install_debian
+if [ "$script" = install ]; then
+    if command -v pacman >/dev/null 2>&1; then
+        installer=install_arch
+    else
+        installer=install_debian
+    fi
+    if ! "$installer" >"$log" 2>&1; then
+        echo "package install failed"
+        tail -40 "$log"
+        exit 1
+    fi
+    versions >linuxprobe/versions.txt || true
+    exit 0
 fi
-if ! "$installer" >"$log" 2>&1; then
-    echo "package install failed"
-    tail -40 "$log"
-    exit 1
-fi
-versions >linuxprobe/versions.txt || true
 
 dbus-uuidgen --ensure
 mkdir -p /run/dbus /tmp/.X11-unix
