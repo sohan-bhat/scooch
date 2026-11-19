@@ -34,16 +34,17 @@ try {
     for (let beat = 0; beat < BEATS; beat++) {
       for (const file of size.files) {
         const path = join(out, `${size.name}-${beat + 1}${file.suffix}.webp`);
-        const encoded = await encode(view(shots[beat], file.width));
+        const shot = await view(shots[beat], file.width).png().toBuffer();
+        const encoded = await encode(sharp(shot));
         await writeFile(path, encoded);
-        written.push({ beat, file, encoded });
+        written.push({ beat, file, shot });
         console.log('wrote', path, `${Math.round(encoded.length / 1024)} KB`);
       }
     }
     const live = await liveShots(browser, size, places, size.proof ? set : null);
-    for (const { beat, file, encoded } of written) {
-      const reference = await encode(view(live[beat], file.width));
-      const result = await compare(encoded, reference);
+    for (const { beat, file, shot } of written) {
+      const reference = await view(live[beat], file.width).png().toBuffer();
+      const result = await compare(shot, reference);
       const line = `${size.name}${file.suffix} beat ${beat + 1} against live at rest: worst region ${result.region.toFixed(2)}, largest energy loss ${(result.loss * 100).toFixed(1)} percent at ${result.cell}, ${result.pass ? 'pass' : 'FAIL'}`;
       console.log(line);
       if (!result.pass) failures.push(line);
