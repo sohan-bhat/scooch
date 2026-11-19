@@ -185,9 +185,11 @@ mod tests {
         assert_eq!(nearest(Path::new("relative"), |_| false), None);
     }
 
-    const DESKTOP_SET: &str = "2d0000002f686f6d652f72756e6e65722f2e6c6f63616c2f73686172652f677666732d6d657461646174612f686f6d65000000001c0000002f4465736b746f702f73636f6f63682d70726f62652d612e7478740028000000120000006e656d6f2d69636f6e2d706f736974696f6e000173000000070000003637322c35393400";
-    const ELSEWHERE_SET: &str = "2d0000002f686f6d652f72756e6e65722f2e6c6f63616c2f73686172652f677666732d6d657461646174612f686f6d6500000000110000002f446f63756d656e74732f612e7478740000000028000000120000006e656d6f2d69636f6e2d706f736974696f6e000173000000070000003637322c35393400";
-    const BIG_SET: &str = "0000002d2f686f6d652f72756e6e65722f2e6c6f63616c2f73686172652f677666732d6d657461646174612f686f6d65000000000000001c2f4465736b746f702f73636f6f63682d70726f62652d612e7478740000000028000000126e656d6f2d69636f6e2d706f736974696f6e000173000000000000073637322c35393400";
+    const CINNAMON_SET: &str = "2d0000002f686f6d652f72756e6e65722f2e6c6f63616c2f73686172652f677666732d6d657461646174612f686f6d65000000001c0000002f4465736b746f702f73636f6f63682d70726f62652d612e7478740028000000120000006e656d6f2d69636f6e2d706f736974696f6e000173000000070000003734312c33323700";
+    const MATE_SET: &str = "2d0000002f686f6d652f72756e6e65722f2e6c6f63616c2f73686172652f677666732d6d657461646174612f686f6d65000000001c0000002f4465736b746f702f73636f6f63682d70726f62652d612e74787400280000001200000063616a612d69636f6e2d706f736974696f6e000173000000070000003736362c32323200";
+    const GNOME_SET: &str = "2d0000002f686f6d652f72756e6e65722f2e6c6f63616c2f73686172652f677666732d6d657461646174612f686f6d65000000001c0000002f4465736b746f702f73636f6f63682d70726f62652d612e747874002c000000160000006e617574696c75732d69636f6e2d706f736974696f6e000173000000070000003634322c33383300";
+    const MADE_UP_BIG_ENDIAN_SET: &str = "0000002d2f686f6d652f72756e6e65722f2e6c6f63616c2f73686172652f677666732d6d657461646174612f686f6d65000000000000001c2f4465736b746f702f73636f6f63682d70726f62652d612e7478740000000028000000126e656d6f2d69636f6e2d706f736974696f6e000173000000000000073637322c35393400";
+    const ARCH_SET: &str = "2d0000002f686f6d652f7465737465722f2e6c6f63616c2f73686172652f677666732d6d657461646174612f686f6d65000000001c0000002f4465736b746f702f73636f6f63682d70726f62652d612e7478740028000000120000006e656d6f2d69636f6e2d706f736974696f6e000173000000070000003734312c33323500";
 
     fn bytes(hex: &str) -> Vec<u8> {
         (0..hex.len()).step_by(2).map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap()).collect()
@@ -195,16 +197,19 @@ mod tests {
 
     #[test]
     fn a_set_call_for_a_desktop_file_wakes_and_one_for_a_file_elsewhere_does_not() {
-        let desktop = Some("/Desktop");
-        let tree = "/home/runner/.local/share/gvfs-metadata/home".to_string();
-        assert_eq!(saved_file("ayaya{sv}", &bytes(DESKTOP_SET), true), Some((tree.clone(), "/Desktop/scooch-probe-a.txt".into())));
-        assert_eq!(saved_file("ayaya{sv}", &bytes(BIG_SET), false), Some((tree, "/Desktop/scooch-probe-a.txt".into())));
-        assert!(place_saved("ayaya{sv}", &bytes(DESKTOP_SET), true, desktop));
-        assert!(!place_saved("ayaya{sv}", &bytes(ELSEWHERE_SET), true, desktop));
-        assert!(!place_saved("ayaya{sv}", &bytes(DESKTOP_SET), true, None));
-        assert_eq!(saved_file("ss", &bytes(DESKTOP_SET), true), None);
-        assert_eq!(saved_file("ayaya{sv}", &bytes(DESKTOP_SET)[..60], true), None);
-        assert!(place_saved("ayaya{sv}", &bytes(DESKTOP_SET)[..60], true, desktop), "a call whose file cannot be told must still wake");
+        let file = "/Desktop/scooch-probe-a.txt".to_string();
+        for (desktop, body) in [("cinnamon", CINNAMON_SET), ("mate", MATE_SET), ("gnome", GNOME_SET)] {
+            assert_eq!(saved_file("ayaya{sv}", &bytes(body), true), Some(("/home/runner/.local/share/gvfs-metadata/home".into(), file.clone())), "{desktop}");
+            assert!(place_saved("ayaya{sv}", &bytes(body), true, Some("/Desktop")), "{desktop}");
+            assert!(!place_saved("ayaya{sv}", &bytes(body), true, Some("/Documents")), "{desktop}");
+            assert!(!place_saved("ayaya{sv}", &bytes(body), true, None), "{desktop}");
+        }
+        assert_eq!(saved_file("ayaya{sv}", &bytes(ARCH_SET), true), Some(("/home/tester/.local/share/gvfs-metadata/home".into(), file)));
+        assert!(place_saved("ayaya{sv}", &bytes(ARCH_SET), true, Some("/Desktop")));
+        assert_eq!(saved_file("ayaya{sv}", &bytes(MADE_UP_BIG_ENDIAN_SET), false), Some(("/home/runner/.local/share/gvfs-metadata/home".into(), "/Desktop/scooch-probe-a.txt".into())));
+        assert_eq!(saved_file("ss", &bytes(CINNAMON_SET), true), None);
+        assert_eq!(saved_file("ayaya{sv}", &bytes(CINNAMON_SET)[..60], true), None);
+        assert!(place_saved("ayaya{sv}", &bytes(CINNAMON_SET)[..60], true, Some("/Documents")), "a call whose file cannot be told must still wake");
     }
 
     #[test]

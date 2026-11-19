@@ -95,6 +95,28 @@ impl Xfce {
         Some(xfce::rc_positions(&keyfile::parse(&text)))
     }
 
+    pub fn lattice(&self, screens: &[Screen]) -> Option<xfce::Lattice> {
+        if number("/desktop-icons/style").unwrap_or(2) != 2 {
+            return None;
+        }
+        let icon = number("/desktop-icons/icon-size").map_or(xfce::DEFAULT_ICON_SIZE, |size| size as f64);
+        let factor = if self.session == Session::X11 { scale() } else { 1 };
+        let work = workarea(self.session, true).map(|work| shrink(work, factor as f32));
+        if self.configs().is_some() {
+            let grids = screens.iter().filter_map(|screen| xfce::grid(&work.and_then(|work| intersect(&work, &screen.frame)).unwrap_or(screen.frame), icon, &STYLE).map(|grid| (screen.frame, grid))).collect();
+            return Some(xfce::Lattice { grids, insets: xfce::INSETS_4_20 });
+        }
+        let primary_only = flag("/desktop-icons/primary", false);
+        let single = workarea(self.session, false).map(|work| xfce::inset_area(&work, factor));
+        let area = match (primary_only, single) {
+            (true, _) => screens.first().map(|screen| work.and_then(|work| intersect(&work, &screen.frame)).unwrap_or(screen.frame)),
+            (false, Some(single)) => Some(single),
+            (false, None) => screens.first().map(|screen| screen.frame),
+        }?;
+        let grid = xfce::grid(&area, icon, &STYLE)?;
+        Some(xfce::Lattice { grids: vec![(area, grid)], insets: xfce::INSETS })
+    }
+
     fn property(&self, screen: &Screen) -> String {
         let prefix = xfce::backdrop_prefix(&screen.id, workspace(self.session));
         format!("{prefix}/last-image")

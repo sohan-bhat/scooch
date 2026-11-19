@@ -51,6 +51,8 @@ enum Command {
     Scenery,
     #[command(about = "Turn the sliding of your picture on or off")]
     Glide,
+    #[command(about = "Turn on or off moving the picture the moment an icon drops on Xfce")]
+    Predict,
     #[command(about = "Run in the foreground, which is what the login item does")]
     Watch,
     #[command(about = "Check permissions and the desktop")]
@@ -79,6 +81,7 @@ fn dispatch() -> Result<()> {
         Some(Command::Flip) => commands::flip(),
         Some(Command::Scenery) => commands::scenery(),
         Some(Command::Glide) => commands::glide(),
+        Some(Command::Predict) => commands::predict(),
         Some(Command::Watch) => commands::watch(),
         Some(Command::Doctor) => commands::doctor(),
     }

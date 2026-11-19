@@ -138,6 +138,9 @@ pub trait Desktop: Send + Sync {
     fn place_saved(&self) -> Option<Instant> {
         None
     }
+    fn predicted(&self) -> Option<Snapshot> {
+        None
+    }
     fn pointer(&self) -> Option<(f32, f32)> {
         None
     }

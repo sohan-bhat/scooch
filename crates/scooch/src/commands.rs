@@ -27,6 +27,8 @@ pub const SCENERY_LINE: &str = "Scenery  on";
 pub const GLIDE_ON: &str = "Scooch now slides your picture into place when icons move.";
 pub const GLIDE_OFF: &str = "Scooch now swaps your picture without sliding it.";
 pub const GLIDE_NONE: &str = "Scooch swaps the picture here, since sliding it works only on macOS and Windows.";
+pub const PREDICT_ON: &str = "Scooch now moves your picture the moment you drop an icon on Xfce.";
+pub const PREDICT_OFF: &str = "Scooch now waits for Xfce to save where your icons sit.";
 pub const GUIDE: &str = "Your wallpaper is not a picture file, so pick a picture for Scooch to move.";
 pub const MADE: &str = "This desktop still shows a picture Scooch made, so pick a picture for Scooch to move.";
 pub const NO_SCREEN: &str = "No screen was found, so connect one and try again.";
@@ -499,6 +501,27 @@ pub fn glide() -> Result<()> {
     Ok(())
 }
 
+pub fn predict() -> Result<()> {
+    let store = Store::open();
+    let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
+    let mut state = store.load();
+    state.predict = !state.predict;
+    store.save(&state)?;
+    if let Some(process) = store.watcher() {
+        poke::send(process);
+    }
+    println!("{}", predict_line(state.predict));
+    Ok(())
+}
+
+pub fn predict_line(on: bool) -> &'static str {
+    if on {
+        PREDICT_ON
+    } else {
+        PREDICT_OFF
+    }
+}
+
 pub fn glide_line(on: bool) -> &'static str {
     if on {
         GLIDE_ON
@@ -884,6 +907,16 @@ mod tests {
         assert_eq!(flip_line(true), "Scooch may now flip your picture when that clears your icons.");
         assert_eq!(flip_line(false), "Scooch now keeps your picture the way round it is.");
         for line in [FLIP_ON, FLIP_OFF, FLIP_HINT] {
+            assert!(!line.contains(['—', '–', ';', '(', ')']) && !line.contains(": "), "{line}");
+        }
+    }
+
+    #[test]
+    fn predict_switches_and_says_so_in_one_line() {
+        assert_eq!(predict_line(true), PREDICT_ON);
+        assert_eq!(predict_line(false), PREDICT_OFF);
+        assert!(State::default().predict);
+        for line in [PREDICT_ON, PREDICT_OFF] {
             assert!(!line.contains(['—', '–', ';', '(', ')']) && !line.contains(": "), "{line}");
         }
     }

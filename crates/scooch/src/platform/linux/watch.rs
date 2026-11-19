@@ -11,7 +11,7 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use zbus::zvariant;
 
-fn tagged(wake: &Shared, name: &'static str) -> Shared {
+pub fn tagged(wake: &Shared, name: &'static str) -> Shared {
     let wake = wake.clone();
     if crate::daemon::trace() {
         Arc::new(move || {

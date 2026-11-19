@@ -163,6 +163,33 @@ impl Grid {
     }
 }
 
+pub fn contains(frame: &Rect, point: (f32, f32)) -> bool {
+    (frame.x..frame.x + frame.w).contains(&point.0) && (frame.y..frame.y + frame.h).contains(&point.1)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lattice {
+    pub grids: Vec<(Rect, Grid)>,
+    pub insets: Insets,
+}
+
+impl Lattice {
+    pub fn cell(grid: &Grid, point: (f32, f32)) -> Option<(i64, i64)> {
+        let column = ((f64::from(point.0) - (grid.origin.0 + grid.xmargin) as f64) / (grid.slot + grid.xspacing as f64)).floor() as i64;
+        let row = ((f64::from(point.1) - (grid.origin.1 + grid.ymargin) as f64) / (grid.slot + grid.yspacing as f64)).floor() as i64;
+        grid.rect(row, column).map(|_| (row, column))
+    }
+
+    pub fn landing(&self, icons: &[Rect], to: (f32, f32)) -> Option<Rect> {
+        let (_, grid) = self.grids.iter().find(|(frame, _)| contains(frame, to))?;
+        let cell = Self::cell(grid, to)?;
+        if icons.iter().any(|icon| Self::cell(grid, (icon.x + icon.w / 2.0, icon.y + icon.h / 2.0)) == Some(cell)) {
+            return None;
+        }
+        grid.rect(cell.0, cell.1).map(|rect| self.insets.apply(rect))
+    }
+}
+
 pub fn version(text: &str) -> Option<(u32, u32)> {
     text.split(|letter: char| letter.is_whitespace() || letter == ',').find_map(|word| {
         let mut parts = word.split('.');
@@ -202,6 +229,39 @@ pub fn workarea(values: &[u32], desktop: usize) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    fn lattice(frame: Rect, area: Rect, insets: Insets) -> Lattice {
+        Lattice { grids: vec![(frame, grid(&area, DEFAULT_ICON_SIZE, &STYLE).unwrap())], insets }
+    }
+
+    #[test]
+    fn a_plain_drag_to_a_free_slot_lands_where_xfdesktop_put_it() {
+        let rc = lattice(at(8.0, 35.0, 1904.0, 1037.0), at(8.0, 35.0, 1904.0, 1037.0), INSETS);
+        let pressed = at(961.0, 506.0, 93.0, 92.0);
+        assert_eq!(rc.landing(&[pressed], (672.0, 594.0)), Some(at(649.0, 506.0, 93.0, 92.0)), "xfce, 4.18, drag 1 from 1007,536 to 672,594");
+        assert_eq!(rc.landing(&[pressed], (1344.0 / 2.0, 1188.0 / 2.0)), Some(at(649.0, 506.0, 93.0, 92.0)), "xfce-scale2, drag 1 from 2015,1073 to 1344,1188 at scale 2");
+        let screen = at(0.0, 0.0, 1920.0, 1080.0);
+        let mut yaml = lattice(screen, at(0.0, 27.0, 1920.0, 1053.0), INSETS_4_20);
+        let pressed = at(859.0, 456.0, 88.0, 78.0);
+        assert_eq!(yaml.landing(&[pressed], (672.0, 594.0)), Some(at(649.0, 560.0, 88.0, 78.0)), "xfce-arch, 4.20, drag 1 from 903,482 to 672,594");
+        yaml.grids.push((at(1920.0, 0.0, 1920.0, 1080.0), grid(&at(1920.0, 27.0, 1920.0, 1053.0), DEFAULT_ICON_SIZE, &STYLE).unwrap()));
+        assert_eq!(yaml.landing(&[pressed], (2592.0, 594.0)), Some(at(2569.0, 560.0, 88.0, 78.0)), "the second monitor of xfce-arch-dual");
+    }
+
+    #[test]
+    fn a_release_on_an_occupied_slot_or_off_the_grid_lands_nowhere() {
+        let rc = lattice(at(8.0, 35.0, 1904.0, 1037.0), at(8.0, 35.0, 1904.0, 1037.0), INSETS);
+        let pressed = at(961.0, 506.0, 93.0, 92.0);
+        let other = at(649.0, 506.0, 93.0, 92.0);
+        assert_eq!(rc.landing(&[pressed, other], (672.0, 594.0)), None);
+        assert_eq!(rc.landing(&[pressed], (1007.0, 540.0)), None, "dropped on its own slot");
+        assert_eq!(rc.landing(&[pressed], (4.0, 594.0)), None);
+        assert_eq!(rc.landing(&[pressed], (1915.0, 594.0)), None);
+    }
     use crate::platform::linux::parse::{keyfile, yaml};
 
     #[test]

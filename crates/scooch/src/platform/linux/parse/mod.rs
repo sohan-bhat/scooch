@@ -1,6 +1,7 @@
 pub mod caja;
 pub mod desktop;
 pub mod ding;
+pub mod drops;
 pub mod entry;
 pub mod geometry;
 pub mod gio;
