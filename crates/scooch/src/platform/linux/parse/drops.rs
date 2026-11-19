@@ -27,7 +27,6 @@ pub struct Press {
 pub enum Guess {
     Nothing,
     Unsure { from: Rect },
-    Stay { from: Rect, shown: bool },
     Move { from: Rect, to: Rect, shown: bool },
 }
 
@@ -67,6 +66,7 @@ pub fn moved_alone(before: &[Rect], after: &[Rect], from: &Rect) -> Option<[i64;
 pub struct Tracker {
     pub selection: Selection,
     pub off: bool,
+    pub reason: Option<&'static str>,
     press: Option<Press>,
     keyed: bool,
     shadows: usize,
@@ -81,7 +81,7 @@ impl Default for Tracker {
 
 impl Tracker {
     pub fn new() -> Self {
-        Self { selection: Selection::Unknown, off: false, press: None, keyed: false, shadows: 0, known: None }
+        Self { selection: Selection::Unknown, off: false, reason: None, press: None, keyed: false, shadows: 0, known: None }
     }
 
     pub fn seen(&mut self, icons: &[Rect]) {
@@ -110,6 +110,7 @@ impl Tracker {
     }
 
     pub fn released(&mut self, at: (f32, f32), desktop: bool, land: impl FnOnce(&Rect) -> Option<Rect>) -> Guess {
+        self.reason = None;
         let Some(press) = self.press.take() else { return Guess::Nothing };
         let keyed = std::mem::take(&mut self.keyed);
         if press.button != 1 || !press.desktop || press.control || press.shift {
@@ -124,22 +125,32 @@ impl Tracker {
             self.selection = Selection::One(Some(from));
             return Guess::Nothing;
         }
-        let alone = matches!(self.selection, Selection::One(_));
-        self.selection = Selection::Unknown;
-        if !alone || keyed || !desktop {
+        let was = std::mem::replace(&mut self.selection, Selection::Unknown);
+        let why = match was {
+            _ if keyed => Some("a key went down during the drag"),
+            _ if !desktop => Some("the release was not over the desktop"),
+            Selection::Many => Some("the selection may hold more than one icon"),
+            Selection::Unknown => Some("the selection is unknown"),
+            Selection::One(_) => None,
+        };
+        if let Some(why) = why {
+            self.reason = Some(why);
             return Guess::Unsure { from };
         }
         let shown = !self.off;
         match land(&from) {
             Some(to) => Guess::Move { from, to, shown },
-            None => Guess::Stay { from, shown },
+            None => {
+                self.reason = Some("the slot under the release is taken or off the grid");
+                Guess::Nothing
+            }
         }
     }
 
     pub fn verify(&mut self, guess: &Guess, before: &[Rect], after: &[Rect]) -> Option<Verdict> {
         let from = match guess {
             Guess::Nothing => return None,
-            Guess::Unsure { from } | Guess::Stay { from, .. } | Guess::Move { from, .. } => *from,
+            Guess::Unsure { from } | Guess::Move { from, .. } => *from,
         };
         let alone = moved_alone(before, after, &from);
         let held = keys(after);
@@ -150,11 +161,8 @@ impl Tracker {
             None => Selection::Unknown,
         };
         self.known = Some(keys(after));
-        let (agreed, shown) = match guess {
-            Guess::Move { to, shown, .. } => (held.contains(&key(to)), *shown),
-            Guess::Stay { from, shown } => (held.contains(&key(from)), *shown),
-            _ => return None,
-        };
+        let Guess::Move { to, shown, .. } = guess else { return None };
+        let (agreed, shown) = (held.contains(&key(to)), *shown);
         if shown {
             if agreed {
                 return Some(Verdict::Agreed);
@@ -231,6 +239,7 @@ mod tests {
         tracker.pressed(plain((1007.0, 536.0), Some(icon)));
         let unsure = tracker.released((672.0, 594.0), true, landing);
         assert_eq!(unsure, Guess::Unsure { from: icon });
+        assert_eq!(tracker.reason, Some("the selection is unknown"));
         let moved = at(649.0, 506.0);
         assert_eq!(tracker.verify(&unsure, &[icon, at(18.0, 40.0)], &[moved, at(18.0, 40.0)]), None);
         assert_eq!(tracker.selection, Selection::One(Some(moved)));
@@ -239,14 +248,16 @@ mod tests {
     }
 
     #[test]
-    fn a_release_on_an_occupied_slot_predicts_no_move() {
+    fn a_release_on_an_occupied_slot_or_off_the_grid_gives_no_guess() {
         let mut tracker = Tracker::new();
         let icon = at(961.0, 506.0);
         known_single(&mut tracker, icon);
         tracker.pressed(plain((1007.0, 536.0), Some(icon)));
-        let stay = tracker.released((672.0, 594.0), true, |_| None);
-        assert_eq!(stay, Guess::Stay { from: icon, shown: true });
-        assert_eq!(tracker.verify(&stay, &[icon], &[icon]), Some(Verdict::Agreed));
+        assert_eq!(tracker.released((672.0, 594.0), true, |_| None), Guess::Nothing);
+        assert_eq!(tracker.reason, Some("the slot under the release is taken or off the grid"));
+        assert_eq!(tracker.selection, Selection::Unknown, "after a drop that xfdesktop may have turned into anything");
+        assert_eq!(tracker.verify(&Guess::Nothing, &[icon], &[]), None);
+        assert!(!tracker.off);
     }
 
     #[test]
@@ -270,6 +281,11 @@ mod tests {
         tracker.pressed(plain((1007.0, 536.0), Some(icon)));
         tracker.key(false);
         assert_eq!(tracker.released((672.0, 594.0), true, landing), Guess::Unsure { from: icon });
+        assert_eq!(tracker.reason, Some("a key went down during the drag"));
+        known_single(&mut tracker, icon);
+        tracker.pressed(plain((1007.0, 536.0), Some(icon)));
+        assert_eq!(tracker.released((672.0, 594.0), false, landing), Guess::Unsure { from: icon });
+        assert_eq!(tracker.reason, Some("the release was not over the desktop"));
     }
 
     #[test]

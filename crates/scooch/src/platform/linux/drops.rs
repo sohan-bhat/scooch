@@ -45,16 +45,8 @@ fn judge(tracker: &Arc<Mutex<Tracker>>, guess: Guess, before: Vec<Rect>, net: &S
                 }
                 net();
             }
-            (Some(Verdict::Missed), Guess::Stay { from, shown: true }) => {
-                eprintln!("{stamp} predicted no move and the file showed a move, the icon at {} left and the file holds {:?}", place(&from), after.icons.iter().map(place).collect::<Vec<_>>());
-                if !was_off {
-                    eprintln!("{OFF}");
-                }
-                net();
-            }
             (Some(Verdict::Back), _) => eprintln!("{stamp} predicted drop back on after {} guesses in a row held", super::parse::drops::SHADOWS),
             (Some(Verdict::Agreed), Guess::Move { shown: true, .. }) => eprintln!("{stamp} predicted drop agreed with the file"),
-            (Some(Verdict::Agreed), Guess::Stay { shown: true, .. }) => eprintln!("{stamp} predicted no move and the file showed none"),
             _ => {}
         }
     });
@@ -90,7 +82,14 @@ pub fn run(predicted: &Shared, net: &Shared) -> bool {
             let snapshot = held.take();
             let lattice = snapshot.as_ref().and_then(|_| shell.lattice(&screens(&linux)));
             let icons = snapshot.as_ref().map(|snapshot| snapshot.icons.clone()).unwrap_or_default();
-            let guess = lock(&tracker).released(point, desktop, |_| lattice.as_ref().and_then(|lattice| lattice.landing(&icons, point)));
+            let (guess, reason) = {
+                let mut tracker = lock(&tracker);
+                let guess = tracker.released(point, desktop, |_| lattice.as_ref().and_then(|lattice| lattice.landing(&icons, point)));
+                (guess, tracker.reason)
+            };
+            if let Some(reason) = reason {
+                eprintln!("{} drop not predicted, {reason}", crate::daemon::stamp());
+            }
             let Some(snapshot) = snapshot else { return };
             if let Guess::Move { from, to, shown: true } = guess {
                 *PREDICTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(moved(&snapshot, &from, to));
