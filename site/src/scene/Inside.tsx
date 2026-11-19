@@ -257,6 +257,7 @@ const ease = (t: number) => {
 };
 
 const ASPECT = { wide: 2560 / 1080, tall: 1080 / 1920 };
+const pinned = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('clean');
 
 function padPlace(pad: Pad, out: Place) {
   scratch.normal.set(0, 0, 1).applyQuaternion(pad.quaternion);
@@ -373,7 +374,7 @@ export function useInside(
     inside.plane.scale.set(place.width / stage.width, place.height / stage.height, place.height / stage.height);
 
     const u = inside.uniforms;
-    u.uTime.value = runtime.frozen ?? state.clock.elapsedTime - runtime.timeShift;
+    u.uTime.value = pinned ? 0 : (runtime.frozen ?? state.clock.elapsedTime - runtime.timeShift);
     const { from, to, s } = frame.select(story.place);
     u.uMapA.value = frame.states[from].map;
     u.uMapB.value = frame.states[to].map;

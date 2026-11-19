@@ -60,7 +60,7 @@ const SPOT = 4;
 const BULB_GLOW = 7;
 const RECT = 2.4;
 const SCREEN_SPOT = 0.09;
-const pinnedScreens = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('clean');
+const pinnedTime = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('clean');
 const SPILL = { laptop: 0.8, television: 1.8, laptopAim: new Vector3(0.4, -0.45, 0), televisionAim: new Vector3(-0.5, -1, 0) };
 const PHONE_SPILL = { laptop: 1, television: 1.4, laptopAim: new Vector3(0, -0.45, 0), televisionAim: new Vector3(0, -0.45, 0) };
 const spill = () => (quality.phone ? PHONE_SPILL : SPILL);
@@ -660,10 +660,10 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       gl.shadowMap.needsUpdate = true;
       shadowFrames.current += 1;
     }
-    const time = runtime.frozen ?? state.clock.elapsedTime - runtime.timeShift;
+    const time = pinnedTime ? 0 : (runtime.frozen ?? state.clock.elapsedTime - runtime.timeShift);
     const posed = runtime.hero || runtime.posterUp || (runtime.frozen !== null && native.posterPose);
     const idle = runtime.idle && !posed;
-    const screenTime = posed || pinnedScreens ? 0 : time;
+    const screenTime = posed ? 0 : time;
     const motion = idle ? 1 : 0;
     const lookX = pointer.x * motion + live.look.x;
     const lookY = pointer.y * motion + live.look.y;
