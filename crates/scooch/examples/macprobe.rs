@@ -3187,6 +3187,7 @@ mod probe {
         glided: usize,
         pairs: Vec<f64>,
         clock: Option<f64>,
+        bundles: Vec<Option<f64>>,
     }
 
     impl Slowness {
@@ -3206,12 +3207,13 @@ mod probe {
             let round = |values: &[Option<f64>]| values.iter().map(|value| value.map_or("none".to_string(), |value| format!("{value:.0}"))).collect::<Vec<_>>().join(", ");
             let pairs: Vec<Option<f64>> = self.pairs.iter().map(|pair| Some(*pair)).collect();
             format!(
-                "by the daemon's own time waited plus the early and open laps plus the launch per slow drag [{}] ms, largest {} ms, glided {}, by the daemon clock each slow drag against its off drag [{}] ms, mean without the largest and the smallest {} ms, limit {SLOW_LIMIT} ms",
+                "by the daemon's own time waited plus the early and open laps plus the launch per slow drag [{}] ms, largest {} ms, glided {}, by the daemon clock each slow drag against its off drag [{}] ms, mean without the largest and the smallest {} ms, limit {SLOW_LIMIT} ms, glide tables built before the plain swap per slow drag [{}] ms",
                 round(&self.direct),
                 rounded(self.largest()),
                 self.glided,
                 round(&pairs),
-                rounded(self.clock)
+                rounded(self.clock),
+                round(&self.bundles)
             )
         }
 
@@ -3221,6 +3223,10 @@ mod probe {
             }
             if !self.clock_ok() {
                 p.fail("a slow helper held the plain swap back by more than 60 ms by the daemon clock");
+            }
+            let built = self.bundles.iter().flatten().count();
+            if built > 0 {
+                p.fail(format!("{built} of {} slow drags built glide tables before the plain swap", self.bundles.len()));
             }
         }
     }
@@ -3261,7 +3267,8 @@ mod probe {
         sorted.sort_by(f64::total_cmp);
         let inner = sorted.get(1..sorted.len().saturating_sub(1)).filter(|inner| !inner.is_empty());
         let clock = inner.map(|inner| inner.iter().sum::<f64>() / inner.len() as f64);
-        Slowness { direct: slow.iter().map(|line| own_time(line)).collect(), glided: slow.iter().filter(|line| line.contains(", glided true,")).count(), pairs, clock }
+        let bundles = slow.iter().map(|line| laps_of(line).and_then(|(_, laps)| laps.iter().find(|(name, _)| name == "bundle").map(|(_, value)| *value))).collect();
+        Slowness { direct: slow.iter().map(|line| own_time(line)).collect(), glided: slow.iter().filter(|line| line.contains(", glided true,")).count(), pairs, clock, bundles }
     }
 
     fn slow_check(paths: Vec<String>) -> ExitCode {
