@@ -37,11 +37,13 @@ fn atom(conn: &RustConnection, name: &[u8]) -> Option<Atom> {
     conn.intern_atom(false, name).ok()?.reply().ok().map(|reply| reply.atom)
 }
 
+fn types(conn: &RustConnection, window: Window, kind: Atom) -> Option<Vec<u32>> {
+    let reply = conn.get_property(false, window, kind, AtomEnum::ATOM, 0, 16).ok()?.reply().ok()?;
+    Some(reply.value32().map(|values| values.collect()).unwrap_or_default())
+}
+
 fn has_type(conn: &RustConnection, window: Window, kind: Atom, wanted: Atom) -> bool {
-    conn.get_property(false, window, kind, AtomEnum::ATOM, 0, 16)
-        .ok()
-        .and_then(|cookie| cookie.reply().ok())
-        .is_some_and(|reply| reply.value32().is_some_and(|mut values| values.any(|value| value == wanted)))
+    types(conn, window, kind).is_some_and(|types| types.contains(&wanted))
 }
 
 fn stack(conn: &RustConnection, root: Window, point: (f32, f32), atoms: &Atoms) -> Option<(Vec<Window>, Vec<Layer>)> {
@@ -58,7 +60,7 @@ fn stack(conn: &RustConnection, root: Window, point: (f32, f32), atoms: &Atoms) 
     }
     for (layer, child) in layers.iter_mut().zip(&children) {
         if layer.viewable && contains(&layer.frame, point) {
-            layer.dnd = has_type(conn, *child, atoms.kind, atoms.dnd);
+            layer.dnd = types(conn, *child, atoms.kind).is_none_or(|types| types.contains(&atoms.dnd));
         }
     }
     Some((children, layers))
