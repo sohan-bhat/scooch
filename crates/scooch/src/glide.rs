@@ -1478,6 +1478,7 @@ pub mod tests {
         pub settle_after: Duration,
         pub slow_hello: Duration,
         pub shown_after: Duration,
+        pub shown_after_asked: Option<Duration>,
         pub ready_after: Duration,
         pub device_after: Option<Duration>,
         pub canvas_after: Option<Duration>,
@@ -1493,6 +1494,7 @@ pub mod tests {
         script: Arc<Mutex<Script>>,
         settles: Vec<(u32, Instant)>,
         glides: Vec<u32>,
+        asked: Option<(u32, Instant)>,
         dead: bool,
     }
 
@@ -1517,7 +1519,7 @@ pub mod tests {
             }
             *self.spawned.lock().unwrap() += 1;
             self.log.lock().unwrap().push(("spawn".into(), Instant::now()));
-            Ok(Box::new(FakeHelper { born: Instant::now(), log: self.log.clone(), waits: self.waits.clone(), script: self.script.clone(), settles: Vec::new(), glides: Vec::new(), dead: false }))
+            Ok(Box::new(FakeHelper { born: Instant::now(), log: self.log.clone(), waits: self.waits.clone(), script: self.script.clone(), settles: Vec::new(), glides: Vec::new(), asked: None, dead: false }))
         }
     }
 
@@ -1537,9 +1539,17 @@ pub mod tests {
             Ok(())
         }
 
-        fn awake(&self, timeout: Duration) -> Result<()> {
+        fn shown_at(&self, id: u32) -> Duration {
             let script = self.script();
-            self.until(script.slow_hello.max(script.shown_after), timeout)
+            let shown = match (script.shown_after_asked, self.asked) {
+                (Some(after), Some((asked, at))) if asked == id => at.saturating_duration_since(self.born) + after,
+                _ => script.shown_after,
+            };
+            script.slow_hello.max(shown)
+        }
+
+        fn awake(&self, id: u32, timeout: Duration) -> Result<()> {
+            self.until(self.shown_at(id), timeout)
         }
 
         fn until(&self, at: Duration, timeout: Duration) -> Result<()> {
@@ -1588,9 +1598,11 @@ pub mod tests {
             Ok(self.adapter())
         }
 
-        fn answered(&mut self, _id: u32) -> bool {
-            let script = self.script();
-            self.dead || self.born.elapsed() >= script.slow_hello.max(script.shown_after)
+        fn answered(&mut self, id: u32) -> bool {
+            if self.asked.is_none_or(|(asked, _)| asked != id) {
+                self.asked = Some((id, Instant::now()));
+            }
+            self.dead || self.born.elapsed() >= self.shown_at(id)
         }
 
         fn window(&mut self, screen: &Screen) -> Result<()> {
@@ -1612,7 +1624,7 @@ pub mod tests {
         fn shown(&mut self, id: u32, timeout: Duration) -> Result<Instant> {
             self.living()?;
             self.waits.lock().unwrap().push(("shown", timeout));
-            self.awake(timeout)?;
+            self.awake(id, timeout)?;
             let script = self.script();
             if script.shown_fails {
                 self.say(format!("hidden {id}"));

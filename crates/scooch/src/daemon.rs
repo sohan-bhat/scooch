@@ -3599,8 +3599,8 @@ pub mod tests {
         let (daemon, fake, script, _) = marked_rig("glide-beside");
         fake.place(vec![subject()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
-        remember_start(&daemon, 100, 5);
-        script.lock().unwrap().shown_after = Duration::from_millis(100);
+        remember_start(&daemon, 1_000, 5);
+        script.lock().unwrap().shown_after_asked = Some(Duration::from_millis(100));
         fake.events.lock().unwrap().clear();
         fake.place(vec![moved_subject()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
@@ -3618,7 +3618,7 @@ pub mod tests {
         fake.place(vec![subject()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
         remember_start(&daemon, 30, 500);
-        script.lock().unwrap().shown_after = Duration::from_millis(30);
+        script.lock().unwrap().shown_after_asked = Some(Duration::from_millis(30));
         fake.events.lock().unwrap().clear();
         fake.place(vec![moved_subject()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
