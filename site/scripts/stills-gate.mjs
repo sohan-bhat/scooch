@@ -5,6 +5,7 @@ import { origin } from './browser.mjs';
 
 const REGION = 2;
 const LOSS = 0.1;
+const FLOOR = 50;
 
 export async function restPlaces(site) {
   const source = await readFile(join(site, 'src', 'story', 'timeline.ts'), 'utf8');
@@ -86,11 +87,18 @@ export async function compare(still, live) {
   const s = measure(a.data, a.info.width, a.info.height);
   const l = measure(b, a.info.width, a.info.height);
   const region = Math.max(...s.regions.map((value, i) => Math.abs(value - l.regions[i])));
+  const around = (energy, k) => {
+    const gx = k % 16;
+    const gy = Math.floor(k / 16);
+    let sum = 0;
+    for (let y = Math.max(0, gy - 1); y <= Math.min(9, gy + 1); y += 1) for (let x = Math.max(0, gx - 1); x <= Math.min(15, gx + 1); x += 1) sum += energy[y * 16 + x];
+    return sum;
+  };
   let loss = 0;
   let cell = '-';
   l.energy.forEach((e, k) => {
-    if (e < 2) return;
-    const r = 1 - s.energy[k] / e;
+    if (e < FLOOR) return;
+    const r = 1 - around(s.energy, k) / around(l.energy, k);
     if (r > loss) {
       loss = r;
       cell = `${k % 16},${Math.floor(k / 16)}`;
