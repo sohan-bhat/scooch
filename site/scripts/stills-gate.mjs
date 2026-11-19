@@ -32,7 +32,7 @@ export async function liveShots(browser, size, places) {
   const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: size.scale });
   const page = await context.newPage();
   await page.goto(`${origin}?hold&v=${Date.now()}`, { waitUntil: 'load' });
-  await page.addStyleTag({ content: 'header, .beats, [data-overlay="hint"], .stage-scrim, #desk-controls { visibility: hidden !important; }' });
+  await page.addStyleTag({ content: 'header, .beats, [data-overlay="hint"], #desk-controls { visibility: hidden !important; }' });
   await page.waitForFunction(() => performance.getEntriesByName('scooch:uploads').length > 0, null, { timeout: 180000, polling: 200 });
   const shots = [];
   for (const place of places) {
