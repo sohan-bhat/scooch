@@ -68,7 +68,14 @@ const models = [
       'stationery_supplies_eraser',
     ],
   },
-  { id: 'alarm_clock_01', resolution: '1k', sharp: true, file: 'clock.glb', textures: small },
+  {
+    id: 'alarm_clock_01',
+    resolution: '1k',
+    sharp: true,
+    file: 'clock.glb',
+    textures: small,
+    dial: { material: 'alarm_clock_01', axis: 0, plane: 0.024, uv: [0.0035, 0.4114, 0.5873, 0.9965], source: '8k', size: { full: 256, sharp: 2048 } },
+  },
   { id: 'cassette_player', resolution: '1k', sharp: true, file: 'cassette.glb', textures: small, merge: true },
   { id: 'potted_plant_04', resolution: '1k', sharp: true, file: 'plant.glb', textures: small, merge: true },
   { id: 'vintage_stapler', resolution: '1k', sharp: true, file: 'stapler.glb', textures: small, merge: true },
@@ -154,6 +161,60 @@ function keepOnly(document, names) {
   for (const node of document.getRoot().listNodes()) if (!names.includes(node.getName())) node.dispose();
 }
 
+async function dialImage(model, size) {
+  const entry = (await listing(model.id)).gltf[model.dial.source].gltf;
+  const [relative, file] = Object.entries(entry.include).find(([name]) => /diff/.test(name));
+  const path = joinPath(cache, model.id, model.dial.source, relative);
+  await download(file.url, path);
+  const image = sharp(await readFile(path), { limitInputPixels: false });
+  const { width, height } = await image.metadata();
+  const [u0, u1, v0, v1] = model.dial.uv;
+  const left = Math.floor(u0 * width);
+  const top = Math.floor(v0 * height);
+  return image.extract({ left, top, width: Math.ceil(u1 * width) - left, height: Math.ceil(v1 * height) - top }).resize(size, size).png().toBuffer();
+}
+
+function splitDial(document, dial, png) {
+  const [u0, u1, v0, v1] = dial.uv;
+  for (const mesh of document.getRoot().listMeshes()) {
+    for (const primitive of mesh.listPrimitives()) {
+      const material = primitive.getMaterial();
+      if (material?.getName() !== dial.material) continue;
+      const indices = primitive.getIndices();
+      const position = primitive.getAttribute('POSITION');
+      const normal = primitive.getAttribute('NORMAL');
+      const uv = primitive.getAttribute('TEXCOORD_0');
+      const keepers = [];
+      const face = [];
+      for (let triangle = 0; triangle < indices.getCount() / 3; triangle++) {
+        const corners = [0, 1, 2].map((corner) => indices.getScalar(triangle * 3 + corner));
+        const flat = corners.every((corner) => {
+          const [x, y, z] = position.getElement(corner, []);
+          const [nx, ny, nz] = normal.getElement(corner, []);
+          const [u, v] = uv.getElement(corner, []);
+          return Math.abs([x, y, z][dial.axis] - dial.plane) < 0.001 && [nx, ny, nz][dial.axis] > 0.97 && u >= u0 && u <= u1 && v >= v0 && v <= v1;
+        });
+        (flat ? face : keepers).push(...corners);
+      }
+      if (face.length === 0) continue;
+      const IndexArray = indices.getArray().constructor;
+      indices.setArray(new IndexArray(keepers));
+      const remapped = new Float32Array(uv.getCount() * 2);
+      for (let i = 0; i < uv.getCount(); i++) {
+        const [u, v] = uv.getElement(i, []);
+        remapped[i * 2] = (u - u0) / (u1 - u0);
+        remapped[i * 2 + 1] = (v - v0) / (v1 - v0);
+      }
+      const second = document.createAccessor().setType('VEC2').setArray(remapped).setBuffer(uv.getBuffer());
+      const texture = document.createTexture(`${dial.material}_dial`).setImage(png).setMimeType('image/png');
+      const dialMaterial = material.clone().setName(`${dial.material}_dial`).setBaseColorTexture(texture);
+      dialMaterial.getBaseColorTextureInfo().setTexCoord(1);
+      const split = primitive.clone().setIndices(document.createAccessor().setType('SCALAR').setArray(new IndexArray(face)).setBuffer(indices.getBuffer())).setMaterial(dialMaterial).setAttribute('TEXCOORD_1', second);
+      mesh.addPrimitive(split);
+    }
+  }
+}
+
 function splitGlass(document, glass) {
   const [u0, u1, v0, v1] = glass.uv;
   for (const mesh of document.getRoot().listMeshes()) {
@@ -228,6 +289,7 @@ async function buildModel(io, model, variant) {
   if (model.keep) keepOnly(document, model.keep);
   if (model.pivots) addPivots(document, model.pivots);
   if (model.glass) splitGlass(document, model.glass);
+  if (model.dial?.size[variant.name]) splitDial(document, model.dial, await dialImage(model, model.dial.size[variant.name]));
   plainGlass(document);
   shareOcclusion(document);
   const steps = [prune(), dedup()];
