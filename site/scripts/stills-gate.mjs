@@ -194,3 +194,27 @@ export async function compare(still, live, shrink = 1) {
   });
   return { region, loss, cell, pass: region <= REGION && loss <= LOSS };
 }
+
+const ENCODERS = {
+  avif: (quality) => (image) => image.avif({ quality, effort: 4, chromaSubsampling: '4:4:4' }),
+  webp: (quality) => (image) => image.webp({ quality, effort: 6, smartSubsample: true }),
+};
+
+export async function encodeLowest(render, format, low = 60, high = 100) {
+  const tried = new Map();
+  const at = async (quality) => {
+    if (!tried.has(quality)) {
+      const buffer = await ENCODERS[format](quality)(sharp(render)).toBuffer();
+      const result = await compare(await sharp(buffer).png().toBuffer(), render);
+      tried.set(quality, { quality, buffer, ...result });
+    }
+    return tried.get(quality);
+  };
+  if (!(await at(high)).pass) return at(high);
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if ((await at(middle)).pass) high = middle;
+    else low = middle + 1;
+  }
+  return at(high);
+}

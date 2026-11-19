@@ -20,7 +20,9 @@ export function Stills() {
             <li key={beat.id}>
               <figure className="relative h-svh min-h-[34rem] overflow-hidden tall:h-auto tall:min-h-0">
                 <picture className="absolute inset-0 block tall:relative tall:aspect-[390/470]">
-                  <source media="(max-width: 767px), (orientation: portrait)" srcSet={asset(`stills/phone-${index + 1}.webp`)} width={780} height={940} />
+                  <source media="(max-width: 767px), (orientation: portrait)" type="image/avif" srcSet={asset(`stills/phone-${index + 1}.avif`)} width={780} height={940} />
+                  <source media="(max-width: 767px), (orientation: portrait)" type="image/webp" srcSet={asset(`stills/phone-${index + 1}.webp`)} width={780} height={940} />
+                  <source type="image/avif" srcSet={`${asset(`stills/desktop-${index + 1}.avif`)} 1x, ${asset(`stills/desktop-${index + 1}-2x.avif`)} 2x`} width={1600} height={1000} />
                   <img
                     src={asset(`stills/desktop-${index + 1}.webp`)}
                     srcSet={`${asset(`stills/desktop-${index + 1}.webp`)} 1x, ${asset(`stills/desktop-${index + 1}-2x.webp`)} 2x`}
