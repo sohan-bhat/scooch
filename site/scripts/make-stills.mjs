@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
-import { launch, openStill } from './browser.mjs';
+import { launch } from './browser.mjs';
 import { compare, liveShots, restPlaces } from './stills-gate.mjs';
 
 const site = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -25,11 +25,9 @@ try {
     const name = `${size.name}${size.suffix ?? ''}`;
     if (only && !only.includes(name)) continue;
     const files = [];
+    const shots = await liveShots(browser, size, places.slice(0, BEATS));
     for (let beat = 0; beat < BEATS; beat++) {
-      const { context, page } = await openStill(browser, { beat, ...size });
-      const shot = await page.screenshot({ type: 'png' });
-      await context.close();
-      let image = sharp(shot);
+      let image = sharp(shots[beat]);
       if (size.crop) image = image.extract({ left: 0, top: 0, ...size.crop });
       const file = join(out, `${size.name}-${beat + 1}${size.suffix ?? ''}.webp`);
       const encoded = await image.webp({ quality: 78, effort: 6 }).toBuffer();
