@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +14,7 @@ const sizes = [
   { name: 'phone', width: 390, height: 844, scale: 2, crop: { width: 780, height: 940 }, files: [{ suffix: '', width: 780 }], proof: false },
 ];
 
+const turn = () => process.env.SHOOT_YIELD && execFileSync(process.env.SHOOT_YIELD, { stdio: 'inherit' });
 const only = process.argv.find((arg) => arg.startsWith('--only='))?.slice(7).split(',');
 const fallback = (image) => image.webp({ quality: 78, effort: 6 }).toBuffer();
 
@@ -29,10 +31,12 @@ try {
       if (size.crop) image = image.extract({ left: 0, top: 0, ...size.crop });
       return width === (size.crop?.width ?? size.width * size.scale) ? image : image.resize(width);
     };
+    turn();
     const shots = await liveShots(browser, size, places, size.proof ? set : null);
     const written = [];
     for (let beat = 0; beat < BEATS; beat++) {
       for (const file of size.files) {
+        turn();
         const shot = await view(shots[beat], file.width).png().toBuffer();
         const base = `${size.name}-${beat + 1}${file.suffix}`;
         const encoded = await encodeLowest(shot, 'avif');
