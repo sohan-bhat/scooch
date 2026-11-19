@@ -5,12 +5,12 @@ import { Box3, Group, HalfFloatType, Mesh, MeshStandardMaterial, Object3D, Vecto
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { asset } from '@/lib/base';
-import { runtime, story } from '@/story/state';
+import { changed, runtime, story } from '@/story/state';
 import { gpuClass, quality } from './quality';
 import { layoutFor } from './shots';
 import { LAMP, LAPTOP, TELEVISION, placements, type Placement } from './layout';
 import { still as native } from './still';
-import { advance, budget, calm, fastPath, level, pause, prefetch, upgrades } from './budget';
+import { advance, budget, calm, fastPath, level, pause, prefetch, stillsPlanned, upgrades } from './budget';
 import { labelProps } from './labels';
 import { live, makeLive, obstacles, rimmed } from './touch';
 import { quiet } from '@/lib/idle';
@@ -108,6 +108,7 @@ async function swapTextures(gl: WebGLRenderer, scene: Object3D, source: Object3D
     material[slot] = texture;
   }
   for (const texture of replaced) if (!uploaded.has(texture)) texture.dispose();
+  if (!stillsPlanned()) changed();
   return true;
 }
 
@@ -137,11 +138,14 @@ function Sharpen({ url, onDone }: { url: string; onDone: () => void }) {
   return null;
 }
 
-function whenReady(start: () => void, test: () => boolean) {
+function whenReady(start: () => void, test: () => boolean, never: () => boolean = () => false) {
   let stopped = false;
   void (async () => {
     await new Promise((resolve) => window.setTimeout(resolve, 0));
-    while (!stopped && !test()) await pause(200);
+    while (!stopped && !test()) {
+      if (never()) return;
+      await pause(200);
+    }
     if (!stopped) start();
   })();
   return () => {
@@ -163,9 +167,13 @@ function Sharpener({ list, when, done, width = 1 }: { list: string[]; when: () =
   }, [step]);
   useEffect(
     () =>
-      whenReady(() => {
-        for (let i = 0; i < width; i++) void calm().then(step);
-      }, when),
+      whenReady(
+        () => {
+          for (let i = 0; i < width; i++) void calm().then(step);
+        },
+        when,
+        () => level() !== 'all',
+      ),
     [when, step, width],
   );
   useEffect(() => {
@@ -182,7 +190,8 @@ function Sharpener({ list, when, done, width = 1 }: { list: string[]; when: () =
 
 const desktop = () => layoutFor(window.innerWidth, window.innerHeight) !== 'phone';
 export const heroesWhen = () => lite && runtime.props && (quality.tier === 'full' || native.ready) && desktop() && level() === 'all';
-export const extrasWhen = () => runtime.painted && native.ready && desktop() && level() === 'all';
+const restShown = () => native.ready || (!stillsPlanned() && native.held);
+export const extrasWhen = () => runtime.painted && restShown() && desktop() && level() === 'all';
 const heroesFirstWhen = () => heroesWhen() && budget.first;
 const extrasFirstWhen = () => extrasWhen() && budget.stage >= 1;
 const FIRST_WIDTH = 1;
