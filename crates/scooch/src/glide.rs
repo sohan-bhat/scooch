@@ -14,6 +14,7 @@ pub const GLIDE_MS: u32 = 450;
 pub const SETTLE_WAIT: Duration = Duration::from_secs(2);
 pub const CHECK: Duration = Duration::from_millis(50);
 pub const PATIENCE: Duration = Duration::from_millis(150);
+pub const HELLO_GRACE: Duration = Duration::from_millis(100);
 pub const SHOWN_AFTER_WAKE: Duration = Duration::from_millis(450);
 pub const BARE: u32 = 2;
 pub const EARLY_EVERY: Duration = Duration::from_secs(10);
@@ -872,6 +873,35 @@ impl Glider {
         self.prepare_while(plan, None, &mut || true)
     }
 
+    pub fn cannot_glide(&mut self, plan: &Plan) -> bool {
+        let refused = if !self.usable() {
+            Some((if self.software { "software adapter" } else { "strikes" }, ""))
+        } else if self.too_large(&plan.screen.id, plan.size) || self.doomed {
+            Some((if self.doomed { "helper failed" } else { "too large" }, ""))
+        } else if !exact(plan.still) {
+            Some(("old still", "the picture on screen was saved with less color detail than the layer shows, so this move swaps it plainly"))
+        } else {
+            None
+        };
+        if let Some((reason, detail)) = refused {
+            self.close_early_for(&plan.screen.id);
+            skipped(reason, detail);
+            return true;
+        }
+        let started = Instant::now();
+        if self.send_warm(plan.picture, plan.size, plan.canvas).is_err() || self.ready {
+            return false;
+        }
+        let launched = self.launched.map(|launched| started.saturating_duration_since(launched));
+        if launched.is_none_or(|launched| launched < HELLO_GRACE) || self.link.as_mut().is_none_or(|link| link.greeted().is_some()) {
+            return false;
+        }
+        note(&mut self.said, format!("decision at the set, helper launched {} ms before it, after launch hello unknown, device unknown, canvas unknown, ready unknown, shown unknown, predicted shown unknown, waited 0 ms, 0 ms of it on the new picture, plain before the tables, {}", shown_ms(launched), drawn_words(None)));
+        self.close_early_for(&plan.screen.id);
+        self.give_up(None, &anyhow!("the helper had not started when the plain swap was ready, so this move swaps plainly"));
+        true
+    }
+
     pub fn prepare_while(&mut self, plan: &Plan, ahead: Option<Duration>, idle: &mut dyn FnMut() -> bool) -> Option<u32> {
         if !self.usable() {
             self.close_early_for(&plan.screen.id);
@@ -1341,6 +1371,38 @@ pub mod tests {
 
     fn ready_waits(waits: &Waits) -> usize {
         waits.lock().unwrap().iter().filter(|(what, wait)| *what == "ready" && !wait.is_zero()).count()
+    }
+
+    fn plan(screen: &Screen) -> Plan<'_> {
+        Plan { screen, picture: Path::new("p.jpg"), canvas: None, size: [160, 100], still: Path::new("s.png") }
+    }
+
+    #[test]
+    fn a_helper_launched_20_ms_before_the_question_keeps_its_tables_and_glides_when_the_hello_comes() {
+        let spawner = FakeSpawner::new(Arc::new(Mutex::new(Vec::new())));
+        spawner.script.lock().unwrap().slow_hello = Duration::from_millis(60);
+        let mut glider = Glider::new(Box::new(spawner));
+        let screen = lone_screen();
+        glider.open_early(&screen, Path::new("p.jpg"), [160, 100], Path::new("s.png"), None);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!glider.cannot_glide(&plan(&screen)), "{:?}", glider.said);
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(glider.prepare(&plan(&screen)).is_some(), "{:?}", glider.said);
+    }
+
+    #[test]
+    fn a_helper_launched_150_ms_before_the_question_with_no_hello_gets_no_tables() {
+        let log: Events = Arc::new(Mutex::new(Vec::new()));
+        let spawner = FakeSpawner::new(log.clone());
+        spawner.script.lock().unwrap().slow_hello = Duration::from_secs(10);
+        let mut glider = Glider::new(Box::new(spawner));
+        let screen = lone_screen();
+        glider.open_early(&screen, Path::new("p.jpg"), [160, 100], Path::new("s.png"), None);
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(glider.cannot_glide(&plan(&screen)), "{:?}", glider.said);
+        assert!(glider.said.iter().any(|line| line.contains("skipped, helper cold, the helper had not started")), "{:?}", glider.said);
+        let said: Vec<String> = log.lock().unwrap().iter().map(|(what, _)| what.clone()).collect();
+        assert!(said.iter().any(|what| what.starts_with("open ")) && said.iter().any(|what| what.starts_with("close ")), "{said:?}");
     }
 
     #[test]
