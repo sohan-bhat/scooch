@@ -25,9 +25,22 @@ public interface IDesktopWallpaper {
 }
 [ComImport, Guid("C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD")]
 public class DesktopWallpaperClass {}
+public struct Spot { public int X; public int Y; }
+public struct Box { public int Left; public int Top; public int Right; public int Bottom; }
 public static class Desk {
     [DllImport("user32.dll")]
     public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr window, out Box box);
+    [DllImport("user32.dll")]
+    public static extern bool ClientToScreen(IntPtr window, ref Spot spot);
+    public static int[] Client(IntPtr window) {
+        Box box;
+        if (!GetClientRect(window, out box)) return null;
+        Spot corner = new Spot();
+        if (!ClientToScreen(window, ref corner)) return null;
+        return new int[] { corner.X, corner.Y, corner.X + box.Right, corner.Y + box.Bottom };
+    }
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")]
@@ -322,7 +335,8 @@ function Pill-Inside {
     $best = 'the controls were not found'
     for ($attempt = 0; $attempt -lt 8; $attempt++) {
         $window = Find-Window
-        $frame = $window.Current.BoundingRectangle
+        $frame = [Desk]::Client([IntPtr]$window.Current.NativeWindowHandle)
+        if (-not $frame) { Start-Sleep -Seconds 1; continue }
         $parts = @()
         $whole = $true
         $seen = 0
@@ -332,11 +346,11 @@ function Pill-Inside {
             if (-not $control) { continue }
             $seen++
             $rect = $control.Current.BoundingRectangle
-            $inside = ($rect.Left -ge $frame.Left) -and ($rect.Top -ge $frame.Top) -and ($rect.Right -le $frame.Right) -and ($rect.Bottom -le $frame.Bottom) -and ($rect.Width -gt 0)
+            $inside = ($rect.Left -ge $frame[0]) -and ($rect.Top -ge $frame[1]) -and ($rect.Right -le $frame[2]) -and ($rect.Bottom -le $frame[3]) -and ($rect.Width -gt 0)
             $whole = $whole -and $inside
             $parts += "$label $(if ($inside) { 'inside' } else { 'cut' })"
         }
-        $best = "every control whole inside the window $whole, $($parts -join ', ')"
+        $best = "every control whole inside the client area $($frame -join ' ') $whole, $($parts -join ', ')"
         if ($seen -ge 5) { return $best }
         Start-Sleep -Seconds 1
     }
@@ -355,7 +369,7 @@ foreach ($scale in 150, 200) {
         Shot "text-$scale-$($size[2])"
         $said = Pill-Inside
         Line "- text at $scale percent, $($size[2]) size, $said"
-        Expect "every control is whole inside the window at $scale percent, $($size[2]) size" ($said -like 'every control whole inside the window True*' -and $said -notlike '*not found*')
+        Expect "every control is whole inside the window at $scale percent, $($size[2]) size" ($said -like 'every control whole inside the client area * True,*' -and $said -notlike '*not found*')
     }
 }
 if ($null -eq $textBefore) { Remove-ItemProperty -Path $access -Name TextScaleFactor -ErrorAction SilentlyContinue } else { Set-ItemProperty -Path $access -Name TextScaleFactor -Value $textBefore -Type DWord }
