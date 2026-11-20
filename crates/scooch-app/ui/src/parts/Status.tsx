@@ -2,8 +2,8 @@ import { Button } from '@/components/ui/button';
 import type { Problem, View } from '~/backend/types';
 import { copy, fill } from '~/lib/copy';
 
-export type Fix = { label: string; run: () => void };
-export type Said = { line: string; fix: Fix | null };
+export type Act = { label: string; run: () => void; busy?: boolean };
+export type Said = { line: string; fix: Act | null };
 
 export function problemLine(problem: Problem, act: (problem: Problem) => void, pick: () => void): Said {
   const fix = (label: string) => ({ label, run: () => act(problem) });
@@ -35,6 +35,15 @@ export function problemLine(problem: Problem, act: (problem: Problem) => void, p
   }
 }
 
+function onLine(view: View) {
+  const counted = view.counted;
+  if (!counted) return copy.status.on.plain;
+  if (counted.icons === 0) return copy.status.on.none;
+  if (counted.icons === 1) return copy.status.on.one;
+  if (counted.screens > 1) return fill(copy.status.on.spread, { n: counted.icons, screens: counted.screens });
+  return fill(copy.status.on.many, { n: counted.icons });
+}
+
 export function said(view: View, act: (problem: Problem) => void, pick: () => void, flip: () => void): Said {
   if (view.problem) return problemLine(view.problem, act, pick);
   if (view.phase === 'starting') return { line: copy.status.starting, fix: null };
@@ -45,22 +54,27 @@ export function said(view: View, act: (problem: Problem) => void, pick: () => vo
     return { line: copy.status.off, fix: null };
   }
   if (view.flipHelps && view.switches.flip === false) return { line: copy.hint.flip.line, fix: { label: copy.hint.flip.fix, run: flip } };
-  return { line: copy.status.on, fix: null };
+  return { line: onLine(view), fix: null };
 }
 
-export function Status({ words, pill }: { words: Said; pill: { label: string; busy: boolean; run: () => void } | null }) {
+export function Status({ line, pill, quiet }: { line: string; pill: Act | null; quiet: Act | null }) {
   return (
     <div className="flex min-h-16 items-center gap-x-4 gap-y-2 px-6 cramped:min-h-14 cramped:px-4">
-      <p key={words.line} role="status" aria-live="polite" className="line-in m-0 min-w-0 text-[1.125rem] leading-snug font-semibold text-paper cramped:text-base">
-        {words.line}
+      <p key={line} role="status" aria-live="polite" className="line-in m-0 min-w-0 text-[1.125rem] leading-snug font-semibold text-paper cramped:text-base">
+        {line}
       </p>
-      {words.fix && (
-        <Button variant="quiet" size="sm" onClick={words.fix.run} className="cramped:h-9 cramped:px-4 cramped:text-[0.875rem]">
-          {words.fix.label}
+      {quiet && (
+        <Button variant="quiet" size="sm" onClick={quiet.busy ? undefined : quiet.run} aria-disabled={quiet.busy || undefined} className="shrink-0 aria-disabled:pointer-events-none cramped:h-9 cramped:px-4 cramped:text-[0.875rem]">
+          {quiet.label}
         </Button>
       )}
       {pill && (
-        <Button size="md" onClick={pill.run} disabled={pill.busy} className="ml-auto min-w-[8.5rem] cramped:h-10 cramped:min-w-[7rem] cramped:px-5 cramped:text-[0.9375rem]">
+        <Button
+          size="md"
+          onClick={pill.busy ? undefined : pill.run}
+          aria-disabled={pill.busy || undefined}
+          className="ml-auto min-w-[8.5rem] aria-disabled:pointer-events-none cramped:h-10 cramped:min-w-[7rem] cramped:px-5 cramped:text-[0.9375rem]"
+        >
           {pill.label}
         </Button>
       )}

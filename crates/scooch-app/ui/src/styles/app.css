@@ -143,7 +143,10 @@
 
 html[data-still] *,
 html[data-still] *::before,
-html[data-still] *::after {
+html[data-still] *::after,
+html[data-calm] *,
+html[data-calm] *::before,
+html[data-calm] *::after {
   animation: none !important;
   transition: none !important;
 }

@@ -2,7 +2,13 @@
   "name": "Scooch",
   "desk": "Your desktop",
   "status": {
-    "on": "Scooch is on.",
+    "on": {
+      "plain": "Scooch is on.",
+      "none": "Scooch is on and the desktop has no icons.",
+      "one": "Scooch is on for 1 icon.",
+      "many": "Scooch is on for {n} icons.",
+      "spread": "Scooch is on for {n} icons on {screens} screens."
+    },
     "off": "Scooch is off.",
     "starting": "Scooch is starting.",
     "stopping": "Scooch is putting your wallpaper back.",
@@ -13,7 +19,9 @@
   },
   "pill": {
     "on": "Turn on",
-    "off": "Turn off"
+    "off": "Turn off",
+    "starting": "Turning on",
+    "stopping": "Turning off"
   },
   "hint": {
     "flip": {
@@ -44,6 +52,7 @@
       "moving": "Your wallpaper is the moving macOS one.",
       "unreadable": "Your wallpaper file is unreadable.",
       "made": "This desktop still shows an old Scooch picture.",
+      "other": "Your wallpaper is not a single picture.",
       "fix": "Pick a picture"
     },
     "gnome": {

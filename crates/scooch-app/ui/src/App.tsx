@@ -6,12 +6,12 @@ import type { Picture, Problem, SwitchName, View, WallpaperKind } from '~/backen
 import { copy } from '~/lib/copy';
 import { Desk } from '~/parts/Desk';
 import { Pictures } from '~/parts/Pictures';
-import { Status, said } from '~/parts/Status';
+import { type Act, Status, said } from '~/parts/Status';
 import { Switches } from '~/parts/Switches';
 
 const BLOCKING: Problem['kind'][] = ['unknown', 'move'];
 
-const EMPTY: Record<WallpaperKind, Icon> = { slideshow: Slideshow, video: FilmStrip, moving: FilmStrip, color: PaintBucket, unreadable: ImageBroken, made: Image };
+const EMPTY: Record<WallpaperKind, Icon> = { slideshow: Slideshow, video: FilmStrip, moving: FilmStrip, color: PaintBucket, unreadable: ImageBroken, made: Image, other: Image };
 
 export function App({ backend, first }: { backend: Backend; first: View }) {
   const [view, setView] = useState(first);
@@ -40,6 +40,14 @@ export function App({ backend, first }: { backend: Backend; first: View }) {
   useEffect(() => {
     document.documentElement.style.setProperty('--text-scale', String(view.textScale));
   }, [view.textScale]);
+  useEffect(() => {
+    document.documentElement.toggleAttribute('data-calm', view.reduceMotion);
+  }, [view.reduceMotion]);
+  useEffect(() => {
+    backend.firstOpen().then((first) => {
+      if (first) backend.turnOn();
+    });
+  }, [backend]);
 
   const pick = useCallback(async () => {
     const path = await backend.pick();
@@ -55,19 +63,23 @@ export function App({ backend, first }: { backend: Backend; first: View }) {
   );
   const on = view.phase === 'on' || view.phase === 'starting';
   const busy = view.phase === 'starting' || view.phase === 'stopping';
-  const pill = blocked ? null : { label: on ? copy.pill.off : copy.pill.on, busy, run: () => (on ? backend.turnOff() : backend.turnOn()) };
+  const label = view.phase === 'starting' ? copy.pill.starting : view.phase === 'stopping' ? copy.pill.stopping : on ? copy.pill.off : copy.pill.on;
+  const cannotTurnOn = view.problem?.kind === 'admin' && !on;
+  const toggle: Act | null = blocked || cannotTurnOn ? null : { label, busy, run: () => (on ? backend.turnOff() : backend.turnOn()) };
+  const pill = words.fix ?? toggle;
+  const quiet = words.fix ? toggle : null;
 
   return (
     <TooltipProvider delayDuration={500}>
       <main className="grid h-full grid-rows-[auto_minmax(0,1fr)_auto_auto] bg-[radial-gradient(110%_80%_at_50%_42%,var(--color-room-2),var(--color-room)_72%)]" data-system={view.system}>
-        <header className="flex h-16 items-center justify-between gap-6 px-6 cramped:h-14 cramped:px-4">
-          <h1 className="wordmark m-0 text-[1.625rem] text-paper cramped:text-[1.375rem]">{copy.name}</h1>
+        <header data-tauri-drag-region className={`flex h-16 items-center justify-between gap-6 px-6 cramped:h-14 cramped:px-4 ${view.system === 'macos' ? 'pl-24 cramped:pl-[5.5rem]' : ''}`}>
+          <h1 data-tauri-drag-region className="wordmark m-0 text-[1.625rem] text-paper cramped:text-[1.375rem]">{copy.name}</h1>
           {!blocked && <Switches values={view.switches} onChange={(name: SwitchName, value) => backend.set(name, value)} />}
         </header>
         <div className="min-h-0 px-10 py-3 cramped:px-6 cramped:py-2">
           <Desk monitors={view.monitors} system={view.system} empty={view.problem?.kind === 'wallpaper' ? EMPTY[view.problem.what] : undefined} />
         </div>
-        <Status words={words} pill={pill} />
+        <Status line={words.line} pill={pill} quiet={quiet} />
         {!blocked && <Pictures pictures={pictures} current={view.current} onUse={(path) => backend.use(path)} onPick={pick} />}
       </main>
       {dropping && (
