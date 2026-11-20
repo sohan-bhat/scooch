@@ -314,4 +314,64 @@ foreach ($stock in @('%USERPROFILE%\AppData\Local\Microsoft\WindowsApps', '')) {
 }
 Set-RawPath $runnerPath
 Line "- the runner's user Path is back $([string]::Equals((Raw-Path), $runnerPath, [StringComparison]::Ordinal))"
+
+$marker = Join-Path $data 'reinstall.on'
+function Install-Quiet { (Start-Process -FilePath $setup.FullName -ArgumentList '/S' -PassThru).WaitForExit(300000) | Out-Null }
+function Remove-Quiet {
+    (Start-Process -FilePath (Join-Path $folder 'uninstall.exe') -ArgumentList '/S' -PassThru).WaitForExit(300000) | Out-Null
+    Wait-For 120 { -not (Test-Path (Join-Path $folder 'scooch-app.exe')) } | Out-Null
+    Start-Sleep -Seconds 2
+}
+
+Line ''
+Line '### Reinstall marker'
+Install-Quiet
+Remove-Quiet
+Line "- removed with Scooch off, a marker left $(Test-Path $marker)"
+New-Item -ItemType Directory -Force $data | Out-Null
+Set-Content -Path $marker -Value ([DateTime]::UtcNow.AddMinutes(-20).ToString('o'))
+Install-Quiet
+Start-Sleep -Seconds 8
+Line "- installed over a marker 20 minutes old, daemons $(Daemons), marker left $(Test-Path $marker)"
+Remove-Quiet
+Set-Content -Path $marker -Value ([DateTime]::UtcNow.AddMinutes(-1).ToString('o'))
+Install-Quiet
+$started = Wait-For 30 { (Daemons) -ge 1 }
+Line "- installed over a marker 1 minute old, a daemon after $started s, marker left $(Test-Path $marker)"
+Wait-For 30 { State-On } | Out-Null
+Remove-Quiet
+Line "- removed with Scooch on, a marker written $(Test-Path $marker) holding $((Get-Content -Raw $marker -ErrorAction SilentlyContinue))"
+
+Line ''
+Line '### Removal with the delete box ticked'
+Install-Quiet
+Start-Process -FilePath (Join-Path $folder 'uninstall.exe') | Out-Null
+$checkbox = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::CheckBox)
+$script:dialog = $null
+$shown = Wait-For 60 {
+    foreach ($window in [System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
+        if ($window.Current.Name -like '*Scooch*' -and $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $checkbox)) { $script:dialog = $window; return $true }
+    }
+    return $false
+}
+if ($script:dialog) {
+    $box = $script:dialog.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $checkbox)
+    Line "- the uninstaller showed '$($script:dialog.Current.Name)' after $shown s with the box '$($box.Current.Name)'"
+    $box.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Toggle()
+    Screen-Shot 'uninstall-box'
+    $byName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Uninstall')
+    $button = $script:dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byName) | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button } | Select-Object -First 1
+    $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $gone = Wait-For 120 { -not (Test-Path (Join-Path $folder 'scooch-app.exe')) }
+    foreach ($label in 'Finish', 'Close') {
+        $byLabel = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $label)
+        $end = $script:dialog.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $byLabel)
+        if ($end) { $end.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); break }
+    }
+    Start-Sleep -Seconds 3
+    Line "- removal finished after $gone s, Scooch's data folder left $(Test-Path $data), marker left $(Test-Path $marker), the window's data folder left $(Test-Path (Join-Path $env:LOCALAPPDATA 'me.sohanbhat.scooch.window'))"
+} else {
+    Screen-Shot 'uninstall-missing'
+    Line "- no uninstaller window with a box came within 60 s, windows $(Top-Windows)"
+}
 exit 0
