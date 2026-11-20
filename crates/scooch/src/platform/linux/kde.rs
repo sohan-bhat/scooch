@@ -1,5 +1,5 @@
 use super::parse::desktop::Session;
-use super::parse::kde::{self, Containment, Fit, Layout, Mapping, State};
+use super::parse::kde::{self, Containment, Fit, Grid, Layout, Mapping, State};
 use super::parse::{gio, keyfile, wakes};
 use super::settings::{self, Plasma};
 use super::{screens, tool, FileWatch, Shell, Watches};
@@ -111,12 +111,12 @@ impl Kde {
         names.into_iter().filter(|name| kde::shows_on(kde::mapped_screen(mapping, &kde::item_urls(name, folder), &activity), number, &available)).collect()
     }
 
-    pub fn icons_on(&self, state: &State, screen: &Screen, plasma6: bool, mapping: &Mapping) -> Vec<Rect> {
-        let (Some(number), Some(containment)) = (number_for(state, screen), containment(state, screen)) else { return Vec::new() };
+    fn cells_on<'a>(&self, state: &'a State, screen: &Screen, plasma6: bool, mapping: &Mapping) -> Option<(&'a Containment, Layout, Rect, Vec<i64>)> {
+        let (number, containment) = (number_for(state, screen)?, containment(state, screen)?);
         if !containment.folder() {
-            return Vec::new();
+            return None;
         }
-        let Some(folder) = folder_of(containment, &self.desktop) else { return Vec::new() };
+        let folder = folder_of(containment, &self.desktop)?;
         let hidden = containment.general.get("showHiddenFiles").is_some_and(|value| value == "true");
         let mine = self.on_screen(state, number, &folder, hidden, mapping);
         let total = mine.len();
@@ -126,8 +126,33 @@ impl Kde {
         let manual = containment.setting("sortMode") == Some(-1);
         let saved = containment.general.get("positions").filter(|_| manual).and_then(|raw| kde::positions(raw, &kde::resolution(&screen.frame)));
         let present = |url: &str| kde::item_path(url, &folder).is_some_and(|path| path.exists() && path.file_name().is_some_and(|name| mine.contains(name.to_string_lossy().as_ref())));
-        kde::occupied(saved.as_ref(), &present, total, per_stripe, plasma6).into_iter().map(|index| if plasma6 { kde::INSETS_6 } else { kde::INSETS }.apply(layout.rect(index, &area))).collect()
+        Some((containment, layout, area, kde::occupied(saved.as_ref(), &present, total, per_stripe, plasma6)))
     }
+
+    pub fn icons_on(&self, state: &State, screen: &Screen, plasma6: bool, mapping: &Mapping) -> Vec<Rect> {
+        let Some((_, layout, area, indices)) = self.cells_on(state, screen, plasma6, mapping) else { return Vec::new() };
+        indices.into_iter().map(|index| if plasma6 { kde::INSETS_6 } else { kde::INSETS }.apply(layout.rect(index, &area))).collect()
+    }
+
+    pub fn boards(&self, state: &State, screens: &[Screen], mapping: &Mapping) -> Vec<Board> {
+        screens
+            .iter()
+            .filter_map(|screen| {
+                let (containment, layout, area, indices) = self.cells_on(state, screen, false, mapping)?;
+                let grid = Grid { area, layout, taken: indices.iter().copied().collect() };
+                let cells = indices.iter().map(|index| (*index, grid.icon(*index))).collect();
+                let why_not = kde::unpredictable(containment, &screen.frame, &area, screen.scale);
+                Some(Board { grid, cells, why_not })
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Board {
+    pub grid: Grid,
+    pub cells: Vec<(i64, Rect)>,
+    pub why_not: Option<&'static str>,
 }
 
 impl Shell for Kde {

@@ -495,10 +495,7 @@ impl Daemon {
     }
 
     fn predicted(&self, worker: &Signal) -> bool {
-        let Some(snapshot) = self.desktop.predicted() else { return false };
-        if !parse(self.store.read().as_deref()).predict {
-            return false;
-        }
+        let Some(snapshot) = self.desktop.predicted(&|| parse(self.store.read().as_deref()).predict) else { return false };
         if trace() {
             eprintln!("{} predicted drop handed, icons {:016x}", stamp(), icon_print(&snapshot));
         }
@@ -1763,7 +1760,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::platform::linux::parse::drops::{Guess, Press, Tracker, Verdict};
+    use crate::platform::linux::parse::drops::{hand, through, Guess, Hold, Press, Tracker, Verdict};
     use crate::platform::Wake;
     use crate::state::scratch;
     use scooch_core::Rect;
@@ -1804,13 +1801,15 @@ pub mod tests {
         pub bad_profile: Mutex<bool>,
         pub saves: Mutex<Vec<Instant>>,
         pub predicted: Mutex<Option<Snapshot>>,
+        pub offered: Mutex<Option<Hold>>,
+        pub hold: Mutex<Option<Hold>>,
         pub events: crate::glide::tests::Events,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), bad_profile: Mutex::new(false), saves: Mutex::new(Vec::new()), predicted: Mutex::new(None), events: Arc::new(Mutex::new(Vec::new())) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), bad_profile: Mutex::new(false), saves: Mutex::new(Vec::new()), predicted: Mutex::new(None), offered: Mutex::new(None), hold: Mutex::new(None), events: Arc::new(Mutex::new(Vec::new())) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -1858,7 +1857,7 @@ pub mod tests {
                 anyhow::bail!(reason);
             }
             let screens = self.screens()?;
-            let icons = self.icons.lock().unwrap().clone();
+            let icons = through(&mut self.hold.lock().unwrap(), self.icons.lock().unwrap().clone(), Instant::now());
             if let Some(later) = self.after_read.lock().unwrap().take() {
                 *self.icons.lock().unwrap() = later;
             }
@@ -1973,8 +1972,9 @@ pub mod tests {
             *self.at_once.lock().unwrap()
         }
 
-        fn predicted(&self) -> Option<Snapshot> {
-            self.predicted.lock().unwrap().take()
+        fn predicted(&self, shown: &dyn Fn() -> bool) -> Option<Snapshot> {
+            let offered = self.predicted.lock().unwrap().take().map(|snapshot| (snapshot, self.offered.lock().unwrap().take()));
+            hand(offered, &mut self.hold.lock().unwrap(), shown)
         }
 
         fn place_saved(&self) -> Option<Instant> {
@@ -4730,12 +4730,45 @@ pub mod tests {
         state.predict = false;
         daemon.store.save(&state).unwrap();
         *fake.predicted.lock().unwrap() = Some(Snapshot { screens: fake.screens.lock().unwrap().clone(), icons: vec![moved_subject()] });
+        *fake.offered.lock().unwrap() = Some(Hold::new(&[subject()], vec![moved_subject()], Instant::now() + Duration::from_secs(5)));
         let signal = Signal::default();
         signal.wake();
         let started = Instant::now();
         daemon.gather(&signal);
         assert!(started.elapsed() >= Duration::from_millis(200), "the prediction was taken with predict off, {:?}", started.elapsed());
         assert!(daemon.handed.lock().unwrap().is_none());
+        assert!(fake.hold.lock().unwrap().is_none(), "a guess the person switched off still held the reads");
+    }
+
+    #[test]
+    fn a_held_guess_outlasts_a_read_from_before_the_save_and_a_save_that_disagrees_is_drawn_at_once() {
+        let (daemon, fake, _) = rig("predict-hold", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let first = fake.showing("main");
+        *fake.predicted.lock().unwrap() = Some(Snapshot { screens: fake.screens.lock().unwrap().clone(), icons: vec![moved_subject()] });
+        *fake.offered.lock().unwrap() = Some(Hold::new(&[subject()], vec![moved_subject()], Instant::now() + Duration::from_secs(5)));
+        let signal = Signal::default();
+        signal.wake();
+        daemon.gather(&signal);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let guessed = fake.showing("main");
+        assert_ne!(guessed, first);
+        let sets = fake.sets.load(Ordering::SeqCst);
+        signal.wake();
+        daemon.gather(&signal);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged, "a read from before the save drew the old places back");
+        assert_eq!((fake.sets.load(Ordering::SeqCst), fake.showing("main")), (sets, guessed.clone()));
+        fake.place(vec![corner()]);
+        signal.wake();
+        daemon.gather(&signal);
+        assert_ne!(outcome(&daemon.tick()), Outcome::Unchanged, "the save that disagrees with the guess was not drawn");
+        assert_ne!(fake.showing("main"), guessed);
+        assert!(fake.hold.lock().unwrap().is_none());
+        fake.place(vec![subject()]);
+        signal.wake();
+        daemon.gather(&signal);
+        assert_ne!(outcome(&daemon.tick()), Outcome::Unchanged, "the hold outlived the save");
     }
 
     fn map_rig(name: &str) -> (Daemon, Arc<Fake>, PathBuf) {
