@@ -1,10 +1,61 @@
+use super::desktop::{Kind, Session};
+use crate::platform::Snapshot;
 use scooch_core::Rect;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const THRESHOLD: f32 = 8.0;
 pub const NET_RC: Duration = Duration::from_millis(1250);
 pub const NET_YAML: Duration = Duration::from_millis(2000);
+pub const NET_PLASMA: Duration = Duration::from_millis(3000);
+pub const NET_POLL: Duration = Duration::from_millis(50);
+pub const HOLD_AFTER_RELEASE: Duration = Duration::from_millis(3500);
 pub const SHADOWS: usize = 3;
+
+pub fn applies(kind: Option<Kind>, session: Session, plasma5: impl FnOnce() -> bool) -> bool {
+    session == Session::X11
+        && match kind {
+            Some(Kind::Xfce) => true,
+            Some(Kind::Kde) => plasma5(),
+            _ => false,
+        }
+}
+
+pub fn off_line(desktop: &str) -> String {
+    format!("Scooch stopped moving the picture at the drop on {desktop} after a wrong guess, and waits for {desktop} to save the places until three guesses in a row hold again.")
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hold {
+    pub before: Vec<[i64; 4]>,
+    pub icons: Vec<Rect>,
+    pub until: Instant,
+}
+
+impl Hold {
+    pub fn new(before: &[Rect], icons: Vec<Rect>, until: Instant) -> Hold {
+        Hold { before: keys(before), icons, until }
+    }
+}
+
+pub fn hand(offered: Option<(Snapshot, Option<Hold>)>, hold: &mut Option<Hold>, shown: &dyn Fn() -> bool) -> Option<Snapshot> {
+    let (snapshot, kept) = offered?;
+    if !shown() {
+        return None;
+    }
+    if let Some(kept) = kept {
+        *hold = Some(kept);
+    }
+    Some(snapshot)
+}
+
+pub fn through(hold: &mut Option<Hold>, read: Vec<Rect>, now: Instant) -> Vec<Rect> {
+    let Some(kept) = hold.as_ref() else { return read };
+    if now < kept.until && keys(&read) == kept.before {
+        return kept.icons.clone();
+    }
+    *hold = None;
+    read
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Selection {
@@ -307,6 +358,39 @@ mod tests {
             place = target;
         }
         assert!(!tracker.off);
+    }
+
+    #[test]
+    fn prediction_applies_to_xfce_and_plasma_5_on_x11_only() {
+        assert!(applies(Some(Kind::Xfce), Session::X11, || panic!("Xfce needs no Plasma version")));
+        assert!(applies(Some(Kind::Kde), Session::X11, || true));
+        assert!(!applies(Some(Kind::Kde), Session::X11, || false), "Plasma 6 saves at the move");
+        assert!(!applies(Some(Kind::Kde), Session::Wayland, || true));
+        assert!(!applies(Some(Kind::Xfce), Session::Wayland, || true));
+        for kind in [Kind::Gnome, Kind::Cinnamon, Kind::Mate] {
+            assert!(!applies(Some(kind), Session::X11, || true));
+        }
+        assert!(!applies(None, Session::X11, || true));
+        assert!(off_line("Plasma").contains("on Plasma after a wrong guess, and waits for Plasma to save"));
+    }
+
+    #[test]
+    fn the_hold_keeps_the_guess_over_reads_from_before_the_drop_until_the_save_or_its_time() {
+        let now = Instant::now();
+        let before = vec![at(961.0, 506.0), at(18.0, 40.0)];
+        let guessed = vec![at(649.0, 506.0), at(18.0, 40.0)];
+        let mut hold = Some(Hold::new(&before, guessed.clone(), now + Duration::from_secs(3)));
+        let stale = vec![at(18.0, 40.0), at(961.0, 506.0)];
+        assert_eq!(through(&mut hold, stale.clone(), now), guessed, "a read in another order is still the stale one");
+        assert!(hold.is_some());
+        let saved = vec![at(545.0, 506.0), at(18.0, 40.0)];
+        assert_eq!(through(&mut hold, saved.clone(), now), saved, "the save brings the truth, right or wrong");
+        assert_eq!(hold, None);
+        assert_eq!(through(&mut hold, stale.clone(), now), stale, "the hold ends with the save");
+        let mut late = Some(Hold::new(&before, guessed, now));
+        assert_eq!(through(&mut late, stale.clone(), now + Duration::from_millis(1)), stale);
+        assert_eq!(late, None);
+        assert_eq!(through(&mut None, stale.clone(), now), stale);
     }
 
     #[test]

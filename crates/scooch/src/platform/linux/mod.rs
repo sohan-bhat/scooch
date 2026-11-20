@@ -219,13 +219,20 @@ mod system {
             Ok(found)
         }
 
-        fn pick(&self, found: Vec<screens::Found>) -> Vec<Screen> {
+        pub fn pick(&self, found: Vec<screens::Found>) -> Vec<Screen> {
             if self.shell.per_screen() {
                 return found.into_iter().map(|found| found.screen).collect();
             }
             let all: Vec<Screen> = found.iter().map(|found| found.screen.clone()).collect();
             let index = self.shell.primary(&all).or_else(|| found.iter().position(|found| found.primary)).unwrap_or(0);
             all.into_iter().nth(index).into_iter().collect()
+        }
+
+        pub fn fresh(&self) -> Result<Snapshot> {
+            let found = self.all_screens()?;
+            let all: Vec<Screen> = found.iter().map(|found| found.screen.clone()).collect();
+            let icons = self.shell.icons(&all)?;
+            Ok(Snapshot { screens: self.pick(found), icons })
         }
 
         fn session_name(&self) -> &'static str {
@@ -272,8 +279,8 @@ mod system {
             super::saves::SAVES.last()
         }
 
-        fn predicted(&self) -> Option<Snapshot> {
-            super::drops::PREDICTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+        fn predicted(&self, shown: &dyn Fn() -> bool) -> Option<Snapshot> {
+            super::drops::take(shown)
         }
 
         fn name(&self) -> String {
@@ -281,10 +288,7 @@ mod system {
         }
 
         fn snapshot(&self) -> Result<Snapshot> {
-            let found = self.all_screens()?;
-            let all: Vec<Screen> = found.iter().map(|found| found.screen.clone()).collect();
-            let icons = self.shell.icons(&all)?;
-            Ok(Snapshot { screens: self.pick(found), icons })
+            Ok(super::drops::held(self.fresh()?))
         }
 
         fn screens(&self) -> Result<Vec<Screen>> {
@@ -304,12 +308,15 @@ mod system {
 
         fn run(&self, wake: Wake) -> Result<()> {
             let wake: screens::Shared = std::sync::Arc::from(wake);
-            if self.kind == Kind::Xfce && self.session == Session::X11 {
+            let mut watches = self.shell.watches();
+            if super::drops::applies(Some(self.kind), self.session) {
                 let (predicted, net) = (watch::tagged(&wake, "predicted drop"), watch::tagged(&wake, "drop net"));
-                let _ = std::thread::Builder::new().name("scooch-drops".into()).spawn(move || super::drops::run(&predicted, &net));
+                let plasma = self.kind == Kind::Kde;
+                watches.pointer &= !plasma;
+                let _ = std::thread::Builder::new().name("scooch-drops".into()).spawn(move || if plasma { super::drops::run_plasma(&predicted, &net) } else { super::drops::run(&predicted, &net) });
             }
             let shared = wake.clone();
-            watch::run(Box::new(move || shared()), self.shell.watches(), &self.desktop, self.session, self.kind.hears_saves())
+            watch::run(Box::new(move || shared()), watches, &self.desktop, self.session, self.kind.hears_saves())
         }
 
         fn autostart(&self, exe: Option<&Path>) -> Result<()> {
