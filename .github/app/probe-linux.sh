@@ -35,7 +35,7 @@ none_inside() { [ -n "$mount" ] && [ -s "$1" ] && ! grep -q ' inside$' "$1"; }
 no_runtime_name() { [ -s "$1" ] && ! grep -q -E "^($(echo $runtime_names | tr ' ' '|')) " "$1"; }
 session_backend() { [ -s "$1" ] && ! grep -q '^GDK_BACKEND ' "$1"; }
 
-allowed="HOME USER LOGNAME PATH LANG DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE NO_AT_BRIDGE WEBKIT_DISABLE_COMPOSITING_MODE LIBGL_ALWAYS_SOFTWARE"
+allowed="HOME USER LOGNAME PATH LANG DISPLAY XAUTHORITY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE NO_AT_BRIDGE WEBKIT_DISABLE_COMPOSITING_MODE LIBGL_ALWAYS_SOFTWARE"
 clean() {
   local pass=() name
   for name in $allowed; do
@@ -233,11 +233,31 @@ expect "reopening the app replaced a daemon of an older version" replaced
 press_pill alt+F4
 wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
 
-pkill -x scooch
-sleep 2
-mkdir -p "$data/out"
-cp "$photo" "$data/out/probe-absent-1.jpg"
-python3 - "$data/state.json" "$photo" "$data/out/probe-absent-1.jpg" <<'PY'
+others() {
+  python3 - "$data/state.json" <<'PY'
+import json, sys
+try:
+    state = json.load(open(sys.argv[1]))
+except Exception:
+    state = {}
+print(" ".join(sorted(key for key in state.get("screens", {}) if key != "probe-absent")))
+PY
+}
+put_back() { [ "$(wallpaper)" = "$photo" ] && [ -z "$(others)" ]; }
+missed() { ! put_back; }
+drawn() { [ -n "$(wallpaper)" ] && [ "$(wallpaper)" != "$photo" ]; }
+cookie_daemon() {
+  local pid
+  pid=$(pgrep -x scooch | head -1)
+  [ -n "$pid" ] && [ -n "${XAUTHORITY:-}" ] && tr '\0' '\n' <"/proc/$pid/environ" | grep -qxF "XAUTHORITY=$XAUTHORITY"
+}
+refused() { ! env -u XAUTHORITY xdpyinfo >/dev/null 2>&1; }
+absent_on() {
+  pkill -x scooch
+  sleep 2
+  mkdir -p "$data/out"
+  cp "$photo" "$data/out/probe-absent-1.jpg"
+  python3 - "$data/state.json" "$photo" "$data/out/probe-absent-1.jpg" <<'PY'
 import json, sys
 path, picture, output = sys.argv[1:4]
 state = json.load(open(path))
@@ -245,11 +265,44 @@ state["on"] = True
 state.setdefault("screens", {})["probe-absent"] = {"source": picture, "original": picture, "output": output}
 json.dump(state, open(path, "w"), indent=2)
 PY
-clean /usr/bin/scooch >"$out/absent-on.txt" 2>&1
+  clean /usr/bin/scooch >"$out/absent-on-$1.txt" 2>&1
+  wait_for 30 sh -c 'pgrep -x scooch >/dev/null' >/dev/null
+  wait_for 30 drawn >/dev/null
+  sleep 3
+}
+clear_absent() {
+  python3 - "$data/state.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+state = json.load(open(path))
+state.get("screens", {}).pop("probe-absent", None)
+json.dump(state, open(path, "w"), indent=2)
+PY
+}
+
+line "### Removal with the X cookie in a file of its own"
+line "- the X server takes its cookie from a file that is not ~/.Xauthority $([ -n "${XAUTHORITY:-}" ] && [ "$XAUTHORITY" != "$HOME/.Xauthority" ] && echo yes || echo no), ~/.Xauthority holds a cookie for this display $(xauth -f "$HOME/.Xauthority" list "$DISPLAY" 2>/dev/null | grep -q . && echo yes || echo no)"
+expect "the X server refuses a client without the cookie file" refused
+absent_on deb
+line "- the saved state holds probe-absent $(grep -c '"probe-absent"' "$data/state.json") and the connected screens $(others), daemons $(daemons), login item $(login)"
+expect "the saved state holds a record for a screen nobody shows before the removal" grep -q '"probe-absent"' "$data/state.json"
+expect "the saved state holds a connected screen before the removal" [ -n "$(others)" ]
+expect "the daemon runs with XAUTHORITY at the cookie file" cookie_daemon
+cp "$data/state.json" "$out/state-before-control.json"
+control="$(mktemp -d)/prerm-without-xauthority.sh"
+sed 's/ XAUTHORITY//' crates/scooch-app/linux/prerm.sh >"$control"
+line "- control, prerm.sh with XAUTHORITY taken out of its list passes $(grep -o 'for name in [A-Z_ ]*' "$control" | cut -c13- | tr -s ' ')"
+sudo sh "$control" remove >"$out/control.log" 2>&1
+sleep 3
+line "- after the control off, the photo is back $([ "$(wallpaper)" = "$photo" ] && echo yes || echo no), connected screens still recorded $(others), daemons $(daemons)"
+expect "without XAUTHORITY the final off leaves Scooch's picture or parks the connected screen, so the check below catches a missing XAUTHORITY" missed
+pkill -x scooch
+sleep 1
+cp "$out/state-before-control.json" "$data/state.json"
+clean /usr/bin/scooch >"$out/control-on.txt" 2>&1
 wait_for 30 sh -c 'pgrep -x scooch >/dev/null' >/dev/null
 sleep 3
-line "- the saved state holds a record for a screen probe-absent that no desktop shows $(grep -c '"probe-absent"' "$data/state.json"), Scooch on again, daemons $(daemons), login item $(login)"
-expect "the saved state holds a record for a screen nobody shows before the removal" grep -q '"probe-absent"' "$data/state.json"
+line "- Scooch on again after the control, daemons $(daemons), login item $(login)"
 cp /usr/bin/scooch "$HOME/.stale-scooch"
 sudo apt-get remove -y scooch >"$out/remove.log" 2>&1
 removed=$?
@@ -257,20 +310,41 @@ line "- package removal exit $removed"
 expect "the package removal succeeded" [ "$removed" = 0 ]
 line "- removal log $(journalctl -t scooch-remove --no-pager -o cat 2>/dev/null | tail -5 | tr '\n' ' ')"
 sleep 3
-line "- wallpaper after removal $(wallpaper), back to the photo $([ "$(wallpaper)" = "$photo" ] && echo yes || echo no)"
+line "- wallpaper after removal $(wallpaper), back to the photo $([ "$(wallpaper)" = "$photo" ] && echo yes || echo no), connected screens still recorded $(others)"
 line "- login item after removal $([ -f "$autostart" ] && echo present || echo gone), daemons running $(daemons)"
-expect "removal put the photo back" [ "$(wallpaper)" = "$photo" ]
+expect "removal put the photo back and parked no screen that was connected" put_back
 expect "removal left no login item" [ ! -f "$autostart" ]
 expect "removal left no daemon" no_daemon
 cp "$data/state.json" "$out/state.json" 2>/dev/null
 expect "the final off kept the record of the screen nobody shows" grep -q '"probe-absent"' "$data/state.json"
-python3 - "$data/state.json" <<'PY'
-import json, sys
-path = sys.argv[1]
-state = json.load(open(path))
-state.get("screens", {}).pop("probe-absent", None)
-json.dump(state, open(path, "w"), indent=2)
-PY
+clear_absent
+
+line
+line "### rpm removal with the X cookie in a file of its own"
+rpm_file=$(ls "$PWD"/built/*.rpm 2>/dev/null | head -1)
+rpm_name=$(rpm -qp --qf '%{NAME}' "$rpm_file" 2>/dev/null)
+sudo rpm --initdb >/dev/null 2>&1 || true
+sudo rpm -i --nodeps --force-debian "$rpm_file" >"$out/rpm-install.log" 2>&1 || sudo rpm -i --nodeps "$rpm_file" >>"$out/rpm-install.log" 2>&1
+line "- rpm $(basename "$rpm_file"), package $rpm_name, installed $([ -x /usr/bin/scooch ] && echo yes || echo no), $(head -c 200 "$out/rpm-install.log" | tr '\n' ' ')"
+expect "the rpm installed /usr/bin/scooch" [ -x /usr/bin/scooch ]
+clean /usr/bin/scooch >"$out/rpm-on.txt" 2>&1
+wait_for 30 drawn >/dev/null
+line "- the rpm's scooch turned Scooch on, wallpaper $(wallpaper), daemons $(daemons)"
+absent_on rpm
+line "- the saved state holds probe-absent $(grep -c '"probe-absent"' "$data/state.json") and the connected screens $(others), daemons $(daemons), login item $(login)"
+expect "the saved state holds a connected screen before the rpm removal" [ -n "$(others)" ]
+expect "the daemon from the rpm runs with XAUTHORITY at the cookie file" cookie_daemon
+sudo rpm -e "${rpm_name:-scooch}" >"$out/rpm-remove.log" 2>&1
+removed=$?
+line "- rpm removal exit $removed"
+expect "the rpm removal succeeded" [ "$removed" = 0 ]
+sleep 3
+line "- wallpaper after the rpm removal $(wallpaper), back to the photo $([ "$(wallpaper)" = "$photo" ] && echo yes || echo no), connected screens still recorded $(others), login item $([ -f "$autostart" ] && echo present || echo gone), daemons $(daemons)"
+expect "the rpm removal put the photo back and parked no screen that was connected" put_back
+expect "the rpm removal left no login item" [ ! -f "$autostart" ]
+expect "the rpm removal left no daemon" no_daemon
+expect "the rpm final off kept the record of the screen nobody shows" grep -q '"probe-absent"' "$data/state.json"
+clear_absent
 line "- cleared the parked record of probe-absent so the AppImage passes start with no screen that cannot be reached"
 
 line

@@ -341,12 +341,18 @@ jobs:
         timeout-minutes: 20
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11 libglib2.0-bin file gnome-themes-extra python3-pyatspi at-spi2-core dconf-gsettings-backend dconf-service
+          sudo apt-get install -y xvfb xauth x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11 libglib2.0-bin file gnome-themes-extra python3-pyatspi at-spi2-core dconf-gsettings-backend dconf-service rpm
           sudo apt-get install -y ./built/*.deb
           XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
           export XDG_RUNTIME_DIR
-          dbus-run-session -- bash .github/linux/xfce.sh .github/app/probe-linux.sh appprobe
+          XAUTHORITY="$RUNNER_TEMP/x-cookie/display.auth"
+          mkdir -p "$RUNNER_TEMP/x-cookie" "$RUNNER_TEMP/x-server"
+          xauth -q -f "$XAUTHORITY" add :99 . "$(mcookie)"
+          printf '#!/bin/sh\nexec /usr/bin/Xvfb "$@" -auth "%s"\n' "$XAUTHORITY" >"$RUNNER_TEMP/x-server/Xvfb"
+          chmod +x "$RUNNER_TEMP/x-server/Xvfb"
+          export XAUTHORITY
+          PATH="$RUNNER_TEMP/x-server:$PATH" dbus-run-session -- bash .github/linux/xfce.sh .github/app/probe-linux.sh appprobe
       - name: Upload
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
