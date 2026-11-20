@@ -283,11 +283,40 @@
         "url": "https://commons.wikimedia.org/wiki/File:Boiling_water_being_poured_into_a_mug_for_tea.ogg"
       },
       {
-        "what": "The Cakewalk in the Sky, 1909",
+        "what": "Glass cup pick up put down on wood table",
+        "use": "Lifting and setting down the glass",
+        "author": "SpliceSound, Freesound",
+        "license": "CC0",
+        "url": "https://freesound.org/people/SpliceSound/sounds/218333/"
+      },
+      {
+        "what": "Cheap TV static",
+        "use": "Static at a channel change",
+        "author": "vacuumfan7072, Freesound",
+        "license": "CC0",
+        "url": "https://freesound.org/people/vacuumfan7072/sounds/264593/"
+      },
+      {
+        "what": "Squeaking of plastic desk lamp",
+        "use": "The lamp arm when it is aimed",
+        "author": "MeanRaccoon, Freesound",
+        "license": "CC0",
+        "url": "https://freesound.org/people/MeanRaccoon/sounds/804958/"
+      },
+      {
+        "what": "Mouse Click Sound",
+        "use": "Copying an install command",
+        "author": "Pixeliota, Freesound",
+        "license": "CC0",
+        "url": "https://freesound.org/people/Pixeliota/sounds/678248/"
+      },
+      {
+        "what": "Lobby Time",
         "use": "The music on the tape",
-        "author": "Ben Harney, played by the Victor Dance Orchestra",
-        "license": "Public domain",
-        "url": "https://commons.wikimedia.org/wiki/File:The_Cakewalk_in_the_sky-Victor_C-6882-Victor_Dance_Orchestra.mp3"
+        "author": "Kevin MacLeod, incompetech.com",
+        "license": "CC BY 4.0",
+        "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+        "url": "https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1600054"
       },
       {
         "what": "Phosphor Icons",

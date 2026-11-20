@@ -33,7 +33,15 @@ export function SourcesPage() {
                   </th>
                   <td className="px-5 py-4 text-plastic">{row.use}</td>
                   <td className="px-5 py-4 text-plastic">{row.author}</td>
-                  <td className="px-5 py-4 text-plastic">{row.license}</td>
+                  <td className="px-5 py-4 text-plastic">
+                    {'licenseUrl' in row ? (
+                      <a href={row.licenseUrl} className="link-quiet">
+                        {row.license}
+                      </a>
+                    ) : (
+                      row.license
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
