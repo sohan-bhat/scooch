@@ -684,40 +684,21 @@ pub fn show_gnome_icons() -> Result<()> {
     if ding_icons() != Icons::Off {
         bail!("gnome-icons");
     }
-    let connection = platform::linux::bus::session()?;
-    let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).interface(EXTENSIONS)?.member("ExtensionStateChanged")?.build();
-    let signals = zbus::blocking::MessageIterator::for_match_rule(rule, &connection, Some(32))?;
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for message in signals.flatten() {
-            let Ok((uuid, info)) = message.body().deserialize::<(String, std::collections::HashMap<String, zbus::zvariant::OwnedValue>)>() else { continue };
-            let state = info.get("state").and_then(|value| value.downcast_ref::<f64>().ok());
-            if uuid == DING && sender.send(state).is_err() {
-                break;
-            }
-        }
-    });
     let _: bool = platform::linux::bus::call(EXTENSIONS, EXTENSIONS_PATH, EXTENSIONS, "EnableExtension", &(DING,))?;
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut active = ding_info().and_then(|info| info.get("state").copied()) == Some(1.0);
-    while !active {
-        let left = deadline.saturating_duration_since(Instant::now());
-        match receiver.recv_timeout(left) {
-            Ok(Some(state)) => active = state == 1.0,
-            Ok(None) => {}
-            Err(_) => break,
+    while ding_info().and_then(|info| info.get("state").copied()) != Some(1.0) {
+        if Instant::now() >= deadline {
+            bail!("gnome-icons");
         }
+        std::thread::sleep(Duration::from_millis(100));
     }
-    if !active {
-        bail!("gnome-icons");
-    }
-    while Instant::now() < deadline + Duration::from_secs(5) {
-        if platform::linux::gnome::running().unwrap_or(false) {
-            return Ok(());
+    while !platform::linux::gnome::running().unwrap_or(false) {
+        if Instant::now() >= deadline + Duration::from_secs(5) {
+            bail!("gnome-icons");
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    bail!("gnome-icons")
+    Ok(())
 }
 
 #[cfg(test)]
