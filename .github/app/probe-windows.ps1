@@ -409,7 +409,10 @@ function Remove-Quiet {
 
 Line ''
 Line '### Reinstall marker'
+Line "- a marker from the last removal with Scooch on $(Test-Path $marker), cleared so the next pass starts with none"
+Remove-Item -Force $marker -ErrorAction SilentlyContinue
 Install-Quiet
+Line "- installed with no marker, daemons $(Daemons), state on $(State-On)"
 Remove-Quiet
 Line "- removed with Scooch off, a marker left $(Test-Path $marker)"
 New-Item -ItemType Directory -Force $data | Out-Null
