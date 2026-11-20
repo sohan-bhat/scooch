@@ -139,11 +139,14 @@ async fn fix<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         Problem::Startup => said(opener.open_url(STARTUP, None::<&str>).map_err(anyhow::Error::from)),
         Problem::Unknown { desktop } => said(opener.open_url(format!("{ISSUES}{}", percent_encoding::utf8_percent_encode(&desktop, percent_encoding::NON_ALPHANUMERIC)), None::<&str>).map_err(anyhow::Error::from)),
         Problem::Move => {
-            off_main(place::move_to_applications).await?;
+            let target = off_main(place::move_to_applications).await?;
+            tauri_plugin_single_instance::destroy(&app);
+            said(place::open_app(&target))?;
             app.exit(0);
             Ok(())
         }
         Problem::Admin => {
+            tauri_plugin_single_instance::destroy(&app);
             off_main(place::open_normally).await?;
             app.exit(0);
             Ok(())
@@ -181,6 +184,13 @@ fn place_on_pointer<R: Runtime>(window: &WebviewWindow<R>) {
 
 fn main() {
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _arguments, _folder| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(StateFlags::SIZE | StateFlags::MAXIMIZED).build());

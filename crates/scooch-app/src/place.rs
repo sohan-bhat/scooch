@@ -94,7 +94,7 @@ pub fn applications(candidates: &[PathBuf]) -> Option<PathBuf> {
     candidates.iter().find(|folder| writable(folder)).cloned()
 }
 
-pub fn move_to_applications() -> Result<()> {
+pub fn move_to_applications() -> Result<PathBuf> {
     let Some(bundle) = bundle() else { bail!("Scooch is not inside an app bundle.") };
     let mut candidates = vec![PathBuf::from("/Applications")];
     candidates.extend(dirs::home_dir().map(|home| home.join("Applications")));
@@ -112,7 +112,11 @@ pub fn move_to_applications() -> Result<()> {
         std::fs::remove_dir_all(&target)?;
     }
     std::fs::rename(&staged, &target)?;
-    Command::new("/usr/bin/open").arg("-n").arg(&target).spawn()?;
+    Ok(target)
+}
+
+pub fn open_app(target: &Path) -> Result<()> {
+    Command::new("/usr/bin/open").arg("-n").arg(target).spawn()?;
     Ok(())
 }
 
