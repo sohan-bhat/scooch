@@ -80,15 +80,33 @@ pub fn misplaced() -> bool {
     })
 }
 
+pub fn writable(folder: &Path) -> bool {
+    if std::fs::create_dir_all(folder).is_err() {
+        return false;
+    }
+    let probe = folder.join(format!(".scooch.write.{}", std::process::id()));
+    let made = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    made
+}
+
+pub fn applications(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates.iter().find(|folder| writable(folder)).cloned()
+}
+
 pub fn move_to_applications() -> Result<()> {
-    let Some(bundle) = bundle() else { bail!("The app is not inside an app bundle.") };
+    let Some(bundle) = bundle() else { bail!("Scooch is not inside an app bundle.") };
+    let mut candidates = vec![PathBuf::from("/Applications")];
+    candidates.extend(dirs::home_dir().map(|home| home.join("Applications")));
+    let Some(folder) = applications(&candidates) else { bail!("Scooch could not be copied to either Applications folder.") };
     let name = bundle.file_name().map(|name| name.to_os_string()).unwrap_or_else(|| "Scooch.app".into());
-    let target = Path::new("/Applications").join(name);
-    let staged = Path::new("/Applications").join(".Scooch.app.new");
+    let target = folder.join(name);
+    let staged = folder.join(format!(".Scooch.app.new.{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staged);
     let copied = Command::new("/usr/bin/ditto").arg(&bundle).arg(&staged).status()?;
     if !copied.success() {
-        bail!("The copy to Applications did not finish.");
+        let _ = std::fs::remove_dir_all(&staged);
+        bail!("The copy to {} did not finish.", folder.display());
     }
     if target.exists() {
         std::fs::remove_dir_all(&target)?;
@@ -102,4 +120,24 @@ pub fn open_normally() -> Result<()> {
     let exe = std::env::current_exe()?;
     Command::new("explorer.exe").arg(exe).spawn()?;
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_locked_folder_falls_back_to_the_next() {
+        let root = std::env::temp_dir().join(format!("scooch-apps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let locked = root.join("Applications");
+        let home = root.join("home").join("Applications");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let chosen = applications(&[locked.clone(), home.clone()]);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(chosen, Some(home));
+    }
 }

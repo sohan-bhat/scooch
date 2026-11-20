@@ -66,17 +66,18 @@ fn data_folder<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("scooch-app"))
 }
 
+fn current() -> View {
+    let mut view = facade::view();
+    if place::misplaced() {
+        view.problem = Some(Problem::Move);
+    }
+    view
+}
+
 #[tauri::command]
 async fn view() -> Result<View, String> {
     appimage::settle();
-    off_main(|| {
-        let mut view = facade::view();
-        if place::misplaced() {
-            view.problem = Some(Problem::Move);
-        }
-        Ok(view)
-    })
-    .await
+    off_main(|| Ok(current())).await
 }
 
 #[tauri::command]
@@ -129,7 +130,8 @@ async fn first_open<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
 }
 
 #[tauri::command]
-async fn fix<R: Runtime>(app: AppHandle<R>, problem: Problem) -> Result<(), String> {
+async fn fix<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let Some(problem) = off_main(|| Ok(current().problem)).await? else { return Ok(()) };
     let opener = app.opener();
     match problem {
         Problem::Automation => said(opener.open_url(AUTOMATION, None::<&str>).map_err(anyhow::Error::from)),
@@ -146,9 +148,9 @@ async fn fix<R: Runtime>(app: AppHandle<R>, problem: Problem) -> Result<(), Stri
             app.exit(0);
             Ok(())
         }
-        Problem::Gnome => off_main(gnome_icons).await,
+        Problem::Gnome { installed: true } => off_main(gnome_icons).await,
         Problem::Stopped | Problem::Other => off_main(|| adopted(facade::turn_on(&ready()?)).map(drop)).await,
-        Problem::Asking | Problem::Screen | Problem::Wallpaper { .. } => Ok(()),
+        Problem::Asking | Problem::Screen | Problem::Wallpaper { .. } | Problem::Gnome { installed: false } => Ok(()),
     }
 }
 
