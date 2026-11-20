@@ -211,8 +211,6 @@ fn place_on_pointer<R: Runtime>(window: &WebviewWindow<R>) {
 
 fn main() {
     #[cfg(target_os = "linux")]
-    appimage::leave_mount();
-    #[cfg(target_os = "linux")]
     facade::child_env(appimage::changes());
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _arguments, _folder| {

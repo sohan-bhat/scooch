@@ -122,16 +122,21 @@ pub fn start_folder(now: Option<&Path>, owd: Option<&Path>, home: Option<&Path>,
     [owd, home, Some(Path::new("/"))].into_iter().flatten().find(|folder| folder.is_absolute() && folder.is_dir() && !within(folder, appdir)).map(Path::to_path_buf)
 }
 
-#[cfg(target_os = "linux")]
-pub fn leave_mount() {
-    let Some((_, appdir)) = inside() else { return };
-    let owd = std::env::var_os("OWD").map(PathBuf::from);
-    if let Some(folder) = start_folder(std::env::current_dir().ok().as_deref(), owd.as_deref(), dirs::home_dir().as_deref(), &appdir) {
-        let _ = std::env::set_current_dir(folder);
-    }
+fn child_folder() -> Option<PathBuf> {
+    static FOLDER: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FOLDER
+        .get_or_init(|| {
+            let (_, appdir) = inside()?;
+            let owd = std::env::var_os("OWD").map(PathBuf::from);
+            start_folder(std::env::current_dir().ok().as_deref(), owd.as_deref(), dirs::home_dir().as_deref(), &appdir)
+        })
+        .clone()
 }
 
 pub fn apply(command: &mut std::process::Command) -> &mut std::process::Command {
+    if let Some(folder) = child_folder() {
+        command.current_dir(folder);
+    }
     for (name, value) in changes() {
         match value {
             Some(value) => command.env(name, value),
@@ -216,7 +221,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_app_leaves_a_working_folder_inside_the_mount_for_the_start_folder() {
+    fn a_child_works_in_the_start_folder_and_never_inside_the_mount() {
         let root = std::env::temp_dir().join(format!("scooch-start-{}", std::process::id()));
         let (appdir, owd, home) = (root.join(".mount_Scooch"), root.join("Downloads"), root.join("home"));
         for folder in [&appdir, &owd, &home] {
