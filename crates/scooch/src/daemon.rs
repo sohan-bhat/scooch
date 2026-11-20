@@ -188,6 +188,10 @@ pub fn settle_screens(state: &mut State, desktop: &dyn Desktop, store: &Store, s
             if drop_gone && gone(&id, known, screens) {
                 state.screens.remove(&id);
                 sweep(desktop, store, state, &id, entry.output.as_slice());
+            } else if drop_gone && detached(desktop, &id, &entry) {
+                state.screens.remove(&id);
+                tally.back += 1;
+                sweep(desktop, store, state, &id, entry.output.as_slice());
             } else {
                 tally.pending += 1;
             }
@@ -223,6 +227,10 @@ pub fn settle_screens(state: &mut State, desktop: &dyn Desktop, store: &Store, s
             Settled { tally, standing: false }
         }
     }
+}
+
+pub fn detached(desktop: &dyn Desktop, id: &str, entry: &Entry) -> bool {
+    !entry.unrestorable && entry.original.is_file() && desktop.put_back_detached(id, &entry.original).unwrap_or(false)
 }
 
 pub fn untouched(store: &Store, id: &str, entry: &Entry) -> bool {
@@ -880,6 +888,14 @@ impl Daemon {
             state.picture = None;
             forget(self.desktop.as_ref(), &self.store, &mut state);
             report.unload = true;
+            #[cfg(target_os = "linux")]
+            if state.origin.is_some() {
+                let own = std::env::current_exe().ok().map(|exe| crate::state::canonical(&exe).unwrap_or(exe));
+                let proven: Vec<PathBuf> = own.into_iter().chain(crate::platform::login_program()).collect();
+                for line in crate::program::remove_copies(&crate::program::copies(&self.store), &proven, &crate::program::link_places()) {
+                    eprintln!("{} {line}", stamp());
+                }
+            }
         }
         if state == parse(now.as_deref()) {
             return report;
@@ -1632,17 +1648,40 @@ pub fn release(desktop: &dyn Desktop, store: &Store, report: &Report, stop: &Sto
     }
 }
 
-fn off_here(daemon: &Daemon) {
+pub fn off_here(daemon: &Daemon) {
     let _lock = daemon.store.command_lock(crate::state::COMMAND_PATIENCE).ok();
     match crate::commands::wind_down(daemon.desktop.as_ref(), &daemon.store) {
         Ok(off) => eprintln!("{} program in the Trash, Scooch turned off with {off:?}", stamp()),
         Err(error) => eprintln!("{} program in the Trash, but Scooch could not turn off, {error:#}", stamp()),
+    }
+    match daemon.desktop.leave_login() {
+        Ok(()) => eprintln!("{} program in the Trash, the login item removed", stamp()),
+        Err(error) => eprintln!("{} program in the Trash, but the login item could not be removed, {error:#}", stamp()),
+    }
+}
+
+pub fn park_left(store: &Store, login: bool) -> bool {
+    let mut state = parse(store.read().as_deref());
+    if !state.restoring || state.on || login || !store.state_file().exists() {
+        return false;
+    }
+    state.restoring = false;
+    store.save(&state).is_ok()
+}
+
+fn ended(store: &Store) {
+    if crate::platform::login_exists() || std::env::var_os("SCOOCH_HOME").is_some_and(|value| !value.is_empty()) {
+        return;
+    }
+    if park_left(store, false) {
+        eprintln!("{} Scooch ended before every screen was back and no login item will start it again, so the rest stay parked", stamp());
     }
 }
 
 fn finish(store: &Store, stop: &Stop) -> ! {
     retire(store, stop);
     if stop.wait_idle(STOP_CAP) {
+        ended(store);
         let _ = store.mark(None);
     }
     std::process::exit(0)
@@ -1753,6 +1792,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     })?;
     signal.wake();
     let result = desktop.run(Box::new(move || signal.wake()));
+    ended(&store);
     let _ = store.mark(None);
     result
 }
@@ -1801,6 +1841,9 @@ pub mod tests {
         pub bad_profile: Mutex<bool>,
         pub saves: Mutex<Vec<Instant>>,
         pub predicted: Mutex<Option<Snapshot>>,
+        pub leaves: AtomicUsize,
+        pub installs: AtomicUsize,
+        pub detached: Mutex<Vec<String>>,
         pub offered: Mutex<Option<Hold>>,
         pub hold: Mutex<Option<Hold>>,
         pub events: crate::glide::tests::Events,
@@ -1809,7 +1852,7 @@ pub mod tests {
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), bad_profile: Mutex::new(false), saves: Mutex::new(Vec::new()), predicted: Mutex::new(None), offered: Mutex::new(None), hold: Mutex::new(None), events: Arc::new(Mutex::new(Vec::new())) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), bad_profile: Mutex::new(false), saves: Mutex::new(Vec::new()), predicted: Mutex::new(None), leaves: AtomicUsize::new(0), installs: AtomicUsize::new(0), detached: Mutex::new(Vec::new()), offered: Mutex::new(None), hold: Mutex::new(None), events: Arc::new(Mutex::new(Vec::new())) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -1938,9 +1981,10 @@ pub mod tests {
         }
 
         fn autostart(&self, exe: Option<&Path>) -> Result<()> {
-            if exe.is_none() {
-                self.unloads.fetch_add(1, Ordering::SeqCst);
-            }
+            match exe {
+                None => self.unloads.fetch_add(1, Ordering::SeqCst),
+                Some(_) => self.installs.fetch_add(1, Ordering::SeqCst),
+            };
             Ok(())
         }
 
@@ -1970,6 +2014,19 @@ pub mod tests {
 
         fn reads_at_once(&self) -> bool {
             *self.at_once.lock().unwrap()
+        }
+
+        fn leave_login(&self) -> Result<()> {
+            self.leaves.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn put_back_detached(&self, id: &str, picture: &Path) -> Result<bool> {
+            if !self.detached.lock().unwrap().iter().any(|listed| listed == id) {
+                return Ok(false);
+            }
+            self.shown.lock().unwrap().insert(id.to_string(), picture.to_path_buf());
+            Ok(true)
         }
 
         fn predicted(&self, shown: &dyn Fn() -> bool) -> Option<Snapshot> {
@@ -3267,6 +3324,25 @@ pub mod tests {
         assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
         assert_eq!(fake.showing("main"), original);
         assert_eq!(fake.decodes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_trash_removes_the_login_item_at_once_even_while_a_screen_is_pending_and_an_orderly_end_parks_the_rest() {
+        let (daemon, fake, original) = rig("trash-pending", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        fake.connect(Vec::new());
+        off_here(&daemon);
+        assert_eq!(fake.leaves.load(Ordering::SeqCst), 1, "the login item stayed while a screen was pending");
+        assert_eq!(fake.installs.load(Ordering::SeqCst), 0);
+        let state = daemon.store.load();
+        assert!(state.restoring && !state.on && state.screens.contains_key("main"));
+        assert!(!park_left(&daemon.store, true), "a restorer with its login item keeps restoring");
+        assert!(daemon.store.load().restoring);
+        assert!(park_left(&daemon.store, false));
+        let state = daemon.store.load();
+        assert!(!state.restoring && !state.on && state.screens["main"].original == original, "the record of the pending screen was not kept parked");
+        assert!(!park_left(&daemon.store, false));
     }
 
     #[test]
