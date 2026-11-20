@@ -51,7 +51,11 @@ fn copy_place(inside: &Path) -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
+static COPYING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(target_os = "linux")]
 fn copied_out(inside: &Path) -> Result<PathBuf> {
+    let _copying = COPYING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let target = copy_place(inside)?;
     let fresh = std::fs::read(inside).context("The app could not read the scooch program inside it.")?;
     let regular = std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_file());
@@ -96,30 +100,54 @@ pub fn writable(folder: &Path) -> bool {
     made
 }
 
-pub fn applications(candidates: &[PathBuf]) -> Option<PathBuf> {
-    candidates.iter().find(|folder| writable(folder)).cloned()
-}
-
 pub fn move_to_applications() -> Result<PathBuf> {
-    let Some(bundle) = bundle() else { bail!("Scooch is not inside an app bundle.") };
+    let Some(bundle) = bundle() else { bail!("the app is not inside an app bundle") };
+    let name = bundle.file_name().map(|name| name.to_os_string()).unwrap_or_else(|| "Scooch.app".into());
     let mut candidates = vec![PathBuf::from("/Applications")];
     candidates.extend(dirs::home_dir().map(|home| home.join("Applications")));
-    let Some(folder) = applications(&candidates) else { bail!("Scooch could not be copied to either Applications folder.") };
-    let name = bundle.file_name().map(|name| name.to_os_string()).unwrap_or_else(|| "Scooch.app".into());
+    for folder in candidates.iter().filter(|folder| writable(folder)) {
+        match place_in(&bundle, folder, Path::new(&name)) {
+            Ok(target) => return Ok(target),
+            Err(error) => eprintln!("scooch-app move into {} failed: {error:#}", folder.display()),
+        }
+    }
+    bail!("no Applications folder took the copy")
+}
+
+fn place_in(bundle: &Path, folder: &Path, name: &Path) -> Result<PathBuf> {
     let target = folder.join(name);
     let staged = folder.join(format!(".Scooch.app.new.{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staged);
-    let copied = Command::new("/usr/bin/ditto").arg(&bundle).arg(&staged).status()?;
-    if !copied.success() {
+    let placed = (|| {
+        let copied = Command::new("/usr/bin/ditto").arg(bundle).arg(&staged).status()?;
+        if !copied.success() {
+            bail!("ditto ended with {copied}");
+        }
+        let _ = Command::new("/usr/bin/xattr").arg("-dr").arg("com.apple.quarantine").arg(&staged).status();
+        if std::fs::symlink_metadata(&target).is_ok() {
+            if !same_owner(&target, &staged) {
+                bail!("{} belongs to another account", target.display());
+            }
+            std::fs::remove_dir_all(&target)?;
+        }
+        std::fs::rename(&staged, &target)?;
+        Ok(target.clone())
+    })();
+    if placed.is_err() {
         let _ = std::fs::remove_dir_all(&staged);
-        bail!("The copy to {} did not finish.", folder.display());
     }
-    let _ = Command::new("/usr/bin/xattr").arg("-dr").arg("com.apple.quarantine").arg(&staged).status();
-    if target.exists() {
-        std::fs::remove_dir_all(&target)?;
-    }
-    std::fs::rename(&staged, &target)?;
-    Ok(target)
+    placed
+}
+
+#[cfg(unix)]
+fn same_owner(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    matches!((std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)), (Ok(a), Ok(b)) if a.uid() == b.uid())
+}
+
+#[cfg(not(unix))]
+fn same_owner(_a: &Path, _b: &Path) -> bool {
+    true
 }
 
 pub fn open_app(target: &Path) -> Result<()> {
@@ -146,9 +174,22 @@ mod tests {
         let home = root.join("home").join("Applications");
         std::fs::create_dir_all(&locked).unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let chosen = applications(&[locked.clone(), home.clone()]);
+        let chosen = [locked.clone(), home.clone()].into_iter().find(|folder| writable(folder));
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(chosen, Some(home));
+    }
+
+    #[test]
+    fn a_failed_place_leaves_no_staged_copy() {
+        let root = std::env::temp_dir().join(format!("scooch-place-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let folder = root.join("Applications");
+        std::fs::create_dir_all(&folder).unwrap();
+        let placed = place_in(&root.join("missing.app"), &folder, Path::new("Scooch.app"));
+        let left: Vec<_> = std::fs::read_dir(&folder).unwrap().flatten().map(|entry| entry.file_name()).collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(placed.is_err());
+        assert!(left.is_empty(), "{left:?}");
     }
 }
