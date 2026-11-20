@@ -215,6 +215,7 @@ mod probe {
         motion: Option<Option<String>>,
         scanned: usize,
         struck: bool,
+        quiet: Option<(u64, u64)>,
         shared: Arc<Mutex<Vec<String>>>,
         last: Arc<Mutex<String>>,
     }
@@ -297,6 +298,7 @@ mod probe {
             "7 Off" => 2_687,
             "8 Second cycle" => 277_539,
             "9 Spaces" => 91_112,
+            "9b Program moved" => 200_000,
             "10 Cleanup" => 308,
             _ => 600_000,
         };
@@ -462,6 +464,7 @@ mod probe {
             motion: None,
             scanned: 0,
             struck: false,
+            quiet: None,
             shared: Arc::new(Mutex::new(Vec::new())),
             last: Arc::new(Mutex::new(String::new())),
         };
@@ -489,6 +492,7 @@ mod probe {
         probe.section("7 Off", off);
         probe.section("8 Second cycle", second_cycle);
         probe.section("9 Spaces", spaces_check);
+        probe.section("9b Program moved", program_moved);
         probe.section("10 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -1419,7 +1423,7 @@ mod probe {
         found
     }
 
-    fn quiet_minute(p: &mut Probe, pid: i32, label: &str) -> Result<()> {
+    fn quiet_minute(p: &mut Probe, pid: i32, label: &str) -> Result<(u64, u64)> {
         let age = p.tool("/bin/ps", &["-o", "etime=", "-p", &pid.to_string()]).out.trim().to_string();
         let seen = daemon_log(p).lines().count();
         let traced = p.out.join(format!("oncpu-{pid}-{}.txt", now()));
@@ -1489,6 +1493,226 @@ mod probe {
         let text = fs::read_to_string(&file).unwrap_or_default();
         let tops: Vec<String> = text.lines().skip_while(|line| !line.starts_with("Sort by top of stack")).skip(1).take_while(|line| !line.trim().is_empty()).map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
         p.line(format!("- sample 5 s after the minute {}, leaf frames {tops:?}", if sampled.ok() { "ok" } else { "failed" }));
+        Ok((after.idle_wakeups.saturating_sub(before.idle_wakeups), after.interrupt_wakeups.saturating_sub(before.interrupt_wakeups)))
+    }
+
+    fn watch_log(path: &Path) -> Vec<String> {
+        fs::read_to_string(path).unwrap_or_default().lines().map(str::to_string).collect()
+    }
+
+    fn program_lines(path: &Path, from: usize) -> Vec<String> {
+        watch_log(path).into_iter().skip(from).filter(|line| line.contains(" program ")).collect()
+    }
+
+    fn logged_within(path: &Path, from: usize, started: Instant, limit: Duration, wanted: impl Fn(&str) -> bool) -> Option<u128> {
+        wait_until(limit, || watch_log(path).iter().skip(from).any(|line| wanted(line))).map(|_| started.elapsed().as_millis())
+    }
+
+    fn make_bundle(bundle: &Path, bin: &Path) -> Result<PathBuf> {
+        let folder = bundle.join("Contents/MacOS");
+        fs::create_dir_all(&folder)?;
+        let exe = folder.join("scooch");
+        fs::copy(bin, &exe)?;
+        fs::write(
+            bundle.join("Contents/Info.plist"),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n<key>CFBundleExecutable</key><string>scooch</string>\n<key>CFBundleIdentifier</key><string>me.sohanbhat.scooch.probe</string>\n<key>CFBundlePackageType</key><string>APPL</string>\n</dict>\n</plist>\n",
+        )?;
+        Ok(exe)
+    }
+
+    fn start_watched(exe: &Path, log: &Path) -> Result<Child> {
+        let file = fs::OpenOptions::new().create(true).append(true).open(log)?;
+        Ok(Command::new(exe).arg("watch").env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(file).spawn()?)
+    }
+
+    fn stop_watched(child: &mut Child) {
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        if wait_until(Duration::from_secs(10), || child.try_wait().ok().flatten().is_some()).is_none() {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+    }
+
+    fn running(child: &mut Child) -> bool {
+        child.try_wait().ok().flatten().is_none()
+    }
+
+    fn names(plist: &Path, exe: &Path) -> bool {
+        fs::read_to_string(plist).unwrap_or_default().contains(&format!("<string>{}</string>", exe.display()))
+    }
+
+    fn rearm(p: &mut Probe, child: &mut Child, exe: &Path, log: &Path) -> Result<()> {
+        stop_watched(child);
+        let from = watch_log(log).len();
+        let started = Instant::now();
+        *child = start_watched(exe, log)?;
+        let armed = logged_within(log, from, started, Duration::from_secs(15), |line| line.contains(" program watched at "));
+        p.line(format!("- started the daemon again from {}, watch armed after {armed:?} ms", exe.display()));
+        armed.map(drop).context("the restarted daemon made no watch on its program")
+    }
+
+    fn program_moved(p: &mut Probe) -> Result<()> {
+        if !scooch_processes(p).is_empty() || launchd::loaded() || launchd::plist_path().is_ok_and(|path| path.exists()) {
+            let ran = p.scooch(&["off"], Duration::from_secs(60));
+            p.line(format!("- scooch off before these checks exit {:?}: {}", ran.code, ran.text()));
+            reap(p);
+        }
+        let desktop = platform::current()?;
+        let screen = main_screen(p)?;
+        let home = dirs::home_dir().context("no home folder")?;
+        let real = dirs::data_local_dir().context("no data folder")?.join("Scooch");
+        let mut bundle = PathBuf::from("/Applications/ScoochWatch.app");
+        let exe = match make_bundle(&bundle, &p.bin) {
+            Ok(exe) => exe,
+            Err(_) => {
+                bundle = home.join("Applications/ScoochWatch.app");
+                make_bundle(&bundle, &p.bin)?
+            }
+        };
+        p.made.push(bundle.clone());
+        fs::create_dir_all(&real)?;
+        p.made.push(real.clone());
+        fs::write(real.join("state.json"), "{\"on\": true}\n")?;
+        let plist = launchd::plist_path()?;
+        fs::write(&plist, launchd::plist(&exe, &real, None, true))?;
+        let before = desktop.wallpaper(&screen).ok().flatten();
+        let log = p.out.join("program-watch.log");
+        let started = Instant::now();
+        let mut child = start_watched(&exe, &log)?;
+        let armed = logged_within(&log, 0, started, Duration::from_secs(15), |line| line.contains(" program watched at "));
+        let ticked = logged_within(&log, 0, started, Duration::from_secs(20), |line| line.contains(" tick "));
+        let showing = desktop.wallpaper(&screen).ok().flatten();
+        let ours = showing.as_deref().is_some_and(|path| path.starts_with(real.join("out")));
+        p.line(format!("- the daemon run from {} with the real data folder and a login item file naming it, watch armed after {armed:?} ms, first tick after {ticked:?} ms, wallpaper before {before:?}, now {showing:?}, Scooch's own picture showing {ours}", exe.display()));
+        if armed.is_none() {
+            p.fail("the daemon run from an app folder made no watch on its program");
+            stop_watched(&mut child);
+            let _ = fs::remove_file(&plist);
+            return Ok(());
+        }
+
+        let pid = child.id() as i32;
+        std::thread::sleep(Duration::from_secs(5));
+        let calm = rusage(pid);
+        std::thread::sleep(Duration::from_secs(60));
+        let later = rusage(pid);
+        let woke = calm.zip(later).map(|(calm, later)| (later.idle_wakeups.saturating_sub(calm.idle_wakeups), later.interrupt_wakeups.saturating_sub(calm.interrupt_wakeups)));
+        p.line(format!("- a quiet 60 s with the program watched, idle and interrupt wakeups {woke:?}, the same minute of check 6 without the watch {:?}", p.quiet));
+        if woke.is_none() || woke.zip(p.quiet).is_some_and(|((idle, interrupt), (before_idle, before_interrupt))| idle > before_idle || interrupt > before_interrupt) {
+            p.fail("the daemon with its program watched woke more at rest than without the watch");
+        }
+
+        let aside = home.join("ScoochMoved");
+        fs::create_dir_all(&aside)?;
+        p.made.push(aside.clone());
+        let moved = aside.join("ScoochWatch.app");
+        let moved_exe = moved.join("Contents/MacOS/scooch");
+        let from = watch_log(&log).len();
+        let started = Instant::now();
+        fs::rename(&bundle, &moved)?;
+        let away = logged_within(&log, from, started, Duration::from_secs(25), |line| line.contains(" program moved from ") && line.contains(" to ") && line.contains("ScoochMoved"));
+        let followed = names(&plist, &moved_exe);
+        let said = program_lines(&log, from);
+        let from = watch_log(&log).len();
+        let started = Instant::now();
+        fs::rename(&moved, &bundle)?;
+        let home_again = logged_within(&log, from, started, Duration::from_secs(25), |line| line.contains(" program moved from ") && line.contains("ScoochMoved"));
+        let followed_back = names(&plist, &exe);
+        let alive = running(&mut child);
+        p.line(format!("- a move to {}: decided after {away:?} ms, the login item names the new place {followed}, then back: decided after {home_again:?} ms, names the old place again {followed_back}, daemon alive {alive}, log {said:?} then {:?}", moved.display(), program_lines(&log, from)));
+        if away.is_none() || !followed || home_again.is_none() || !followed_back || !alive {
+            p.fail("a move of the program did not point the login item at the new place");
+        }
+
+        let from = watch_log(&log).len();
+        let started = Instant::now();
+        let trashed = p.osa(&format!("tell application \"Finder\" to delete (POSIX file \"{}\" as alias)", bundle.display()));
+        std::thread::sleep(Duration::from_millis(1500));
+        let folder = bundle.parent().map(Path::to_path_buf).unwrap_or_default();
+        let put = p.osa(&format!("tell application \"Finder\" to move (first item of trash whose name starts with \"ScoochWatch\") to (POSIX file \"{}\" as alias)", folder.display()));
+        let returned = wait_until(Duration::from_secs(5), || exe.is_file()).map(|_| started.elapsed().as_millis());
+        let calmed = wait_until(Duration::from_secs(30), || program_lines(&log, from).iter().filter(|line| line.contains("nothing changes")).count() >= 2).map(|_| started.elapsed().as_millis());
+        let said = program_lines(&log, from);
+        let off = said.iter().any(|line| line.contains("moved to the Trash"));
+        let alive = running(&mut child);
+        let kept = names(&plist, &exe);
+        p.line(format!("- Put Back inside 5 s, Finder delete exit {:?}, Finder move back exit {:?}, back in place after {returned:?} ms, both moves judged nothing after {calmed:?} ms, turned off {off}, daemon alive {alive}, login item unchanged {kept}, log {said:?}", trashed.code, put.code));
+        if trashed.code != Some(0) || returned.is_none() || returned.is_some_and(|ms| ms > 5_000) || calmed.is_none() || off || !alive || !kept {
+            p.fail("a Put Back inside 5 s did not leave Scooch as it was");
+        }
+
+        let old = bundle.with_file_name(".ScoochWatch-old.app");
+        let from = watch_log(&log).len();
+        let started = Instant::now();
+        fs::rename(&bundle, &old)?;
+        p.made.push(old.clone());
+        make_bundle(&bundle, &p.bin)?;
+        let replaced = logged_within(&log, from, started, Duration::from_secs(25), |line| line.contains(" program at ") && line.contains("is back at its old place"));
+        let said = program_lines(&log, from);
+        let off = said.iter().any(|line| line.contains("moved to the Trash") || line.contains("moved from"));
+        let alive = running(&mut child);
+        let kept = names(&plist, &exe);
+        p.line(format!("- replaced in place, the old app moved aside and a new one copied to its place: judged nothing after {replaced:?} ms, acted anyway {off}, daemon alive {alive}, login item unchanged {kept}, log {said:?}"));
+        if replaced.is_none() || off || !alive || !kept {
+            p.fail("replacing the program in place changed Scooch");
+        }
+        rearm(p, &mut child, &exe, &log)?;
+        let _ = fs::remove_dir_all(&old);
+
+        let attached = p.tool("/usr/bin/hdiutil", &["attach", "-nomount", "ram://262144"]);
+        let device = attached.out.split_whitespace().next().unwrap_or_default().to_string();
+        let erased = p.tool("/usr/sbin/diskutil", &["erasevolume", "HFS+", "ScoochRAM", &device]);
+        let copy = PathBuf::from("/Volumes/ScoochRAM/ScoochWatch.app");
+        let copied = p.tool("/usr/bin/ditto", &[&bundle.to_string_lossy(), &copy.to_string_lossy()]);
+        if device.is_empty() || !erased.ok() || !copied.ok() {
+            p.line(format!("- the ramdisk could not be made, device {device:?}, erase {:?}, copy {:?}", erased.code, copied.code));
+            p.fail("the ramdisk case could not run");
+        } else {
+            let from = watch_log(&log).len();
+            let started = Instant::now();
+            fs::remove_dir_all(&bundle)?;
+            let deleted = logged_within(&log, from, started, Duration::from_secs(10), |line| line.contains(" was deleted, so nothing changes"));
+            std::thread::sleep(Duration::from_secs(12));
+            let said = program_lines(&log, from);
+            let off = said.iter().any(|line| line.contains("moved to the Trash") || line.contains("moved from"));
+            let alive = running(&mut child);
+            let kept = names(&plist, &exe);
+            let still = desktop.wallpaper(&screen).ok().flatten() == showing;
+            p.line(format!("- copied to a ramdisk at {} and the original deleted: judged nothing after {deleted:?} ms, acted anyway {off}, daemon alive {alive}, login item unchanged {kept}, wallpaper unchanged {still}, log {said:?}", copy.display()));
+            if deleted.is_none() || off || !alive || !kept || !still {
+                p.fail("a copy to another disk and a delete of the original changed Scooch");
+            }
+            let back = p.tool("/usr/bin/ditto", &[&copy.to_string_lossy(), &bundle.to_string_lossy()]);
+            p.line(format!("- copied the app back from the ramdisk exit {:?}", back.code));
+        }
+        if !device.is_empty() {
+            let _ = p.tool("/usr/bin/hdiutil", &["detach", &device, "-force"]);
+        }
+        rearm(p, &mut child, &exe, &log)?;
+
+        let shown = desktop.wallpaper(&screen).ok().flatten();
+        let from = watch_log(&log).len();
+        let started = Instant::now();
+        let trashed = p.osa(&format!("tell application \"Finder\" to delete (POSIX file \"{}\" as alias)", bundle.display()));
+        let decided = logged_within(&log, from, started, Duration::from_secs(25), |line| line.contains(" program moved to the Trash at "));
+        let turned = logged_within(&log, from, started, Duration::from_secs(25), |line| line.contains(" program in the Trash, Scooch turned off"));
+        let exited = wait_until(Duration::from_secs(30), || !running(&mut child)).map(|_| started.elapsed().as_millis());
+        let removed = wait_until(Duration::from_secs(10), || !plist.exists()).map(|_| started.elapsed().as_millis());
+        let after = desktop.wallpaper(&screen).ok().flatten();
+        let restored = after == before;
+        p.line(format!(
+            "- moved to the Trash through Finder, exit {:?}: decided after {decided:?} ms, turned off after {turned:?} ms, the daemon exited after {exited:?} ms, the login item file was gone after {removed:?} ms, wallpaper before the Trash {shown:?}, after {after:?}, the one before Scooch {before:?}, back {restored}, log {:?}",
+            trashed.code,
+            program_lines(&log, from)
+        ));
+        if trashed.code != Some(0) || decided.is_none() || turned.is_none() || exited.is_none() || removed.is_none() || !restored {
+            p.fail("moving the program to the Trash did not turn Scooch off and put the wallpaper back");
+        }
+        if running(&mut child) {
+            stop_watched(&mut child);
+        }
+        let _ = fs::remove_file(&plist);
+        p.line(format!("- the trashed app stays in the runner's Trash, the daemon's log is in the artifact as {}", log.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
         Ok(())
     }
 
@@ -1517,7 +1741,8 @@ mod probe {
         let label = if p.stand.is_some() { "the probe started daemon" } else { "the launchd daemon" };
         let ps = p.tool("/bin/ps", &["-o", "cputime=,rss=,ppid=", "-p", &pid.to_string()]);
         p.line(format!("- ps cputime, rss and parent {}", ps.out.trim()));
-        quiet_minute(p, pid, label)
+        p.quiet = Some(quiet_minute(p, pid, label)?);
+        Ok(())
     }
 
     fn gone(p: &mut Probe, what: &str) {
