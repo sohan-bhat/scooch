@@ -175,6 +175,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         probe.section("6 End to end", end_to_end);
         probe.section("7 Two monitors", monitors);
         probe.section("7b Desktop after the drop", after_drop);
+        probe.section("7c The AppImage thrown away", thrown_away);
         probe.section("8 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -2371,6 +2372,272 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         if left {
             p.fail("scooch off left its record file behind");
         }
+        Ok(())
+    }
+
+    struct Thrown {
+        child: Child,
+        copy: PathBuf,
+        bin: PathBuf,
+        stand_in: PathBuf,
+        moved: PathBuf,
+        entry: PathBuf,
+        login: Vec<u8>,
+        log: PathBuf,
+        places: String,
+        real: PathBuf,
+        before: Option<PathBuf>,
+    }
+
+    fn logged_since(log: &Path, mark: usize, started: Instant, limit: Duration, wanted: &str) -> Option<u128> {
+        wait_until(limit, || log_lines(log).iter().skip(mark).any(|line| line.contains(wanted))).map(|_| started.elapsed().as_millis())
+    }
+
+    fn program_said(log: &Path, mark: usize) -> Vec<String> {
+        log_lines(log).into_iter().skip(mark).filter(|line| line.contains(" program ") && !line.contains(" program event ")).collect()
+    }
+
+    fn saved_origin(real: &Path) -> Option<String> {
+        let state: serde_json::Value = serde_json::from_slice(&fs::read(real.join("state.json")).ok()?).ok()?;
+        state["origin"].as_str().map(str::to_string)
+    }
+
+    fn start_thrown(copy: &Path, log: &Path, places: &str) -> Result<Child> {
+        let file = fs::OpenOptions::new().create(true).append(true).open(log)?;
+        Ok(Command::new(copy).arg("watch").env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").env("SCOOCH_LINK_PLACES", places).stdin(Stdio::null()).stdout(Stdio::null()).stderr(file).spawn()?)
+    }
+
+    fn stop_thrown(child: &mut Child) {
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+        if wait_until(Duration::from_secs(10), || matches!(child.try_wait(), Ok(Some(_)))).is_none() {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+    }
+
+    fn still_running(child: &mut Child) -> bool {
+        matches!(child.try_wait(), Ok(None))
+    }
+
+    fn task_switches(process: u32) -> Vec<(String, u64)> {
+        let Ok(tasks) = fs::read_dir(format!("/proc/{process}/task")) else { return Vec::new() };
+        tasks
+            .flatten()
+            .filter_map(|task| {
+                let name = fs::read_to_string(task.path().join("comm")).ok()?.trim().to_string();
+                let status = fs::read_to_string(task.path().join("status")).ok()?;
+                let field = |key: &str| status.lines().find_map(|line| line.strip_prefix(key)).and_then(|rest| rest.trim().parse::<u64>().ok());
+                Some((format!("{name} {}", task.file_name().to_string_lossy()), field("voluntary_ctxt_switches:")? + field("nonvoluntary_ctxt_switches:")?))
+            })
+            .collect()
+    }
+
+    fn freedesktop_trash(home: &Path, file: &Path) -> Result<()> {
+        let trash = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|path| path.is_absolute()).unwrap_or_else(|| home.join(".local/share")).join("Trash");
+        fs::create_dir_all(trash.join("files"))?;
+        fs::create_dir_all(trash.join("info"))?;
+        let name = file.file_name().context("the stand in has no file name")?;
+        fs::write(trash.join("info").join(format!("{}.trashinfo", name.to_string_lossy())), format!("[Trash Info]\nPath={}\nDeletionDate=2026-11-20T00:00:00\n", file.display()))?;
+        fs::rename(file, trash.join("files").join(name))?;
+        Ok(())
+    }
+
+    fn thrown_report(p: &mut Probe, name: &str, result: Result<()>) {
+        if let Err(error) = result {
+            p.fail(format!("the {name} case stopped on an error of the probe's own, {error:#}"));
+        }
+    }
+
+    fn thrown_quiet(p: &mut Probe, run: &mut Thrown) -> Result<()> {
+        let started = Instant::now();
+        let rest = logged_since(&run.log, 0, started, Duration::from_secs(45), " sessions let go of ");
+        std::thread::sleep(Duration::from_secs(3));
+        let mark = log_lines(&run.log).len();
+        let pid = run.child.id();
+        let first = task_switches(pid);
+        std::thread::sleep(Duration::from_secs(60));
+        let last = task_switches(pid);
+        let lines: Vec<String> = log_lines(&run.log).into_iter().skip(mark).collect();
+        let events = lines.iter().filter(|line| line.contains(" program event ")).count();
+        let delta = |name: &str, count: u64| first.iter().find(|(seen, _)| seen == name).map(|(_, earlier)| count.saturating_sub(*earlier));
+        let woke: Vec<String> = last.iter().filter_map(|(name, count)| delta(name, *count).filter(|change| *change > 0).map(|change| format!("{name} +{change}"))).collect();
+        let watch = last.iter().find(|(name, _)| name.starts_with("scooch-program ")).and_then(|(name, count)| delta(name, *count));
+        p.line(format!("- a quiet 60 s with the AppImage watched, begun 3 s after the daemon let its render sessions go {rest:?} ms in: inotify events {events}, the watch thread scooch-program switched {watch:?} times, threads that woke {woke:?}, other log lines {lines:?}"));
+        if events > 0 || watch != Some(0) {
+            p.fail("the watch of the AppImage woke at rest");
+        }
+        Ok(())
+    }
+
+    fn thrown_rename(p: &mut Probe, run: &mut Thrown, linux: &Linux, screen: &Screen) -> Result<()> {
+        let showing = linux.wallpaper(screen).ok().flatten();
+        let mark = log_lines(&run.log).len();
+        let started = Instant::now();
+        fs::rename(&run.stand_in, &run.moved)?;
+        let decided = logged_since(&run.log, mark, started, Duration::from_secs(25), " program moved from ");
+        let moved = run.moved.to_string_lossy().into_owned();
+        let followed = wait_until(Duration::from_secs(2), || saved_origin(&run.real).as_deref() == Some(moved.as_str())).is_some();
+        let said = program_said(&run.log, mark);
+        let mark = log_lines(&run.log).len();
+        let started = Instant::now();
+        fs::rename(&run.moved, &run.stand_in)?;
+        let back = logged_since(&run.log, mark, started, Duration::from_secs(25), " program moved from ");
+        let origin = run.stand_in.to_string_lossy().into_owned();
+        let followed_back = wait_until(Duration::from_secs(2), || saved_origin(&run.real).as_deref() == Some(origin.as_str())).is_some();
+        let login = fs::read(&run.entry).ok().as_deref() == Some(run.login.as_slice());
+        let alive = still_running(&mut run.child);
+        let now = linux.wallpaper(screen).ok().flatten();
+        p.line(format!(
+            "- renamed to {}: decided after {decided:?} ms, origin followed {followed}, then back: decided after {back:?} ms, origin followed back {followed_back}, login item untouched {login}, daemon alive {alive}, wallpaper before {showing:?} and after {now:?}, log {said:?} then {:?}",
+            run.moved.display(),
+            program_said(&run.log, mark)
+        ));
+        if decided.is_none() || !followed || back.is_none() || !followed_back || !login || !alive {
+            p.fail("a rename of the AppImage did not take origin with it, or changed something else");
+        }
+        Ok(())
+    }
+
+    fn thrown_nothing(p: &mut Probe, run: &mut Thrown, what: &str, wanted: &str, act: impl FnOnce(&Path) -> std::io::Result<()>) -> Result<()> {
+        let mark = log_lines(&run.log).len();
+        let started = Instant::now();
+        act(&run.stand_in)?;
+        let judged = logged_since(&run.log, mark, started, Duration::from_secs(10), wanted);
+        std::thread::sleep(Duration::from_secs(2));
+        let said = program_said(&run.log, mark);
+        let acted = said.iter().any(|line| line.contains("moved to the Trash") || line.contains("moved from"));
+        let login = fs::read(&run.entry).ok().as_deref() == Some(run.login.as_slice());
+        let alive = still_running(&mut run.child);
+        let origin = run.stand_in.to_string_lossy().into_owned();
+        let kept = saved_origin(&run.real).as_deref() == Some(origin.as_str());
+        p.line(format!("- {what}: judged nothing after {judged:?} ms, acted anyway {acted}, login item untouched {login}, daemon alive {alive}, origin unchanged {kept}, log {said:?}"));
+        if judged.is_none() || acted || !login || !alive || !kept {
+            p.fail(format!("{what} changed Scooch"));
+        }
+        Ok(())
+    }
+
+    fn thrown_restart(p: &mut Probe, run: &mut Thrown) -> Result<()> {
+        if !run.stand_in.exists() {
+            fs::write(&run.stand_in, b"a stand in for the AppImage")?;
+        }
+        stop_thrown(&mut run.child);
+        let mark = log_lines(&run.log).len();
+        let started = Instant::now();
+        run.child = start_thrown(&run.copy, &run.log, &run.places)?;
+        let armed = logged_since(&run.log, mark, started, Duration::from_secs(60), " program watched at ");
+        p.line(format!("- the stand in made again and the daemon started again, watch armed after {armed:?} ms"));
+        armed.map(drop).context("the restarted daemon made no watch on the AppImage")
+    }
+
+    fn thrown_trash(p: &mut Probe, run: &mut Thrown, linux: &Linux, screen: &Screen) -> Result<()> {
+        let home = dirs::home_dir().context("no home folder")?;
+        let mark = log_lines(&run.log).len();
+        let started = Instant::now();
+        let gio = Command::new("gio").arg("trash").arg(&run.stand_in).output();
+        let used = match &gio {
+            Ok(out) if out.status.success() => "gio trash".to_string(),
+            other => {
+                freedesktop_trash(&home, &run.stand_in)?;
+                format!("a Freedesktop move made by the probe, since gio trash gave {:?}", other.as_ref().map(|out| out.status.code()).map_err(|error| error.to_string()))
+            }
+        };
+        let decided = logged_since(&run.log, mark, started, Duration::from_secs(25), " program moved to the Trash at ");
+        let turned = logged_since(&run.log, mark, started, Duration::from_secs(25), " program in the Trash, Scooch turned off");
+        let exited = wait_until(Duration::from_secs(30), || !still_running(&mut run.child)).map(|_| started.elapsed().as_millis());
+        let gone = wait_until(Duration::from_secs(10), || !run.entry.exists()).map(|_| started.elapsed().as_millis());
+        let copy_gone = !run.copy.exists();
+        let link_gone = fs::symlink_metadata(run.bin.join("scooch")).is_err();
+        let others = fs::read_link(run.bin.join("foreign")).is_ok_and(|points| points == Path::new("/usr/bin/env")) && fs::read(run.bin.join("scooch-old")).is_ok_and(|bytes| bytes == b"a program of its own");
+        let after = linux.wallpaper(screen).ok().flatten();
+        let restored = after == run.before;
+        p.line(format!(
+            "- moved to the Trash through {used}: decided after {decided:?} ms, turned off after {turned:?} ms, the daemon exited after {exited:?} ms, the login item was gone after {gone:?} ms, the copy removed {copy_gone}, the link at the copy removed {link_gone}, a foreign link and a regular file untouched {others}, wallpaper now {after:?}, the person's own {:?}, back {restored}, log {:?}",
+            run.before,
+            program_said(&run.log, mark)
+        ));
+        if decided.is_none() || turned.is_none() || exited.is_none() || gone.is_none() || !copy_gone || !link_gone || !others || !restored {
+            p.fail("the AppImage in the Trash did not turn Scooch off, put the wallpaper back and take away the copy and its link");
+        }
+        Ok(())
+    }
+
+    fn thrown_away(p: &mut Probe) -> Result<()> {
+        let single = std::env::var("SCOOCH_MONITORS").map_or(true, |value| value == "1");
+        if p.kind != Some(Kind::Gnome) || !single {
+            p.line("- this check runs on the single screen GNOME job, which carries gio".to_string());
+            return Ok(());
+        }
+        if let Some(mut child) = p.daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let linux = p.linux()?;
+        let screen = linux.screens()?.first().cloned().context("no screen")?;
+        let home = dirs::home_dir().context("no home folder")?;
+        let real = dirs::data_local_dir().context("no data folder")?.join("scooch");
+        let scratch = std::env::temp_dir().join(format!("scooch-thrown-{}", std::process::id()));
+        let (local, bin) = (scratch.join("local"), scratch.join("bin"));
+        fs::create_dir_all(&local)?;
+        fs::create_dir_all(&bin)?;
+        p.made.push(scratch.clone());
+        let copy = local.join("scooch");
+        fs::copy(scooch_program()?, &copy)?;
+        std::os::unix::fs::symlink(&copy, bin.join("scooch"))?;
+        std::os::unix::fs::symlink("/usr/bin/env", bin.join("foreign"))?;
+        fs::write(bin.join("scooch-old"), b"a program of its own")?;
+        let apps = home.join("Applications");
+        let moved_folder = home.join("Applications-moved");
+        fs::create_dir_all(&apps)?;
+        fs::create_dir_all(&moved_folder)?;
+        p.made.push(moved_folder.clone());
+        let stand_in = apps.join("Scooch-probe.AppImage");
+        fs::write(&stand_in, b"a stand in for the AppImage")?;
+        p.made.push(stand_in.clone());
+        fs::create_dir_all(&real)?;
+        p.made.push(real.clone());
+        fs::write(real.join("state.json"), br#"{"version":1,"on":true}"#)?;
+        std::env::remove_var("SCOOCH_HOME");
+        let set = scooch::facade::set_origin(Some(stand_in.as_path()));
+        std::env::set_var("SCOOCH_HOME", &p.home);
+        p.line(format!("- the stand in AppImage {} recorded through facade::set_origin {:?}, saved origin {:?}", stand_in.display(), set.map_err(|error| format!("{error:#}")), saved_origin(&real)));
+        let entry = scooch::platform::linux::autostart::path()?;
+        if let Some(folder) = entry.parent() {
+            fs::create_dir_all(folder)?;
+        }
+        fs::write(&entry, scooch::platform::linux::parse::entry::text(&copy))?;
+        let login = fs::read(&entry)?;
+        let before = linux.wallpaper(&screen).ok().flatten();
+        let log = p.out.join("program-watch.log");
+        let places = format!("{}:{}", local.display(), bin.display());
+        let started = Instant::now();
+        let child = start_thrown(&copy, &log, &places)?;
+        let mut run = Thrown { child, copy, bin, stand_in, moved: moved_folder.join("Scooch-probe.AppImage"), entry, login, log, places, real, before };
+        let armed = logged_since(&run.log, 0, started, Duration::from_secs(60), " program watched at ");
+        let ready = wait_until(Duration::from_secs(60), || rendered(&run.real)).map(|_| started.elapsed().as_millis());
+        let showing = linux.wallpaper(&screen).ok().flatten();
+        p.line(format!("- the daemon run from the copy {} with the real data folder, a login item at {} and link places {}, rendered after {ready:?} ms, watch armed after {armed:?} ms, wallpaper before {:?}, now {showing:?}", run.copy.display(), run.entry.display(), run.places, run.before));
+        if armed.is_none() {
+            p.fail("the daemon made no watch on the recorded AppImage");
+        } else {
+            let result = thrown_quiet(p, &mut run);
+            thrown_report(p, "quiet minute", result);
+            let result = thrown_rename(p, &mut run, &linux, &screen);
+            thrown_report(p, "rename", result);
+            let result = thrown_nothing(p, &mut run, "a replace in place, the file written over", "changed in place, so nothing changes", |path| fs::write(path, b"a newer stand in for the AppImage"));
+            thrown_report(p, "replace in place", result);
+            let result = thrown_nothing(p, &mut run, "a delete", "was deleted, so nothing changes", |path| fs::remove_file(path));
+            thrown_report(p, "delete", result);
+            let result = thrown_restart(p, &mut run);
+            thrown_report(p, "restart", result);
+            let result = thrown_trash(p, &mut run, &linux, &screen);
+            thrown_report(p, "Trash", result);
+        }
+        if still_running(&mut run.child) {
+            stop_thrown(&mut run.child);
+        }
+        let _ = fs::remove_file(&run.entry);
+        p.line(format!("- the stand in stays in the runner's Trash, the daemon's log is in the artifact as {}", run.log.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
         Ok(())
     }
 
