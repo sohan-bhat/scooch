@@ -105,7 +105,7 @@ pub fn watch_self(trashed: std::sync::Arc<std::sync::atomic::AtomicBool>, signal
                 signal.wake();
             }
             Decision::Repoint(now) => {
-                if let Err(error) = crate::platform::macos::launchd::repoint(&moved_program(program, at, now)) {
+                if let Err(error) = crate::platform::macos::launchd::repoint(&moved_program(program, at, &plain(now))) {
                     eprintln!("{} program moved but the login item could not follow it, {error:#}", stamp());
                 }
             }
