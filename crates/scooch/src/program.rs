@@ -98,18 +98,16 @@ pub fn watch_self(trashed: std::sync::Arc<std::sync::atomic::AtomicBool>, signal
         return;
     };
     let act = move |decision: &Decision, at: &Path, program: &Path| {
+        if let Decision::Repoint(now) = decision {
+            if let Err(error) = crate::platform::macos::launchd::repoint(&moved_program(program, at, &plain(now))) {
+                eprintln!("{} program moved from {} to {} but the login item could not follow it, {error:#}", stamp(), at.display(), now.display());
+                return;
+            }
+        }
         eprintln!("{} {}", stamp(), said(decision, at));
-        match decision {
-            Decision::Off(_) => {
-                trashed.store(true, std::sync::atomic::Ordering::SeqCst);
-                signal.wake();
-            }
-            Decision::Repoint(now) => {
-                if let Err(error) = crate::platform::macos::launchd::repoint(&moved_program(program, at, &plain(now))) {
-                    eprintln!("{} program moved but the login item could not follow it, {error:#}", stamp());
-                }
-            }
-            Decision::Nothing(_) => {}
+        if let Decision::Off(_) = decision {
+            trashed.store(true, std::sync::atomic::Ordering::SeqCst);
+            signal.wake();
         }
     };
     let _ = std::thread::Builder::new().name("scooch-program".into()).spawn(move || mac::run(program, target, home, act));
@@ -166,6 +164,9 @@ mod mac {
                     break;
                 }
                 let flags = event.fflags;
+                if crate::daemon::trace() {
+                    eprintln!("{} program event flags {flags:#x} on {}", crate::daemon::stamp(), target.display());
+                }
                 let seen = if flags & libc::NOTE_REVOKE != 0 {
                     Seen::Revoked
                 } else if flags & libc::NOTE_DELETE != 0 {
