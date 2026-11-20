@@ -354,19 +354,16 @@ open_from_image() {
   wait_for 40 has_window >/dev/null
   sleep 4
 }
-status_text() {
-  limited 60 osascript <<'APPLESCRIPT' 2>&1
+window_texts() {
+  limited 90 osascript <<'APPLESCRIPT' 2>&1
 tell application "System Events"
   set scoochApp to first process whose bundle identifier is "me.sohanbhat.scooch.window"
   set texts to {}
   repeat with element in (entire contents of window 1 of scoochApp)
     try
-      if subrole of element is "AXApplicationStatus" then
-        repeat with part in (entire contents of element)
-          try
-            if role of part is "AXStaticText" then set end of texts to (value of part as text)
-          end try
-        end repeat
+      if role of element is "AXStaticText" then
+        set shown to value of element
+        if shown is not missing value then set end of texts to (shown as text)
       end if
     end try
   end repeat
@@ -502,11 +499,19 @@ line "- $pressed"
 sleep 6
 line "- the window still runs from $(from_where)"
 sentence=$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV[0]))["failure"]["move"]' crates/scooch-app/ui/src/copy/en.json)
-shown=$(status_text)
-line "- the status line reads \"$shown\", the copy file says \"$sentence\""
+strings="$out/copy-strings.txt"
+ruby -rjson -e 'def flat(node); node.is_a?(Hash) ? node.values.flat_map { |v| flat(v) } : [node.to_s]; end; puts flat(JSON.parse(File.read(ARGV[0])))' crates/scooch-app/ui/src/copy/en.json >"$strings"
+shown=$(window_texts)
+line "- the window shows the texts $(printf '%s' "$shown" | tr '\n' '|'), the copy file says \"$sentence\""
 expect "the Move button was pressed" grep -q "^pressed Move to Applications" <<<"$pressed"
-same_sentence() { [ -n "$sentence" ] && [ "$shown" = "$sentence" ]; }
-expect "the window shows the copy sentence for a failed Move and no other text" same_sentence
+only_copy() {
+  [ -n "$sentence" ] && grep -qxF -- "$sentence" <<<"$shown" || return 1
+  while IFS= read -r text; do
+    [ -z "$text" ] && continue
+    grep -qixF -- "$text" "$strings" || return 1
+  done <<<"$shown"
+}
+expect "the window shows the copy sentence for a failed Move and no text from outside the copy file" only_copy
 expect "with no folder to take it the window stays where it was" grep -q -E 'AppTranslocation|^/Volumes/' <<<"$(from_where)"
 expect "the failed Move left no staged copy" no_staged
 shot move-failed
