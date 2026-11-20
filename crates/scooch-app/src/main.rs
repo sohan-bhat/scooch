@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "linux")]
+mod children;
 mod pictures;
 mod place;
 #[cfg(feature = "updater")]
@@ -24,7 +26,16 @@ const KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", 
 struct Kept(Mutex<Option<notify::RecommendedWatcher>>);
 
 fn said<T>(result: anyhow::Result<T>) -> Result<T, String> {
-    result.map_err(|error| error.to_string())
+    result.map_err(|error| {
+        eprintln!("{error}");
+        error.to_string()
+    })
+}
+
+fn adopted<T>(result: anyhow::Result<T>) -> anyhow::Result<T> {
+    #[cfg(target_os = "linux")]
+    children::reap_daemons();
+    result
 }
 
 async fn off_main<T: Send + 'static>(work: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
@@ -49,12 +60,12 @@ async fn view() -> Result<View, String> {
 
 #[tauri::command]
 async fn turn_on() -> Result<Started, String> {
-    off_main(|| facade::turn_on(&place::program()?)).await
+    off_main(|| adopted(facade::turn_on(&place::program()?))).await
 }
 
 #[tauri::command]
 async fn turn_off() -> Result<Tally, String> {
-    off_main(|| facade::turn_off(&place::program()?)).await
+    off_main(|| adopted(facade::turn_off(&place::program()?))).await
 }
 
 #[tauri::command]
@@ -66,7 +77,7 @@ async fn set(switch: Switch, on: bool) -> Result<(), String> {
 async fn use_picture<R: Runtime>(app: AppHandle<R>, path: PathBuf) -> Result<(), String> {
     let folder = data_folder(&app);
     off_main(move || {
-        facade::use_picture(&place::program()?, &path)?;
+        adopted(facade::use_picture(&place::program()?, &path))?;
         pictures::remember(&folder, &path);
         Ok(())
     })
@@ -115,7 +126,7 @@ async fn fix<R: Runtime>(app: AppHandle<R>, problem: Problem) -> Result<(), Stri
             Ok(())
         }
         Problem::Gnome => off_main(gnome_icons).await,
-        Problem::Stopped | Problem::Other => off_main(|| facade::turn_on(&place::program()?).map(drop)).await,
+        Problem::Stopped | Problem::Other => off_main(|| adopted(facade::turn_on(&place::program()?)).map(drop)).await,
         Problem::Asking | Problem::Screen | Problem::Wallpaper { .. } => Ok(()),
     }
 }
@@ -176,7 +187,7 @@ fn main() {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
                     if let Ok(program) = place::program() {
-                        if facade::repair(&program).unwrap_or(false) {
+                        if adopted(facade::repair(&program)).unwrap_or(false) {
                             let _ = handle.emit("changed", ());
                         }
                     }
