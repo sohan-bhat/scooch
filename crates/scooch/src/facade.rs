@@ -517,7 +517,16 @@ pub fn pictures(history: &[PathBuf]) -> Vec<PathBuf> {
         add(&entry.source);
         add(&entry.original);
     }
-    let gallery = platform::current().map(|desktop| desktop.gallery()).unwrap_or_default();
+    let desktop = platform::current().ok();
+    if let Some(desktop) = &desktop {
+        let store = Store::open();
+        for screen in desktop.screens().unwrap_or_default() {
+            if let Some(path) = desktop.wallpaper(&screen).ok().flatten().filter(|path| !store.owns(path)) {
+                add(&path);
+            }
+        }
+    }
+    let gallery = desktop.map(|desktop| desktop.gallery()).unwrap_or_default();
     let mut listed = commands::pictures(&gallery);
     listed.sort_by_cached_key(|path| path.file_name().map(|name| name.to_string_lossy().to_lowercase()));
     for path in &listed {
