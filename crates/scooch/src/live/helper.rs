@@ -1587,7 +1587,6 @@ mod running {
                     helper.event(event);
                 }
                 helper.advance();
-                helper.sweep();
             }
         }
 
