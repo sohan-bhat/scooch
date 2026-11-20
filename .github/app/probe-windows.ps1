@@ -299,7 +299,8 @@ $box = $sized.Current.BoundingRectangle
 $handle = [IntPtr]$sized.Current.NativeWindowHandle
 function Pill-Inside {
     $names = 'Slide', 'Clouds', 'Flip', 'Quick drop', 'Turn off', 'Turn on', 'Open Startup apps', 'Start again', 'Pick a file'
-    for ($attempt = 0; $attempt -lt 6; $attempt++) {
+    $best = 'the controls were not found'
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
         $window = Find-Window
         $frame = $window.Current.BoundingRectangle
         $parts = @()
@@ -315,10 +316,11 @@ function Pill-Inside {
             $whole = $whole -and $inside
             $parts += "$label $(if ($inside) { 'inside' } else { 'cut' })"
         }
-        if ($seen -ge 3) { return "every control whole inside the window $whole, $($parts -join ', ')" }
+        $best = "every control whole inside the window $whole, $($parts -join ', ')"
+        if ($seen -ge 5) { return $best }
         Start-Sleep -Seconds 1
     }
-    return 'the controls were not found'
+    return "$best, after 8 tries some controls were not found"
 }
 Line ''
 Line '### Large text'
