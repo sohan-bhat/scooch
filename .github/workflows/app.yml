@@ -78,11 +78,9 @@ jobs:
           - name: linux-x64
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            musl: x86_64-unknown-linux-musl
           - name: linux-arm64
             runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            musl: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -91,7 +89,6 @@ jobs:
         with:
           name: ${{ matrix.name }}
           target: ${{ matrix.target }}
-          musl: ${{ matrix.musl }}
           bundles: deb,rpm,appimage
 
   files:

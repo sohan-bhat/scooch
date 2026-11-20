@@ -138,7 +138,10 @@ if ($Programs) {
     $key.SetValue('Path', ((@($old -split ';' | Where-Object { $_ }) + $folder) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
     $key.Close()
     $env:Path = "$env:Path;$folder"
-    $command = Start-Process -FilePath (Join-Path $folder 'scooch.exe') -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $Out 'old-start.txt')
+    $empty = Join-Path $Out 'empty.txt'
+    Set-Content -Path $empty -Value ''
+    $command = Start-Process -FilePath (Join-Path $folder 'scooch.exe') -NoNewWindow -PassThru -RedirectStandardInput $empty -RedirectStandardOutput (Join-Path $Out 'old-start.txt')
+    if (-not $command.WaitForExit(60000)) { Stop-Process -Id $command.Id -Force -ErrorAction SilentlyContinue }
     $started = Wait-For 20 { (Daemons) -ge 1 }
     Line "- older command install in $folder, as install.ps1 lays it out, turned Scooch on with exit $($command.ExitCode), daemon after $started s from $(Daemon-Paths)"
     Line "- login entry from the older command $(Run-Value)"
