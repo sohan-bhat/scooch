@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Built,
-    [Parameter(Mandatory = $true)][string]$Out
+    [Parameter(Mandatory = $true)][string]$Out,
+    [string]$Programs = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -33,6 +34,18 @@ public static class Desk {
     public static string Wallpaper() {
         var shell = Shell();
         return shell.GetWallpaper(shell.GetMonitorDevicePathAt(0));
+    }
+    [DllImport("user32.dll")]
+    static extern bool SystemParametersInfo(int action, int param, ref bool value, int flags);
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfo")]
+    static extern bool SystemParametersFlag(int action, int param, IntPtr value, int flags);
+    public static bool Animations() {
+        bool on = true;
+        SystemParametersInfo(0x1042, 0, ref on, 0);
+        return on;
+    }
+    public static void SetAnimations(bool on) {
+        SystemParametersFlag(0x1043, 0, new IntPtr(on ? 1 : 0), 3);
     }
     public static void Set(string path) {
         Shell().SetWallpaper(null, path);
@@ -111,14 +124,38 @@ Line "- installer signature $($signature.Status)"
 [Desk]::Set($photo)
 Line "- wallpaper before install $([Desk]::Wallpaper())"
 
+function Path-Count { @(([Environment]::GetEnvironmentVariable('Path', 'User')) -split ';' | Where-Object { $_.TrimEnd('\') -ieq $folder }).Count }
+function Daemon-Paths { (@(Get-Process -Name scoochw -ErrorAction SilentlyContinue | ForEach-Object { $_.Path }) -join ', ') }
+
+if ($Programs) {
+    New-Item -ItemType Directory -Force $folder | Out-Null
+    foreach ($name in 'scooch', 'scoochw') {
+        $from = Get-ChildItem $Programs -Filter "$name-*.exe" | Select-Object -First 1
+        Copy-Item -Force $from.FullName (Join-Path $folder "$name.exe")
+    }
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    $old = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $key.SetValue('Path', ((@($old -split ';' | Where-Object { $_ }) + $folder) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    $key.Close()
+    $env:Path = "$env:Path;$folder"
+    $command = Start-Process -FilePath (Join-Path $folder 'scooch.exe') -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $Out 'old-start.txt')
+    $started = Wait-For 20 { (Daemons) -ge 1 }
+    Line "- older command install in $folder, as install.ps1 lays it out, turned Scooch on with exit $($command.ExitCode), daemon after $started s from $(Daemon-Paths)"
+    Line "- login entry from the older command $(Run-Value)"
+    Line "- the folder is on PATH $(Path-Count) times before the app"
+}
+
 $took = Measure-Command { Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait }
 Line "- silent install took $([int]$took.TotalSeconds) s"
 Line "- installed into $folder holding $((Get-ChildItem $folder -File | ForEach-Object Name) -join ', ')"
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 Line "- user PATH holds the folder $([bool]($userPath -split ';' | Where-Object { $_.TrimEnd('\') -ieq $folder }))"
 
+Line "- animation effects before $([Desk]::Animations())"
+[Desk]::SetAnimations($true)
+Line "- animation effects after the probe turned them on $([Desk]::Animations())"
 $app = Get-ChildItem $folder -Filter 'scooch-app.exe' | Select-Object -First 1
-Start-Process -FilePath $app.FullName
+Start-Process -FilePath $app.FullName -RedirectStandardError (Join-Path $Out 'app.log')
 $shown = Wait-For 40 { [bool](Find-Window) }
 Line "- window showed after $shown s"
 Start-Sleep -Seconds 3
@@ -130,9 +167,19 @@ Start-Sleep -Seconds 3
 Shot 'on'
 Line "- login entry $(Run-Value)"
 Line "- wallpaper while on $([Desk]::Wallpaper())"
-Line "- daemons running $(Daemons)"
+Line "- daemons running $(Daemons) from $(Daemon-Paths)"
+Line "- a terminal finds scooch at $((Get-Command scooch -ErrorAction SilentlyContinue).Source)"
+Line "- the folder is on PATH $(Path-Count) times, copies of scooch.exe under LOCALAPPDATA $(@(Get-ChildItem $env:LOCALAPPDATA -Recurse -Filter scooch.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike '*\\Temp\\*' } | ForEach-Object FullName) -join ', ')"
+Start-Sleep -Seconds 2
+Line "- the app says $((Get-Content (Join-Path $Out 'app.log') -ErrorAction SilentlyContinue | Select-String 'scooch-app') -join ' ')"
+$glideBefore = (Get-Content -Raw "$data\state.json") -match '"glide": true'
+Line "- $(Press 'Slide' 1)"
+Start-Sleep -Seconds 2
+$glideAfter = (Get-Content -Raw "$data\state.json") -match '"glide": true'
+Line "- Slide was on $glideBefore and after one press is on $glideAfter"
+Shot 'slide'
 
-Line "- $(Press 'Turn off' 3)"
+Line "- $(Press 'Turn off' 4)"
 $off = Wait-For 30 { -not (State-On) }
 Line "- off after $off s"
 Start-Sleep -Seconds 3
