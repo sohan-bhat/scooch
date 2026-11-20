@@ -3136,8 +3136,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn launched_by_gio(entry: &Path) -> String {
-        match Command::new("gio").arg("launch").arg(entry).stdin(Stdio::null()).output() {
-            Ok(out) => format!("gio launch exit {:?}", out.status.code()),
+        match Command::new("gio").arg("launch").arg(entry).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status() {
+            Ok(status) => format!("gio launch exit {:?}", status.code()),
             Err(error) => format!("gio launch could not run, {error}"),
         }
     }
