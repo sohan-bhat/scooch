@@ -53,23 +53,23 @@ press() {
 on run argv
   set wanted to item 1 of argv
   tell application "System Events"
-    set target to first process whose bundle identifier is "me.sohanbhat.scooch.window"
-    set frontmost of target to true
-    set everything to entire contents of window 1 of target
+    set scoochApp to first process whose bundle identifier is "me.sohanbhat.scooch.window"
+    set frontmost of scoochApp to true
+    set everything to entire contents of window 1 of scoochApp
     repeat with element in everything
       try
         if role of element is "AXButton" then
-          set words to ""
+          set seen to ""
           try
-            set words to words & (name of element as text)
+            set seen to seen & (name of element as text)
           end try
           try
-            set words to words & (description of element as text)
+            set seen to seen & (description of element as text)
           end try
           try
-            set words to words & (title of element as text)
+            set seen to seen & (title of element as text)
           end try
-          if words contains wanted then
+          if seen contains wanted then
             click element
             return "pressed " & wanted
           end if
