@@ -11,14 +11,14 @@ export function Pictures({ pictures, current, onUse, onPick }: { pictures: Pictu
   const selected = current ?? '';
   return (
     <ScrollArea className="min-h-0 w-full">
-      <div className="flex items-center gap-3 px-6 pt-2 pb-4 cramped:px-4 cramped:pb-3">
-        <Button variant="quiet" onClick={onPick} className="h-[4.375rem] w-28 shrink-0 flex-col gap-1 px-0 text-[0.8125rem] cramped:h-15 cramped:w-24">
+      <div className="flex items-center gap-[12px] px-[24px] pt-[8px] pb-[16px] cramped:px-[16px] cramped:pb-[12px]">
+        <Button variant="quiet" onClick={onPick} className="h-auto min-h-[70px] w-auto min-w-[112px] shrink-0 flex-col gap-[4px] px-[10px] py-[6px] text-[0.8125rem] cramped:min-h-[60px] cramped:min-w-[96px]">
           <Plus weight="bold" aria-hidden />
           {copy.pictures.pick}
         </Button>
-        <ToggleGroup type="single" value={selected} onValueChange={(path) => path && onUse(path)} aria-label={copy.pictures.label}>
+        <ToggleGroup className="gap-[12px]" type="single" value={selected} onValueChange={(path) => path && onUse(path)} aria-label={copy.pictures.label}>
           {pictures.map((picture) => (
-            <ToggleGroupItem key={picture.path} value={picture.path} aria-label={nameOf(picture.path)} className="h-[4.375rem] w-28 cramped:h-15 cramped:w-24">
+            <ToggleGroupItem key={picture.path} value={picture.path} aria-label={nameOf(picture.path)} className="h-[70px] w-[112px] cramped:h-[60px] cramped:w-[96px]">
               <img src={picture.thumb} alt="" draggable={false} loading="lazy" className="size-full object-cover" />
             </ToggleGroupItem>
           ))}

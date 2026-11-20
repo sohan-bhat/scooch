@@ -63,12 +63,12 @@ export function said(view: View, act: (problem: Problem) => void, pick: () => vo
 
 export function Status({ line, pill, quiet }: { line: string; pill: Act | null; quiet: Act | null }) {
   return (
-    <div className="flex min-h-16 flex-wrap items-center gap-x-4 gap-y-2 px-6 py-2 cramped:min-h-14 cramped:px-4">
+    <div className="flex min-h-[64px] flex-wrap items-center gap-x-[16px] gap-y-[8px] px-[24px] py-[8px] cramped:min-h-[56px] cramped:px-[16px]">
       <p key={line} role="status" aria-live="polite" className="line-in m-0 min-w-0 text-[1.125rem] leading-snug font-semibold text-paper cramped:text-base">
         {line}
       </p>
       {quiet && (
-        <Button variant="quiet" size="sm" onClick={quiet.busy ? undefined : quiet.run} aria-disabled={quiet.busy || undefined} className="shrink-0 aria-disabled:pointer-events-none cramped:h-9 cramped:px-4 cramped:text-[0.875rem]">
+        <Button variant="quiet" size="sm" onClick={quiet.busy ? undefined : quiet.run} aria-disabled={quiet.busy || undefined} className="h-auto min-h-[40px] shrink-0 px-[20px] py-[6px] aria-disabled:pointer-events-none cramped:min-h-[36px] cramped:px-[16px] cramped:text-[0.875rem]">
           {quiet.label}
         </Button>
       )}
@@ -77,7 +77,7 @@ export function Status({ line, pill, quiet }: { line: string; pill: Act | null; 
           size="md"
           onClick={pill.busy ? undefined : pill.run}
           aria-disabled={pill.busy || undefined}
-          className="ml-auto min-w-[8.5rem] aria-disabled:pointer-events-none cramped:h-10 cramped:min-w-[7rem] cramped:px-5 cramped:text-[0.9375rem]"
+          className="ml-auto h-auto min-h-[48px] min-w-[136px] px-[24px] py-[8px] aria-disabled:pointer-events-none cramped:min-h-[40px] cramped:min-w-[112px] cramped:px-[20px] cramped:text-[0.9375rem]"
         >
           {pill.label}
         </Button>
