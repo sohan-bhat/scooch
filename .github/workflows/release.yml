@@ -153,6 +153,9 @@ jobs:
         working-directory: dist
         run: |
           want="SHA256SUMS Scooch-Setup-arm64.exe Scooch-Setup-x64.exe Scooch-aarch64.AppImage Scooch-x86_64.AppImage Scooch.dmg scooch-linux-aarch64.tar.gz scooch-linux-x86_64.tar.gz scooch-macos.tar.gz scooch-windows-aarch64.zip scooch-windows-x86_64.zip scooch.aarch64.rpm scooch.x86_64.rpm scooch_amd64.deb scooch_arm64.deb"
+          if [ -f latest.json ]; then
+            want="$want latest.json Scooch.app.tar.gz Scooch.app.tar.gz.sig Scooch-Setup-arm64.exe.sig Scooch-Setup-x64.exe.sig Scooch-aarch64.AppImage.sig Scooch-x86_64.AppImage.sig scooch.aarch64.rpm.sig scooch.x86_64.rpm.sig scooch_amd64.deb.sig scooch_arm64.deb.sig"
+          fi
           have=$(LC_ALL=C ls -1 | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
           want=$(printf '%s\n' $want | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
           if [ "$have" != "$want" ]; then

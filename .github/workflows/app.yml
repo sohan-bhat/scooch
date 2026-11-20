@@ -173,30 +173,15 @@ jobs:
     needs: [secrets, build-macos, build-windows, build-linux]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: app-*
           path: built
       - name: Release names
         run: |
-          mkdir -p release
-          take() {
-            found=$(find built -type f -name "$1" | head -1)
-            if [ -z "$found" ]; then
-              echo "No build output matches $1 for $2."
-              exit 1
-            fi
-            cp "$found" "release/$2"
-          }
-          take '*_universal.dmg' Scooch.dmg
-          take '*_x64-setup.exe' Scooch-Setup-x64.exe
-          take '*_arm64-setup.exe' Scooch-Setup-arm64.exe
-          take '*_amd64.deb' scooch_amd64.deb
-          take '*_arm64.deb' scooch_arm64.deb
-          take '*.x86_64.rpm' scooch.x86_64.rpm
-          take '*.aarch64.rpm' scooch.aarch64.rpm
-          take '*_amd64.AppImage' Scooch-x86_64.AppImage
-          take '*_aarch64.AppImage' Scooch-aarch64.AppImage
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          bash .github/app/release-files.sh built release "$version"
           {
             echo "## Release files"
             echo
@@ -206,6 +191,8 @@ jobs:
               echo "| $(basename "$file") | $(wc -c < "$file" | tr -d ' ') |"
             done
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Release names in both modes from stand in files
+        run: bash .github/app/release-files-check.sh | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: release-files
