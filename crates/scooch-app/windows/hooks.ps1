@@ -11,13 +11,14 @@ $old = Join-Path $env:LOCALAPPDATA 'Programs\Scooch'
 
 function Read-UserPath {
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+    if (-not $key) { return }
     $value = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
     $key.Close()
     return @($value -split ';' | Where-Object { $_ })
 }
 
 function Write-UserPath([string[]]$Parts) {
-    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
     $key.SetValue('Path', ($Parts -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
     $key.Close()
     [Environment]::SetEnvironmentVariable('SCOOCH_PATH_REFRESH', '1', 'User')
@@ -29,9 +30,9 @@ function Same([string]$A, [string]$B) {
 }
 
 if ($Step -eq 'installed') {
-    $parts = Read-UserPath
+    $parts = @(Read-UserPath)
     if (-not ($parts | Where-Object { Same $_ $Folder })) {
-        Write-UserPath ($parts + $Folder)
+        Write-UserPath (@($parts) + @($Folder))
     }
     $daemon = Join-Path $Folder 'scoochw.exe'
     if ((Test-Path $marker) -and -not ($WasRunning -eq 'yes')) {
@@ -56,7 +57,7 @@ if (Test-Path $daemon) {
         Stop-Process -Id $off.Id -Force -ErrorAction SilentlyContinue
     }
 }
-$parts = Read-UserPath
+$parts = @(Read-UserPath)
 $kept = @($parts | Where-Object { -not (Same $_ $Folder) })
 if ($kept.Count -ne $parts.Count) {
     Write-UserPath $kept
