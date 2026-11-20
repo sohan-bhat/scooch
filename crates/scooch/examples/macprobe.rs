@@ -1718,9 +1718,11 @@ mod probe {
         let acted = said.iter().any(|line| line.contains("moved to the Trash") || line.contains("moved from"));
         let alive = alive(run);
         let kept = names(&run.plist, &run.exe);
-        let still = desktop.wallpaper(screen).ok().flatten() == showing;
-        p.line(format!("- copied to a ramdisk at {} and the original deleted: judged nothing after {deleted:?} ms, acted anyway {acted}, daemon alive {alive}, login item unchanged {kept}, wallpaper unchanged {still}, log {said:?}", copy.display()));
-        if deleted.is_none() || acted || !alive || !kept || !still {
+        let now = desktop.wallpaper(screen).ok().flatten();
+        let ours = now.as_deref().is_some_and(|path| path.starts_with(run.real.join("out")));
+        let on = fs::read_to_string(run.real.join("state.json")).unwrap_or_default().contains("\"on\": true");
+        p.line(format!("- copied to a ramdisk at {} and the original deleted: judged nothing after {deleted:?} ms, acted anyway {acted}, daemon alive {alive}, login item unchanged {kept}, wallpaper before the delete {showing:?} and 12 s after {now:?}, still a picture Scooch made {ours}, saved state still on {on}, log {said:?}", copy.display()));
+        if deleted.is_none() || acted || !alive || !kept || !ours || !on {
             p.fail("a copy to another disk and a delete of the original changed Scooch");
         }
         let back = p.tool("/usr/bin/ditto", &[&copy.to_string_lossy(), &run.bundle.to_string_lossy()]);
