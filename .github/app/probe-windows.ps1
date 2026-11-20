@@ -404,6 +404,21 @@ $closed = Wait-For 15 { @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyCo
 Line "- closing the window ended the app process after $closed s, daemons still running $(Daemons)"
 Expect "closing the window ended the app process" ($closed -ge 0)
 
+Get-CimInstance Win32_Process -Filter "Name = 'scoochw.exe'" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Seconds 2
+$parked = Join-Path $data 'out\probe-absent-1.jpg'
+New-Item -ItemType Directory -Force (Split-Path $parked) | Out-Null
+Copy-Item $photo $parked -Force
+$saved = Get-Content -Raw "$data\state.json" | ConvertFrom-Json
+$saved.on = $true
+$saved.screens | Add-Member -NotePropertyName 'probe-absent' -NotePropertyValue ([pscustomobject]@{ source = $photo; original = $photo; output = $parked }) -Force
+$saved | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 "$data\state.json"
+Start-Process -FilePath (Join-Path $folder 'scoochw.exe') -WindowStyle Hidden
+Wait-For 30 { (Daemons) -ge 1 } | Out-Null
+Start-Sleep -Seconds 3
+Line "- the saved state holds a record for a screen probe-absent that no desktop shows $((Get-Content -Raw "$data\state.json") -match 'probe-absent'), Scooch on again, daemons $(Daemons), login entry $(Run-Value)"
+function Uninstall-Entry { @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DisplayName -eq 'Scooch' }).Count }
+Line "- uninstall entries for Scooch before removal $(Uninstall-Entry)"
 $uninstaller = Join-Path $folder 'uninstall.exe'
 $took = Measure-Command {
     (Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru).WaitForExit(300000) | Out-Null
@@ -414,6 +429,7 @@ Line "- silent removal took $([int]$took.TotalSeconds) s"
 Line "- wallpaper after removal $([Desk]::Wallpaper()), back to the photo $([Desk]::Wallpaper() -ieq $photo)"
 Line "- login entry after removal '$(Run-Value)', daemons running $(Daemons)"
 Line "- left in the install folder $(@(Get-ChildItem $folder -ErrorAction SilentlyContinue).Count) files"
+Line "- uninstall entries for Scooch after removal $(Uninstall-Entry), scoochw processes $(@(Get-Process -Name scoochw -ErrorAction SilentlyContinue).Count)"
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 Line "- user PATH still holds the folder $([bool]($userPath -split ';' | Where-Object { $_.TrimEnd('\') -ieq $folder }))"
 Expect "removal put the photo back" ([Desk]::Wallpaper() -ieq $photo)

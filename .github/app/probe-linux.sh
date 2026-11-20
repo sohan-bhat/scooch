@@ -204,6 +204,22 @@ expect "reopening the app replaced a daemon of an older version" replaced
 press_pill alt+F4
 wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
 
+pkill -x scooch
+sleep 2
+mkdir -p "$data/out"
+cp "$photo" "$data/out/probe-absent-1.jpg"
+python3 - "$data/state.json" "$photo" "$data/out/probe-absent-1.jpg" <<'PY'
+import json, sys
+path, picture, output = sys.argv[1:4]
+state = json.load(open(path))
+state["on"] = True
+state.setdefault("screens", {})["probe-absent"] = {"source": picture, "original": picture, "output": output}
+json.dump(state, open(path, "w"), indent=2)
+PY
+clean /usr/bin/scooch >"$out/absent-on.txt" 2>&1
+wait_for 30 sh -c 'pgrep -x scooch >/dev/null' >/dev/null
+sleep 3
+line "- the saved state holds a record for a screen probe-absent that no desktop shows $(grep -c '"probe-absent"' "$data/state.json"), Scooch on again, daemons $(daemons), login item $(login)"
 cp /usr/bin/scooch "$HOME/.stale-scooch"
 sudo apt-get remove -y scooch >"$out/remove.log" 2>&1
 removed=$?
