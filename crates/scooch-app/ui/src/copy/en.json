@@ -1,0 +1,100 @@
+{
+  "name": "Scooch",
+  "desk": "Your desktop",
+  "status": {
+    "on": "Scooch is on.",
+    "off": "Scooch is off.",
+    "starting": "Scooch is starting.",
+    "stopping": "Scooch is putting your wallpaper back.",
+    "pending": {
+      "one": "Scooch is off. 1 more desktop switches back when it shows.",
+      "many": "Scooch is off. {n} more desktops switch back when they show."
+    }
+  },
+  "pill": {
+    "on": "Turn on",
+    "off": "Turn off"
+  },
+  "hint": {
+    "flip": {
+      "line": "Icons still cover part of the picture.",
+      "fix": "Let it flip"
+    }
+  },
+  "problem": {
+    "automation": {
+      "line": "Finder access is off for Scooch.",
+      "fix": "Open settings"
+    },
+    "asking": {
+      "line": "Choose Allow in the Finder access window."
+    },
+    "finder": {
+      "line": "Finder is closed, so your icons are hidden.",
+      "fix": "Open Finder"
+    },
+    "move": {
+      "line": "Scooch is not in Applications yet.",
+      "fix": "Move to Applications"
+    },
+    "wallpaper": {
+      "slideshow": "Your wallpaper is a slideshow.",
+      "video": "Your wallpaper is a video.",
+      "color": "Your wallpaper is a plain color.",
+      "moving": "Your wallpaper is the moving macOS one.",
+      "unreadable": "Your wallpaper file is unreadable.",
+      "made": "This desktop still shows an old Scooch picture.",
+      "fix": "Pick a picture"
+    },
+    "gnome": {
+      "line": "Desktop icons are off in GNOME.",
+      "fix": "Turn them on"
+    },
+    "unknown": {
+      "line": "{desktop} is not supported yet.",
+      "fix": "Ask for {desktop}"
+    },
+    "admin": {
+      "line": "Scooch is open as administrator.",
+      "fix": "Open normally"
+    },
+    "startup": {
+      "line": "Scooch is off in Startup apps.",
+      "fix": "Open Startup apps"
+    },
+    "stopped": {
+      "line": "Scooch stopped running.",
+      "fix": "Start again"
+    },
+    "screen": {
+      "line": "No screen is showing right now."
+    },
+    "other": {
+      "line": "Something went wrong with the last picture.",
+      "fix": "Try again"
+    }
+  },
+  "switch": {
+    "glide": {
+      "label": "Slide",
+      "tip": "The picture slides into place."
+    },
+    "scenery": {
+      "label": "Clouds",
+      "tip": "Clouds and islands around your icons."
+    },
+    "flip": {
+      "label": "Flip",
+      "tip": "The picture may flip to clear your icons."
+    },
+    "predict": {
+      "label": "Quick drop",
+      "tip": "The picture moves the moment an icon lands."
+    }
+  },
+  "pictures": {
+    "label": "Pictures",
+    "pick": "Pick a file",
+    "drop": "Drop to use this picture."
+  }
+}
