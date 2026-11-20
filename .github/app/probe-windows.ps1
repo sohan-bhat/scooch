@@ -30,6 +30,8 @@ public static class Desk {
     public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")]
+    public static extern bool PrintWindow(IntPtr window, IntPtr hdc, uint flags);
     static IDesktopWallpaper Shell() { return (IDesktopWallpaper)new DesktopWallpaperClass(); }
     public static string Wallpaper() {
         var shell = Shell();
@@ -78,7 +80,10 @@ function Shot([string]$Name) {
     $box = $window.Current.BoundingRectangle
     $bitmap = New-Object System.Drawing.Bitmap([int]$box.Width, [int]$box.Height)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graphics.CopyFromScreen([int]$box.X, [int]$box.Y, 0, 0, $bitmap.Size)
+    $hdc = $graphics.GetHdc()
+    $printed = [Desk]::PrintWindow([IntPtr]$window.Current.NativeWindowHandle, $hdc, 2)
+    $graphics.ReleaseHdc($hdc)
+    if (-not $printed) { $graphics.CopyFromScreen([int]$box.X, [int]$box.Y, 0, 0, $bitmap.Size) }
     $bitmap.Save((Join-Path $Out "$Name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
     $graphics.Dispose()
     $bitmap.Dispose()
@@ -90,12 +95,16 @@ function Press([string]$Label, [int]$Tabs) {
     for ($attempt = 0; $attempt -lt 10; $attempt++) {
         $window = Find-Window
         if ($window) {
-            $found = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $byName)
-            if ($found) {
+            foreach ($found in $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byName)) {
                 $invoke = $null
                 if ($found.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
                     $invoke.Invoke()
                     return "pressed $Label through UI Automation"
+                }
+                $toggle = $null
+                if ($found.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$toggle)) {
+                    $toggle.Toggle()
+                    return "toggled $Label through UI Automation"
                 }
             }
         }
@@ -184,7 +193,7 @@ Line "- installer signature $($signature.Status)"
 Line "- wallpaper before install $([Desk]::Wallpaper())"
 
 function Path-Count { @(([Environment]::GetEnvironmentVariable('Path', 'User')) -split ';' | Where-Object { $_.TrimEnd('\') -ieq $folder }).Count }
-function Daemon-Paths { (@(Get-Process -Name scoochw -ErrorAction SilentlyContinue | ForEach-Object { $_.Path }) -join ', ') }
+function Daemon-Paths { (@(Get-CimInstance Win32_Process -Filter "Name = 'scoochw.exe'" -ErrorAction SilentlyContinue | ForEach-Object { $_.CommandLine }) -join ', ') }
 
 if ($Programs) {
     New-Item -ItemType Directory -Force $folder | Out-Null
@@ -274,4 +283,35 @@ Line "- left in the install folder $(@(Get-ChildItem $folder -ErrorAction Silent
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 Line "- user PATH still holds the folder $([bool]($userPath -split ';' | Where-Object { $_.TrimEnd('\') -ieq $folder }))"
 Copy-Item "$data\state.json" (Join-Path $Out 'state.json') -ErrorAction SilentlyContinue
+
+function Raw-Path {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+    $value = $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $key.Close()
+    return $value
+}
+
+function Set-RawPath($Value) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if ($null -eq $Value) { $key.DeleteValue('Path', $false) } else { $key.SetValue('Path', $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString) }
+    $key.Close()
+}
+
+$runnerPath = Raw-Path
+foreach ($stock in @('%USERPROFILE%\AppData\Local\Microsoft\WindowsApps', '')) {
+    Line ''
+    Line "### Install with the user Path set to '$stock'"
+    Set-RawPath $stock
+    (Start-Process -FilePath $setup.FullName -ArgumentList '/S' -PassThru).WaitForExit(300000) | Out-Null
+    $after = Raw-Path
+    $want = @(@($stock -split ';' | Where-Object { $_ }) + @($folder)) -join ';'
+    Line "- after the install the user Path is '$after', entries $(@($after -split ';' | Where-Object { $_ }).Count), as expected $([string]::Equals($after, $want, [StringComparison]::Ordinal))"
+    (Start-Process -FilePath (Join-Path $folder 'uninstall.exe') -ArgumentList '/S' -PassThru).WaitForExit(300000) | Out-Null
+    Wait-For 120 { -not (Test-Path (Join-Path $folder 'scooch-app.exe')) } | Out-Null
+    Start-Sleep -Seconds 2
+    $back = Raw-Path
+    Line "- after the removal the user Path is '$back', the same bytes as before $([string]::Equals($back, $stock, [StringComparison]::Ordinal))"
+}
+Set-RawPath $runnerPath
+Line "- the runner's user Path is back $([string]::Equals((Raw-Path), $runnerPath, [StringComparison]::Ordinal))"
 exit 0
