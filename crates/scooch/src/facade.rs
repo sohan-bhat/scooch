@@ -491,7 +491,12 @@ pub fn turn_off(program: &Path) -> Result<Tally> {
     let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
     desktop.screens()?;
     commands::stop(&store)?;
-    Ok(match commands::wind_down(desktop.as_ref(), &store)? {
+    #[cfg(target_os = "linux")]
+    let seen = format!("login program {:?}, origin {:?}, copies {:?}", platform::login_program(), store.load().origin, crate::program::copies(&store));
+    let off = commands::wind_down(desktop.as_ref(), &store)?;
+    #[cfg(target_os = "linux")]
+    eprintln!("scooch-app off {off:?}, before it {seen}, copies left {:?}", crate::program::copies(&store).iter().filter(|copy| copy.exists()).collect::<Vec<_>>());
+    Ok(match off {
         Off::Unreadable => {
             desktop.autostart(None)?;
             Tally::default()
