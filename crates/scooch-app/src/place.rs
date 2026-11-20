@@ -124,13 +124,26 @@ fn place_in(bundle: &Path, folder: &Path, name: &Path) -> Result<PathBuf> {
             bail!("ditto ended with {copied}");
         }
         let _ = Command::new("/usr/bin/xattr").arg("-dr").arg("com.apple.quarantine").arg(&staged).status();
-        if std::fs::symlink_metadata(&target).is_ok() {
+        let aside = folder.join(format!(".Scooch.app.old.{}", std::process::id()));
+        let replacing = std::fs::symlink_metadata(&target).is_ok();
+        if replacing {
             if !same_owner(&target, &staged) {
                 bail!("{} belongs to another account", target.display());
             }
-            std::fs::remove_dir_all(&target)?;
+            let _ = std::fs::remove_dir_all(&aside);
+            std::fs::rename(&target, &aside)?;
         }
-        std::fs::rename(&staged, &target)?;
+        if let Err(error) = std::fs::rename(&staged, &target) {
+            if replacing {
+                let _ = std::fs::rename(&aside, &target);
+            }
+            return Err(error.into());
+        }
+        if replacing {
+            if let Err(error) = std::fs::remove_dir_all(&aside) {
+                eprintln!("scooch-app the old app set aside at {} stays, {error}", aside.display());
+            }
+        }
         Ok(target.clone())
     })();
     if placed.is_err() {
@@ -191,5 +204,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert!(placed.is_err());
         assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_replace_that_cannot_delete_the_old_app_still_leaves_a_whole_new_one() {
+        let root = std::env::temp_dir().join(format!("scooch-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bundle = root.join("New.app");
+        std::fs::create_dir_all(bundle.join("Contents")).unwrap();
+        std::fs::write(bundle.join("Contents/new"), b"new").unwrap();
+        let folder = root.join("Applications");
+        let locked = folder.join("Scooch.app/Contents/Locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("old"), b"old").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let placed = place_in(&bundle, &folder, Path::new("Scooch.app"));
+        let whole = folder.join("Scooch.app/Contents/new").exists() && !folder.join("Scooch.app/Contents/Locked").exists();
+        let staged = std::fs::read_dir(&folder).unwrap().flatten().any(|entry| entry.file_name().to_string_lossy().starts_with(".Scooch.app.new"));
+        for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+            let _ = std::fs::set_permissions(entry.path().join("Contents/Locked"), std::fs::Permissions::from_mode(0o755));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(placed.is_ok(), "{placed:?}");
+        assert!(whole, "the new app is not whole in place");
+        assert!(!staged, "a staged copy stayed");
     }
 }
