@@ -260,9 +260,7 @@ fn startup_off() -> bool {
 
 #[cfg(target_os = "linux")]
 fn predicts() -> bool {
-    use platform::linux::parse::desktop::{pick, session, Kind, Session};
-    let current = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    pick(&current) == Some(Kind::Xfce) && session(std::env::var("WAYLAND_DISPLAY").ok().as_deref()) == Session::X11
+    crate::platform::linux::drops::predicts()
 }
 
 #[cfg(not(target_os = "linux"))]
