@@ -1,5 +1,5 @@
 use crate::platform::{Desktop, DragHooks, Format, Screen, Snapshot};
-use crate::state::{display_of, file_safe, parse, same, write_atomic, Entry, Lock, State, Store, Tally};
+use crate::state::{display_of, file_safe, parse, same, write_atomic, Entry, Lock, Places, State, Store, Tally};
 use crate::glide::{Glider, Launch, Plan, Program, Warmup};
 use crate::{cache, poke, scene};
 use anyhow::{Context, Result};
@@ -1032,6 +1032,7 @@ impl Daemon {
         if outcome != Outcome::Interrupted {
             entry.fingerprint = Some(fingerprint);
             entry.chosen = false;
+            entry.places = Some(Places { width: scene.width, height: scene.height, icons: scene.icons.clone() });
         }
         Ok(outcome)
     }
@@ -1433,6 +1434,7 @@ pub fn merge(mine: &State, before: &State, fresh: &State) -> State {
                     theirs.painted = ours.painted;
                 }
                 theirs.icons = ours.icons;
+                theirs.places.clone_from(&ours.places);
                 theirs.counter = theirs.counter.max(ours.counter);
             }
             None if before.screens.contains_key(id) => {}

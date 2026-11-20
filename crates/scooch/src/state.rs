@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use scooch_core::{Options, Placement, Scenery};
+use scooch_core::{Options, Placement, Rect, Scenery};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -133,6 +133,15 @@ pub struct Entry {
     pub belongs: Option<Belongs>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub drawn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub places: Option<Places>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Places {
+    pub width: u32,
+    pub height: u32,
+    pub icons: Vec<Rect>,
 }
 
 fn lenient<'de, D: Deserializer<'de>, T: serde::de::DeserializeOwned>(deserializer: D) -> std::result::Result<Option<T>, D::Error> {
