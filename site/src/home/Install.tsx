@@ -11,6 +11,7 @@ function CopyCommand({ command }: { command: string }) {
   const timer = useRef<number>(0);
   useEffect(() => () => window.clearTimeout(timer.current), []);
   const copy = async () => {
+    void import('@/lib/audio').then((audio) => audio.shot('click', { gain: 0.45 }));
     try {
       await navigator.clipboard.writeText(command);
     } catch {
