@@ -120,7 +120,12 @@ runs:
       env:
         TAURI_BUNDLER_DMG_IGNORE_CI: "true"
       run: |
-        for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+        if [ -n "${APPLE_API_PRIVATE_KEY:-}" ]; then
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/AuthKey.p8"
+          export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+        fi
+        unset APPLE_API_PRIVATE_KEY
+        for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
           if [ -z "${!name:-}" ]; then unset "$name"; fi
         done
         node ui/node_modules/@tauri-apps/cli/tauri.js build --ci --target ${{ inputs.target }} --bundles ${{ inputs.bundles }} ${{ steps.updater.outputs.args }}
