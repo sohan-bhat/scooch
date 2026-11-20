@@ -144,9 +144,30 @@ sleep 8
 limited 20 screencapture -x -D 1 "$out/gatekeeper-open.png"
 line "- opened the quarantined copy, screen kept as gatekeeper-open.png, windows now $(limited 20 osascript -e 'tell application "System Events" to get name of every process whose visible is true' 2>&1)"
 line "- Gatekeeper log $(limited 60 log show --last 30s --style compact --predicate 'process == "syspolicyd" OR process == "CoreServicesUIAgent"' 2>/dev/null | grep -i -E 'scooch|deny|reject|notariz' | tail -3 | tr '\n' ' ')"
+killall CoreServicesUIAgent >/dev/null 2>&1
 limited 15 open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension" >/dev/null 2>&1 &
 sleep 10
-limited 20 osascript -e 'tell application "System Settings" to activate' -e 'tell application "System Events" to key code 119' >/dev/null 2>&1
+line "- Privacy and Security says $(limited 60 osascript <<'APPLESCRIPT' 2>&1
+tell application "System Events"
+  tell process "System Settings"
+    set frontmost to true
+    set said to ""
+    repeat with element in (entire contents of window 1)
+      try
+        if role of element is "AXStaticText" and (value of element as text) contains "Scooch" then set said to said & (value of element as text) & " | "
+      end try
+      try
+        if role of element is "AXButton" and (name of element as text) contains "Open Anyway" then
+          perform action "AXScrollToVisible" of element
+          set said to said & "button " & (name of element as text) & " | "
+        end if
+      end try
+    end repeat
+    return said
+  end tell
+end tell
+APPLESCRIPT
+)"
 sleep 2
 limited 20 screencapture -x -D 1 "$out/gatekeeper-settings.png"
 line "- Privacy and Security after the blocked open kept as gatekeeper-settings.png"
@@ -195,7 +216,7 @@ if no_plist; then line "- the login item is gone"; else line "- the login item i
 line "- $(press 'Turn on')"
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 sleep 3
-limited 20 osascript -e 'tell application id "me.sohanbhat.scooch.window" to quit' >/dev/null 2>&1
+line "- closing the window $(limited 30 osascript -e 'tell application "System Events" to tell (first process whose bundle identifier is "me.sohanbhat.scooch.window") to click (first button of window 1 whose subrole is "AXCloseButton")' 2>&1)"
 if wait_for 15 sh -c '! pgrep -f "Scooch.app/Contents/MacOS/scooch-app" >/dev/null' >/dev/null; then line "- closing the window ended the app process"; else line "- the app process outlived its window"; fi
 line "- daemon processes after close $(pgrep -fl 'Scooch.app/Contents/MacOS/scooch watch' | wc -l | tr -d ' ')"
 
