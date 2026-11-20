@@ -307,6 +307,224 @@ mod mac {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub mod linux {
+    use super::{decide, follow_origin, inside_any, links_into, places, remove_links, said, seen_from, trash_roots, After, Decision, Seen, PLACES};
+    use crate::daemon::{stamp, trace, Signal};
+    use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask, Watches};
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::io::AsRawFd;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::time::Duration;
+
+    const SETTLE: Duration = Duration::from_secs(10);
+
+    struct Armed {
+        origin: PathBuf,
+        wd: WatchDescriptor,
+        fd: Option<std::fs::File>,
+        dev: u64,
+        ino: u64,
+        roots: Vec<PathBuf>,
+    }
+
+    pub struct Watcher {
+        watches: Mutex<Watches>,
+        armed: Mutex<Option<Armed>>,
+        wanted: Mutex<Option<PathBuf>>,
+        home: PathBuf,
+    }
+
+    fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+        mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn read_only(path: &Path) -> bool {
+        let Ok(name) = CString::new(path.as_os_str().as_bytes()) else { return false };
+        let mut found: libc::statvfs = unsafe { std::mem::zeroed() };
+        unsafe { libc::statvfs(name.as_ptr(), &mut found) == 0 && found.f_flag & libc::ST_RDONLY != 0 }
+    }
+
+    fn top_of(path: &Path, dev: u64) -> PathBuf {
+        let mut top = path.parent().unwrap_or(Path::new("/")).to_path_buf();
+        for folder in path.ancestors().skip(1) {
+            match std::fs::metadata(folder) {
+                Ok(meta) if meta.dev() == dev => top = folder.to_path_buf(),
+                _ => break,
+            }
+        }
+        top
+    }
+
+    fn locate(dev: u64, ino: u64, folders: &[PathBuf]) -> Option<PathBuf> {
+        folders.iter().filter_map(|folder| std::fs::read_dir(folder).ok()).flat_map(|entries| entries.flatten()).map(|entry| entry.path()).find(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.dev() == dev && meta.ino() == ino))
+    }
+
+    impl Watcher {
+        pub fn start(trashed: Arc<AtomicBool>, signal: Arc<Signal>) -> Option<Arc<Watcher>> {
+            if std::env::var_os("SCOOCH_HOME").is_some_and(|value| !value.is_empty()) {
+                return None;
+            }
+            let home = dirs::home_dir()?;
+            let inotify = Inotify::init().ok()?;
+            let watcher = Arc::new(Watcher { watches: Mutex::new(inotify.watches()), armed: Mutex::new(None), wanted: Mutex::new(None), home: home.clone() });
+            let places = places(&home, std::env::var_os(PLACES));
+            let program = std::env::current_exe().ok().map(|exe| crate::state::canonical(&exe).unwrap_or(exe));
+            let act = move |decision: &Decision, at: &Path| {
+                if let Decision::Repoint(now) = decision {
+                    if let Err(error) = follow_origin(&crate::state::Store::open(), now) {
+                        eprintln!("{} program moved from {} to {} but Scooch could not follow it, {error:#}", stamp(), at.display(), now.display());
+                        return;
+                    }
+                }
+                eprintln!("{} {}", stamp(), said(decision, at));
+                if let Decision::Off(_) = decision {
+                    if let Some((copy, others)) = places.split_first().map(|(first, others)| (first.join("scooch"), others)) {
+                        if program.as_deref().is_some_and(|program| crate::state::canonical(&copy).is_ok_and(|real| real == program)) {
+                            for line in remove_links(&links_into(others, &copy)) {
+                                eprintln!("{} {line}", stamp());
+                            }
+                            match std::fs::remove_file(&copy) {
+                                Ok(()) => eprintln!("{} program copy {} removed", stamp(), copy.display()),
+                                Err(error) => eprintln!("{} program copy {} could not be removed, {error}", stamp(), copy.display()),
+                            }
+                        }
+                    }
+                    trashed.store(true, Ordering::SeqCst);
+                    signal.wake();
+                }
+            };
+            let runner = watcher.clone();
+            std::thread::Builder::new().name("scooch-program".into()).spawn(move || runner.run(inotify, act)).ok()?;
+            Some(watcher)
+        }
+
+        pub fn arm(&self, origin: Option<&Path>) {
+            let mut wanted = lock(&self.wanted);
+            if wanted.as_deref() == origin {
+                return;
+            }
+            *wanted = origin.map(Path::to_path_buf);
+            let mut armed = lock(&self.armed);
+            if let Some(old) = armed.take() {
+                let _ = lock(&self.watches).remove(old.wd);
+            }
+            let Some(origin) = origin else { return };
+            match self.make(origin) {
+                Ok(made) => {
+                    if trace() {
+                        eprintln!("{} program watched at {}", stamp(), origin.display());
+                    }
+                    *armed = Some(made);
+                }
+                Err(why) => {
+                    if trace() {
+                        eprintln!("{} program not watched at {}, {why}", stamp(), origin.display());
+                    }
+                }
+            }
+        }
+
+        fn make(&self, origin: &Path) -> Result<Armed, String> {
+            let meta = std::fs::metadata(origin).map_err(|error| error.to_string())?;
+            if read_only(origin) {
+                return Err("it sits on a read only mount".into());
+            }
+            let wd = lock(&self.watches).add(origin, WatchMask::MOVE_SELF | WatchMask::DELETE_SELF | WatchMask::ATTRIB | WatchMask::CLOSE_WRITE).map_err(|error| error.to_string())?;
+            let same = std::fs::metadata(&self.home).is_ok_and(|home| home.dev() == meta.dev());
+            let fd = if same { std::fs::OpenOptions::new().read(true).custom_flags(libc::O_PATH).open(origin).ok() } else { None };
+            let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|path| path.is_absolute()).unwrap_or_else(|| self.home.join(".local").join("share"));
+            let roots = trash_roots(&data, &top_of(origin, meta.dev()), unsafe { libc::getuid() });
+            Ok(Armed { origin: origin.to_path_buf(), wd, fd, dev: meta.dev(), ino: meta.ino(), roots })
+        }
+
+        fn current(&self, wd: &WatchDescriptor) -> Option<(PathBuf, bool)> {
+            let armed = lock(&self.armed);
+            let armed = armed.as_ref().filter(|armed| armed.wd == *wd)?;
+            let unlinked = armed.fd.as_ref().is_some_and(|fd| fd.metadata().is_ok_and(|meta| meta.nlink() == 0));
+            Some((armed.origin.clone(), unlinked))
+        }
+
+        fn where_now(&self, wd: &WatchDescriptor) -> (Option<PathBuf>, Vec<PathBuf>) {
+            let armed = lock(&self.armed);
+            let Some(armed) = armed.as_ref().filter(|armed| armed.wd == *wd) else { return (None, Vec::new()) };
+            let now = match &armed.fd {
+                Some(fd) => std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).ok().filter(|path| !path.to_string_lossy().ends_with(" (deleted)")),
+                None => {
+                    let mut folders = armed.roots.clone();
+                    folders.extend(armed.origin.parent().map(Path::to_path_buf));
+                    folders.extend(["", "Applications", "Desktop", "Downloads"].iter().map(|name| self.home.join(name)));
+                    locate(armed.dev, armed.ino, &folders)
+                }
+            };
+            (now, armed.roots.clone())
+        }
+
+        fn moved(&self, wd: &WatchDescriptor, now: &Path) {
+            if let Some(armed) = lock(&self.armed).as_mut().filter(|armed| armed.wd == *wd) {
+                armed.origin = now.to_path_buf();
+            }
+            *lock(&self.wanted) = Some(now.to_path_buf());
+        }
+
+        fn ended(&self, wd: &WatchDescriptor) {
+            let matched = {
+                let mut armed = lock(&self.armed);
+                let matched = armed.as_ref().is_some_and(|armed| armed.wd == *wd);
+                if matched {
+                    *armed = None;
+                }
+                matched
+            };
+            if matched {
+                *lock(&self.wanted) = None;
+            }
+        }
+
+        fn run(&self, mut inotify: Inotify, act: impl Fn(&Decision, &Path)) {
+            let mut buffer = [0u8; 4096];
+            loop {
+                let events: Vec<(WatchDescriptor, EventMask)> = match inotify.read_events_blocking(&mut buffer) {
+                    Ok(events) => events.map(|event| (event.wd.clone(), event.mask)).collect(),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => return,
+                };
+                for (wd, mask) in events {
+                    let Some((origin, unlinked)) = self.current(&wd) else { continue };
+                    if trace() {
+                        eprintln!("{} program event flags {:#x} on {}", stamp(), mask.bits(), origin.display());
+                    }
+                    if mask.contains(EventMask::IGNORED) {
+                        self.ended(&wd);
+                        continue;
+                    }
+                    let seen = seen_from(mask.contains(EventMask::UNMOUNT), mask.contains(EventMask::DELETE_SELF), mask.contains(EventMask::MOVE_SELF), mask.contains(EventMask::CLOSE_WRITE), mask.contains(EventMask::ATTRIB) && unlinked);
+                    let Some(seen) = seen else { continue };
+                    if seen == Seen::Renamed {
+                        std::thread::sleep(SETTLE);
+                    }
+                    let (now, roots) = self.where_now(&wd);
+                    let decision = decide(&origin, seen, &After { now: now.as_deref(), back: origin.exists() }, &|path| inside_any(path, &roots));
+                    act(&decision, &origin);
+                    match decision {
+                        Decision::Repoint(now) => self.moved(&wd, &now),
+                        Decision::Off(_) => {
+                            self.ended(&wd);
+                            return;
+                        }
+                        Decision::Nothing(_) if matches!(seen, Seen::Deleted | Seen::Revoked) => self.ended(&wd),
+                        Decision::Nothing(_) => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

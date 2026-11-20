@@ -84,6 +84,8 @@ pub struct Report {
     pub unsaved: bool,
     pub exit: bool,
     pub unload: bool,
+    #[cfg(any(target_os = "linux", test))]
+    pub origin: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -810,6 +812,8 @@ impl Daemon {
         *self.ledger.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Ledger { expected: before.clone(), external: false };
         let mut state = parse(before.as_deref());
         let mut report = Report::default();
+        #[cfg(any(target_os = "linux", test))]
+        report.origin.clone_from(&state.origin);
         if !state.on && !state.restoring {
             report.exit = true;
             return report;
@@ -1705,6 +1709,8 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     let trashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     #[cfg(target_os = "macos")]
     crate::program::watch_self(trashed.clone(), signal.clone());
+    #[cfg(target_os = "linux")]
+    let origin = crate::program::linux::Watcher::start(trashed.clone(), signal.clone());
     std::thread::Builder::new().name("scooch-tick".into()).spawn(move || {
         let mut said: Option<String> = None;
         loop {
@@ -1719,6 +1725,10 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             }
             let started = Instant::now();
             let report = daemon.tick();
+            #[cfg(target_os = "linux")]
+            if let Some(origin) = &origin {
+                origin.arm(report.origin.as_deref());
+            }
             drop(busy);
             relieve();
             stop.end();
@@ -2149,6 +2159,27 @@ pub mod tests {
         assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
         assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 2);
         assert_eq!(daemon.store.read(), Some(before));
+    }
+
+    #[test]
+    fn the_tick_reads_origin_from_the_state_it_loads_with_no_new_read_or_save() {
+        let (daemon, fake, _) = rig("origin-read", vec![screen("main", 0.0, 1.0)]);
+        let mut state = daemon.store.load();
+        state.origin = Some(PathBuf::from("/home/ada/Applications/Scooch.AppImage"));
+        daemon.store.save(&state).unwrap();
+        fake.place(vec![subject()]);
+        let reads = fake.snapshots.load(Ordering::SeqCst);
+        let report = daemon.tick();
+        assert_eq!(outcome(&report), Outcome::Rendered);
+        assert_eq!(report.origin, state.origin);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 1);
+        let before = compact(&daemon);
+        let report = daemon.tick();
+        assert_eq!(outcome(&report), Outcome::Unchanged);
+        assert_eq!(report.origin, state.origin);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 2);
+        assert_eq!(daemon.store.read(), Some(before));
+        assert_eq!(daemon.store.load().origin, state.origin);
     }
 
     #[test]
