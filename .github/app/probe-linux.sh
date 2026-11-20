@@ -395,22 +395,25 @@ line "- after closing it, ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ]
 mkdir -p "$HOME/probe-bin"
 cat >"$HOME/probe-bin/xdg-open" <<'OPEN'
 #!/bin/sh
+pwd -P >"$HOME/.probe-link-folder"
 env -0 >"$HOME/.probe-link-env"
 OPEN
 chmod +x "$HOME/probe-bin/xdg-open"
-rm -f "$HOME/.probe-link-env"
+rm -f "$HOME/.probe-link-env" "$HOME/.probe-link-folder"
 clean env NO_AT_BRIDGE=0 XDG_CURRENT_DESKTOP=Nowhere PATH="$HOME/probe-bin:$PATH" "$appimage" >>"$out/appimage.log" 2>&1 &
 wait_for 40 has_window >/dev/null
 sleep 4
 mount=$(tr '\0' '\n' <"/proc/$(pgrep -x scooch-app | head -1)/environ" 2>/dev/null | sed -n 's/^APPDIR=//p')
 folder=$(readlink "/proc/$(pgrep -x scooch-app | head -1)/cwd" 2>/dev/null)
 outside_mount() { [ -n "$mount" ] && [ -n "$folder" ] && case "$folder/" in "$mount"/*) false ;; *) true ;; esac; }
-line "- the app works in a folder inside the mount $(outside_mount && echo no || echo yes)"
-expect "the app started from the AppImage works in a folder outside the mount, so its children do too" outside_mount
+line "- the app itself works in a folder inside the mount $(outside_mount && echo no || echo yes), as WebKit finds its helper programs from there"
 line "- on a desktop named Nowhere $(python3 "$PWD/.github/app/controls.py" "Ask for Nowhere" press 2>&1 | tail -1)"
 wait_for 15 test -s "$HOME/.probe-link-env" >/dev/null
 [ -s "$HOME/.probe-link-env" ] && judged "$HOME/.probe-link-env" "$mount" >"$out/link-env.txt"
-rm -f "$HOME/.probe-link-env"
+folder=$(cat "$HOME/.probe-link-folder" 2>/dev/null)
+rm -f "$HOME/.probe-link-env" "$HOME/.probe-link-folder"
+line "- the link opener works in a folder inside the mount $(outside_mount && echo no || echo yes)"
+expect "the link opened from the AppImage works in a folder outside the mount" outside_mount
 line "- the link opener got $(wc -l <"$out/link-env.txt" 2>/dev/null || echo 0) names, inside the mount $(grep ' inside$' "$out/link-env.txt" 2>/dev/null | cut -d' ' -f1 | tr '\n' ' ')"
 expect "the link opened from the AppImage got no value inside the mount" none_inside "$out/link-env.txt"
 expect "the link opened from the AppImage got none of the runtime's names" no_runtime_name "$out/link-env.txt"
