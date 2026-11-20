@@ -201,7 +201,7 @@ line "- opened with Scooch off, ~/.local/bin/scooch $([ -e "$HOME/.local/bin/sco
 press_pill alt+F4
 wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
 sleep 2
-line "- after closing it, ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo absent), files Scooch wrote outside its folders $(find "$HOME" -newer "$appimage" -type f -not -path "$data/*" -not -path "$HOME/.local/share/me.sohanbhat.scooch.window/*" -not -path "$HOME/.cache/*" -not -path "$HOME/.config/me.sohanbhat.scooch.window/*" -not -path "$HOME/.local/share/gvfs-metadata/*" -not -path "$HOME/.config/xfce4/*" -not -path "$HOME/work/*" -not -path "$HOME/Downloads/*" 2>/dev/null | head -5 | tr '\n' ' ')"
+line "- after closing it, ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo absent), files Scooch wrote outside its folders $(find "$HOME/.local" "$HOME/bin" "$HOME/.config" -newer "$appimage" \( -type f -o -type l \) -not -path "$data/*" -not -path "$HOME/.local/share/me.sohanbhat.scooch.window/*" -not -path "$HOME/.cache/*" -not -path "$HOME/.config/me.sohanbhat.scooch.window/*" -not -path "$HOME/.local/share/gvfs-metadata/*" -not -path "$HOME/.config/xfce4/*" -not -path "$HOME/work/*" -not -path "$HOME/Downloads/*" 2>/dev/null | head -5 | tr '\n' ' ')"
 clean "$appimage" >>"$out/appimage.log" 2>&1 &
 wait_for 40 has_window >/dev/null
 sleep 3
