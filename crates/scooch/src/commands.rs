@@ -419,7 +419,7 @@ fn tally_lines(tally: &Tally) -> Vec<String> {
     lines
 }
 
-fn stop(store: &Store) -> Result<()> {
+pub(crate) fn stop(store: &Store) -> Result<()> {
     let Some(process) = store.watcher() else { return Ok(()) };
     poke::stop(process);
     if !wait_gone(|| poke::alive(process), STOP_PATIENCE, POLL, std::thread::sleep) {
