@@ -20,11 +20,10 @@ pub fn clean(command: &mut Command) -> &mut Command {
     command
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn a_child_gets_a_set_name_loses_a_removed_one_and_keeps_the_rest() {
         child_env(vec![("SCOOCH_CHILD_SET".into(), Some("set".into())), ("SCOOCH_CHILD_GONE".into(), None)]);

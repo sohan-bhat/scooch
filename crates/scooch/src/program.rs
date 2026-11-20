@@ -120,7 +120,7 @@ pub fn thrown(origin: &Path, trashes: &[(PathBuf, PathBuf)]) -> Option<PathBuf> 
 
 #[cfg(target_os = "linux")]
 pub fn copies(store: &crate::state::Store) -> Vec<PathBuf> {
-    let mut found: Vec<PathBuf> = dirs::home_dir().map(|home| home.join(".local").join("bin").join("scooch")).into_iter().collect();
+    let mut found: Vec<PathBuf> = link_places().first().map(|place| place.join("scooch")).into_iter().collect();
     found.push(store.root.join("bin").join("scooch"));
     found
 }
