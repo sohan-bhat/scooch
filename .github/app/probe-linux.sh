@@ -325,7 +325,7 @@ env -0 >"$HOME/.probe-link-env"
 OPEN
 chmod +x "$HOME/probe-bin/xdg-open"
 rm -f "$HOME/.probe-link-env"
-PATH="$HOME/probe-bin:$PATH" XDG_CURRENT_DESKTOP=Nowhere clean "$appimage" >>"$out/appimage.log" 2>&1 &
+clean env NO_AT_BRIDGE=0 XDG_CURRENT_DESKTOP=Nowhere PATH="$HOME/probe-bin:$PATH" "$appimage" >>"$out/appimage.log" 2>&1 &
 wait_for 40 has_window >/dev/null
 sleep 4
 mount=$(tr '\0' '\n' <"/proc/$(pgrep -x scooch-app | head -1)/environ" 2>/dev/null | sed -n 's/^APPDIR=//p')
