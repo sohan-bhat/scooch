@@ -1741,8 +1741,11 @@ mod probe {
     }
 
     fn delete_case(p: &mut Probe, run: &mut Watching) -> Result<()> {
+        let mark = watch_log(&run.log).len();
         ensure_running(p, run)?;
         let pid = run.child.as_ref().map(|child| child.id() as i32).context("no daemon runs")?;
+        let rested = logged_within(&run.log, mark, Instant::now(), Duration::from_secs(45), |line| line.contains(" sessions let go of "));
+        std::thread::sleep(Duration::from_secs(3));
         let aside = run.bundle.with_file_name(".ScoochWatch-kept.app");
         let _ = fs::remove_dir_all(&aside);
         let copied = p.tool("/usr/bin/ditto", &[&run.bundle.to_string_lossy(), &aside.to_string_lossy()]);
@@ -1756,10 +1759,13 @@ mod probe {
         let deleted = logged_within(&run.log, from, started, Duration::from_secs(10), |line| line.contains(" was deleted, so nothing changes"));
         let waiting = logged_within(&run.log, from, started, Duration::from_secs(10), |line| line.contains(" program folder watched at "));
         std::thread::sleep(Duration::from_secs(3));
+        let quiet_from = watch_log(&run.log).len();
         let calm = rusage(pid).context("the daemon usage could not be read")?;
         std::thread::sleep(Duration::from_secs(60));
         let later = rusage(pid).context("the daemon usage could not be read after the minute")?;
         let woke = (later.idle_wakeups.saturating_sub(calm.idle_wakeups), later.interrupt_wakeups.saturating_sub(calm.interrupt_wakeups));
+        let quiet_lines: Vec<String> = watch_log(&run.log).into_iter().skip(quiet_from).collect();
+        let folder_events = quiet_lines.iter().filter(|line| line.contains(" program folder event ")).count();
         let mark = watch_log(&run.log).len();
         let started = Instant::now();
         let back = p.tool("/usr/bin/ditto", &[&aside.to_string_lossy(), &run.bundle.to_string_lossy()]);
@@ -1767,7 +1773,7 @@ mod probe {
         let rearmed = logged_within(&run.log, mark, started, Duration::from_secs(10), |line| line.contains(" program watched at ") && line.contains(target.as_str()));
         let alive = alive(run);
         p.line(format!(
-            "- the app deleted: judged nothing after {deleted:?} ms, its folder watched after {waiting:?} ms, a quiet 60 s with only the folder watched: idle and interrupt wakeups {woke:?}, the same minute of check 6 without any watch {:?}, the app copied back exit {:?} and the watch armed on it again after {rearmed:?} ms, daemon alive {alive}, log {:?}",
+            "- the app deleted {rested:?} ms after the restarted daemon let its render sessions go: judged nothing after {deleted:?} ms, its folder watched after {waiting:?} ms, a quiet 60 s with only the folder watched: idle and interrupt wakeups {woke:?}, folder events {folder_events}, other log lines {quiet_lines:?}, the same minute of check 6 without any watch {:?}, the app copied back exit {:?} and the watch armed on it again after {rearmed:?} ms, daemon alive {alive}, log {:?}",
             p.quiet,
             back.code,
             program_lines(&run.log, from)
@@ -1775,7 +1781,7 @@ mod probe {
         if deleted.is_none() || waiting.is_none() || rearmed.is_none() || !alive {
             p.fail("after a delete the watch did not wait on the folder and arm again on the program put back");
         }
-        if p.quiet.is_some_and(|(idle, interrupt)| woke.0 > idle || woke.1 > interrupt) {
+        if folder_events > 0 || p.quiet.is_some_and(|(idle, interrupt)| woke.0 > idle || woke.1 > interrupt) {
             p.fail("the daemon woke more at rest with the folder watched than without any watch");
         }
         let _ = fs::remove_dir_all(&aside);
@@ -1839,12 +1845,16 @@ mod probe {
         std::thread::sleep(Duration::from_millis(1500));
         let moved_back = fs::rename(&inside, &app);
         let returned = moved_back.is_ok().then(|| started.elapsed().as_millis());
-        let calmed = wait_until(Duration::from_secs(30), || program_lines(&run.log, from).iter().filter(|line| line.contains("nothing changes")).count() >= 2).map(|_| started.elapsed().as_millis());
+        let calmed = wait_until(Duration::from_secs(30), || {
+            let said = program_lines(&run.log, from);
+            said.iter().position(|line| line.contains("nothing changes")).is_some_and(|at| said.iter().skip(at).any(|line| line.contains(" program watched at ") && line.contains(mark.as_str())))
+        })
+        .map(|_| started.elapsed().as_millis());
         let said = program_lines(&run.log, from);
         let off = said.iter().any(|line| line.contains("moved to the Trash"));
         let alive = running(&mut child);
         let kept = names(&run.plist, &exe);
-        p.line(format!("- Put Back inside 5 s on a ramdisk, the app moved into {} and back after {returned:?} ms ({moved_back:?}): both moves judged nothing after {calmed:?} ms, turned off {off}, daemon alive {alive}, login item unchanged {kept}, log {said:?}", inside.display()));
+        p.line(format!("- Put Back inside 5 s on a ramdisk, the app moved into {} and back after {returned:?} ms ({moved_back:?}): judged nothing and the watch armed again on the app after {calmed:?} ms, turned off {off}, daemon alive {alive}, login item unchanged {kept}, log {said:?}", inside.display()));
         if returned.is_none_or(|ms| ms > 5_000) || calmed.is_none() || off || !alive || !kept {
             p.fail("a Put Back inside 5 s did not leave Scooch as it was");
         }

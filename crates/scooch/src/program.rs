@@ -431,7 +431,11 @@ mod mac {
                     break true;
                 }
                 match next(queue) {
-                    Some(flags) if flags & GONE == 0 => {}
+                    Some(flags) if flags & GONE == 0 => {
+                        if crate::daemon::trace() {
+                            eprintln!("{} program folder event flags {flags:#x} on {}", crate::daemon::stamp(), target.parent().unwrap_or(target).display());
+                        }
+                    }
                     _ => break false,
                 }
             };
