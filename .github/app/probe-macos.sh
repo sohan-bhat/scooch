@@ -6,7 +6,7 @@ out="$2"
 mkdir -p "$out"
 report="$out/report.md"
 app=/Applications/Scooch.app
-daemon="$app/Contents/MacOS/scooch"
+daemon="$app/Contents/Helpers/Scooch.app/Contents/MacOS/scooch"
 data="$HOME/Library/Application Support/Scooch"
 plist="$HOME/Library/LaunchAgents/me.sohanbhat.scooch.plist"
 photo="$PWD/assets/photos/seagull-sky.jpg"
@@ -155,6 +155,12 @@ hdiutil detach -quiet "$mount" || hdiutil detach -force -quiet "$mount"
 line "- copied Scooch.app to Applications, $(du -sk "$app" | cut -f1) KB"
 line "- programs inside $(ls "$app/Contents/MacOS" | tr '\n' ' ')"
 codesign -dv "$app" 2>&1 | grep -E "Identifier|Signature|TeamIdentifier" | sed 's/^/- signature /' | tee -a "$report"
+helper="$app/Contents/Helpers/Scooch.app"
+line "- helper bundle $(ls "$helper/Contents" | tr '\n' ' '), its program $(ls "$helper/Contents/MacOS" | tr '\n' ' ')"
+line "- codesign --verify --deep --strict on the app $(codesign --verify --deep --strict "$app" 2>&1 && echo passes)"
+line "- the helper $(codesign -dv "$helper" 2>&1 | grep -E '^Identifier=|^Info.plist|^Runtime|^CodeDirectory' | tr '\n' ' ')"
+line "- the helper names $(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$helper/Contents/Info.plist" 2>&1), version $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$helper/Contents/Info.plist" 2>&1), sentence $(/usr/libexec/PlistBuddy -c 'Print :NSAppleEventsUsageDescription' "$helper/Contents/Info.plist" 2>&1)"
+line "- the helper's entitlements $(codesign -d --entitlements :- "$helper" 2>/dev/null | grep -o 'automation.apple-events' | head -1)"
 
 xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$app"
 line "- Gatekeeper on a downloaded copy, word for word: $(spctl --assess --type execute -vvv "$app" 2>&1 | tr '\n' ' ')"
@@ -218,12 +224,16 @@ consent_owner() {
   done
   return 1
 }
-if took=$(wait_for 30 consent_owner); then
+has_consent() { consent_owner >/dev/null; }
+if took=$(wait_for 30 has_consent); then
   owner=$(consent_owner)
   screencapture -x "$out/consent.png"
   words=$(limited 15 osascript -e "tell application \"System Events\" to tell process \"$owner\" to get value of every static text of window 1" 2>&1 | tr '\n' ' ')
   buttons=$(limited 15 osascript -e "tell application \"System Events\" to tell process \"$owner\" to get name of every button of window 1" 2>&1 | tr '\n' ' ')
-  line "- the consent window came after $took s from $owner, screen kept as consent.png"
+  sleep 3
+  count=$(limited 10 osascript -e "tell application \"System Events\" to count windows of process \"$owner\"" 2>/dev/null)
+  screencapture -x "$out/consent.png"
+  line "- the consent window came after $took s from $owner, $count window there, screen kept as consent.png"
   line "- it says: $words"
   line "- its buttons: $buttons"
 else
@@ -275,7 +285,7 @@ line "- daemons after close $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')
 moved=/Applications/Tools/Scooch.app
 mkdir -p /Applications/Tools
 mv "$app" "$moved"
-points_at_move() { [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null)" = "$moved/Contents/MacOS/scooch" ] && [ "$(readlink "$HOME/.local/bin/scooch")" = "$moved/Contents/MacOS/scooch" ]; }
+points_at_move() { [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null)" = "$moved/Contents/Helpers/Scooch.app/Contents/MacOS/scooch" ] && [ "$(readlink "$HOME/.local/bin/scooch")" = "$moved/Contents/Helpers/Scooch.app/Contents/MacOS/scooch" ]; }
 if took=$(wait_for 25 points_at_move); then line "- moved the app to /Applications/Tools, the login item and the terminal link followed after $took s"; else line "- moved the app to /Applications/Tools, login item $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null), link $(readlink "$HOME/.local/bin/scooch") after 25 s"; fi
 line "- Trash through Finder $(limited 30 osascript -e "tell application \"Finder\" to delete POSIX file \"$moved\"" 2>&1)"
 cleared() { wallpaper_is_photo && no_plist && ! pgrep -f 'MacOS/scooch watch' >/dev/null && [ ! -L "$HOME/.local/bin/scooch" ] && [ ! -e "$HOME/.local/bin/scooch" ]; }
@@ -344,13 +354,13 @@ line "- /Applications mode $mode set to $(stat -f %Lp /Applications) for the pro
 open_from_image
 press_move
 line "- ~/Applications/Scooch.app is there $([ -d "$HOME/Applications/Scooch.app" ] && echo yes || echo no)"
-ln -sf /Applications/Tools/Scooch.app/Contents/MacOS/scooch "$HOME/.local/bin/scooch"
+ln -sf /Applications/Tools/Scooch.app/Contents/Helpers/Scooch.app/Contents/MacOS/scooch "$HOME/.local/bin/scooch"
 line "- a link at ~/.local/bin/scooch points at a bundle that is gone, $(readlink "$HOME/.local/bin/scooch")"
 line "- $(press 'Turn on')"
 wait_for 30 state_on >/dev/null
 sleep 5
 line "- after Turn on the link points at $(readlink "$HOME/.local/bin/scooch"), the login item at $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null)"
-daemon="$HOME/Applications/Scooch.app/Contents/MacOS/scooch"
+daemon="$HOME/Applications/Scooch.app/Contents/Helpers/Scooch.app/Contents/MacOS/scooch"
 stand_in
 wait_for 40 rendered >/dev/null
 sleep 5
