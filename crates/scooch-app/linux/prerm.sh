@@ -18,7 +18,8 @@ for proc in /proc/[0-9]*; do
   [ -n "$uid" ] || continue
   user=$(getent passwd "$uid" | cut -d: -f1)
   [ -n "$user" ] || continue
-  timeout 60 runuser -u "$user" -- xargs -0 -a "$proc/environ" sh -c 'exec env -i "$@" '"$program"' off' sh >/dev/null 2>&1 || true
+  logger -t scooch-remove "turning Scooch off for $user" 2>/dev/null
+  timeout 60 runuser -u "$user" -- xargs -0 -a "$proc/environ" sh -c 'exec env -i "$@" '"$program"' off' sh 2>&1 | logger -t scooch-remove || true
 done
 
 exit 0

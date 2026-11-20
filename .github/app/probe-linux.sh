@@ -63,7 +63,9 @@ press_pill() {
   id=$(window)
   [ -n "$id" ] || return 1
   xdotool windowactivate --sync "$id" >/dev/null 2>&1
-  xdotool key --window "$id" "$@"
+  xdotool windowfocus --sync "$id" >/dev/null 2>&1
+  sleep 0.5
+  xdotool key --delay 120 "$@"
 }
 
 : >"$report"
@@ -99,6 +101,7 @@ line "- daemons running $(pgrep -fc '/usr/bin/scooch watch')"
 
 sudo apt-get remove -y scooch >"$out/remove.log" 2>&1
 line "- package removal exit $?"
+line "- removal log $(journalctl -t scooch-remove --no-pager -o cat 2>/dev/null | tail -5 | tr '\n' ' ')"
 sleep 3
 line "- wallpaper after removal $(wallpaper), back to the photo $([ "$(wallpaper)" = "$photo" ] && echo yes || echo no)"
 line "- login item after removal $([ -f "$autostart" ] && echo present || echo gone), daemons running $(pgrep -fc '/usr/bin/scooch watch')"
