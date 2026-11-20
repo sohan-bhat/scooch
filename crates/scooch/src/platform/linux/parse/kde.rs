@@ -224,7 +224,12 @@ pub fn extra(cell: f64, container: f64) -> f64 {
     ((container - fit * cell).max(0.0) / fit).floor()
 }
 
-pub const DRAG_EDGE: f64 = 20.0;
+pub const EDGE_SLACK: f64 = 2.0;
+pub const DRAG_DISTANCE: f32 = 10.0;
+
+pub fn drag_distance(kdeglobals: &[Group]) -> f32 {
+    find(kdeglobals, &["KDE"]).and_then(|group| group.get("StartDragDist")).and_then(|value| value.trim().parse::<f32>().ok()).filter(|value| *value > 0.0).unwrap_or(DRAG_DISTANCE)
+}
 
 pub fn unpredictable(containment: &Containment, frame: &Rect, area: &Rect, scale: f32) -> Option<&'static str> {
     if containment.setting("sortMode") != Some(-1) {
@@ -317,24 +322,28 @@ impl Grid {
         }
     }
 
-    pub fn target(&self, release: (f32, f32)) -> Option<i64> {
-        let (across, down) = self.local(release)?;
+    pub fn target(&self, from: i64, start: (f32, f32), release: (f32, f32)) -> Result<i64, &'static str> {
+        let cell = self.layout.rect(from, &self.area);
         let (wide, tall) = self.size();
         let small = self.layout.small_spacing();
-        self.index(((across + small + wide / 2.0) / wide).floor() as i64, ((down + 2.0 * small + self.layout.icon / 2.0) / tall).floor() as i64)
+        let across = f64::from(cell.x - self.area.x) + small + f64::from(release.0 - start.0) + wide / 2.0 - 1.0;
+        let down = f64::from(cell.y - self.area.y) + small + f64::from(release.1 - start.1) + small + self.layout.icon / 2.0 - 1.0;
+        if across < 0.0 || down < 0.0 {
+            return Err("the dragged icon left the grid");
+        }
+        let near = |value: f64, size: f64| {
+            let inside = value.rem_euclid(size);
+            inside < EDGE_SLACK || size - inside < EDGE_SLACK
+        };
+        if near(across, wide) || near(down, tall) {
+            return Err("the middle of the dragged icon sat on the edge of a cell");
+        }
+        self.index((across / wide).floor() as i64, (down / tall).floor() as i64).ok_or("the landing cell lies past the end of its row or column")
     }
 
-    pub fn landing(&self, from: i64, press: (f32, f32), release: (f32, f32)) -> Result<i64, &'static str> {
+    pub fn landing(&self, from: i64, start: (f32, f32), release: (f32, f32)) -> Result<i64, &'static str> {
         if self.layout.right_to_left {
             return Err("the icons are aligned right to left");
-        }
-        if self.cell_at(press) != Some(from) {
-            return Err("the press was not on the icon's own cell");
-        }
-        let cell = self.layout.rect(from, &self.area);
-        let (x, y) = (f64::from(press.0 - cell.x), f64::from(press.1 - cell.y));
-        if x < DRAG_EDGE || y < DRAG_EDGE || x > f64::from(cell.w) - DRAG_EDGE || y > f64::from(cell.h) - DRAG_EDGE {
-            return Err("the press sat too near the edge of its cell to know where Plasma takes the drag from");
         }
         if self.local(release).is_none() {
             return Err("the release left the desktop of the screen the drag began on");
@@ -344,7 +353,7 @@ impl Grid {
             Some(index) if self.taken.contains(&index) => return Err("the release was over another icon"),
             _ => {}
         }
-        let to = self.target(release).ok_or("the landing cell lies past the end of its row or column")?;
+        let to = self.target(from, start, release)?;
         if to == from {
             return Err("the icon would land in its own cell");
         }
@@ -688,29 +697,43 @@ mod tests {
     #[test]
     fn plasma5_lands_a_drop_where_folder_view_puts_it() {
         let grid = plasma5_grid(&[0]);
-        assert_eq!(grid.landing(0, (60.0, 60.0), (600.0, 300.0)), Ok(37));
-        assert_eq!(grid.landing(0, (60.0, 60.0), (654.0, 300.0)), Ok(37));
-        assert_eq!(grid.landing(0, (60.0, 60.0), (656.0, 300.0)), Ok(38), "past the middle less the frame margin the drop goes one column on");
-        assert_eq!(grid.landing(0, (60.0, 60.0), (600.0, 341.0)), Ok(37));
-        assert_eq!(grid.landing(0, (60.0, 60.0), (600.0, 342.0)), Ok(53), "a drop low in a cell goes one row down");
+        let start = (70.0, 60.0);
+        assert_eq!(grid.landing(0, start, (600.0, 300.0)), Ok(36), "the cell under the middle of the dragged icon, not under the pointer");
+        assert_eq!(grid.landing(0, start, (612.0, 300.0)), Ok(37));
+        assert_eq!(grid.landing(0, start, (605.0, 300.0)), Err("the middle of the dragged icon sat on the edge of a cell"));
+        assert_eq!(grid.landing(0, start, (600.0, 400.0)), Ok(36));
+        assert_eq!(grid.landing(0, start, (600.0, 405.0)), Ok(52));
+        assert_eq!(grid.landing(0, (60.0, 60.0), (600.0, 300.0)), Ok(37), "Plasma takes the drag from where the pointer first went far enough, not from the press");
+        assert_eq!(grid.landing(0, start, (5.0, 300.0)), Err("the dragged icon left the grid"));
         assert_eq!(grid.icon(37), Rect { x: 606.0, y: 266.0, w: 109.0, h: 113.0 });
         let columns = Grid { layout: Layout { rows_first: false, ..grid.layout }, ..grid.clone() };
-        assert_eq!(columns.landing(0, (60.0, 60.0), (600.0, 300.0)), Ok(42));
+        assert_eq!(columns.landing(0, start, (600.0, 300.0)), Ok(34));
+    }
+
+    #[test]
+    fn plasma5_lands_the_two_drops_measured_on_plasma_5_27_where_plasma_put_them() {
+        assert_eq!(plasma5_grid(&[69]).landing(69, (675.0, 558.0), (960.0, 540.0)), Ok(71));
+        assert_eq!(plasma5_grid(&[89]).landing(89, (1129.0, 685.0), (912.0, 628.0)), Ok(71));
     }
 
     #[test]
     fn plasma5_gives_no_landing_where_folder_view_would_not_move_or_would_walk() {
-        let grid = plasma5_grid(&[0, 37, 54]);
-        assert_eq!(grid.landing(0, (60.0, 60.0), (600.0, 300.0)), Err("the release was over another icon"));
-        assert_eq!(grid.landing(0, (60.0, 60.0), (740.0, 345.0)), Err("the landing cell is taken"));
-        assert_eq!(grid.landing(0, (60.0, 60.0), (100.0, 100.0)), Err("the release stayed in the icon's own cell"));
-        assert_eq!(grid.landing(0, (60.0, 60.0), (1900.0, 300.0)), Err("the landing cell lies past the end of its row or column"));
-        assert_eq!(grid.landing(0, (60.0, 60.0), (2000.0, 300.0)), Err("the release left the desktop of the screen the drag began on"));
-        assert_eq!(grid.landing(0, (60.0, 15.0), (600.0, 500.0)), Err("the press sat too near the edge of its cell to know where Plasma takes the drag from"));
-        assert_eq!(grid.landing(0, (110.0, 60.0), (600.0, 500.0)), Err("the press sat too near the edge of its cell to know where Plasma takes the drag from"));
-        assert_eq!(grid.landing(0, (300.0, 60.0), (600.0, 500.0)), Err("the press was not on the icon's own cell"));
+        let grid = plasma5_grid(&[0, 37, 52]);
+        let start = (70.0, 60.0);
+        assert_eq!(grid.landing(0, start, (612.0, 300.0)), Err("the release was over another icon"));
+        assert_eq!(grid.landing(0, start, (603.0, 405.0)), Err("the landing cell is taken"));
+        assert_eq!(grid.landing(0, start, (100.0, 100.0)), Err("the release stayed in the icon's own cell"));
+        assert_eq!(grid.landing(0, (50.0, 60.0), (1910.0, 300.0)), Err("the landing cell lies past the end of its row or column"));
+        assert_eq!(grid.landing(0, start, (2000.0, 300.0)), Err("the release left the desktop of the screen the drag began on"));
         let mirrored = Grid { layout: Layout { right_to_left: true, ..grid.layout }, ..grid };
         assert_eq!(mirrored.landing(0, (1860.0, 60.0), (600.0, 500.0)), Err("the icons are aligned right to left"));
+    }
+
+    #[test]
+    fn the_drag_distance_comes_from_kdeglobals_or_is_ten() {
+        assert_eq!(drag_distance(&parse("[KDE]\nStartDragDist=4\n")), 4.0);
+        assert_eq!(drag_distance(&parse("[KDE]\nStartDragDist=none\n")), DRAG_DISTANCE);
+        assert_eq!(drag_distance(&parse("")), 10.0);
     }
 
     #[test]

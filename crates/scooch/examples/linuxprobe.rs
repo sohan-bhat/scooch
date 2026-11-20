@@ -1186,9 +1186,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let shown: Vec<String> = reads.iter().map(|taken| format!("{}+{}:{}", taken.began.as_millis(), taken.took.as_millis(), changed.iter().filter(|rect| taken.seen.contains(rect)).count())).collect();
         p.line(format!("    - reads {}", shown.join(" ")));
         if let Some(boards) = boards {
-            let press = (f32::from(plan.from.0) / bench.scale, f32::from(plan.from.1) / bench.scale);
-            let release = (f32::from(plan.to.0) / bench.scale, f32::from(plan.to.1) / bench.scale);
-            let said = match plasma_landing(&boards, press, release) {
+            let start = logical(drag_start(plan.from, plan.to, drag_distance()), bench.scale);
+            let said = match plasma_landing(&boards, logical(plan.from, bench.scale), start, logical(plan.to, bench.scale)) {
                 Ok((_, to, rect)) => {
                     let mut expected: Rects = plan.before.iter().filter(|rect| !plan.moving.contains(rect)).copied().collect();
                     expected.push(rounded(&rect));
@@ -1356,13 +1355,28 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
     }
 
-    fn plasma_landing(boards: &[kde::Board], press: (f32, f32), release: (f32, f32)) -> Result<(i64, i64, Rect), &'static str> {
+    fn plasma_landing(boards: &[kde::Board], press: (f32, f32), start: (f32, f32), release: (f32, f32)) -> Result<(i64, i64, Rect), &'static str> {
         let (board, from) = plasma_board(boards, press)?;
         if let Some(why) = board.why_not {
             return Err(why);
         }
-        let to = board.grid.landing(from, press, release)?;
+        let to = board.grid.landing(from, start, release)?;
         Ok((from, to, board.grid.icon(to)))
+    }
+
+    fn drag_distance() -> f32 {
+        kde_rules::drag_distance(&kde::groups("kdeglobals"))
+    }
+
+    fn drag_start(from: (i16, i16), to: (i16, i16), distance: f32) -> (i16, i16) {
+        (1..=20i32)
+            .map(|step| ((from.0 as i32 + (to.0 as i32 - from.0 as i32) * step / 20) as i16, (from.1 as i32 + (to.1 as i32 - from.1 as i32) * step / 20) as i16))
+            .find(|point| f32::from((point.0 - from.0).abs() + (point.1 - from.1).abs()) >= distance)
+            .unwrap_or(to)
+    }
+
+    fn logical(point: (i16, i16), scale: f32) -> (f32, f32) {
+        (f32::from(point.0) / scale, f32::from(point.1) / scale)
     }
 
     fn set_times(lines: &[String], dropped: f64) -> Vec<f64> {
@@ -1410,6 +1424,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let active = wait_until(Duration::from_secs(3), || active_window(&conn, screen.root) == Some(window)).is_some();
         std::thread::sleep(Duration::from_millis(600));
         let code = key_code(&conn, 0x61).context("no key for the letter a")?;
+        conn.xtest_fake_input(KEY_PRESS_EVENT, code, 0, screen.root, 0, 0, 0)?;
+        conn.xtest_fake_input(KEY_RELEASE_EVENT, code, 0, screen.root, 0, 0, 0)?;
+        conn.sync()?;
+        std::thread::sleep(Duration::from_millis(400));
         let before = drops_switches(pid);
         for _ in 0..50 {
             conn.xtest_fake_input(KEY_PRESS_EVENT, code, 0, screen.root, 0, 0, 0)?;
@@ -1442,7 +1460,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn key_lines(lines: &[String]) -> Vec<String> {
-        lines.iter().filter(|line| line.contains(" drop key")).cloned().collect()
+        lines.iter().filter(|line| line.contains(" drop key") || line.contains(" drop thread woke")).cloned().collect()
     }
 
     fn key_cases(p: &mut Probe, bench: &Bench, tracked: Option<(f32, f32)>, at: &dyn Fn(f32, f32) -> (i16, i16)) -> Option<(f32, f32)> {
@@ -1450,7 +1468,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         match typed_elsewhere(bench.pid) {
             Ok((active, before, after)) => {
                 let switched = before.zip(after).map(|(before, after)| after.saturating_sub(before));
-                p.line(format!("  - 50 keys typed into a window of the probe's own, which the window manager made the active window {active}, the scooch-drops thread switched {switched:?} times while they went in"));
+                p.line(format!("  - 50 keys typed into a window of the probe's own, which the window manager made the active window {active}, after one key that makes the X server's test keyboard the one in use, the scooch-drops thread switched {switched:?} times while they went in"));
                 match switched {
                     None => p.fail("the scooch-drops thread could not be read while keys went to another window"),
                     Some(0) => {}
@@ -1505,13 +1523,15 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         (0..rows.max(0)).flat_map(move |row| (0..columns.max(0)).map(move |column| (area.x + 24.0 + 8.0 * column as f32, area.y + 24.0 + 8.0 * row as f32)))
     }
 
-    fn taken_drop(boards: &[kde::Board], press: (f32, f32)) -> Option<((f32, f32), i64, i64)> {
+    fn taken_drop(boards: &[kde::Board], press: (f32, f32), scale: f32) -> Option<((f32, f32), i64, i64)> {
         let (board, from) = plasma_board(boards, press).ok()?;
         let grid = &board.grid;
+        let distance = drag_distance();
         by_center(&grid.area, lattice_points(&grid.area)).into_iter().find_map(|point| {
-            let landing = grid.target(point)?;
+            let start = logical(drag_start(physical_point(press, scale), physical_point(point, scale), distance), scale);
+            let landing = grid.target(from, start, point).ok()?;
             let pointer = grid.cell_at(point)?;
-            let usable = grid.landing(from, press, point) == Err("the landing cell is taken") && pointer != from && !grid.taken.contains(&pointer);
+            let usable = grid.landing(from, start, point) == Err("the landing cell is taken") && pointer != from && !grid.taken.contains(&pointer);
             usable.then(|| walked(grid, from, landing).map(|walk| (point, landing, walk))).flatten()
         })
     }
@@ -1523,14 +1543,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let grid = &board.grid;
         let (_, tall) = grid.size();
         let jump = (press.0, press.1 - tall as f32);
-        let start = grid.cell_at(jump)?;
-        let per = grid.per();
+        grid.cell_at(jump)?;
         by_center(&grid.area, lattice_points(&grid.area)).into_iter().find_map(|point| {
-            let guess = grid.landing(from, press, point).ok()?;
-            let truth = if grid.layout.rows_first { guess + per } else { (guess % per + 1 < per).then_some(guess + 1)? };
-            let fits = grid.icon(truth).y + grid.icon(truth).h <= grid.area.y + grid.area.h;
-            let usable = grid.cell_at(point) != Some(start) && truth != from && !grid.taken.contains(&truth) && fits;
-            usable.then_some((jump, point, guess, truth))
+            let hooked = grid.landing(from, jump, point).ok()?;
+            let straight = grid.target(from, press, point).ok()?;
+            (straight != hooked).then_some((jump, point, hooked, straight))
         })
     }
 
@@ -1574,7 +1591,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             p.fail("Plasma's grid could not be read for the drop on a taken cell");
             return;
         };
-        let Some((spot, landing, walk)) = taken_drop(&boards, press) else {
+        let Some((spot, landing, walk)) = taken_drop(&boards, press, scale) else {
             p.fail("no release point lands the probe icon on a taken cell with a free cell under the pointer");
             return;
         };
@@ -1611,39 +1628,32 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let from = grab(&icon, scale);
         let press = (f32::from(from.0) / scale, f32::from(from.1) / scale);
         let plan = plasma_boards(bench.linux).and_then(|boards| hook_plan(&boards, press).map(|plan| (boards, plan)));
-        let Some((boards, (jump, release, guess, truth))) = plan else {
-            p.soft("the forced miss", "no free pair of cells one row apart was found for the hook drag");
+        let Some((boards, (jump, release, hooked, straight))) = plan else {
+            p.fail("no release point gives the hook drag a landing apart from a straight drag");
             return;
         };
         let Ok((board, _)) = plasma_board(&boards, press) else { return };
-        let (truth_rect, guess_rect) = (rounded(&board.grid.icon(truth)), rounded(&board.grid.icon(guess)));
+        let (hooked_rect, straight_rect) = (rounded(&board.grid.icon(hooked)), rounded(&board.grid.icon(straight)));
         let (jump_at, release_at) = (physical_point(jump, scale), physical_point(release, scale));
         let mark = log_lines(&bench.log).len();
         let dropped = wall();
-        let hooked = special(p, bench, "a hook drag whose first motion leaves the icon's row, which the prediction misses", || {
+        let hook = special(p, bench, "a hook drag whose first motion leaves the icon's row, which the prediction follows", || {
             hook_drag(from, jump_at, release_at)?;
-            Ok(format!("the probe icon pressed at {},{}, first moved to {},{} in the row above, then let go at {},{}, where the prediction lands it in cell {guess} and Plasma, which takes the drag from the first motion, in cell {truth}", from.0, from.1, jump_at.0, jump_at.1, release_at.0, release_at.1))
+            Ok(format!("the probe icon pressed at {},{}, first moved to {},{} in the row above, then let go at {},{}, where Plasma, which takes the drag from that first motion, lands it in cell {hooked} and a drag taken from the press would land in cell {straight}", from.0, from.1, jump_at.0, jump_at.1, release_at.0, release_at.1))
         });
         let fresh = log_lines(&bench.log);
         let fresh = fresh.get(mark..).unwrap_or_default();
         let sets = set_times(fresh, dropped);
-        let off = fresh.iter().any(|line| line.contains(&rules_off_line()));
-        let missed = fresh.iter().any(|line| line.contains("predicted drop missed"));
+        let (agreed, began) = (fresh.iter().any(|line| line.contains("predicted drop agreed")), fresh.iter().filter(|line| line.contains(" drop drag began at ")).cloned().collect::<Vec<_>>());
         let now = places(bench.linux);
-        let landed = now.contains(&truth_rect);
-        p.line(format!("    - wallpaper sets at {sets:?} ms after the drop, the miss logged {missed}, the line that turns prediction off logged {off}, the icon in Plasma's cell {landed} and in the guessed cell {}", now.contains(&guess_rect)));
-        if !hooked.0 {
-            p.soft("the forced miss", "the daemon made no guess for the hook drag");
-        } else if !missed && landed {
-            p.fail("the hook drag landed where Plasma's rule says and yet the net found no miss");
-        } else if !missed {
-            p.soft("the forced miss", "Plasma did not take the hook drag from its first motion, so the guess held");
-        } else if !off || sets.len() < 2 || !sets.get(1).is_some_and(|second| *second >= 1500.0) || !landed {
-            p.fail(format!("the forced miss was not corrected at the save, sets {sets:?} ms, off line {off}, icon in Plasma's cell {landed}"));
+        let (landed, astray) = (now.contains(&hooked_rect), now.contains(&straight_rect));
+        p.line(format!("    - drag starts seen {began:?}, wallpaper sets at {sets:?} ms after the drop, the net agreed {agreed}, the icon in the hooked cell {landed} and in the straight cell {astray}"));
+        if !hook.0 || !agreed || !landed || sets.len() != 1 || !sets.first().is_some_and(|first| *first < KDE_DROP_BAR) {
+            p.fail(format!("the hook drag was not predicted where Plasma put it, guessed {}, agreed {agreed}, in the hooked cell {landed}, sets {sets:?} ms", hook.0));
         }
         let _ = clicks(&[at(0.92, 0.92)]);
         let now = places(bench.linux);
-        let Some(icon) = nearest(&now, center(&truth_rect)) else { return };
+        let Some(icon) = nearest(&now, center(&hooked_rect)) else { return };
         let from = grab(&icon, scale);
         let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
         let escape = special(p, bench, "drag ended with Escape", || {
@@ -1651,10 +1661,6 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             Ok(format!("the probe icon from {},{} toward {},{}, Escape before the release", from.0, from.1, free.0, free.1))
         });
         untouched(p, "drag ended with Escape", escape, false);
-    }
-
-    fn rules_off_line() -> String {
-        scooch::platform::linux::parse::drops::off_line("Plasma")
     }
 
     fn steady_lines(p: &mut Probe, tally: &mut Tally, plan: &Plan, reads: &[Taken<Rects>], last: &[[i64; 4]], slot: usize) {
