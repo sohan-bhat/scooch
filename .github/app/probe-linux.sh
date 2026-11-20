@@ -139,7 +139,7 @@ pid=$(pgrep -x scooch-app | head -1)
 if [ -n "$pid" ]; then
   tr '\0' '\n' <"/proc/$pid/environ" >"$out/appimage-env.txt"
   line "- environment the AppImage sets $(grep -E '^(LD_|GIO|GTK|GDK|GSETTINGS|XDG_DATA_DIRS|APPDIR|PYTHON|PERL|QT_)' "$out/appimage-env.txt" | cut -d= -f1 | tr '\n' ' ')"
-  xargs -0 -a "/proc/$pid/environ" env -i xfconf-query -c xfce4-desktop -l >"$out/xfconf-in-appimage.txt" 2>&1
+  xargs -0 -a "/proc/$pid/environ" sh -c 'exec env -i "$@" xfconf-query -c xfce4-desktop -l' sh >"$out/xfconf-in-appimage.txt" 2>&1
   line "- xfconf-query under that environment exit $?, $(head -c 300 "$out/xfconf-in-appimage.txt" | tr '\n' ' ')"
   appdir=$(grep '^APPDIR=' "$out/appimage-env.txt" | cut -d= -f2-)
   line "- the scooch inside is $(file -b "$appdir/usr/bin/scooch" | cut -c1-80), --version says $("$appdir/usr/bin/scooch" --version 2>&1; echo " exit $?")"
@@ -159,7 +159,7 @@ if took=$(wait_for 30 state_off); then line "- off again after $took s"; else li
 press_pill Return
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 press_pill alt+F4
-if wait_for 15 sh -c '! pgrep -f "\.AppImage" >/dev/null && ! pgrep -x scooch-app >/dev/null' >/dev/null; then line "- closing the window ended the AppImage"; else line "- the AppImage outlived its window"; fi
+if wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null; then line "- closing the window ended the app, left running $(pgrep -fa 'AppImage|scooch' | grep -v probe | cut -c1-120 | tr '\n' ';')"; else line "- the app outlived its window"; fi
 "$HOME/.local/bin/scooch" off >"$out/appimage-off.txt" 2>&1
 line "- the command turned Scooch off, wallpaper $(wallpaper)"
 exit 0
