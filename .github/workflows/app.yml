@@ -177,10 +177,14 @@ jobs:
         with:
           name: app-windows-x64
           path: built
+      - uses: actions/download-artifact@v4
+        with:
+          name: programs-windows-x64
+          path: programs
       - name: Probe
         timeout-minutes: 20
         shell: pwsh
-        run: ./.github/app/probe-windows.ps1 -Built built -Out appprobe
+        run: ./.github/app/probe-windows.ps1 -Built built -Out appprobe -Programs programs
       - name: Upload
         if: always()
         uses: actions/upload-artifact@v4
@@ -219,6 +223,48 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: appprobe-linux
+          path: appprobe
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+  rpm-fedora:
+    needs: build-linux
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-linux-x64
+          path: built
+      - name: Install, answer and remove
+        run: |
+          mkdir -p appprobe
+          report=appprobe/report.md
+          rpm=$(ls built/*.x86_64.rpm | head -1)
+          name=$(rpm -qp --qf '%{NAME}' "$rpm")
+          echo "## rpm on $(. /etc/os-release && echo "$PRETTY_NAME")" > "$report"
+          echo >> "$report"
+          echo "- file $(basename "$rpm"), package $name" >> "$report"
+          dnf install -y "$rpm" > appprobe/install.log 2>&1
+          echo "- dnf install exit $?, pulled $(grep -c '^ ' appprobe/install.log) lines of packages" >> "$report"
+          echo "- scooch --version answers $(scooch --version 2>&1)" >> "$report"
+          missing=$(ldd /usr/bin/scooch-app | grep 'not found' || true)
+          echo "- ldd on scooch-app misses ${missing:-nothing}" >> "$report"
+          dnf remove -y "$name" > appprobe/remove.log 2>&1
+          removed=$?
+          echo "- dnf remove exit $removed, files left $(rpm -q "$name" >/dev/null 2>&1 && echo yes || echo no)" >> "$report"
+          cat "$report"
+          scooch_left=$(command -v scooch || true)
+          if [ -n "$missing" ] || [ "$removed" != 0 ] || [ -n "$scooch_left" ]; then exit 1; fi
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appprobe-rpm
           path: appprobe
           if-no-files-found: warn
       - name: Summary
