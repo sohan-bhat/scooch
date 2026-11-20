@@ -1,0 +1,179 @@
+name: app
+
+on:
+  push:
+    branches: [app]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "site/src/styles/tokens.css"
+      - "site/src/components/ui/**"
+      - "site/scripts/make-brand.mjs"
+      - ".github/workflows/app.yml"
+      - ".github/actions/app-build/**"
+      - ".github/app/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+  APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+  APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+  APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+  APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+  APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+  WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+  WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+  TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+
+jobs:
+  build-macos:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/app-build
+        with:
+          name: macos
+          target: universal-apple-darwin
+          bundles: app,dmg
+
+  build-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            target: x86_64-pc-windows-msvc
+            clippy: "true"
+          - name: windows-arm64
+            target: aarch64-pc-windows-msvc
+            clippy: "false"
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/app-build
+        with:
+          name: ${{ matrix.name }}
+          target: ${{ matrix.target }}
+          bundles: nsis
+          clippy: ${{ matrix.clippy }}
+
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            musl: x86_64-unknown-linux-musl
+          - name: linux-arm64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            musl: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/app-build
+        with:
+          name: ${{ matrix.name }}
+          target: ${{ matrix.target }}
+          musl: ${{ matrix.musl }}
+          bundles: deb,rpm,appimage
+
+  probe-macos:
+    needs: build-macos
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-macos
+          path: built
+      - name: Probe
+        timeout-minutes: 20
+        run: bash .github/app/probe-macos.sh built appprobe
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appprobe-${{ matrix.runner }}
+          path: appprobe
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+  probe-windows:
+    needs: build-windows
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-windows-x64
+          path: built
+      - name: Probe
+        timeout-minutes: 20
+        shell: pwsh
+        run: ./.github/app/probe-windows.ps1 -Built built -Out appprobe
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appprobe-windows
+          path: appprobe
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        shell: bash
+        run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+  probe-linux:
+    needs: build-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-linux-x64
+          path: built
+      - name: Probe
+        timeout-minutes: 20
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11
+          sudo apt-get install -y ./built/*.deb
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          dbus-run-session -- bash .github/linux/xfce.sh .github/app/probe-linux.sh appprobe
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appprobe-linux
+          path: appprobe
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true

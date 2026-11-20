@@ -1,6 +1,7 @@
 mod cache;
 mod commands;
 mod daemon;
+pub mod facade;
 mod glide;
 #[doc(hidden)]
 pub mod live;

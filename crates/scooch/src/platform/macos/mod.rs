@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-static RUNNING: AtomicBool = AtomicBool::new(false);
+pub(crate) static RUNNING: AtomicBool = AtomicBool::new(false);
 const COMBINED_SESSION: i32 = 0;
 const LEFT_BUTTON: u32 = 0;
 
