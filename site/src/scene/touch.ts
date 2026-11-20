@@ -32,8 +32,6 @@ export const live = {
   power: true,
   channel: -1,
   noiseAt: -1e9,
-  tape: false,
-  tapeAt: 0,
   ringUntil: 0,
   stapleAt: -1e9,
   sipAt: -1e9,
@@ -130,7 +128,6 @@ export function release(now: number) {
     live.power = true;
     live.onAt = now;
   }
-  live.tape = false;
   live.ringUntil = 0;
   live.look.tx = 0;
   live.look.ty = 0;
