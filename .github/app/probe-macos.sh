@@ -116,7 +116,7 @@ stand_in() {
   close_prompts
   sleep 2
   rm -f "$data/watch.pid"
-  "$daemon" watch >>"$out/watch.log" 2>&1 &
+  SCOOCH_TRACE=1 "$daemon" watch >>"$out/watch.log" 2>&1 &
   line "- booted out the login item job and started $daemon watch from the probe as $!, which inherits the runner's Finder automation"
 }
 
@@ -216,22 +216,25 @@ if no_plist; then line "- the login item is gone"; else line "- the login item i
 line "- $(press 'Turn on')"
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 sleep 3
+stand_in
+wait_for 40 rendered >/dev/null
+sleep 3
+line "- wallpaper before the Trash $(wallpaper)"
+line "- daemon log $(grep 'program watched' "$out/watch.log" | tail -1)"
 line "- closing the window $(limited 30 osascript -e 'tell application "System Events" to tell (first process whose bundle identifier is "me.sohanbhat.scooch.window") to click (first button of window 1 whose subrole is "AXCloseButton")' 2>&1)"
 if wait_for 15 sh -c '! pgrep -f "Scooch.app/Contents/MacOS/scooch-app" >/dev/null' >/dev/null; then line "- closing the window ended the app process"; else line "- the app process outlived its window"; fi
-line "- daemon processes after close $(pgrep -fl 'Scooch.app/Contents/MacOS/scooch watch' | wc -l | tr -d ' ')"
+line "- daemons after close $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')"
 
-before=$(wallpaper)
-mv "$app" "$HOME/.Trash/Scooch.app"
-line "- moved Scooch.app to the Trash with Scooch on, wallpaper was $before"
-sleep 15
-after=$(wallpaper)
-if [ "$after" = "$photo" ]; then
-  line "- 15 s later the wallpaper is the photo again"
+line "- Trash through Finder $(limited 30 osascript -e 'tell application "Finder" to delete POSIX file "/Applications/Scooch.app"' 2>&1)"
+cleared() { wallpaper_is_photo && no_plist && ! pgrep -f 'MacOS/scooch watch' >/dev/null; }
+if took=$(wait_for 25 cleared); then
+  line "- after the Trash the wallpaper is the photo, the login item is gone and no daemon runs, $took s later"
 else
-  line "- 15 s later the wallpaper is still $after"
-  limit "putting the app in the Trash while Scooch is on leaves Scooch's picture until the daemon watch for its own program lands"
+  line "- 25 s after the Trash the wallpaper is $(wallpaper), login item $([ -f "$plist" ] && echo present || echo gone), daemons $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')"
 fi
+line "- daemon log after the Trash $(grep -i -E 'program|trash|moved|off' "$out/watch.log" | tail -4 | tr '\n' ' ')"
 pkill -f "Scooch.app/Contents/MacOS/scooch" >/dev/null 2>&1
 launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1
+rm -rf "$HOME/.Trash/Scooch.app"
 cp "$data/state.json" "$out/state.json" 2>/dev/null
 exit 0
