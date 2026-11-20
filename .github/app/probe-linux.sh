@@ -403,6 +403,10 @@ clean env NO_AT_BRIDGE=0 XDG_CURRENT_DESKTOP=Nowhere PATH="$HOME/probe-bin:$PATH
 wait_for 40 has_window >/dev/null
 sleep 4
 mount=$(tr '\0' '\n' <"/proc/$(pgrep -x scooch-app | head -1)/environ" 2>/dev/null | sed -n 's/^APPDIR=//p')
+folder=$(readlink "/proc/$(pgrep -x scooch-app | head -1)/cwd" 2>/dev/null)
+outside_mount() { [ -n "$mount" ] && [ -n "$folder" ] && case "$folder/" in "$mount"/*) false ;; *) true ;; esac; }
+line "- the app works in a folder inside the mount $(outside_mount && echo no || echo yes)"
+expect "the app started from the AppImage works in a folder outside the mount, so its children do too" outside_mount
 line "- on a desktop named Nowhere $(python3 "$PWD/.github/app/controls.py" "Ask for Nowhere" press 2>&1 | tail -1)"
 wait_for 15 test -s "$HOME/.probe-link-env" >/dev/null
 [ -s "$HOME/.probe-link-env" ] && judged "$HOME/.probe-link-env" "$mount" >"$out/link-env.txt"
