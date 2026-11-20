@@ -176,6 +176,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         probe.section("7 Two monitors", monitors);
         probe.section("7b Desktop after the drop", after_drop);
         probe.section("7c The AppImage thrown away", thrown_away);
+        probe.section("7d The final off", final_off_check);
         probe.section("8 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -2954,9 +2955,44 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         Ok(())
     }
 
+    fn thrown_off(p: &mut Probe, run: &mut Thrown) -> Result<()> {
+        let started = Instant::now();
+        let out = Command::new(&run.copy).arg("off").env_remove("SCOOCH_HOME").env("SCOOCH_LINK_PLACES", &run.places).stdin(Stdio::null()).output()?;
+        let exited = wait_until(Duration::from_secs(10), || !still_running(&mut run.child)).map(|_| started.elapsed().as_millis());
+        let copy_gone = !run.copy.exists();
+        let link_gone = fs::symlink_metadata(run.bin.join("scooch")).is_err();
+        let others = fs::read_link(run.bin.join("foreign")).is_ok_and(|points| points == Path::new("/usr/bin/env")) && fs::read(run.bin.join("scooch-old")).is_ok_and(|bytes| bytes == b"a program of its own");
+        let entry_gone = !run.entry.exists();
+        let origin = saved_origin(&run.real);
+        p.line(format!(
+            "- scooch off run from the copy with origin {origin:?} and nothing pending, exit {:?}, said {:?}: the daemon exited after {exited:?} ms, the copy removed {copy_gone}, the link at the copy removed {link_gone}, a foreign link and a regular file untouched {others}, the login item removed {entry_gone}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).trim()
+        ));
+        if !out.status.success() || exited.is_none() || !copy_gone || !link_gone || !others || !entry_gone {
+            p.fail("an off with nothing pending did not take away the AppImage copy and its link, or touched a file it must leave alone");
+        }
+        Ok(())
+    }
+
     fn thrown_restart(p: &mut Probe, run: &mut Thrown) -> Result<()> {
         if !run.stand_in.exists() {
             fs::write(&run.stand_in, b"a stand in for the AppImage")?;
+        }
+        if !run.copy.exists() {
+            fs::copy(scooch_program()?, &run.copy)?;
+            let link = run.bin.join("scooch");
+            if fs::symlink_metadata(&link).is_err() {
+                std::os::unix::fs::symlink(&run.copy, &link)?;
+            }
+        }
+        if fs::read(&run.entry).ok().as_deref() != Some(run.login.as_slice()) {
+            fs::write(&run.entry, &run.login)?;
+        }
+        let mut state: serde_json::Value = serde_json::from_slice(&fs::read(run.real.join("state.json"))?)?;
+        if state["on"] != serde_json::Value::Bool(true) {
+            state["on"] = serde_json::Value::Bool(true);
+            fs::write(run.real.join("state.json"), serde_json::to_vec(&state)?)?;
         }
         stop_thrown(&mut run.child);
         let mark = log_lines(&run.log).len();
@@ -3067,6 +3103,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             thrown_report(p, "delete", result);
             let result = thrown_restart(p, &mut run);
             thrown_report(p, "restart", result);
+            let result = thrown_off(p, &mut run);
+            thrown_report(p, "off", result);
+            let result = thrown_restart(p, &mut run);
+            thrown_report(p, "restart after the off", result);
             let result = thrown_trash(p, &mut run, &linux, &screen);
             thrown_report(p, "Trash", result);
         }
@@ -3075,6 +3115,124 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         let _ = fs::remove_file(&run.entry);
         p.line(format!("- the stand in stays in the runner's Trash, the daemon's log is in the artifact as {}", run.log.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+        Ok(())
+    }
+
+    fn real_scooch(program: &Path, arguments: &[&str]) -> Result<std::process::Output> {
+        Ok(Command::new(program).args(arguments).env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").stdin(Stdio::null()).output()?)
+    }
+
+    fn real_state(real: &Path) -> serde_json::Value {
+        fs::read(real.join("state.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn real_daemon(real: &Path) -> Option<u32> {
+        let pid: u32 = fs::read_to_string(real.join("watch.pid")).ok()?.trim().parse().ok()?;
+        (unsafe { libc::kill(pid as libc::pid_t, 0) } == 0).then_some(pid)
+    }
+
+    fn said(out: &std::process::Output) -> String {
+        String::from_utf8_lossy(&out.stdout).trim().replace('\n', " / ")
+    }
+
+    fn launched_by_gio(entry: &Path) -> String {
+        match Command::new("gio").arg("launch").arg(entry).stdin(Stdio::null()).output() {
+            Ok(out) => format!("gio launch exit {:?}", out.status.code()),
+            Err(error) => format!("gio launch could not run, {error}"),
+        }
+    }
+
+    fn final_off_check(p: &mut Probe) -> Result<()> {
+        let single = std::env::var("SCOOCH_MONITORS").map_or(true, |value| value == "1");
+        if p.kind != Some(Kind::Gnome) || !single {
+            p.line("- this check runs on the single screen GNOME job, which carries gio".to_string());
+            return Ok(());
+        }
+        let linux = p.linux()?;
+        let screen = linux.screens()?.first().cloned().context("no screen")?;
+        let program = scooch_program()?;
+        let real = dirs::data_local_dir().context("no data folder")?.join("scooch");
+        let picture = p.pictures.first().cloned().context("no probe picture")?;
+        let entry = scooch::platform::linux::autostart::path()?;
+        if let Some(folder) = entry.parent() {
+            fs::create_dir_all(folder)?;
+        }
+        let _ = fs::remove_dir_all(&real);
+        fs::create_dir_all(real.join("out"))?;
+        if !p.made.contains(&real) {
+            p.made.push(real.clone());
+        }
+        let set = linux.set_wallpaper(&screen, &picture).map_err(|error| format!("{error:#}"));
+        let parked_out = real.join("out").join("probe-absent-1.jpg");
+        fs::copy(&picture, &parked_out)?;
+        let record = serde_json::json!({"version": 1, "on": true, "screens": {"probe-absent": {"source": picture, "original": picture, "output": parked_out}}});
+        fs::write(real.join("state.json"), serde_json::to_vec(&record)?)?;
+        p.line(format!("- the real data folder {} holds a record for a screen probe-absent that no desktop shows, its own picture {} and its output {}, the wallpaper set to that picture {set:?}", real.display(), picture.display(), parked_out.display()));
+        let on = real_scooch(&program, &[])?;
+        let id = screen.id.clone();
+        let drawn = wait_until(Duration::from_secs(60), || !real_state(&real)["screens"][id.as_str()]["fingerprint"].is_null());
+        let daemon = real_daemon(&real);
+        p.line(format!("- scooch turned on exit {:?}, said {:?}, the screen drawn after {:?} ms, daemon {daemon:?}, login item {}", on.status.code(), said(&on), drawn.map(|time| time.as_millis()), entry.exists()));
+        let started = Instant::now();
+        let off = real_scooch(&program, &["off", "--final"])?;
+        let took = started.elapsed().as_millis();
+        let state = real_state(&real);
+        let left = daemon.filter(|pid| unsafe { libc::kill(*pid as libc::pid_t, 0) } == 0);
+        let kept = state["screens"]["probe-absent"]["original"].as_str() == picture.to_str();
+        let parked = state["on"] != serde_json::Value::Bool(true) && state["restoring"] != serde_json::Value::Bool(true) && kept && state["screens"].get(id.as_str()).is_none();
+        let back = linux.wallpaper(&screen).ok().flatten();
+        p.line(format!(
+            "- scooch off --final exit {:?} after {took} ms, said {:?}: daemon left {left:?}, login item left {}, record of probe-absent kept with its own picture {kept}, state parked {parked}, its output still there {}, the shown screen back on its own picture {}",
+            off.status.code(),
+            said(&off),
+            entry.exists(),
+            parked_out.exists(),
+            back.as_deref() == Some(picture.as_path())
+        ));
+        if off.status.code() != Some(0) || left.is_some() || entry.exists() || !parked || !parked_out.exists() || !said(&off).contains("could not reach") {
+            p.fail("the final off left a daemon or a login item, or did not keep the record of the screen it could not reach");
+        }
+        let status = real_scooch(&program, &["status"])?;
+        p.line(format!("- scooch status on the parked state said {:?}", said(&status)));
+        if !said(&status).contains("still shows a picture Scooch made") {
+            p.fail("status on a parked state did not count the screen that still shows Scooch's picture");
+        }
+        let again = real_scooch(&program, &[])?;
+        let drawn = wait_until(Duration::from_secs(60), || !real_state(&real)["screens"][id.as_str()]["fingerprint"].is_null());
+        let state = real_state(&real);
+        let woke = state["on"] == serde_json::Value::Bool(true) && state["screens"]["probe-absent"]["original"].as_str() == picture.to_str();
+        p.line(format!("- scooch turned on again exit {:?}, said {:?}, the shown screen drawn after {:?} ms, on with the parked record of probe-absent and its own picture still kept {woke}, daemon {:?}", again.status.code(), said(&again), drawn.map(|time| time.as_millis()), real_daemon(&real)));
+        if !woke {
+            p.fail("turning on after a final off lost the record of the screen it could not reach");
+        }
+        let entry_named = fs::read_to_string(&entry).unwrap_or_default();
+        p.line(format!("- the login item the daemon wrote {:?}", entry_named.lines().find(|line| line.starts_with("Exec="))));
+        let ended = real_scooch(&program, &["off", "--final"])?;
+        p.line(format!("- scooch off --final again exit {:?}, said {:?}", ended.status.code(), said(&ended)));
+        let missing = real.join("gone").join("scooch");
+        fs::write(&entry, scooch::platform::linux::parse::entry::text(&missing, &entry))?;
+        let how = launched_by_gio(&entry);
+        let removed = wait_until(Duration::from_secs(10), || !entry.exists()).map(|time| time.as_millis());
+        p.line(format!("- a login item naming {} which is not there, started the way GNOME starts it, {how}: the entry removed itself after {removed:?} ms", missing.display()));
+        if removed.is_none() {
+            p.fail("a login item whose program is gone did not remove itself");
+        }
+        let mut on_again = real_state(&real);
+        on_again["on"] = serde_json::Value::Bool(true);
+        fs::write(real.join("state.json"), serde_json::to_vec(&on_again)?)?;
+        fs::write(&entry, scooch::platform::linux::parse::entry::text(&program, &entry))?;
+        let how = launched_by_gio(&entry);
+        let found = wait_until(Duration::from_secs(20), || real_daemon(&real).is_some()).and_then(|_| real_daemon(&real));
+        let exe = found.and_then(|pid| fs::read_link(format!("/proc/{pid}/exe")).ok());
+        let line = found.and_then(|pid| fs::read(format!("/proc/{pid}/cmdline")).ok()).map(|bytes| bytes.split(|byte| *byte == 0).map(|part| String::from_utf8_lossy(part).into_owned()).filter(|part| !part.is_empty()).collect::<Vec<_>>());
+        p.line(format!("- a login item naming the program, started the same way, {how}: daemon {found:?}, its program {exe:?}, its command line {line:?}, the entry still there {}", entry.exists()));
+        if exe.as_deref() != Some(program.as_path()) || !line.as_deref().is_some_and(|parts| parts.last().map(String::as_str) == Some("watch")) {
+            p.fail("the login item did not start the program itself as scooch watch");
+        }
+        let cleared = real_scooch(&program, &["off", "--final"])?;
+        let _ = fs::write(real.join("state.json"), br#"{"version":1,"on":false}"#);
+        let _ = fs::remove_file(&entry);
+        p.line(format!("- cleared with scooch off --final exit {:?}, daemon left {:?}", cleared.status.code(), real_daemon(&real)));
         Ok(())
     }
 
