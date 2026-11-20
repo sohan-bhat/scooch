@@ -15,20 +15,27 @@ Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
+[ComImport, Guid("B92B56A9-8B55-4E14-9A89-0199BBB6F93B"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IDesktopWallpaper {
+    void SetWallpaper([MarshalAs(UnmanagedType.LPWStr)] string monitor, [MarshalAs(UnmanagedType.LPWStr)] string wallpaper);
+    [return: MarshalAs(UnmanagedType.LPWStr)] string GetWallpaper([MarshalAs(UnmanagedType.LPWStr)] string monitor);
+    [return: MarshalAs(UnmanagedType.LPWStr)] string GetMonitorDevicePathAt(uint index);
+    uint GetMonitorDevicePathCount();
+}
+[ComImport, Guid("C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD")]
+public class DesktopWallpaperClass {}
 public static class Desk {
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern bool SystemParametersInfo(int action, int param, string value, int flags);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern bool SystemParametersInfo(int action, int param, System.Text.StringBuilder value, int flags);
     [DllImport("user32.dll")]
     public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr window);
+    static IDesktopWallpaper Shell() { return (IDesktopWallpaper)new DesktopWallpaperClass(); }
     public static string Wallpaper() {
-        var text = new System.Text.StringBuilder(1024);
-        SystemParametersInfo(0x0073, text.Capacity, text, 0);
-        return text.ToString();
+        var shell = Shell();
+        return shell.GetWallpaper(shell.GetMonitorDevicePathAt(0));
     }
     public static void Set(string path) {
-        SystemParametersInfo(0x0014, 0, path, 3);
+        Shell().SetWallpaper(null, path);
     }
 }
 '@
@@ -65,16 +72,29 @@ function Shot([string]$Name) {
     Line "- window shot $Name.png at $([int]$box.Width)x$([int]$box.Height)"
 }
 
-function Press([string]$Label) {
+function Press([string]$Label, [int]$Tabs) {
+    $byName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $Label)
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        $window = Find-Window
+        if ($window) {
+            $found = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $byName)
+            if ($found) {
+                $invoke = $null
+                if ($found.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
+                    $invoke.Invoke()
+                    return "pressed $Label through UI Automation"
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 700
+    }
     $window = Find-Window
     if (-not $window) { return "no window to press $Label in" }
-    $condition = New-Object System.Windows.Automation.AndCondition(
-        (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
-        (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $Label)))
-    $button = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
-    if (-not $button) { return "no button $Label" }
-    $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-    return "pressed $Label"
+    [Desk]::SetForegroundWindow([IntPtr]$window.Current.NativeWindowHandle) | Out-Null
+    Start-Sleep -Milliseconds 500
+    $shell = New-Object -ComObject WScript.Shell
+    $shell.SendKeys(('{TAB}' * $Tabs) + '~')
+    return "pressed $Label with $Tabs Tabs and Enter, since UI Automation found no button named $Label"
 }
 
 function State-On { (Test-Path "$data\state.json") -and ((Get-Content -Raw "$data\state.json") -match '"on": true') }
@@ -112,7 +132,7 @@ Line "- login entry $(Run-Value)"
 Line "- wallpaper while on $([Desk]::Wallpaper())"
 Line "- daemons running $(Daemons)"
 
-Line "- $(Press 'Turn off')"
+Line "- $(Press 'Turn off' 3)"
 $off = Wait-For 30 { -not (State-On) }
 Line "- off after $off s"
 Start-Sleep -Seconds 3
@@ -120,7 +140,7 @@ Shot 'off'
 Line "- wallpaper after off $([Desk]::Wallpaper()), back to the photo $([Desk]::Wallpaper() -ieq $photo)"
 Line "- login entry after off '$(Run-Value)'"
 
-Line "- $(Press 'Turn on')"
+Line "- $(Press 'Turn on' 0)"
 $again = Wait-For 30 { State-On }
 Line "- on again after $again s"
 Start-Sleep -Seconds 5

@@ -100,7 +100,7 @@ jobs:
       matrix:
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -108,22 +108,23 @@ jobs:
           name: app-macos
           path: built
       - name: Probe
+        timeout-minutes: 20
         run: bash .github/app/probe-macos.sh built appprobe
       - name: Upload
-        if: ${{ !cancelled() }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: appprobe-${{ matrix.runner }}
           path: appprobe
           if-no-files-found: warn
       - name: Summary
-        if: ${{ !cancelled() }}
+        if: always()
         run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
 
   probe-windows:
     needs: build-windows
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -131,24 +132,25 @@ jobs:
           name: app-windows-x64
           path: built
       - name: Probe
+        timeout-minutes: 20
         shell: pwsh
         run: ./.github/app/probe-windows.ps1 -Built built -Out appprobe
       - name: Upload
-        if: ${{ !cancelled() }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: appprobe-windows
           path: appprobe
           if-no-files-found: warn
       - name: Summary
-        if: ${{ !cancelled() }}
+        if: always()
         shell: bash
         run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
 
   probe-linux:
     needs: build-linux
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -156,6 +158,7 @@ jobs:
           name: app-linux-x64
           path: built
       - name: Probe
+        timeout-minutes: 20
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11
@@ -165,12 +168,12 @@ jobs:
           export XDG_RUNTIME_DIR
           dbus-run-session -- bash .github/linux/xfce.sh .github/app/probe-linux.sh appprobe
       - name: Upload
-        if: ${{ !cancelled() }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: appprobe-linux
           path: appprobe
           if-no-files-found: warn
       - name: Summary
-        if: ${{ !cancelled() }}
+        if: always()
         run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true

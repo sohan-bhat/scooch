@@ -13,14 +13,15 @@ photo="$PWD/assets/photos/seagull-sky.jpg"
 label="me.sohanbhat.scooch"
 
 line() { echo "$*" | tee -a "$report"; }
+limited() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 limit() { line "- limit: $*"; }
 
 wallpaper() {
-  osascript -e 'with timeout of 10 seconds' -e 'tell application "Finder" to get POSIX path of (desktop picture as alias)' -e 'end timeout' 2>/dev/null
+  limited 15 osascript -e 'with timeout of 10 seconds' -e 'tell application "Finder" to get POSIX path of (desktop picture as alias)' -e 'end timeout' 2>/dev/null
 }
 
 window_id() {
-  osascript -l JavaScript -e '
+  limited 15 osascript -l JavaScript -e '
     ObjC.import("CoreGraphics");
     const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0))) || [];
     const mine = list.filter((w) => (w.kCGWindowOwnerName === "Scooch" || w.kCGWindowOwnerName === "scooch-app") && w.kCGWindowLayer === 0);
@@ -29,7 +30,7 @@ window_id() {
 }
 
 window_size() {
-  osascript -l JavaScript -e '
+  limited 15 osascript -l JavaScript -e '
     ObjC.import("CoreGraphics");
     const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0))) || [];
     const mine = list.filter((w) => (w.kCGWindowOwnerName === "Scooch" || w.kCGWindowOwnerName === "scooch-app") && w.kCGWindowLayer === 0);
@@ -49,7 +50,7 @@ shot() {
 }
 
 press() {
-  osascript - "$1" <<'APPLESCRIPT' 2>&1
+  limited 90 osascript - "$1" <<'APPLESCRIPT' 2>&1
 on run argv
   set wanted to item 1 of argv
   tell application "System Events"
@@ -125,7 +126,7 @@ line
 dmg=$(ls "$built"/*.dmg | head -1)
 line "- disk image $(basename "$dmg"), $(wc -c <"$dmg" | tr -d ' ') bytes"
 
-osascript -e "tell application \"Finder\" to set desktop picture to POSIX file \"$photo\"" >/dev/null 2>&1
+limited 20 osascript -e "tell application \"Finder\" to set desktop picture to POSIX file \"$photo\"" >/dev/null 2>&1
 line "- wallpaper before install $(wallpaper)"
 
 mount=$(mktemp -d)
@@ -141,15 +142,15 @@ line "- Gatekeeper on a downloaded copy: $(spctl --assess --type execute -vv "$a
 open "$app"
 sleep 6
 screencapture -x -D 1 "$out/gatekeeper-open.png"
-line "- opened the quarantined copy, screen kept as gatekeeper-open.png, windows now $(osascript -e 'tell application "System Events" to get name of every process whose visible is true' 2>/dev/null)"
+line "- opened the quarantined copy, screen kept as gatekeeper-open.png, windows now $(limited 20 osascript -e 'tell application "System Events" to get name of every process whose visible is true' 2>&1)"
 line "- Gatekeeper log $(log show --last 30s --style compact --predicate 'process == "syspolicyd" OR process == "CoreServicesUIAgent"' 2>/dev/null | grep -i -E 'scooch|deny|reject|notariz' | tail -3 | tr '\n' ' ')"
 open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"
 sleep 8
-osascript -e 'tell application "System Settings" to activate' -e 'tell application "System Events" to key code 119' >/dev/null 2>&1
+limited 20 osascript -e 'tell application "System Settings" to activate' -e 'tell application "System Events" to key code 119' >/dev/null 2>&1
 sleep 2
 screencapture -x -D 1 "$out/gatekeeper-settings.png"
 line "- Privacy and Security after the blocked open kept as gatekeeper-settings.png"
-osascript -e 'tell application "System Settings" to quit' >/dev/null 2>&1
+limited 20 osascript -e 'tell application "System Settings" to quit' >/dev/null 2>&1
 killall CoreServicesUIAgent >/dev/null 2>&1
 pkill -f "Scooch.app/Contents/MacOS/scooch-app" >/dev/null 2>&1
 xattr -dr com.apple.quarantine "$app"
@@ -188,7 +189,7 @@ if no_plist; then line "- the login item is gone"; else line "- the login item i
 line "- $(press 'Turn on')"
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 sleep 3
-osascript -e 'tell application id "me.sohanbhat.scooch.window" to quit' >/dev/null 2>&1
+limited 20 osascript -e 'tell application id "me.sohanbhat.scooch.window" to quit' >/dev/null 2>&1
 if wait_for 15 sh -c '! pgrep -f "Scooch.app/Contents/MacOS/scooch-app" >/dev/null' >/dev/null; then line "- closing the window ended the app process"; else line "- the app process outlived its window"; fi
 line "- daemon processes after close $(pgrep -fl 'Scooch.app/Contents/MacOS/scooch watch' | wc -l | tr -d ' ')"
 
