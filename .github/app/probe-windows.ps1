@@ -38,6 +38,8 @@ public static class Desk {
     public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")]
     public static extern IntPtr GetDesktopWindow();
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr window, int command);
     public static void Announce(string what) {
         UIntPtr result;
         SendMessageTimeout(new IntPtr(0xffff), 0x1A, UIntPtr.Zero, what, 2, 5000, out result);
@@ -265,16 +267,23 @@ Shot 'look-dark-on'
 Get-CimInstance Win32_Process -Filter "Name = 'scoochw.exe'" | Where-Object { $_.CommandLine -match ' watch' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 Start-Sleep -Seconds 2
 $front = Find-Window
-if ($front) { [Desk]::SetForegroundWindow([IntPtr]$front.Current.NativeWindowHandle) | Out-Null }
-Start-Sleep -Seconds 3
+function Refocus {
+    if (-not $front) { return }
+    $hwnd = [IntPtr]$front.Current.NativeWindowHandle
+    [Desk]::ShowWindow($hwnd, 6) | Out-Null
+    Start-Sleep -Milliseconds 700
+    [Desk]::ShowWindow($hwnd, 9) | Out-Null
+    [Desk]::SetForegroundWindow($hwnd) | Out-Null
+    Start-Sleep -Seconds 3
+}
+Refocus
 Line "- stopped the daemon so the window shows a problem, daemons now $(Daemons)"
 Shot 'look-dark-problem'
 Set-Look 1
 Shot 'look-light-problem'
 Start-Process -FilePath (Join-Path $folder 'scoochw.exe') -ArgumentList 'watch' -WindowStyle Hidden
 Wait-For 30 { (Daemons) -ge 1 } | Out-Null
-if ($front) { [Desk]::SetForegroundWindow([IntPtr]$front.Current.NativeWindowHandle) | Out-Null }
-Start-Sleep -Seconds 3
+Refocus
 Line "- login entry $(Run-Value)"
 Line "- wallpaper while on $([Desk]::Wallpaper())"
 Line "- daemons running $(Daemons) from $(Daemon-Paths)"
