@@ -203,6 +203,7 @@ xattr -d com.apple.quarantine "$daemon" 2>/dev/null
 sleep 5
 shot asking
 look() { limited 20 osascript -e "tell application \"System Events\" to tell appearance preferences to set dark mode to $1" >/dev/null 2>&1; sleep 3; }
+line "- the app's Info.plist says $(/usr/libexec/PlistBuddy -c 'Print :NSAppleEventsUsageDescription' "$app/Contents/Info.plist" 2>&1), the program inside carries $(otool -X -s __TEXT __info_plist "$daemon" 2>/dev/null | xxd -r -p 2>/dev/null | grep -A1 NSAppleEvents | tail -1 | sed 's/<[^>]*>//g' | tr -d '\t')"
 line "- the system look before the probe, dark $(limited 20 osascript -e 'tell application "System Events" to tell appearance preferences to get dark mode' 2>&1)"
 look false
 shot look-light-problem
@@ -327,8 +328,8 @@ press_move() {
 line
 line "### Move from a downloaded disk image"
 pkill -f "MacOS/scooch-app" >/dev/null 2>&1
-xattr -w com.apple.quarantine "0083;$(printf '%x' "$(date +%s)");Safari;$(uuidgen)" "$dmg"
-line "- the disk image carries quarantine $(quarantine_of "$dmg"), as a browser download does"
+xattr -w com.apple.quarantine "00c3;$(printf '%x' "$(date +%s)");Safari;$(uuidgen)" "$dmg"
+line "- the disk image carries quarantine $(quarantine_of "$dmg"), a browser download the person has already approved with Open Anyway, since the probe cannot press that button"
 mount=$(hdiutil attach -nobrowse "$dmg" | awk -F'\t' '/\/Volumes\// { print $NF }' | tail -1)
 line "- mounted at $mount, the app inside carries quarantine $(quarantine_of "$mount/Scooch.app")"
 open_from_image
@@ -337,6 +338,14 @@ shot move-before
 press_move
 line "- /Applications/Scooch.app carries quarantine $(quarantine_of /Applications/Scooch.app), the window says $(status_text)"
 shot move-after
+pkill -f "MacOS/scooch-app" >/dev/null 2>&1
+sleep 2
+rm -rf /Applications/Scooch.app
+ditto "$mount/Scooch.app" /Applications/Scooch.app
+limited 20 open /Applications/Scooch.app >/dev/null 2>&1
+wait_for 40 has_window >/dev/null
+sleep 4
+line "- without the clear, a copy that keeps quarantine $(quarantine_of /Applications/Scooch.app) runs from $(from_where) and says $(status_text)"
 
 line
 line "### Move when /Applications cannot be written"
