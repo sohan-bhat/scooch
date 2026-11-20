@@ -315,7 +315,9 @@ Line '### Large text'
 foreach ($scale in 150, 200) {
     Set-ItemProperty -Path $access -Name TextScaleFactor -Value $scale -Type DWord
     [Desk]::Announce('WindowMetrics')
-    foreach ($size in @(@(1, 1, 'smallest'), @([int]$box.Width, [int]$box.Height, 'default'))) {
+    $edgeX = [int]$box.Width - 900
+    $edgeY = [int]$box.Height - 620
+    foreach ($size in @(@((640 + $edgeX), (480 + $edgeY), 'smallest'), @([int]$box.Width, [int]$box.Height, 'default'))) {
         [Desk]::SetWindowPos($handle, [IntPtr]::Zero, [int]$box.X, [int]$box.Y, $size[0], $size[1], 0x0014) | Out-Null
         Refocus
         Shot "text-$scale-$($size[2])"
