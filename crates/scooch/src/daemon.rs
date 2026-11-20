@@ -889,7 +889,7 @@ impl Daemon {
             forget(self.desktop.as_ref(), &self.store, &mut state);
             report.unload = true;
             #[cfg(target_os = "linux")]
-            if state.origin.is_some() {
+            if crate::commands::copy_goes(&state) {
                 let own = std::env::current_exe().ok().map(|exe| crate::state::canonical(&exe).unwrap_or(exe));
                 let proven: Vec<PathBuf> = own.into_iter().chain(crate::platform::login_program()).collect();
                 for line in crate::program::remove_copies(&crate::program::copies(&self.store), &proven, &crate::program::link_places()) {

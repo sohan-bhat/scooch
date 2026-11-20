@@ -340,7 +340,7 @@ pub fn final_off(store: &Store, program: &Path, patience: Duration) -> Final {
     let desktop = platform::current().ok();
     let done = finish_off(store, desktop.as_deref(), &own, patience, platform::remove_login);
     #[cfg(target_os = "linux")]
-    if done.parked == 0 && store.load().origin.is_some() {
+    if copy_goes(&store.load()) {
         let proven: Vec<PathBuf> = running.into_iter().chain(named).collect();
         crate::program::remove_copies(&crate::program::copies(store), &proven, &crate::program::link_places());
     }
@@ -454,7 +454,7 @@ pub fn wind_down(desktop: &dyn Desktop, store: &Store) -> Result<Off> {
         state.tally = tally;
         daemon::forget(desktop, store, &mut state);
         #[cfg(target_os = "linux")]
-        if state.origin.is_some() {
+        if copy_goes(&state) {
             let proven: Vec<PathBuf> = platform::login_program().into_iter().collect();
             crate::program::remove_copies(&crate::program::copies(store), &proven, &crate::program::link_places());
         }
@@ -464,6 +464,11 @@ pub fn wind_down(desktop: &dyn Desktop, store: &Store) -> Result<Off> {
         store.save(&state)?;
     }
     Ok(off)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn copy_goes(state: &State) -> bool {
+    state.origin.is_some() && !state.on && !state.restoring && state.screens.is_empty()
 }
 
 pub fn parked(state: &State) -> bool {
@@ -1341,6 +1346,27 @@ mod tests {
         finished(&fake, &store);
         assert_eq!(off_of(&fake, &store), Off::Pending(tally(0, 0, 0, 1, 0)));
         assert!(store.load().restoring);
+    }
+
+    #[test]
+    fn the_copy_goes_only_when_an_off_ends_with_nothing_pending_and_an_origin_is_set() {
+        let (fake, store, _, _) = pair("copy-goes");
+        let mut state = store.load();
+        state.origin = Some(PathBuf::from("/home/ada/Applications/Scooch.AppImage"));
+        store.save(&state).unwrap();
+        assert!(!copy_goes(&store.load()), "Scooch is on");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        finished(&fake, &store);
+        assert!(!copy_goes(&store.load()), "a screen is parked");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0), crate::daemon::tests::screen("R", 160.0, 1.0)]);
+        finished(&fake, &store);
+        assert!(copy_goes(&store.load()));
+        let mut restoring = store.load();
+        restoring.restoring = true;
+        assert!(!copy_goes(&restoring), "a restore is still pending");
+        let mut plain = store.load();
+        plain.origin = None;
+        assert!(!copy_goes(&plain), "no AppImage was recorded");
     }
 
     #[test]
