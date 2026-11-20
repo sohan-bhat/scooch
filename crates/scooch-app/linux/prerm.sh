@@ -20,7 +20,7 @@ for proc in /proc/[0-9]*; do
   [ -n "$user" ] || continue
   logger -t scooch-remove "turning Scooch off for $user" 2>/dev/null
   set --
-  for name in HOME USER LOGNAME DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE XDG_CONFIG_HOME XDG_DATA_HOME XDG_DATA_DIRS SCOOCH_HOME; do
+  for name in HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_DATA_DIRS XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP KDE_SESSION_VERSION SCOOCH_HOME; do
     value=$(tr '\000' '\n' <"$proc/environ" 2>/dev/null | sed -n "s/^$name=//p" | head -1)
     [ -n "$value" ] && set -- "$@" "$name=$value"
   done
