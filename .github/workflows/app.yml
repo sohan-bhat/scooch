@@ -2,7 +2,7 @@ name: app
 
 on:
   push:
-    branches: [app]
+    branches: [main, app]
     paths:
       - "crates/**"
       - "Cargo.toml"
@@ -14,6 +14,7 @@ on:
       - ".github/actions/app-build/**"
       - ".github/app/**"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -93,8 +94,52 @@ jobs:
           musl: ${{ matrix.musl }}
           bundles: deb,rpm,appimage
 
+  files:
+    needs: [build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: app-*
+          path: built
+      - name: Release names
+        run: |
+          mkdir -p release
+          take() {
+            found=$(find built -type f -name "$1" | head -1)
+            if [ -z "$found" ]; then
+              echo "No build output matches $1 for $2."
+              exit 1
+            fi
+            cp "$found" "release/$2"
+          }
+          take '*_universal.dmg' Scooch.dmg
+          take '*_x64-setup.exe' Scooch-Setup-x64.exe
+          take '*_arm64-setup.exe' Scooch-Setup-arm64.exe
+          take '*_amd64.deb' scooch_amd64.deb
+          take '*_arm64.deb' scooch_arm64.deb
+          take '*.x86_64.rpm' scooch.x86_64.rpm
+          take '*.aarch64.rpm' scooch.aarch64.rpm
+          take '*_amd64.AppImage' Scooch-x86_64.AppImage
+          take '*_aarch64.AppImage' Scooch-aarch64.AppImage
+          {
+            echo "## Release files"
+            echo
+            echo "| file | bytes |"
+            echo "|---|---|"
+            for file in release/*; do
+              echo "| $(basename "$file") | $(wc -c < "$file" | tr -d ' ') |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: release
+          if-no-files-found: error
+
   probe-macos:
     needs: build-macos
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     strategy:
       fail-fast: false
       matrix:
@@ -123,6 +168,7 @@ jobs:
 
   probe-windows:
     needs: build-windows
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     runs-on: windows-2025
     timeout-minutes: 40
     steps:
@@ -149,6 +195,7 @@ jobs:
 
   probe-linux:
     needs: build-linux
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:

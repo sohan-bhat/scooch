@@ -88,17 +88,36 @@ jobs:
           name: windows-${{ matrix.arch }}
           path: scooch-windows-${{ matrix.arch }}.zip
 
+  app:
+    needs: version
+    uses: ./.github/workflows/app.yml
+    secrets: inherit
+
   publish:
-    needs: [macos, linux, windows]
+    needs: [macos, linux, windows, app]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          name: macos
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: linux-*
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: windows-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: dist
       - working-directory: dist
-        run: sha256sum scooch-* > SHA256SUMS
+        run: sha256sum * > SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
