@@ -623,8 +623,7 @@ pub fn set_origin(origin: Option<&Path>) -> Result<bool> {
 }
 
 pub fn login_points_at(program: &Path) -> Option<bool> {
-    let text = login_text()?;
-    let Some(named) = login_program(&text) else { return Some(false) };
+    let named = platform::login_program()?;
     let wanted = state::canonical(program).unwrap_or_else(|_| program.to_path_buf());
     let twin = wanted.with_file_name(if cfg!(windows) { "scoochw.exe" } else { "scooch" });
     let found = state::canonical(&named).unwrap_or(named);
@@ -639,116 +638,8 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn login_program(text: &str) -> Option<PathBuf> {
-    plist_program(text)
-}
-
-#[cfg(target_os = "linux")]
-fn login_program(text: &str) -> Option<PathBuf> {
-    entry_program(text)
-}
-
-#[cfg(windows)]
-fn login_program(text: &str) -> Option<PathBuf> {
-    run_program(text)
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn plist_program(text: &str) -> Option<PathBuf> {
-    let after = &text[text.find("<key>ProgramArguments</key>")?..];
-    let start = after.find("<string>")? + "<string>".len();
-    let end = start + after[start..].find("</string>")?;
-    Some(PathBuf::from(xml_text(&after[start..end])?))
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn xml_text(raw: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut rest = raw;
-    while let Some(at) = rest.find('&') {
-        out.push_str(&rest[..at]);
-        let end = at + rest[at..].find(';')?;
-        let name = &rest[at + 1..end];
-        let letter = match name {
-            "amp" => '&',
-            "lt" => '<',
-            "gt" => '>',
-            "quot" => '"',
-            "apos" => '\'',
-            _ if name.starts_with("#x") => char::from_u32(u32::from_str_radix(&name[2..], 16).ok()?)?,
-            _ if name.starts_with('#') => char::from_u32(name[1..].parse().ok()?)?,
-            _ => return None,
-        };
-        out.push(letter);
-        rest = &rest[end + 1..];
-    }
-    out.push_str(rest);
-    Some(out)
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn entry_program(text: &str) -> Option<PathBuf> {
-    let value = text.lines().find_map(|line| line.trim_start().strip_prefix("Exec="))?;
-    let mut plain = String::new();
-    let mut letters = value.chars();
-    while let Some(letter) = letters.next() {
-        match letter {
-            '\\' => match letters.next()? {
-                's' => plain.push(' '),
-                'n' => plain.push('\n'),
-                't' => plain.push('\t'),
-                'r' => plain.push('\r'),
-                other => plain.push(other),
-            },
-            '%' => {
-                if letters.next() == Some('%') {
-                    plain.push('%');
-                }
-            }
-            other => plain.push(other),
-        }
-    }
-    let mut letters = plain.trim_start().chars();
-    let mut program = String::new();
-    if plain.trim_start().starts_with('"') {
-        letters.next();
-        loop {
-            match letters.next()? {
-                '"' => break,
-                '\\' => program.push(letters.next()?),
-                other => program.push(other),
-            }
-        }
-    } else {
-        program.extend(letters.take_while(|letter| !letter.is_whitespace()));
-    }
-    (!program.is_empty()).then(|| PathBuf::from(program))
-}
-
-#[cfg(any(windows, test))]
-fn run_program(text: &str) -> Option<PathBuf> {
-    let text = text.trim();
-    let program = match text.strip_prefix('"') {
-        Some(rest) => &rest[..rest.find('"')?],
-        None => text.split_whitespace().next()?,
-    };
-    (!program.is_empty()).then(|| PathBuf::from(program))
-}
-
-#[cfg(target_os = "macos")]
-fn login_text() -> Option<String> {
-    std::fs::read_to_string(platform::macos::launchd::plist_path().ok()?).ok()
-}
-
-#[cfg(windows)]
-fn login_text() -> Option<String> {
-    platform::windows::startup::entry()
-}
-
-#[cfg(target_os = "linux")]
-fn login_text() -> Option<String> {
-    std::fs::read_to_string(platform::linux::autostart::path().ok()?).ok()
+pub fn reclaim(program: &Path) -> bool {
+    commands::reclaim(&Store::open(), program).is_some()
 }
 
 pub fn is_on() -> bool {
@@ -872,21 +763,6 @@ mod tests {
         assert_eq!(icons_from(Some(&with(3.0)), false), Icons::Broken);
         assert_eq!(icons_from(Some(&with(4.0)), false), Icons::Broken);
         assert_eq!(serde_json::to_string(&Problem::Gnome { icons: Icons::Blocked }).unwrap(), r#"{"kind":"gnome","icons":"blocked"}"#);
-    }
-
-    #[test]
-    fn login_items_name_their_program_with_any_letters() {
-        for raw in ["/home/ada/.local/bin/scooch", "/home/ada/it's \"mine\"/$HOME/`x`/back\\slash/100%/a b/scooch"] {
-            let path = Path::new(raw);
-            let entry = crate::platform::linux::parse::entry::text(path);
-            assert_eq!(entry_program(&entry).as_deref(), Some(path), "{entry}");
-        }
-        let plist = "<dict>\n\t<key>Label</key>\n\t<string>me.sohanbhat.scooch</string>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/Applications/R&amp;D &lt;1&gt;/Scooch.app/Contents/MacOS/scooch</string>\n\t\t<string>watch</string>\n\t</array>";
-        assert_eq!(plist_program(plist).as_deref(), Some(Path::new("/Applications/R&D <1>/Scooch.app/Contents/MacOS/scooch")));
-        assert_eq!(xml_text("a&#38;b&#x26;c&quot;").as_deref(), Some("a&b&c\""));
-        assert_eq!(run_program("\"C:\\Users\\ada\\AppData\\Local\\Programs\\Scooch\\scoochw.exe\" watch").as_deref(), Some(Path::new("C:\\Users\\ada\\AppData\\Local\\Programs\\Scooch\\scoochw.exe")));
-        assert_eq!(run_program("C:\\Scooch\\scoochw.exe watch").as_deref(), Some(Path::new("C:\\Scooch\\scoochw.exe")));
-        assert_eq!(entry_program("[Desktop Entry]\nName=Scooch\n"), None);
     }
 
     #[test]
