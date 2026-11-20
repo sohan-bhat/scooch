@@ -136,9 +136,7 @@ function Setup-Windows {
     foreach ($window in $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
         $name = $window.Current.Name
         $process = (Get-Process -Id $window.Current.ProcessId -ErrorAction SilentlyContinue).ProcessName
-        if (-not $name -or $name -eq 'Program Manager' -or $name -eq 'Scooch') { continue }
-        if ($process -in 'scooch-app', 'pwsh', 'powershell', 'conhost', 'SystemPropertiesPerformance') { continue }
-        $window
+        if ($name -eq 'Microsoft account' -or $process -in 'WWAHost', 'UserOOBEBroker', 'CloudExperienceHostBroker', 'msoobe') { $window }
     }
 }
 
