@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import content from '@/content.json';
-import { asset } from '@/lib/base';
 
 type Arch = 'x64' | 'arm64';
 type Hints = { platform?: string; getHighEntropyValues?: (hints: string[]) => Promise<{ architecture?: string; platform?: string }> };
@@ -14,7 +13,7 @@ function systemOf(agent: string) {
   return 'macos';
 }
 
-async function guess(): Promise<{ system: string; arch: Arch }> {
+async function guess(): Promise<{ system: string; arch: Arch; kind: string }> {
   const hints = (navigator as Navigator & { userAgentData?: Hints }).userAgentData;
   const agent = `${navigator.userAgent} ${hints?.platform ?? ''}`;
   const system = systemOf(agent);
@@ -22,17 +21,20 @@ async function guess(): Promise<{ system: string; arch: Arch }> {
   const found = await hints?.getHighEntropyValues?.(['architecture']).catch(() => undefined);
   if (found?.architecture === 'arm') arch = 'arm64';
   if (found?.architecture === 'x86') arch = 'x64';
-  return { system, arch };
+  const kind = /Fedora|Red Hat|openSUSE|SUSE/i.test(navigator.userAgent) ? 'rpm' : 'deb';
+  return { system, arch, kind };
 }
 
 export function Install() {
   const { install } = content;
   const [system, setSystem] = useState('macos');
   const [arch, setArch] = useState<Arch>('x64');
+  const [kind, setKind] = useState('deb');
   useEffect(() => {
     guess().then((found) => {
       setSystem(found.system);
       setArch(found.arch);
+      setKind(found.kind);
     });
   }, []);
   return (
@@ -50,7 +52,8 @@ export function Install() {
             ))}
           </TabsList>
           {install.systems.map((item) => {
-            const main = item.downloads.find((download) => download.arch === arch || download.arch === 'any') ?? item.downloads[0];
+            const fits = item.downloads.filter((download) => download.arch === arch || download.arch === 'any');
+            const main = fits.find((download) => download.kind === kind) ?? fits[0] ?? item.downloads[0];
             const same = item.downloads.filter((download) => download !== main && download.arch === main.arch);
             const other = item.downloads.filter((download) => download.arch !== main.arch);
             const otherArch = other[0]?.arch as Arch | undefined;
@@ -66,14 +69,14 @@ export function Install() {
                   <nav aria-label={install.others} className="flex flex-wrap items-center gap-2.5">
                     {same.map((download) => (
                       <Button key={download.file} asChild variant="quiet" size="sm">
-                        <a href={`${install.release}${download.file}`} download aria-label={download.label}>
+                        <a href={`${install.release}${download.file}`} download aria-label={download.name}>
                           {download.format}
                         </a>
                       </Button>
                     ))}
                     {otherArch && other.length === 1 && (
                       <Button asChild variant="quiet" size="sm">
-                        <a href={`${install.release}${other[0].file}`} download aria-label={other[0].label}>
+                        <a href={`${install.release}${other[0].file}`} download aria-label={other[0].name}>
                           {install.processors[otherArch]}
                         </a>
                       </Button>
@@ -84,22 +87,6 @@ export function Install() {
                       </Button>
                     )}
                   </nav>
-                )}
-                {item.pictures && item.pictures.length > 0 && (
-                  <div className="flex flex-wrap items-start gap-4">
-                    {item.pictures.map((picture) => (
-                      <img
-                        key={picture.src}
-                        src={asset(picture.src)}
-                        alt={picture.alt}
-                        width={picture.width}
-                        height={picture.height}
-                        loading="lazy"
-                        decoding="async"
-                        className="h-auto w-[min(13rem,100%)] rounded-field shadow-[0_0_0_1px_rgb(243_236_220/0.1),0_18px_40px_-24px_rgb(0_0_0/0.9)]"
-                      />
-                    ))}
-                  </div>
                 )}
               </TabsContent>
             );

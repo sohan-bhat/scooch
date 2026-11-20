@@ -68,15 +68,9 @@
             "arch": "any",
             "label": "Download for Mac",
             "format": "Mac",
-            "file": "Scooch.dmg"
-          }
-        ],
-        "pictures": [
-          {
-            "src": "install/mac-not-opened.webp",
-            "width": 292,
-            "height": 264,
-            "alt": "The first open shows Scooch Not Opened with Done and Move to Trash, so choose Done."
+            "file": "Scooch.dmg",
+            "kind": "setup",
+            "name": "Download for Mac"
           }
         ]
       },
@@ -88,13 +82,17 @@
             "arch": "x64",
             "label": "Download for Windows",
             "format": "Windows",
-            "file": "Scooch-Setup-x64.exe"
+            "file": "Scooch-Setup-x64.exe",
+            "kind": "setup",
+            "name": "Download for Windows"
           },
           {
             "arch": "arm64",
             "label": "Download for Windows on Arm",
             "format": "Windows",
-            "file": "Scooch-Setup-arm64.exe"
+            "file": "Scooch-Setup-arm64.exe",
+            "kind": "setup",
+            "name": "Download for Windows on Arm"
           }
         ]
       },
@@ -106,37 +104,49 @@
             "arch": "x64",
             "label": "Download for Linux",
             "format": ".deb",
-            "file": "scooch_amd64.deb"
+            "file": "scooch_amd64.deb",
+            "kind": "deb",
+            "name": "Download the Linux deb package"
           },
           {
             "arch": "x64",
-            "label": "Download the Linux RPM",
+            "label": "Download for Linux",
             "format": ".rpm",
-            "file": "scooch.x86_64.rpm"
+            "file": "scooch.x86_64.rpm",
+            "kind": "rpm",
+            "name": "Download the Linux RPM package"
           },
           {
             "arch": "x64",
-            "label": "Download the Linux AppImage",
+            "label": "Download for Linux",
             "format": "AppImage",
-            "file": "Scooch-x86_64.AppImage"
+            "file": "Scooch-x86_64.AppImage",
+            "kind": "appimage",
+            "name": "Download the Linux AppImage"
           },
           {
             "arch": "arm64",
             "label": "Download for Linux on Arm",
             "format": ".deb",
-            "file": "scooch_arm64.deb"
+            "file": "scooch_arm64.deb",
+            "kind": "deb",
+            "name": "Download the Linux deb package for Arm"
           },
           {
             "arch": "arm64",
-            "label": "Download the Linux RPM for Arm",
+            "label": "Download for Linux on Arm",
             "format": ".rpm",
-            "file": "scooch.aarch64.rpm"
+            "file": "scooch.aarch64.rpm",
+            "kind": "rpm",
+            "name": "Download the Linux RPM package for Arm"
           },
           {
             "arch": "arm64",
-            "label": "Download the Linux AppImage for Arm",
+            "label": "Download for Linux on Arm",
             "format": "AppImage",
-            "file": "Scooch-aarch64.AppImage"
+            "file": "Scooch-aarch64.AppImage",
+            "kind": "appimage",
+            "name": "Download the Linux AppImage for Arm"
           }
         ]
       }
