@@ -11,6 +11,8 @@ export type Monitor = {
   places: Places | null;
 };
 
+export type GnomeIcons = 'missing' | 'off' | 'blocked' | 'broken' | 'unknown';
+
 export type WallpaperKind = 'slideshow' | 'video' | 'color' | 'moving' | 'unreadable' | 'made' | 'other';
 
 export type Problem =
@@ -19,7 +21,7 @@ export type Problem =
   | { kind: 'finder' }
   | { kind: 'move' }
   | { kind: 'wallpaper'; what: WallpaperKind }
-  | { kind: 'gnome'; installed: boolean }
+  | { kind: 'gnome'; icons: GnomeIcons }
   | { kind: 'unknown'; desktop: string }
   | { kind: 'admin' }
   | { kind: 'startup' }
