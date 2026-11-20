@@ -203,8 +203,11 @@ $closed = Wait-For 15 { @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyCo
 Line "- closing the window ended the app process after $closed s, daemons still running $(Daemons)"
 
 $uninstaller = Join-Path $folder 'uninstall.exe'
-$took = Measure-Command { (Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru).WaitForExit(300000) | Out-Null }
-Start-Sleep -Seconds 5
+$took = Measure-Command {
+    (Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru).WaitForExit(300000) | Out-Null
+    Wait-For 120 { -not (Test-Path (Join-Path $folder 'scooch-app.exe')) } | Out-Null
+}
+Start-Sleep -Seconds 3
 Line "- silent removal took $([int]$took.TotalSeconds) s"
 Line "- wallpaper after removal $([Desk]::Wallpaper()), back to the photo $([Desk]::Wallpaper() -ieq $photo)"
 Line "- login entry after removal '$(Run-Value)', daemons running $(Daemons)"
