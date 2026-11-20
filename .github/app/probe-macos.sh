@@ -290,27 +290,8 @@ launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1
 rm -rf "$HOME/.Trash/Scooch.app" /Applications/Tools
 cp "$data/state.json" "$out/state.json" 2>/dev/null
 
-status_text() {
-  limited 60 osascript <<'APPLESCRIPT' 2>&1 | tr '\n' ' '
-tell application "System Events"
-  set scoochApp to first process whose bundle identifier is "me.sohanbhat.scooch.window"
-  set found to {}
-  repeat with element in (entire contents of window 1 of scoochApp)
-    try
-      if role of element is "AXStaticText" then
-        set seen to value of element as text
-        if seen ends with "." then copy seen to end of found
-      end if
-    end try
-  end repeat
-  set AppleScript's text item delimiters to " | "
-  return found as text
-end tell
-APPLESCRIPT
-}
 from_where() { ps -axo command= | grep "MacOS/scooch-app" | grep -v grep | head -1 | sed 's|/Contents/MacOS/scooch-app.*||'; }
 has_window() { [ -n "$(window_id)" ]; }
-outside_mount() { where=$(from_where); [ -n "$where" ] && [ "${where#"$mount"}" = "$where" ]; }
 quarantine_of() { xattr -p com.apple.quarantine "$1" 2>/dev/null | cut -d';' -f1,3 || echo none; }
 open_from_image() {
   pkill -f "MacOS/scooch-app" >/dev/null 2>&1
@@ -320,9 +301,15 @@ open_from_image() {
   sleep 4
 }
 press_move() {
+  before=$(pgrep -f "MacOS/scooch-app" | head -1)
   line "- $(press 'Move to Applications')"
-  if took=$(wait_for 40 outside_mount); then line "- a new window runs from $(from_where) after $took s"; else line "- no window outside the disk image within 40 s, still $(from_where)"; fi
-  sleep 5
+  fresh() { pgrep -f "MacOS/scooch-app" | grep -v -x "$before" | grep -q .; }
+  if took=$(wait_for 40 fresh); then
+    sleep 5
+    line "- a new window process started after $took s and runs from $(from_where)"
+  else
+    line "- no new window process within 40 s, still $(from_where)"
+  fi
 }
 
 line
@@ -333,10 +320,10 @@ line "- the disk image carries quarantine $(quarantine_of "$dmg"), a browser dow
 mount=$(hdiutil attach -nobrowse "$dmg" | awk -F'\t' '/\/Volumes\// { print $NF }' | tail -1)
 line "- mounted at $mount, the app inside carries quarantine $(quarantine_of "$mount/Scooch.app")"
 open_from_image
-line "- opened from the disk image, the window runs from $(from_where) and says $(status_text)"
+line "- opened from the disk image, the window runs from $(from_where)"
 shot move-before
 press_move
-line "- /Applications/Scooch.app carries quarantine $(quarantine_of /Applications/Scooch.app), the window says $(status_text)"
+line "- /Applications/Scooch.app carries quarantine $(quarantine_of /Applications/Scooch.app)"
 shot move-after
 pkill -f "MacOS/scooch-app" >/dev/null 2>&1
 sleep 2
@@ -345,7 +332,7 @@ ditto "$mount/Scooch.app" /Applications/Scooch.app
 limited 20 open /Applications/Scooch.app >/dev/null 2>&1
 wait_for 40 has_window >/dev/null
 sleep 4
-line "- without the clear, a copy that keeps quarantine $(quarantine_of /Applications/Scooch.app) runs from $(from_where) and says $(status_text)"
+line "- without the clear, a copy that keeps quarantine $(quarantine_of /Applications/Scooch.app) runs from $(from_where)"
 
 line
 line "### Move when /Applications cannot be written"
@@ -356,7 +343,7 @@ sudo chmod 755 /Applications
 line "- /Applications mode $mode set to $(stat -f %Lp /Applications) for the probe"
 open_from_image
 press_move
-line "- ~/Applications/Scooch.app is there $([ -d "$HOME/Applications/Scooch.app" ] && echo yes || echo no), the window says $(status_text)"
+line "- ~/Applications/Scooch.app is there $([ -d "$HOME/Applications/Scooch.app" ] && echo yes || echo no)"
 ln -sf /Applications/Tools/Scooch.app/Contents/MacOS/scooch "$HOME/.local/bin/scooch"
 line "- a link at ~/.local/bin/scooch points at a bundle that is gone, $(readlink "$HOME/.local/bin/scooch")"
 line "- $(press 'Turn on')"
@@ -385,7 +372,7 @@ chmod 555 "$HOME/Applications"
 open_from_image
 line "- $(press 'Move to Applications')"
 sleep 6
-line "- the window still runs from $(from_where) and says $(status_text)"
+line "- the window still runs from $(from_where)"
 shot move-failed
 chmod 755 "$HOME/Applications"
 sudo chmod "$mode" /Applications
