@@ -30,19 +30,23 @@ runs:
           exit 1
         fi
 
-    - uses: dtolnay/rust-toolchain@stable
-      with:
-        components: clippy
-        targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || inputs.target }}
+    - name: Rust
+      shell: bash
+      env:
+        TARGETS: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin x86_64-apple-darwin' || inputs.target }}
+      run: |
+        rustup toolchain install stable --profile minimal --component clippy --no-self-update
+        rustup default stable
+        rustup target add $TARGETS
 
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       with:
         key: ${{ inputs.name }}
         workspaces: |
           . -> target
           crates/scooch-app -> target
 
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
         node-version: 22
         cache: npm
