@@ -159,6 +159,14 @@ html.js:not(.stills-mode) .stills {
   display: none;
 }
 
+.js-only {
+  display: none;
+}
+
+html.js .js-only {
+  display: revert-layer;
+}
+
 html:not(.js) .site-nav,
 html.stills-mode .site-nav {
   pointer-events: auto;

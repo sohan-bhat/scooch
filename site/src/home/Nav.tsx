@@ -35,7 +35,8 @@ export function Nav({ header, action, skip }: Refs) {
           pressed={on}
           onPressedChange={setSound}
           aria-label={content.nav.sound}
-          className="story-only inline-flex size-11 cursor-pointer items-center justify-center rounded-pill text-plastic transition-colors duration-(--duration-hover) ease-(--ease-out) outline-none hover-fine:text-paper focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-pad active:text-pad"
+          data-sound=""
+          className="js-only inline-flex size-11 cursor-pointer items-center justify-center rounded-pill text-plastic transition-[color,transform] duration-(--duration-hover) ease-(--ease-out) outline-none hover-fine:text-paper focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-pad active:scale-[0.92] active:text-pad active:duration-(--duration-press)"
         >
           {on ? <SpeakerHigh weight="bold" aria-hidden className="size-5" /> : <SpeakerSlash weight="bold" aria-hidden className="size-5" />}
         </Toggle.Root>
