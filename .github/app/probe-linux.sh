@@ -146,6 +146,30 @@ press_pill alt+F4
 if wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null; then line "- closing the window ended the app process"; else line "- the app process outlived its window"; fi
 line "- daemons running $(daemons)"
 
+line
+line "### Large text"
+clean env NO_AT_BRIDGE=0 scooch-app >"$out/app-text.log" 2>&1 &
+wait_for 40 has_window >/dev/null
+sleep 3
+controls="Slide,Clouds,Flip,Quick drop,Turn off,Turn on,Start again,Pick a file"
+for scale in 1.5 2.0; do
+  gsettings set org.gnome.desktop.interface text-scaling-factor "$scale"
+  for size in "640 480 smallest" "900 620 default"; do
+    set -- $size
+    xdotool windowsize "$(window)" "$1" "$2" >/dev/null 2>&1
+    xdotool windowminimize "$(window)" >/dev/null 2>&1
+    sleep 1
+    xdotool windowactivate --sync "$(window)" >/dev/null 2>&1
+    sleep 3
+    shot "text-$scale-$3"
+    line "- text at $scale, $3 size, read back $(gsettings get org.gnome.desktop.interface text-scaling-factor) $(python3 "$PWD/.github/app/controls.py" "$controls" 2>&1 | tail -1)"
+  done
+done
+gsettings reset org.gnome.desktop.interface text-scaling-factor
+press_pill alt+F4
+wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+line
+
 before=$(pgrep -x scooch | head -1)
 sed -i 's/"daemon": "[^"]*"/"daemon": "0.0.0"/' "$data/state.json"
 line "- the saved state now says $(grep -o '"daemon": "[^"]*"' "$data/state.json"), as after an upgrade in place, daemon $before"

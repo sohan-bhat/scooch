@@ -298,20 +298,27 @@ $sized = Find-Window
 $box = $sized.Current.BoundingRectangle
 $handle = [IntPtr]$sized.Current.NativeWindowHandle
 function Pill-Inside {
+    $names = 'Slide', 'Clouds', 'Flip', 'Quick drop', 'Turn off', 'Turn on', 'Open Startup apps', 'Start again', 'Pick a file'
     for ($attempt = 0; $attempt -lt 6; $attempt++) {
         $window = Find-Window
         $frame = $window.Current.BoundingRectangle
-        foreach ($label in 'Turn off', 'Turn on', 'Open Startup apps', 'Start again') {
+        $parts = @()
+        $whole = $true
+        $seen = 0
+        foreach ($label in $names) {
             $byName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $label)
-            foreach ($found in $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byName)) {
-                if ($found.Current.ControlType -ne [System.Windows.Automation.ControlType]::Button) { continue }
-                $pill = $found.Current.BoundingRectangle
-                return "$label inside the window $(($pill.Left -ge $frame.Left) -and ($pill.Right -le $frame.Right) -and ($pill.Bottom -le $frame.Bottom))"
-            }
+            $control = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byName) | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -or $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::CheckBox } | Select-Object -First 1
+            if (-not $control) { continue }
+            $seen++
+            $rect = $control.Current.BoundingRectangle
+            $inside = ($rect.Left -ge $frame.Left) -and ($rect.Top -ge $frame.Top) -and ($rect.Right -le $frame.Right) -and ($rect.Bottom -le $frame.Bottom) -and ($rect.Width -gt 0)
+            $whole = $whole -and $inside
+            $parts += "$label $(if ($inside) { 'inside' } else { 'cut' })"
         }
+        if ($seen -ge 3) { return "every control whole inside the window $whole, $($parts -join ', ')" }
         Start-Sleep -Seconds 1
     }
-    return 'no main button found'
+    return 'the controls were not found'
 }
 Line ''
 Line '### Large text'
