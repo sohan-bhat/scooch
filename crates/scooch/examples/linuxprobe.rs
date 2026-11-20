@@ -2004,6 +2004,51 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
     }
 
+    struct Thread {
+        name: String,
+        id: String,
+        voluntary: u64,
+        involuntary: u64,
+        cpu: u64,
+    }
+
+    fn threads_of(process: u32) -> Vec<Thread> {
+        let Ok(tasks) = fs::read_dir(format!("/proc/{process}/task")) else { return Vec::new() };
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+        let mut found: Vec<Thread> = tasks
+            .flatten()
+            .filter_map(|task| {
+                let folder = task.path();
+                let name = fs::read_to_string(folder.join("comm")).ok()?.trim().to_string();
+                let status = fs::read_to_string(folder.join("status")).ok()?;
+                let field = |key: &str| status.lines().find_map(|line| line.strip_prefix(key)).and_then(|rest| rest.trim().parse::<u64>().ok());
+                let stat = fs::read_to_string(folder.join("stat")).ok()?;
+                let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+                let cpu = (fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?) * 1000 / ticks;
+                Some(Thread { name, id: task.file_name().to_string_lossy().into_owned(), voluntary: field("voluntary_ctxt_switches:")?, involuntary: field("nonvoluntary_ctxt_switches:")?, cpu })
+            })
+            .collect();
+        found.sort_by_key(|thread| thread.id.parse::<u64>().unwrap_or(0));
+        found
+    }
+
+    const REST_BAR: u64 = 2;
+
+    fn thread_rows(before: &[Thread], after: &[Thread]) -> (Vec<String>, Vec<(String, u64)>) {
+        let mut rows = Vec::new();
+        let mut woke = Vec::new();
+        for now in after {
+            let (voluntary, involuntary, cpu, began) = match before.iter().find(|was| was.id == now.id) {
+                Some(was) => (now.voluntary.saturating_sub(was.voluntary), now.involuntary.saturating_sub(was.involuntary), now.cpu.saturating_sub(was.cpu), ""),
+                None => (now.voluntary, now.involuntary, now.cpu, "began during the minute, "),
+            };
+            rows.push(format!("`{}` {}: {began}voluntary {voluntary}, involuntary {involuntary}, CPU {cpu} ms", now.name, now.id));
+            woke.push((format!("{} {}", now.name, now.id), voluntary + involuntary));
+        }
+        rows.extend(before.iter().filter(|was| !after.iter().any(|now| now.id == was.id)).map(|was| format!("`{}` {}: ended during the minute", was.name, was.id)));
+        (rows, woke)
+    }
+
     fn proc_numbers(process: u32) -> Option<(u64, u64, u64)> {
         let stat = fs::read_to_string(format!("/proc/{process}/stat")).ok()?;
         let rest = stat.rsplit_once(')')?.1;
@@ -2098,10 +2143,27 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         heard_saves(p);
         switch_check(p, &linux, &screen, (&program, process))?;
+        let resting = Instant::now();
+        let rested = wait_until(Duration::from_secs(45), || !threads_of(process).iter().any(|thread| thread.name == "scooch-reap")).map(|_| resting.elapsed().as_millis());
         std::thread::sleep(Duration::from_secs(3));
         let before = proc_numbers(process);
+        let threads_before = threads_of(process);
         std::thread::sleep(Duration::from_secs(60));
         let after = proc_numbers(process);
+        let threads_after = threads_of(process);
+        p.line(format!("- every thread of the daemon over a quiet minute begun 3 s after its render sessions were let go, {rested:?} ms after the last check, as name, id, voluntary and involuntary switches and CPU ms"));
+        let (rows, woke) = thread_rows(&threads_before, &threads_after);
+        for row in rows {
+            p.line(format!("  - {row}"));
+        }
+        let busiest = woke.iter().map(|(_, count)| *count).max().unwrap_or(0);
+        let over: Vec<String> = woke.iter().filter(|(_, count)| *count > REST_BAR).map(|(name, count)| format!("{name} {count}")).collect();
+        p.line(format!("- the busiest thread switched {busiest} times in the quiet minute, the bar is {REST_BAR} for every thread"));
+        if threads_after.is_empty() {
+            p.fail("the daemon's threads could not be read for the quiet minute");
+        } else if !over.is_empty() {
+            p.fail(format!("daemon threads woke at rest {over:?}"));
+        }
         p.line(format!("- CPU ms, resident KB and threads before {before:?} and after {after:?} a quiet minute"));
         if let (Some(before), Some(after)) = (before, after) {
             p.line(format!("- CPU used while idle {} ms", after.0.saturating_sub(before.0)));

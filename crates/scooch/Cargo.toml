@@ -25,6 +25,9 @@ dirs = "6"
 dialoguer = { version = "0.11", default-features = false, features = ["fuzzy-select"] }
 jpeg-encoder = { version = "0.7", features = ["simd"] }
 
+[dev-dependencies]
+blocking = "~1.6.2"
+
 [build-dependencies]
 embed-manifest = "1.5"
 
@@ -65,6 +68,7 @@ x11rb = { version = "0.13", default-features = false, features = ["randr", "xtes
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 inotify = { version = "0.11", default-features = false }
+blocking = "~1.6.2"
 jxl-oxide = { version = "0.12", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
