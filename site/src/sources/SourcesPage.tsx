@@ -1,10 +1,9 @@
 import { ArrowUpRight } from '@phosphor-icons/react/dist/ssr';
 import { Footer } from '@/components/Footer';
 import { Header } from '@/components/Header';
-import content from '@/content.json';
+import sources from './content.json';
 
 export function SourcesPage() {
-  const { sources } = content;
   return (
     <>
       <Header />
