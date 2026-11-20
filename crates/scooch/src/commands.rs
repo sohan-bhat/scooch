@@ -1415,8 +1415,9 @@ mod tests {
         assert_eq!(end_daemon(&store, &own, Duration::from_millis(300)), Some(child.id()));
         assert!(child.try_wait().unwrap().is_none(), "a process not proven to be Scooch was ended");
         assert!(poke::proven(child.id(), std::slice::from_ref(&stranger)) && !poke::proven(child.id(), &own));
-        assert_eq!(end_daemon(&store, &[stranger], Duration::from_millis(1000)), None);
-        assert!(child.wait().is_ok());
+        let reaper = std::thread::spawn(move || child.wait());
+        assert_eq!(end_daemon(&store, &[stranger], Duration::from_millis(3000)), None);
+        assert!(reaper.join().unwrap().is_ok());
         assert!(UNPROVEN.ends_with('.') && !UNPROVEN.contains([';', '(', ')']));
         let _ = std::fs::remove_dir_all(&folder);
     }
