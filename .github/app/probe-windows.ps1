@@ -417,6 +417,7 @@ Start-Process -FilePath (Join-Path $folder 'scoochw.exe') -WindowStyle Hidden
 Wait-For 30 { (Daemons) -ge 1 } | Out-Null
 Start-Sleep -Seconds 3
 Line "- the saved state holds a record for a screen probe-absent that no desktop shows $((Get-Content -Raw "$data\state.json") -match 'probe-absent'), Scooch on again, daemons $(Daemons), login entry $(Run-Value)"
+Expect "the saved state holds a record for a screen nobody shows before the removal" ((Get-Content -Raw "$data\state.json") -match 'probe-absent')
 function Uninstall-Entry { @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DisplayName -eq 'Scooch' }).Count }
 Line "- uninstall entries for Scooch before removal $(Uninstall-Entry)"
 $uninstaller = Join-Path $folder 'uninstall.exe'
@@ -430,6 +431,8 @@ Line "- wallpaper after removal $([Desk]::Wallpaper()), back to the photo $([Des
 Line "- login entry after removal '$(Run-Value)', daemons running $(Daemons)"
 Line "- left in the install folder $(@(Get-ChildItem $folder -ErrorAction SilentlyContinue).Count) files"
 Line "- uninstall entries for Scooch after removal $(Uninstall-Entry), scoochw processes $(@(Get-Process -Name scoochw -ErrorAction SilentlyContinue).Count)"
+Expect "a removal with a screen nobody shows leaves no uninstall entry" ((Uninstall-Entry) -eq 0)
+Expect "a removal with a screen nobody shows leaves no scoochw process" (@(Get-Process -Name scoochw -ErrorAction SilentlyContinue).Count -eq 0)
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 Line "- user PATH still holds the folder $([bool]($userPath -split ';' | Where-Object { $_.TrimEnd('\') -ieq $folder }))"
 Expect "removal put the photo back" ([Desk]::Wallpaper() -ieq $photo)

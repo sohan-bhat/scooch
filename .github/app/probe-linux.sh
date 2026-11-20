@@ -220,6 +220,7 @@ clean /usr/bin/scooch >"$out/absent-on.txt" 2>&1
 wait_for 30 sh -c 'pgrep -x scooch >/dev/null' >/dev/null
 sleep 3
 line "- the saved state holds a record for a screen probe-absent that no desktop shows $(grep -c '"probe-absent"' "$data/state.json"), Scooch on again, daemons $(daemons), login item $(login)"
+expect "the saved state holds a record for a screen nobody shows before the removal" grep -q '"probe-absent"' "$data/state.json"
 cp /usr/bin/scooch "$HOME/.stale-scooch"
 sudo apt-get remove -y scooch >"$out/remove.log" 2>&1
 removed=$?
