@@ -233,16 +233,21 @@ line "- closing the window $(limited 30 osascript -e 'tell application "System E
 if wait_for 15 sh -c '! pgrep -f "Scooch.app/Contents/MacOS/scooch-app" >/dev/null' >/dev/null; then line "- closing the window ended the app process"; else line "- the app process outlived its window"; fi
 line "- daemons after close $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')"
 
-line "- Trash through Finder $(limited 30 osascript -e 'tell application "Finder" to delete POSIX file "/Applications/Scooch.app"' 2>&1)"
-cleared() { wallpaper_is_photo && no_plist && ! pgrep -f 'MacOS/scooch watch' >/dev/null; }
+moved=/Applications/Tools/Scooch.app
+mkdir -p /Applications/Tools
+mv "$app" "$moved"
+points_at_move() { [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null)" = "$moved/Contents/MacOS/scooch" ] && [ "$(readlink "$HOME/.local/bin/scooch")" = "$moved/Contents/MacOS/scooch" ]; }
+if took=$(wait_for 25 points_at_move); then line "- moved the app to /Applications/Tools, the login item and the terminal link followed after $took s"; else line "- moved the app to /Applications/Tools, login item $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null), link $(readlink "$HOME/.local/bin/scooch") after 25 s"; fi
+line "- Trash through Finder $(limited 30 osascript -e "tell application \"Finder\" to delete POSIX file \"$moved\"" 2>&1)"
+cleared() { wallpaper_is_photo && no_plist && ! pgrep -f 'MacOS/scooch watch' >/dev/null && [ ! -L "$HOME/.local/bin/scooch" ] && [ ! -e "$HOME/.local/bin/scooch" ]; }
 if took=$(wait_for 25 cleared); then
-  line "- after the Trash the wallpaper is the photo, the login item is gone and no daemon runs, $took s later"
+  line "- after the Trash the wallpaper is the photo, the login item and the terminal link are gone and no daemon runs, $took s later"
 else
-  line "- 25 s after the Trash the wallpaper is $(wallpaper), login item $([ -f "$plist" ] && echo present || echo gone), daemons $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')"
+  line "- 25 s after the Trash the wallpaper is $(wallpaper), login item $([ -f "$plist" ] && echo present || echo gone), link $(readlink "$HOME/.local/bin/scooch" || echo gone), daemons $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')"
 fi
 line "- daemon log after the Trash $(grep -i -E 'program|trash|moved|off' "$out/watch.log" | tail -4 | tr '\n' ' ')"
 pkill -f "Scooch.app/Contents/MacOS/scooch" >/dev/null 2>&1
 launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1
-rm -rf "$HOME/.Trash/Scooch.app"
+rm -rf "$HOME/.Trash/Scooch.app" /Applications/Tools
 cp "$data/state.json" "$out/state.json" 2>/dev/null
 exit 0
