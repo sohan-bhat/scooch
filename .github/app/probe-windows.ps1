@@ -12,7 +12,7 @@ $folder = Join-Path $env:LOCALAPPDATA 'Programs\Scooch'
 $data = Join-Path $env:LOCALAPPDATA 'Scooch'
 $photo = Join-Path (Resolve-Path 'assets/photos').Path 'golden-tree.jpg'
 
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing, System.Windows.Forms
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -114,8 +114,60 @@ function State-On { (Test-Path "$data\state.json") -and ((Get-Content -Raw "$dat
 function Run-Value { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Scooch -ErrorAction SilentlyContinue).Scooch }
 function Daemons { @(Get-Process -Name scoochw -ErrorAction SilentlyContinue).Count }
 
-Line "## App probe on $((Get-CimInstance Win32_OperatingSystem).Caption) build $([Environment]::OSVersion.Version.Build)"
+function Screen-Shot([string]$Name) {
+    $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.CopyFromScreen($bounds.X, $bounds.Y, 0, 0, $bitmap.Size)
+    $bitmap.Save((Join-Path $Out "$Name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+    $graphics.Dispose()
+    $bitmap.Dispose()
+}
+
+function Top-Windows {
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    @($root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object {
+        "$($_.Current.Name) from $((Get-Process -Id $_.Current.ProcessId -ErrorAction SilentlyContinue).ProcessName)"
+    }) -join '; '
+}
+
+function Clear-Setup {
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $pressed = @()
+    for ($round = 0; $round -lt 8; $round++) {
+        $hit = $false
+        foreach ($window in $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
+            $process = (Get-Process -Id $window.Current.ProcessId -ErrorAction SilentlyContinue).ProcessName
+            if ($process -in 'explorer', 'scooch-app', 'pwsh', 'powershell', 'Runner.Worker', 'Runner.Listener') { continue }
+            foreach ($label in 'Accept', 'Next', 'Skip', 'Skip for now', 'Not now') {
+                $byName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $label)
+                $found = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $byName)
+                $invoke = $null
+                if ($found -and $found.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
+                    $invoke.Invoke()
+                    $pressed += "$label in $process"
+                    $hit = $true
+                    break
+                }
+            }
+        }
+        if (-not $hit) { break }
+        Start-Sleep -Seconds 3
+    }
+    return $pressed
+}
+
+Line "## App probe on $((Get-CimInstance Win32_OperatingSystem).Caption) build $([Environment]::OSVersion.Version.Build) $env:PROCESSOR_ARCHITECTURE"
 Line ''
+Screen-Shot 'screen-at-start'
+Line "- windows at the start $(Top-Windows)"
+$cleared = Clear-Setup
+if ($cleared.Count -gt 0) {
+    Line "- a Windows setup screen covered the desktop, the probe pressed $($cleared -join ', ')"
+    Start-Sleep -Seconds 3
+    Line "- windows after that $(Top-Windows)"
+    Screen-Shot 'screen-cleared'
+}
 $setup = Get-ChildItem $Built -Filter '*-setup.exe' | Select-Object -First 1
 Line "- installer $($setup.Name), $($setup.Length) bytes"
 $signature = Get-AuthenticodeSignature $setup.FullName
