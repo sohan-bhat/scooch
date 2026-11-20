@@ -307,6 +307,44 @@ jobs:
         if: always()
         run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
 
+  probe-gnome:
+    needs: build-linux
+    if: ${{ github.workflow == 'app' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-linux-x64
+          path: built
+      - name: Probe
+        timeout-minutes: 20
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-shell gvfs gvfs-daemons dconf-service libglib2.0-bin gnome-shell-extension-prefs fonts-cantarell adwaita-icon-theme dconf-cli xdg-user-dirs
+          sudo apt-get install -y ./built/*.deb
+          sudo apt-get remove -y gnome-shell-extension-desktop-icons-ng || true
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          PASS=missing dbus-run-session -- bash .github/linux/gnome.sh .github/app/probe-gnome.sh appprobe
+          sudo apt-get install -y gnome-shell-extension-desktop-icons-ng
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          PASS=off dbus-run-session -- bash .github/linux/gnome.sh .github/app/probe-gnome.sh appprobe
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appprobe-gnome
+          path: appprobe
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
+
   rpm-fedora:
     needs: build-linux
     if: ${{ github.workflow == 'app' }}

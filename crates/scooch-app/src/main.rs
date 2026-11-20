@@ -247,7 +247,7 @@ fn main() {
                     }
                 }
                 let view = facade::view();
-                eprintln!("scooch-app live {} reduce motion {}", view.live, view.reduce_motion);
+                eprintln!("scooch-app live {} reduce motion {} problem {}", view.live, view.reduce_motion, serde_json::to_string(&view.problem).unwrap_or_default());
             });
             Ok(())
         })
