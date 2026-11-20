@@ -105,5 +105,8 @@
     "label": "Pictures",
     "pick": "Pick a file",
     "drop": "Drop to use this picture."
+  },
+  "dmg": {
+    "first": "In System Settings, press Privacy and Security, then Open Anyway."
   }
 }
