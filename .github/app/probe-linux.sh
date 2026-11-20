@@ -124,8 +124,10 @@ line "### AppImage"
 mkdir -p "$HOME/bin"
 mv "$HOME/.stale-scooch" "$HOME/bin/scooch"
 line "- an older command install sits at ~/bin/scooch, $(file -b "$HOME/bin/scooch" | cut -c1-30), answering $("$HOME/bin/scooch" --version 2>&1)"
-appimage=$(ls "$PWD"/built/*.AppImage 2>/dev/null | head -1)
-line "- file $(basename "$appimage"), $(wc -c <"$appimage" | tr -d ' ') bytes"
+mkdir -p "$HOME/Downloads"
+cp "$(ls "$PWD"/built/*.AppImage 2>/dev/null | head -1)" "$HOME/Downloads/"
+appimage=$(ls "$HOME"/Downloads/*.AppImage | head -1)
+line "- file ~/Downloads/$(basename "$appimage"), $(wc -c <"$appimage" | tr -d ' ') bytes, on the home file system $([ "$(stat -c %d "$appimage")" = "$(stat -c %d "$HOME")" ] && echo yes || echo no)"
 chmod +x "$appimage"
 "$appimage" >"$out/appimage.log" 2>&1 &
 if took=$(wait_for 40 has_window); then
