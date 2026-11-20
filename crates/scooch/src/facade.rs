@@ -783,6 +783,11 @@ fn repair_with(store: &Store, points: impl FnOnce() -> Option<bool>, act: impl F
 }
 
 #[cfg(target_os = "linux")]
+pub fn child_env(changes: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>) {
+    platform::linux::child_env(changes);
+}
+
+#[cfg(target_os = "linux")]
 pub fn show_gnome_icons() -> Result<()> {
     use std::time::{Duration, Instant};
     if ding_icons() != Icons::Off {

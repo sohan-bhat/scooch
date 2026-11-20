@@ -1,10 +1,9 @@
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
+use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::{Condvar, Mutex};
-use std::time::Duration;
 
 const KEYS: [&str; 8] = ["LD_LIBRARY_PATH", "PATH", "PYTHONPATH", "PYTHONHOME", "PERLLIB", "QT_PLUGIN_PATH", "GIO_MODULE_DIR", "GSETTINGS_SCHEMA_DIR"];
-
-static READY: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 
 fn inside() -> Option<PathBuf> {
     std::env::var_os("APPIMAGE")?;
@@ -19,36 +18,9 @@ pub fn scrubbed(value: &std::ffi::OsStr, appdir: &std::path::Path) -> Option<std
     std::env::join_paths(kept).ok()
 }
 
-pub fn settle() {
-    let (done, ready) = &READY;
-    let mut done = done.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if *done {
-        return;
-    }
-    if let Some(appdir) = inside() {
-        for key in KEYS {
-            let Some(value) = std::env::var_os(key) else { continue };
-            match scrubbed(&value, &appdir) {
-                Some(kept) => std::env::set_var(key, kept),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
-    *done = true;
-    ready.notify_all();
-}
-
-pub fn wait() {
-    if inside().is_none() {
-        return;
-    }
-    let (done, ready) = &READY;
-    let done = done.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let waited = ready.wait_timeout_while(done, Duration::from_secs(15), |done| !*done);
-    let late = waited.is_ok_and(|(_, timeout)| timeout.timed_out());
-    if late {
-        settle();
-    }
+pub fn changes() -> Vec<(OsString, Option<OsString>)> {
+    let Some(appdir) = inside() else { return Vec::new() };
+    KEYS.iter().filter_map(|key| Some((OsString::from(key), scrubbed(&std::env::var_os(key)?, &appdir)))).collect()
 }
 
 #[cfg(target_os = "linux")]

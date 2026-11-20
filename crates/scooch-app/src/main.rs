@@ -77,7 +77,6 @@ fn current() -> View {
 
 #[tauri::command]
 async fn view() -> Result<View, String> {
-    appimage::settle();
     off_main("view", || Ok(current())).await
 }
 
@@ -189,6 +188,8 @@ fn place_on_pointer<R: Runtime>(window: &WebviewWindow<R>) {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    facade::child_env(appimage::changes());
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _arguments, _folder| {
             if let Some(window) = app.get_webview_window("main") {
@@ -234,7 +235,6 @@ fn main() {
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || {
-                appimage::wait();
                 #[cfg(target_os = "linux")]
                 appimage::seal();
                 let _ = facade::set_origin(std::env::var_os("APPIMAGE").map(PathBuf::from).as_deref());

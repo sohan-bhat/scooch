@@ -15,7 +15,15 @@ fn same(a: &Path, b: &Path) -> bool {
 }
 
 pub fn answers_as_scooch(path: &Path) -> bool {
-    let Ok(mut child) = Command::new(path).arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return false };
+    let mut command = Command::new(path);
+    #[cfg(target_os = "linux")]
+    for (name, value) in crate::appimage::changes() {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    let Ok(mut child) = command.arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return false };
     let started = Instant::now();
     loop {
         match child.try_wait() {
