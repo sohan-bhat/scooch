@@ -1013,6 +1013,9 @@ impl Daemon {
         let fingerprint = scene::fingerprint(&entry.source, &scene, options);
         let showing = current.as_deref().is_some_and(|path| same(path, entry.shown()));
         if entry.fingerprint.as_deref() == Some(fingerprint.as_str()) && entry.shown().is_file() {
+            if entry.places.is_none() {
+                entry.places = Some(Places { width: scene.width, height: scene.height, icons: scene.icons.clone() });
+            }
             if let Some(glider) = glider.as_deref_mut() {
                 glider.close_early_for(&screen.id);
             }
@@ -2125,6 +2128,27 @@ pub mod tests {
         newer["screens"]["main"]["later"] = serde_json::json!({ "from": "a newer Scooch" });
         let read: State = serde_json::from_value(newer).unwrap();
         assert_eq!(read.screens["main"].places.clone().map(|places| places.icons), Some(vec![corner()]));
+    }
+
+    #[test]
+    fn an_entry_without_places_gets_them_on_the_first_unchanged_tick_and_saves_once() {
+        let (daemon, fake, _) = rig("places-upgrade", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let mut old: serde_json::Value = serde_json::from_slice(&daemon.store.read().unwrap()).unwrap();
+        old["screens"]["main"].as_object_mut().unwrap().remove("places");
+        let older = serde_json::to_vec(&old).unwrap();
+        std::fs::write(daemon.store.state_file(), &older).unwrap();
+        let reads = fake.snapshots.load(Ordering::SeqCst);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 1);
+        assert_ne!(daemon.store.read(), Some(older));
+        assert_eq!(daemon.store.load().screens["main"].places.clone().map(|places| (places.width, places.height, places.icons)), Some((160, 100, vec![subject()])));
+        fake.place(vec![Rect { x: 60.2, ..subject() }]);
+        let before = compact(&daemon);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 2);
+        assert_eq!(daemon.store.read(), Some(before));
     }
 
     #[test]
