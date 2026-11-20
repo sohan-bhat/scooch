@@ -19,7 +19,7 @@ export type Problem =
   | { kind: 'finder' }
   | { kind: 'move' }
   | { kind: 'wallpaper'; what: WallpaperKind }
-  | { kind: 'gnome' }
+  | { kind: 'gnome'; installed: boolean }
   | { kind: 'unknown'; desktop: string }
   | { kind: 'admin' }
   | { kind: 'startup' }
@@ -45,6 +45,7 @@ export type View = {
   counted: { icons: number; screens: number } | null;
   reduceMotion: boolean;
   textScale: number;
+  failure: string | null;
 };
 
 export type Picture = { path: string; thumb: string };

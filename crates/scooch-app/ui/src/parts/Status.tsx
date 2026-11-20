@@ -19,7 +19,7 @@ export function problemLine(problem: Problem, act: (problem: Problem) => void, p
     case 'wallpaper':
       return { line: copy.problem.wallpaper[problem.what], fix: { label: copy.problem.wallpaper.fix, run: pick } };
     case 'gnome':
-      return { line: copy.problem.gnome.line, fix: fix(copy.problem.gnome.fix) };
+      return problem.installed ? { line: copy.problem.gnome.line, fix: fix(copy.problem.gnome.fix) } : { line: copy.problem.gnome.missing, fix: null };
     case 'unknown':
       return { line: fill(copy.problem.unknown.line, { desktop: problem.desktop }), fix: fix(fill(copy.problem.unknown.fix, { desktop: problem.desktop })) };
     case 'admin':
@@ -45,7 +45,11 @@ function onLine(view: View) {
 }
 
 export function said(view: View, act: (problem: Problem) => void, pick: () => void, flip: () => void): Said {
-  if (view.problem) return problemLine(view.problem, act, pick);
+  if (view.problem) {
+    const problem = problemLine(view.problem, act, pick);
+    return view.failure ? { line: view.failure, fix: problem.fix } : problem;
+  }
+  if (view.failure) return { line: view.failure, fix: null };
   if (view.phase === 'starting') return { line: copy.status.starting, fix: null };
   if (view.phase === 'stopping') return { line: copy.status.stopping, fix: null };
   if (view.phase === 'off') {

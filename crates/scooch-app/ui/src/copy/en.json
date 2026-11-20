@@ -57,7 +57,8 @@
     },
     "gnome": {
       "line": "Desktop icons are off in GNOME.",
-      "fix": "Turn them on"
+      "fix": "Turn them on",
+      "missing": "Install the Desktop Icons NG extension to show icons in GNOME."
     },
     "unknown": {
       "line": "{desktop} is not supported yet.",
