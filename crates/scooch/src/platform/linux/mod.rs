@@ -1,5 +1,8 @@
+pub mod children;
 pub mod parse;
 pub mod saves;
+
+pub use children::child_env;
 
 #[cfg(target_os = "linux")]
 pub mod autostart;
@@ -109,7 +112,7 @@ mod system {
         }
 
         pub fn run_os(program: &str, arguments: &[OsString]) -> Result<Output> {
-            Command::new(program)
+            super::super::children::clean(&mut Command::new(program))
                 .args(arguments)
                 .env("LC_ALL", "C.UTF-8")
                 .env_remove("LANGUAGE")

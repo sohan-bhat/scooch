@@ -36,6 +36,15 @@ pub fn watched(program: &Path, custom_home: bool, read_only: bool) -> Option<Pat
     Some(outermost.unwrap_or(program).to_path_buf())
 }
 
+pub fn resolved(path: &Path) -> PathBuf {
+    crate::state::canonical(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn data_home(home: &Path, xdg: Option<std::ffi::OsString>) -> PathBuf {
+    resolved(&xdg.map(PathBuf::from).filter(|path| path.is_absolute()).unwrap_or_else(|| home.join(".local").join("share")))
+}
+
 fn plain(path: &Path) -> PathBuf {
     match path.strip_prefix("/System/Volumes/Data") {
         Ok(rest) => Path::new("/").join(rest),
@@ -66,6 +75,79 @@ pub fn trash_roots(data_home: &Path, top: &Path, uid: u32) -> Vec<PathBuf> {
 }
 
 #[cfg(any(target_os = "linux", test))]
+pub fn trash_dirs(data_home: &Path, top: &Path, uid: u32) -> Vec<(PathBuf, PathBuf)> {
+    vec![(data_home.join("Trash"), PathBuf::from("/")), (top.join(".Trash").join(uid.to_string()), top.to_path_buf()), (top.join(format!(".Trash-{uid}")), top.to_path_buf())]
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn info_path(text: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let raw = text.lines().skip_while(|line| line.trim() != "[Trash Info]").find_map(|line| line.strip_prefix("Path="))?.trim();
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut rest = raw.as_bytes();
+    while let Some((&first, tail)) = rest.split_first() {
+        match (first, tail) {
+            (b'%', [high, low, after @ ..]) => {
+                bytes.push(u8::from_str_radix(std::str::from_utf8(&[*high, *low]).ok()?, 16).ok()?);
+                rest = after;
+            }
+            _ => {
+                bytes.push(first);
+                rest = tail;
+            }
+        }
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn thrown(origin: &Path, trashes: &[(PathBuf, PathBuf)]) -> Option<PathBuf> {
+    for (trash, top) in trashes {
+        let Ok(entries) = std::fs::read_dir(trash.join("info")) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".trashinfo")) else { continue };
+            let Some(path) = std::fs::read_to_string(entry.path()).ok().and_then(|text| info_path(&text)) else { continue };
+            let full = if path.is_absolute() { path } else { top.join(path) };
+            let file = trash.join("files").join(stem);
+            if full == origin && std::fs::symlink_metadata(&file).is_ok() {
+                return Some(file);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+pub fn copies(store: &crate::state::Store) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = link_places().first().map(|place| place.join("scooch")).into_iter().collect();
+    found.push(store.root.join("bin").join("scooch"));
+    found
+}
+
+#[cfg(target_os = "linux")]
+pub fn link_places() -> Vec<PathBuf> {
+    dirs::home_dir().map(|home| places(&resolved(&home), std::env::var_os(PLACES))).unwrap_or_default()
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn remove_copies(copies: &[PathBuf], proven: &[PathBuf], places: &[PathBuf]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for copy in copies {
+        let regular = std::fs::symlink_metadata(copy).is_ok_and(|meta| meta.is_file());
+        if !regular || !proven.iter().any(|program| crate::state::same(program, copy)) {
+            continue;
+        }
+        lines.extend(remove_links(&links_into(places, copy)));
+        lines.push(match std::fs::remove_file(copy) {
+            Ok(()) => format!("program copy {} removed", copy.display()),
+            Err(error) => format!("program copy {} could not be removed, {error}", copy.display()),
+        });
+    }
+    lines
+}
+
+#[cfg(any(target_os = "linux", test))]
 pub fn inside_any(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path.starts_with(root) && path != root.as_path())
 }
@@ -83,6 +165,11 @@ pub fn seen_from(unmount: bool, delete_self: bool, move_self: bool, close_write:
     } else {
         None
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub fn rearm(seen: Seen, back: bool) -> bool {
+    matches!(seen, Seen::Deleted | Seen::Revoked) || (seen == Seen::Renamed && back)
 }
 
 pub fn decide(original: &Path, seen: Seen, after: &After, is_trash: &dyn Fn(&Path) -> bool) -> Decision {
@@ -188,7 +275,7 @@ pub fn watch_self(trashed: std::sync::Arc<std::sync::atomic::AtomicBool>, signal
     let Ok(exe) = std::env::current_exe() else { return };
     let program = crate::state::canonical(&exe).unwrap_or(exe);
     let custom = std::env::var_os("SCOOCH_HOME").is_some_and(|value| !value.is_empty());
-    let Some(home) = crate::platform::macos::real_home() else { return };
+    let Some(home) = crate::platform::macos::real_home().map(|home| resolved(&home)) else { return };
     let Some(target) = watched(&program, custom, mac::read_only(&program)) else {
         if trace() {
             eprintln!("{} program not watched at {}", stamp(), program.display());
@@ -220,13 +307,13 @@ pub fn watch_self(trashed: std::sync::Arc<std::sync::atomic::AtomicBool>, signal
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use super::{decide, moved_program, trashed, After, Decision, Seen};
+    use super::{decide, moved_program, rearm, trashed, After, Decision, Seen};
     use std::ffi::{CString, OsStr};
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    const SETTLE: Duration = Duration::from_secs(10);
+    const SETTLE: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(10) };
 
     pub fn read_only(path: &Path) -> bool {
         let Ok(name) = CString::new(path.as_os_str().as_bytes()) else { return false };
@@ -243,73 +330,123 @@ mod mac {
         Some(PathBuf::from(OsStr::from_bytes(&buffer[..end])))
     }
 
-    pub fn run(mut program: PathBuf, mut target: PathBuf, home: PathBuf, act: impl Fn(&Decision, &Path, &Path)) {
-        let Ok(name) = CString::new(target.as_os_str().as_bytes()) else { return };
+    fn open(path: &Path) -> Option<libc::c_int> {
+        let name = CString::new(path.as_os_str().as_bytes()).ok()?;
         let fd = unsafe { libc::open(name.as_ptr(), libc::O_EVTONLY) };
-        if fd < 0 {
-            return;
-        }
-        let queue = unsafe { libc::kqueue() };
+        (fd >= 0).then_some(fd)
+    }
+
+    fn register(queue: libc::c_int, fd: libc::c_int, fflags: u32) -> bool {
         let mut change: libc::kevent = unsafe { std::mem::zeroed() };
         change.ident = fd as libc::uintptr_t;
         change.filter = libc::EVFILT_VNODE;
         change.flags = libc::EV_ADD | libc::EV_CLEAR;
-        change.fflags = libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE | libc::NOTE_WRITE | libc::NOTE_EXTEND;
-        if queue >= 0 && unsafe { libc::kevent(queue, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } == 0 {
+        change.fflags = fflags;
+        unsafe { libc::kevent(queue, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0 }
+    }
+
+    fn next(queue: libc::c_int) -> Option<u32> {
+        loop {
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            let got = unsafe { libc::kevent(queue, std::ptr::null(), 0, &mut event, 1, std::ptr::null()) };
+            if got < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return (got > 0).then_some(event.fflags);
+        }
+    }
+
+    const GONE: u32 = libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE;
+
+    pub fn run(mut program: PathBuf, mut target: PathBuf, home: PathBuf, act: impl Fn(&Decision, &Path, &Path)) {
+        let queue = unsafe { libc::kqueue() };
+        if queue < 0 {
+            return;
+        }
+        loop {
+            let again = match open(&target) {
+                Some(fd) => {
+                    let again = watch(queue, fd, (&mut program, &mut target), &home, &act);
+                    unsafe { libc::close(fd) };
+                    again
+                }
+                None => wait_for(queue, &target),
+            };
+            if !again {
+                break;
+            }
+        }
+        unsafe { libc::close(queue) };
+    }
+
+    fn watch(queue: libc::c_int, fd: libc::c_int, (program, target): (&mut PathBuf, &mut PathBuf), home: &Path, act: &impl Fn(&Decision, &Path, &Path)) -> bool {
+        if !register(queue, fd, GONE | libc::NOTE_WRITE | libc::NOTE_EXTEND) {
+            return false;
+        }
+        if crate::daemon::trace() {
+            eprintln!("{} program watched at {}", crate::daemon::stamp(), target.display());
+        }
+        loop {
+            let Some(flags) = next(queue) else { return false };
             if crate::daemon::trace() {
-                eprintln!("{} program watched at {}", crate::daemon::stamp(), target.display());
+                eprintln!("{} program event flags {flags:#x} on {}", crate::daemon::stamp(), target.display());
             }
-            loop {
-                let mut event: libc::kevent = unsafe { std::mem::zeroed() };
-                let got = unsafe { libc::kevent(queue, std::ptr::null(), 0, &mut event, 1, std::ptr::null()) };
-                if got < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                    continue;
+            let seen = if flags & libc::NOTE_REVOKE != 0 {
+                Seen::Revoked
+            } else if flags & libc::NOTE_DELETE != 0 {
+                Seen::Deleted
+            } else if flags & libc::NOTE_RENAME != 0 {
+                Seen::Renamed
+            } else {
+                Seen::Written
+            };
+            if seen == Seen::Renamed {
+                std::thread::sleep(SETTLE);
+            }
+            let now = path_of(fd);
+            let back = target.exists();
+            let decision = decide(target, seen, &After { now: now.as_deref(), back }, &|path| trashed(path, home));
+            act(&decision, target, program);
+            match decision {
+                Decision::Repoint(now) => {
+                    *program = moved_program(program, target, &now);
+                    *target = now;
                 }
-                if got <= 0 {
-                    break;
+                Decision::Off(_) => return false,
+                Decision::Nothing(_) if rearm(seen, back) => return true,
+                Decision::Nothing(_) => {}
+            }
+        }
+    }
+
+    fn wait_for(queue: libc::c_int, target: &Path) -> bool {
+        let Some(folder) = target.parent().and_then(open) else { return false };
+        let armed = register(queue, folder, GONE | libc::NOTE_WRITE);
+        if armed && crate::daemon::trace() {
+            eprintln!("{} program folder watched at {}, waiting for {}", crate::daemon::stamp(), target.parent().unwrap_or(target).display(), target.display());
+        }
+        let back = armed
+            && loop {
+                if target.exists() {
+                    break true;
                 }
-                let flags = event.fflags;
-                if crate::daemon::trace() {
-                    eprintln!("{} program event flags {flags:#x} on {}", crate::daemon::stamp(), target.display());
-                }
-                let seen = if flags & libc::NOTE_REVOKE != 0 {
-                    Seen::Revoked
-                } else if flags & libc::NOTE_DELETE != 0 {
-                    Seen::Deleted
-                } else if flags & libc::NOTE_RENAME != 0 {
-                    Seen::Renamed
-                } else {
-                    Seen::Written
-                };
-                if seen == Seen::Renamed {
-                    std::thread::sleep(SETTLE);
-                }
-                let now = path_of(fd);
-                let decision = decide(&target, seen, &After { now: now.as_deref(), back: target.exists() }, &|path| trashed(path, &home));
-                act(&decision, &target, &program);
-                match decision {
-                    Decision::Repoint(now) => {
-                        program = moved_program(&program, &target, &now);
-                        target = now;
+                match next(queue) {
+                    Some(flags) if flags & GONE == 0 => {
+                        if crate::daemon::trace() {
+                            eprintln!("{} program folder event flags {flags:#x} on {}", crate::daemon::stamp(), target.parent().unwrap_or(target).display());
+                        }
                     }
-                    Decision::Off(_) => break,
-                    Decision::Nothing(_) if matches!(seen, Seen::Deleted | Seen::Revoked) => break,
-                    Decision::Nothing(_) => {}
+                    _ => break false,
                 }
-            }
-        }
-        unsafe {
-            if queue >= 0 {
-                libc::close(queue);
-            }
-            libc::close(fd);
-        }
+            };
+        unsafe { libc::close(folder) };
+        back
     }
 }
 
 #[cfg(target_os = "linux")]
 pub mod linux {
-    use super::{decide, follow_origin, inside_any, links_into, places, remove_links, said, seen_from, trash_roots, After, Decision, Seen, PLACES};
+    use super::{copies, decide, follow_origin, inside_any, places, remove_copies, said, seen_from, trash_roots, After, Decision, Seen, PLACES};
     use crate::daemon::{stamp, trace, Signal};
     use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask, Watches};
     use std::ffi::CString;
@@ -332,11 +469,14 @@ pub mod linux {
         roots: Vec<PathBuf>,
     }
 
+    type Act = Arc<dyn Fn(&Decision, &Path) + Send + Sync>;
+
     pub struct Watcher {
         watches: Mutex<Watches>,
         armed: Mutex<Option<Armed>>,
         wanted: Mutex<Option<PathBuf>>,
         home: PathBuf,
+        act: Act,
     }
 
     fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -369,12 +509,11 @@ pub mod linux {
             if std::env::var_os("SCOOCH_HOME").is_some_and(|value| !value.is_empty()) {
                 return None;
             }
-            let home = dirs::home_dir()?;
+            let home = super::resolved(&dirs::home_dir()?);
             let inotify = Inotify::init().ok()?;
-            let watcher = Arc::new(Watcher { watches: Mutex::new(inotify.watches()), armed: Mutex::new(None), wanted: Mutex::new(None), home: home.clone() });
             let places = places(&home, std::env::var_os(PLACES));
             let program = std::env::current_exe().ok().map(|exe| crate::state::canonical(&exe).unwrap_or(exe));
-            let act = move |decision: &Decision, at: &Path| {
+            let act: Act = Arc::new(move |decision: &Decision, at: &Path| {
                 if let Decision::Repoint(now) = decision {
                     if let Err(error) = follow_origin(&crate::state::Store::open(), now) {
                         eprintln!("{} program moved from {} to {} but Scooch could not follow it, {error:#}", stamp(), at.display(), now.display());
@@ -383,23 +522,17 @@ pub mod linux {
                 }
                 eprintln!("{} {}", stamp(), said(decision, at));
                 if let Decision::Off(_) = decision {
-                    if let Some((copy, others)) = places.split_first().map(|(first, others)| (first.join("scooch"), others)) {
-                        if program.as_deref().is_some_and(|program| crate::state::canonical(&copy).is_ok_and(|real| real == program)) {
-                            for line in remove_links(&links_into(others, &copy)) {
-                                eprintln!("{} {line}", stamp());
-                            }
-                            match std::fs::remove_file(&copy) {
-                                Ok(()) => eprintln!("{} program copy {} removed", stamp(), copy.display()),
-                                Err(error) => eprintln!("{} program copy {} could not be removed, {error}", stamp(), copy.display()),
-                            }
-                        }
+                    let proven: Vec<PathBuf> = program.iter().cloned().chain(crate::platform::login_program()).collect();
+                    for line in remove_copies(&copies(&crate::state::Store::open()), &proven, &places) {
+                        eprintln!("{} {line}", stamp());
                     }
                     trashed.store(true, Ordering::SeqCst);
                     signal.wake();
                 }
-            };
+            });
+            let watcher = Arc::new(Watcher { watches: Mutex::new(inotify.watches()), armed: Mutex::new(None), wanted: Mutex::new(None), home, act });
             let runner = watcher.clone();
-            std::thread::Builder::new().name("scooch-program".into()).spawn(move || runner.run(inotify, act)).ok()?;
+            std::thread::Builder::new().name("scooch-program".into()).spawn(move || runner.run(inotify)).ok()?;
             Some(watcher)
         }
 
@@ -425,8 +558,23 @@ pub mod linux {
                     if trace() {
                         eprintln!("{} program not watched at {}, {why}", stamp(), origin.display());
                     }
+                    drop(armed);
+                    drop(wanted);
+                    if let Some(file) = self.thrown_away(origin) {
+                        (self.act)(&Decision::Off(file), origin);
+                    }
                 }
             }
+        }
+
+        fn thrown_away(&self, origin: &Path) -> Option<PathBuf> {
+            if std::fs::symlink_metadata(origin).is_ok() {
+                return None;
+            }
+            let folder = origin.parent()?;
+            let dev = std::fs::metadata(folder).ok()?.dev();
+            let data = super::data_home(&self.home, std::env::var_os("XDG_DATA_HOME"));
+            super::thrown(origin, &super::trash_dirs(&data, &top_of(&folder.join("."), dev), unsafe { libc::getuid() }))
         }
 
         fn make(&self, origin: &Path) -> Result<Armed, String> {
@@ -437,8 +585,8 @@ pub mod linux {
             let wd = lock(&self.watches).add(origin, WatchMask::MOVE_SELF | WatchMask::DELETE_SELF | WatchMask::ATTRIB | WatchMask::CLOSE_WRITE).map_err(|error| error.to_string())?;
             let same = std::fs::metadata(&self.home).is_ok_and(|home| home.dev() == meta.dev());
             let fd = if same { std::fs::OpenOptions::new().read(true).custom_flags(libc::O_PATH).open(origin).ok() } else { None };
-            let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|path| path.is_absolute()).unwrap_or_else(|| self.home.join(".local").join("share"));
-            let roots = trash_roots(&data, &top_of(origin, meta.dev()), unsafe { libc::getuid() });
+            let data = super::data_home(&self.home, std::env::var_os("XDG_DATA_HOME"));
+            let roots = trash_roots(&data, &top_of(&super::resolved(origin), meta.dev()), unsafe { libc::getuid() });
             Ok(Armed { origin: origin.to_path_buf(), wd, fd, dev: meta.dev(), ino: meta.ino(), roots })
         }
 
@@ -485,7 +633,8 @@ pub mod linux {
             }
         }
 
-        fn run(&self, mut inotify: Inotify, act: impl Fn(&Decision, &Path)) {
+        fn run(&self, mut inotify: Inotify) {
+            let act = self.act.clone();
             let mut buffer = [0u8; 4096];
             loop {
                 let events: Vec<(WatchDescriptor, EventMask)> = match inotify.read_events_blocking(&mut buffer) {
@@ -550,6 +699,130 @@ mod tests {
         for path in ["/Users/ada/Documents/Trash/Scooch.app", "/Users/ada/Documents/.Trash/Scooch.app", "/Users/bo/.Trash/Scooch.app", "/Applications/Scooch.app", "/Users/ada/.Trash", "/Volumes/Spare/Trash/Scooch.app", "/Volumes/Spare/.Trashes", "/Applications/.Trashes/Scooch.app"] {
             assert!(!trashed(Path::new(path), &home), "{path}");
         }
+    }
+
+    #[test]
+    fn a_foreign_file_at_the_first_place_stays_and_the_copy_in_the_data_folder_goes_with_its_links() {
+        let root = crate::state::scratch("copies");
+        let (local, bin, data) = (root.join(".local/bin"), root.join("bin"), root.join("data/bin"));
+        for folder in [&local, &bin, &data] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let foreign = local.join("scooch");
+        std::fs::write(&foreign, b"someone else's scooch").unwrap();
+        let copy = data.join("scooch");
+        std::fs::write(&copy, b"the program Scooch runs from").unwrap();
+        std::os::unix::fs::symlink(&copy, bin.join("scooch")).unwrap();
+        std::os::unix::fs::symlink(&foreign, bin.join("other")).unwrap();
+        let places = vec![local.clone(), bin.clone()];
+        let copies = vec![foreign.clone(), copy.clone()];
+        assert!(remove_copies(&copies, &[], &places).is_empty(), "nothing is removed that is not proven to be the program");
+        assert!(copy.exists() && foreign.exists());
+        let lines = remove_copies(&copies, std::slice::from_ref(&copy), &places);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(!copy.exists() && std::fs::symlink_metadata(bin.join("scooch")).is_err());
+        assert!(foreign.exists() && std::fs::symlink_metadata(bin.join("other")).is_ok(), "the foreign file or a link to it was touched");
+        std::fs::write(&copy, b"again").unwrap();
+        std::os::unix::fs::symlink(&copy, local.join("scooch-link")).unwrap();
+        assert!(remove_copies(&[local.join("scooch-link")], &[local.join("scooch-link")], &places).is_empty(), "a link is never taken for the copy");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_appimage_thrown_away_while_nothing_ran_is_found_by_its_trashinfo() {
+        let root = crate::state::scratch("trashinfo");
+        let origin = root.join("Apps").join("Scooch 1.AppImage");
+        let data = root.join("share");
+        let top = root.join("disk");
+        let home_trash = data.join("Trash");
+        std::fs::create_dir_all(home_trash.join("info")).unwrap();
+        std::fs::create_dir_all(home_trash.join("files")).unwrap();
+        let trashes = trash_dirs(&data, &top, 1000);
+        assert_eq!(thrown(&origin, &trashes), None, "a plain delete leaves no trashinfo");
+        let encoded = origin.to_string_lossy().replace(' ', "%20");
+        std::fs::write(home_trash.join("info").join("Scooch 1.AppImage.trashinfo"), format!("[Trash Info]\nPath={encoded}\nDeletionDate=2026-11-20T10:00:00\n")).unwrap();
+        assert_eq!(thrown(&origin, &trashes), None, "a trashinfo without its file counts for nothing");
+        std::fs::write(home_trash.join("files").join("Scooch 1.AppImage"), b"x").unwrap();
+        assert_eq!(thrown(&origin, &trashes), Some(home_trash.join("files").join("Scooch 1.AppImage")));
+        assert_eq!(thrown(&root.join("Apps").join("Other.AppImage"), &trashes), None);
+        let disk_trash = top.join(".Trash-1000");
+        std::fs::create_dir_all(disk_trash.join("info")).unwrap();
+        std::fs::create_dir_all(disk_trash.join("files")).unwrap();
+        let on_disk = top.join("Apps").join("Scooch.AppImage");
+        std::fs::write(disk_trash.join("info").join("Scooch.AppImage.trashinfo"), "[Trash Info]\nPath=Apps/Scooch.AppImage\n").unwrap();
+        std::fs::write(disk_trash.join("files").join("Scooch.AppImage"), b"x").unwrap();
+        assert_eq!(thrown(&on_disk, &trashes), Some(disk_trash.join("files").join("Scooch.AppImage")), "a path in a disk trash is relative to the top of the disk");
+        assert_eq!(info_path("[Trash Info]\nPath=/a%2Fb%25c\n"), Some(PathBuf::from("/a/b%c")));
+        assert_eq!(info_path("Path=/no/header"), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_watch_arms_again_after_a_delete_a_revoke_or_a_replace_in_place() {
+        assert!(rearm(Seen::Deleted, false) && rearm(Seen::Revoked, false) && rearm(Seen::Renamed, true));
+        assert!(!rearm(Seen::Renamed, false) && !rearm(Seen::Written, true) && !rearm(Seen::Written, false));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_mac_watch_follows_a_delete_and_a_replace_in_place_and_still_sees_the_trash() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let root = crate::state::scratch("mac-rearm");
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".Trash")).unwrap();
+        let apps = root.join("Applications");
+        let bundle = apps.join("Scooch.app");
+        let make = || std::fs::create_dir_all(bundle.join("Contents").join("MacOS")).unwrap();
+        make();
+        let (sender, heard) = channel();
+        let (program, target, watched_home) = (bundle.join("Contents/MacOS/scooch"), bundle.clone(), home.clone());
+        std::thread::spawn(move || mac::run(program, target, watched_home, move |decision: &Decision, _: &Path, _: &Path| {
+            let _ = sender.send(decision.clone());
+        }));
+        let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
+        let next = || loop {
+            match heard.recv_timeout(Duration::from_secs(5)).ok() {
+                Some(Decision::Nothing("changed in place")) => continue,
+                other => break other,
+            }
+        };
+        pause(300);
+        std::fs::remove_dir_all(&bundle).unwrap();
+        assert_eq!(next(), Some(Decision::Nothing("was deleted")));
+        pause(300);
+        make();
+        pause(300);
+        std::fs::rename(&bundle, apps.join("Scooch old.app")).unwrap();
+        make();
+        assert_eq!(next(), Some(Decision::Nothing("moved but a program is back at its old place")));
+        pause(300);
+        let thrown = home.join(".Trash").join("Scooch.app");
+        std::fs::rename(&bundle, &thrown).unwrap();
+        assert_eq!(next(), Some(Decision::Off(resolved(&thrown))), "the watch was not armed again on the copy that replaced the old one");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_home_behind_a_link_is_compared_as_the_folder_it_points_at() {
+        let root = crate::state::scratch("home-link");
+        let real = root.join("real").join("ada");
+        std::fs::create_dir_all(real.join(".Trash")).unwrap();
+        std::fs::create_dir_all(real.join(".local").join("share").join("Trash").join("files")).unwrap();
+        let link = root.join("ada");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let thrown = real.join(".Trash").join("Scooch.app");
+        assert!(!trashed(&thrown, &link), "the bare link names no Trash the resolved path lies in");
+        assert!(trashed(&thrown, &resolved(&link)));
+        let data = data_home(&link, None);
+        assert_eq!(data, real.join(".local").join("share"));
+        let roots = trash_roots(&data, Path::new("/"), 1000);
+        assert!(inside_any(&real.join(".local/share/Trash/files/Scooch.AppImage"), &roots));
+        let custom = root.join("data");
+        std::os::unix::fs::symlink(real.join(".local").join("share"), &custom).unwrap();
+        assert_eq!(data_home(&link, Some(custom.into_os_string())), real.join(".local").join("share"));
+        assert_eq!(data_home(&link, Some("relative/share".into())), real.join(".local").join("share"), "a relative XDG_DATA_HOME is ignored");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

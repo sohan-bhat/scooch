@@ -91,12 +91,22 @@ pub fn command_line(program: &Path) -> String {
     format!("\"{}\" watch", plain(program).display())
 }
 
+pub fn program_in(command: &str) -> Option<PathBuf> {
+    let rest = command.trim().strip_prefix('"')?;
+    Some(PathBuf::from(&rest[..rest.find('"')?]))
+}
+
 pub fn twin(exe: &Path) -> PathBuf {
     exe.with_file_name(TWIN)
 }
 
 fn folded(path: &Path) -> String {
     plain(path).to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    let (a, b) = (folded(a), folded(b));
+    !a.is_empty() && a == b
 }
 
 pub fn inside(path: &Path, folder: &Path) -> bool {
@@ -278,6 +288,10 @@ mod tests {
     fn the_login_command_quotes_the_program() {
         assert_eq!(command_line(Path::new(r"\\?\C:\Program Files\Scooch\scoochw.exe")), r#""C:\Program Files\Scooch\scoochw.exe" watch"#);
         assert_eq!(command_line(Path::new(r"C:\tools\scooch.exe")), r#""C:\tools\scooch.exe" watch"#);
+        assert_eq!(program_in(&command_line(Path::new(r"C:\Program Files\Scooch\scoochw.exe"))), Some(PathBuf::from(r"C:\Program Files\Scooch\scoochw.exe")));
+        assert_eq!(program_in("scoochw.exe watch"), None);
+        assert!(same_file(Path::new(r"\\?\C:\Users\A\Pictures\Lake.JPG"), Path::new("C:/Users/a/Pictures/lake.jpg")));
+        assert!(!same_file(Path::new(r"C:\Users\a\Pictures\lake.jpg"), Path::new(r"C:\Users\a\Pictures\sea.jpg")));
     }
 
     #[test]
