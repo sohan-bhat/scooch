@@ -15,7 +15,7 @@ mod probe {
     use scooch::platform::linux::parse::geometry::{intersect, Insets};
     use scooch::platform::linux::parse::{caja, ding, gio, gvariant, kde as kde_rules, keyfile, nemo, record, wakes, xfce as xfce_rules};
     use scooch::platform::linux::settings::{self, Gsettings, Plasma, Xfconf};
-    use scooch::platform::linux::{bus, cinnamon, decode, gnome, gvfs, kde, mate, screens, tool, xfce, Linux};
+    use scooch::platform::linux::{bus, cinnamon, decode, drops, gnome, gvfs, kde, mate, screens, tool, xfce, Linux};
     use scooch::platform::{Desktop, Screen};
     use scooch_core::{Rect, RgbImage};
     use std::collections::{BTreeMap, VecDeque};
@@ -28,7 +28,7 @@ mod probe {
     use std::time::{Duration, Instant};
     use x11rb::connection::Connection as _;
     use x11rb::wrapper::ConnectionExt as _;
-    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, KeyButMask, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT};
+    use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask, ImageFormat, KeyButMask, PropMode, WindowClass, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT};
     use x11rb::protocol::xtest::ConnectionExt as _;
     use zbus::zvariant;
 
@@ -963,6 +963,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         Ok(true)
     }
 
+    const KDE_DROP_BAR: f64 = 500.0;
     const OFFSETS: [u64; 16] = [0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600, 2000];
     const STEADY: Duration = Duration::from_millis(400);
     const TRUTH: Duration = Duration::from_millis(2500);
@@ -999,6 +1000,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         lattice: Option<Lattice>,
         steady: bool,
         scale: f32,
+        plasma5: bool,
+        pid: u32,
+    }
+
+    impl Bench<'_> {
+        fn predicts(&self) -> bool {
+            self.lattice.is_some() || self.plasma5
+        }
     }
 
     struct Plan {
@@ -1064,7 +1073,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let scale = factor(p);
         let frame = physical(&screen.frame, scale);
         let at = |x: f32, y: f32| ((frame.x + frame.w * x) as i16, (frame.y + frame.h * y) as i16);
-        let bench = Bench { linux: &linux, log: p.out.join("drop.log"), stamps, live, lattice, steady, scale };
+        let plasma5 = kde && drops::applies(p.kind, p.session);
+        if plasma5 {
+            p.line("- the Plasma 5 prediction lands each single drag by the folder view rule, and the probe checks that rule against the places Plasma saves 2.5 s after the drop");
+        }
+        let bench = Bench { linux: &linux, log: p.out.join("drop.log"), stamps, live, lattice, steady, scale, plasma5, pid: process };
         let back = if steady { ", back to back for the first 400 ms on this desktop" } else { "" };
         p.line(format!("- ten drags of the probe icon, each to whichever of two spots lies farther from it, then five drags of the same three icons from the leftmost column, selected by three control clicks after a click on empty desktop, each by XTest, with reads at 0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600 and 2000 ms after the drop{back}, against the places read 2.5 s after the drop, each read printed as began+took:moved places it shows"));
         let mut tally = Tally::default();
@@ -1085,6 +1098,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         if bench.lattice.is_some() {
             if let Some(point) = tracked {
                 specials(p, &bench, point, &at);
+            }
+        }
+        if bench.predicts() {
+            tracked = key_cases(p, &bench, tracked, &at);
+        }
+        if plasma5 {
+            if let Some(point) = tracked {
+                plasma_specials(p, &bench, point, &at);
             }
         }
         let mut group: Rects = Vec::new();
@@ -1119,6 +1140,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let log_mark = log_lines(&bench.log).len();
         let stamp_mark = bench.stamps.lock().map(|list| list.len()).unwrap_or(0);
         let live_before = bench.live.as_ref().map(Live::read);
+        let boards = if bench.plasma5 && !plan.group { plasma_boards(bench.linux) } else { None };
         let sent = drag(plan.from, plan.to).is_ok();
         let dropped = Instant::now();
         let dropped_wall = wall();
@@ -1163,7 +1185,23 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         ));
         let shown: Vec<String> = reads.iter().map(|taken| format!("{}+{}:{}", taken.began.as_millis(), taken.took.as_millis(), changed.iter().filter(|rect| taken.seen.contains(rect)).count())).collect();
         p.line(format!("    - reads {}", shown.join(" ")));
-        if bench.lattice.is_some() {
+        if let Some(boards) = boards {
+            let press = (f32::from(plan.from.0) / bench.scale, f32::from(plan.from.1) / bench.scale);
+            let release = (f32::from(plan.to.0) / bench.scale, f32::from(plan.to.1) / bench.scale);
+            let said = match plasma_landing(&boards, press, release) {
+                Ok((_, to, rect)) => {
+                    let mut expected: Rects = plan.before.iter().filter(|rect| !plan.moving.contains(rect)).copied().collect();
+                    expected.push(rounded(&rect));
+                    expected.sort_unstable();
+                    let right = expected == last;
+                    tally.predicted[slot] += usize::from(right);
+                    format!("lands it in cell {to}, equal to the final places {right}")
+                }
+                Err(why) => format!("gives no landing since {why}"),
+            };
+            p.line(format!("    - the Plasma 5 landing rule from the press {said}"));
+        }
+        if bench.predicts() {
             let (guessed, verdict) = guessed(&wakes, lines.get(log_mark..).unwrap_or_default());
             tally.guessed[slot] += usize::from(guessed);
             if guessed && slot == 0 {
@@ -1302,6 +1340,323 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         untouched(p, "drag ended with Escape", escape, false);
     }
 
+    fn plasma_boards(linux: &Linux) -> Option<Vec<kde::Board>> {
+        let shell = kde::Kde { desktop: linux.desktop.clone(), config: kde::config_folder(), session: linux.session };
+        let found = linux.all_screens().ok()?;
+        let state = kde::state().ok()?;
+        let screens: Vec<Screen> = found.into_iter().map(|found| found.screen).collect();
+        Some(shell.boards(&state, &screens, &kde::mapping()))
+    }
+
+    fn plasma_board(boards: &[kde::Board], press: (f32, f32)) -> Result<(&kde::Board, i64), &'static str> {
+        let board = boards.iter().find(|board| board.grid.cell_at(press).is_some()).ok_or("the press was off Plasma's icons")?;
+        match board.grid.spot(press) {
+            kde_rules::Spot::Icon(from) => Ok((board, from)),
+            _ => Err("the press was not on an icon"),
+        }
+    }
+
+    fn plasma_landing(boards: &[kde::Board], press: (f32, f32), release: (f32, f32)) -> Result<(i64, i64, Rect), &'static str> {
+        let (board, from) = plasma_board(boards, press)?;
+        if let Some(why) = board.why_not {
+            return Err(why);
+        }
+        let to = board.grid.landing(from, press, release)?;
+        Ok((from, to, board.grid.icon(to)))
+    }
+
+    fn set_times(lines: &[String], dropped: f64) -> Vec<f64> {
+        lines.iter().filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let stamp = words.next()?.parse::<f64>().ok()?;
+            (words.next() == Some("set")).then_some((stamp - dropped) * 1000.0)
+        }).collect()
+    }
+
+    fn drops_switches(pid: u32) -> Option<u64> {
+        threads_of(pid).iter().find(|thread| thread.name == "scooch-drops").map(|thread| thread.voluntary + thread.involuntary)
+    }
+
+    fn intern(conn: &x11rb::rust_connection::RustConnection, name: &[u8]) -> Result<u32> {
+        Ok(conn.intern_atom(false, name)?.reply()?.atom)
+    }
+
+    fn active_window(conn: &x11rb::rust_connection::RustConnection, root: u32) -> Option<u32> {
+        let atom = intern(conn, b"_NET_ACTIVE_WINDOW").ok()?;
+        conn.get_property(false, root, atom, AtomEnum::WINDOW, 0, 1).ok()?.reply().ok()?.value32()?.next()
+    }
+
+    fn desktop_active() -> Result<bool> {
+        let (conn, number) = x11rb::connect(None)?;
+        let root = conn.setup().roots.get(number).context("no root")?.root;
+        let Some(window) = active_window(&conn, root) else { return Ok(false) };
+        let (kind, desktop) = (intern(&conn, b"_NET_WM_WINDOW_TYPE")?, intern(&conn, b"_NET_WM_WINDOW_TYPE_DESKTOP")?);
+        let types = conn.get_property(false, window, kind, AtomEnum::ATOM, 0, 16)?.reply()?;
+        Ok(types.value32().is_some_and(|mut values| values.any(|value| value == desktop)))
+    }
+
+    fn typed_elsewhere(pid: u32) -> Result<(bool, Option<u64>, Option<u64>)> {
+        let (conn, number) = x11rb::connect(None)?;
+        let screen = conn.setup().roots.get(number).context("no root")?.clone();
+        let window = conn.generate_id()?;
+        conn.create_window(x11rb::COPY_DEPTH_FROM_PARENT, window, screen.root, 240, 200, 480, 240, 0, WindowClass::INPUT_OUTPUT, 0, &CreateWindowAux::new().background_pixel(screen.white_pixel).event_mask(EventMask::KEY_PRESS))?;
+        conn.change_property8(PropMode::REPLACE, window, AtomEnum::WM_NAME, AtomEnum::STRING, b"scooch probe typing")?;
+        conn.map_window(window)?;
+        conn.flush()?;
+        std::thread::sleep(Duration::from_millis(300));
+        let message = ClientMessageEvent::new(32, window, intern(&conn, b"_NET_ACTIVE_WINDOW")?, [2, 0, 0, 0, 0]);
+        conn.send_event(false, screen.root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, message)?;
+        conn.flush()?;
+        let active = wait_until(Duration::from_secs(3), || active_window(&conn, screen.root) == Some(window)).is_some();
+        std::thread::sleep(Duration::from_millis(600));
+        let code = key_code(&conn, 0x61).context("no key for the letter a")?;
+        let before = drops_switches(pid);
+        for _ in 0..50 {
+            conn.xtest_fake_input(KEY_PRESS_EVENT, code, 0, screen.root, 0, 0, 0)?;
+            conn.flush()?;
+            std::thread::sleep(Duration::from_millis(15));
+            conn.xtest_fake_input(KEY_RELEASE_EVENT, code, 0, screen.root, 0, 0, 0)?;
+            conn.flush()?;
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        conn.sync()?;
+        std::thread::sleep(Duration::from_millis(400));
+        let after = drops_switches(pid);
+        conn.destroy_window(window)?;
+        conn.flush()?;
+        std::thread::sleep(Duration::from_millis(300));
+        Ok((active, before, after))
+    }
+
+    fn tap_shift() -> Result<()> {
+        let (conn, number) = x11rb::connect(None)?;
+        let root = conn.setup().roots.get(number).context("no root")?.root;
+        let code = key_code(&conn, 0xffe1).context("no Shift key")?;
+        conn.xtest_fake_input(KEY_PRESS_EVENT, code, 0, root, 0, 0, 0)?;
+        conn.flush()?;
+        std::thread::sleep(Duration::from_millis(60));
+        conn.xtest_fake_input(KEY_RELEASE_EVENT, code, 0, root, 0, 0, 0)?;
+        conn.sync()?;
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(())
+    }
+
+    fn key_lines(lines: &[String]) -> Vec<String> {
+        lines.iter().filter(|line| line.contains(" drop key")).cloned().collect()
+    }
+
+    fn key_cases(p: &mut Probe, bench: &Bench, tracked: Option<(f32, f32)>, at: &dyn Fn(f32, f32) -> (i16, i16)) -> Option<(f32, f32)> {
+        let mark = log_lines(&bench.log).len();
+        match typed_elsewhere(bench.pid) {
+            Ok((active, before, after)) => {
+                let switched = before.zip(after).map(|(before, after)| after.saturating_sub(before));
+                p.line(format!("  - 50 keys typed into a window of the probe's own, which the window manager made the active window {active}, the scooch-drops thread switched {switched:?} times while they went in"));
+                match switched {
+                    None => p.fail("the scooch-drops thread could not be read while keys went to another window"),
+                    Some(0) => {}
+                    Some(count) => p.fail(format!("the scooch-drops thread woke {count} times while 50 keys went to another window, where it must not wake at all")),
+                }
+                if !active {
+                    p.soft("keys typed into another window", "the window manager did not make the probe's window the active window");
+                }
+            }
+            Err(error) => p.fail(format!("keys could not be typed into another window, {error:#}")),
+        }
+        let lines = log_lines(&bench.log);
+        p.line(format!("  - drop.log lines about keys while the keys went elsewhere {:?}", key_lines(lines.get(mark..).unwrap_or_default())));
+        let _ = clicks(&[at(0.92, 0.92)]);
+        let on_desktop = desktop_active().unwrap_or(false);
+        let before = places(bench.linux);
+        let icon = tracked.and_then(|point| nearest(&before, point))?;
+        let from = grab(&icon, bench.scale);
+        let to = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
+        let mark = log_lines(&bench.log).len();
+        let typed = special(p, bench, "a drag after Shift went down with the desktop active", || {
+            tap_shift()?;
+            drag(from, to)?;
+            Ok(format!("Shift pressed and let go with the desktop the active window {on_desktop}, then the probe icon from {},{} to {},{}", from.0, from.1, to.0, to.1))
+        });
+        let lines = log_lines(&bench.log);
+        let fresh = lines.get(mark..).unwrap_or_default();
+        p.line(format!("  - drop.log lines about keys around that drag {:?}", key_lines(fresh)));
+        let why = unguessed(fresh);
+        if typed.0 {
+            p.fail("the daemon predicted a drag after a key went down on the active desktop, where the selection may hold more than one icon");
+        } else if on_desktop && !why.contains("the selection may hold more than one icon") {
+            p.fail(format!("a key on the active desktop did not make the selection unknown to the daemon{why}"));
+        }
+        let after = places(bench.linux);
+        after.iter().find(|rect| !before.contains(rect)).map(center).or(tracked)
+    }
+
+    fn walked(grid: &kde_rules::Grid, from: i64, start: i64) -> Option<i64> {
+        (start..start + 64).find(|index| *index == from || !grid.taken.contains(index)).filter(|index| *index != from)
+    }
+
+    fn by_center(area: &Rect, points: impl Iterator<Item = (f32, f32)>) -> Vec<(f32, f32)> {
+        let middle = (area.x + area.w / 2.0, area.y + area.h / 2.0);
+        let mut points: Vec<(f32, f32)> = points.collect();
+        points.sort_by(|a, b| (a.0 - middle.0).hypot(a.1 - middle.1).total_cmp(&(b.0 - middle.0).hypot(b.1 - middle.1)));
+        points
+    }
+
+    fn lattice_points(area: &Rect) -> impl Iterator<Item = (f32, f32)> + '_ {
+        let (columns, rows) = (((area.w - 48.0) / 8.0) as i32, ((area.h - 48.0) / 8.0) as i32);
+        (0..rows.max(0)).flat_map(move |row| (0..columns.max(0)).map(move |column| (area.x + 24.0 + 8.0 * column as f32, area.y + 24.0 + 8.0 * row as f32)))
+    }
+
+    fn taken_drop(boards: &[kde::Board], press: (f32, f32)) -> Option<((f32, f32), i64, i64)> {
+        let (board, from) = plasma_board(boards, press).ok()?;
+        let grid = &board.grid;
+        by_center(&grid.area, lattice_points(&grid.area)).into_iter().find_map(|point| {
+            let landing = grid.target(point)?;
+            let pointer = grid.cell_at(point)?;
+            let usable = grid.landing(from, press, point) == Err("the landing cell is taken") && pointer != from && !grid.taken.contains(&pointer);
+            usable.then(|| walked(grid, from, landing).map(|walk| (point, landing, walk))).flatten()
+        })
+    }
+
+    type Hook = ((f32, f32), (f32, f32), i64, i64);
+
+    fn hook_plan(boards: &[kde::Board], press: (f32, f32)) -> Option<Hook> {
+        let (board, from) = plasma_board(boards, press).ok()?;
+        let grid = &board.grid;
+        let (_, tall) = grid.size();
+        let jump = (press.0, press.1 - tall as f32);
+        let start = grid.cell_at(jump)?;
+        let per = grid.per();
+        by_center(&grid.area, lattice_points(&grid.area)).into_iter().find_map(|point| {
+            let guess = grid.landing(from, press, point).ok()?;
+            let truth = if grid.layout.rows_first { guess + per } else { (guess % per + 1 < per).then_some(guess + 1)? };
+            let fits = grid.icon(truth).y + grid.icon(truth).h <= grid.area.y + grid.area.h;
+            let usable = grid.cell_at(point) != Some(start) && truth != from && !grid.taken.contains(&truth) && fits;
+            usable.then_some((jump, point, guess, truth))
+        })
+    }
+
+    fn hook_drag(from: (i16, i16), jump: (i16, i16), to: (i16, i16)) -> Result<()> {
+        let (conn, number) = x11rb::connect(None)?;
+        let root = conn.setup().roots.get(number).context("no root")?.root;
+        let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
+        conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, from.0, from.1, 0)?;
+        conn.flush()?;
+        pause(200);
+        conn.xtest_fake_input(BUTTON_PRESS_EVENT, 1, 0, root, 0, 0, 0)?;
+        conn.flush()?;
+        pause(200);
+        conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, jump.0, jump.1, 0)?;
+        conn.flush()?;
+        pause(150);
+        for step in 1..=20i32 {
+            let x = jump.0 as i32 + (to.0 as i32 - jump.0 as i32) * step / 20;
+            let y = jump.1 as i32 + (to.1 as i32 - jump.1 as i32) * step / 20;
+            conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, x as i16, y as i16, 0)?;
+            conn.flush()?;
+            pause(30);
+        }
+        pause(200);
+        conn.xtest_fake_input(BUTTON_RELEASE_EVENT, 1, 0, root, 0, 0, 0)?;
+        conn.flush()?;
+        conn.sync()?;
+        Ok(())
+    }
+
+    fn physical_point(point: (f32, f32), scale: f32) -> (i16, i16) {
+        ((point.0 * scale) as i16, (point.1 * scale) as i16)
+    }
+
+    fn plasma_specials(p: &mut Probe, bench: &Bench, point: (f32, f32), at: &dyn Fn(f32, f32) -> (i16, i16)) {
+        let scale = bench.scale;
+        let Some(icon) = nearest(&places(bench.linux), point) else { return };
+        let from = grab(&icon, scale);
+        let press = (f32::from(from.0) / scale, f32::from(from.1) / scale);
+        let Some(boards) = plasma_boards(bench.linux) else {
+            p.fail("Plasma's grid could not be read for the drop on a taken cell");
+            return;
+        };
+        let Some((spot, landing, walk)) = taken_drop(&boards, press) else {
+            p.fail("no release point lands the probe icon on a taken cell with a free cell under the pointer");
+            return;
+        };
+        let onto = physical_point(spot, scale);
+        let before = places(bench.linux);
+        let mark = log_lines(&bench.log).len();
+        let dropped = wall();
+        let taken = special(p, bench, "a drop whose landing cell is taken, which gives no guess and follows the save", || {
+            drag(from, onto)?;
+            Ok(format!("the probe icon from {},{} to {},{}, where Plasma's rule lands it on the taken cell {landing} and walks it on to cell {walk}", from.0, from.1, onto.0, onto.1))
+        });
+        let fresh = log_lines(&bench.log);
+        let sets = set_times(fresh.get(mark..).unwrap_or_default(), dropped);
+        let why = unguessed(fresh.get(mark..).unwrap_or_default());
+        if taken.0 {
+            p.fail("the daemon predicted a drop whose landing cell is taken, which it must never do");
+        } else if !why.contains("the landing cell is taken") {
+            p.fail(format!("the drop on a taken cell was not refused for its taken cell{why}"));
+        } else if taken.2 {
+            p.fail("the drop on a taken cell moved no icon, so it could not show the save being followed");
+        } else if !sets.first().is_some_and(|first| *first >= 1500.0) {
+            p.fail(format!("the drop on a taken cell set the wallpaper at {sets:?} ms after the drop, where it must follow Plasma's save at about 2 s"));
+        }
+        let now = places(bench.linux);
+        let Some(icon) = now.iter().find(|rect| !before.contains(rect)).copied().or_else(|| nearest(&now, point)) else { return };
+        let from = grab(&icon, scale);
+        let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
+        special(p, bench, "a plain drag so the daemon learns the selection again", || {
+            drag(from, free)?;
+            Ok(format!("the probe icon from {},{} to {},{}", from.0, from.1, free.0, free.1))
+        });
+        let now = places(bench.linux);
+        let Some(icon) = nearest(&now, (f32::from(free.0) / scale, f32::from(free.1) / scale)) else { return };
+        let from = grab(&icon, scale);
+        let press = (f32::from(from.0) / scale, f32::from(from.1) / scale);
+        let plan = plasma_boards(bench.linux).and_then(|boards| hook_plan(&boards, press).map(|plan| (boards, plan)));
+        let Some((boards, (jump, release, guess, truth))) = plan else {
+            p.soft("the forced miss", "no free pair of cells one row apart was found for the hook drag");
+            return;
+        };
+        let Ok((board, _)) = plasma_board(&boards, press) else { return };
+        let (truth_rect, guess_rect) = (rounded(&board.grid.icon(truth)), rounded(&board.grid.icon(guess)));
+        let (jump_at, release_at) = (physical_point(jump, scale), physical_point(release, scale));
+        let mark = log_lines(&bench.log).len();
+        let dropped = wall();
+        let hooked = special(p, bench, "a hook drag whose first motion leaves the icon's row, which the prediction misses", || {
+            hook_drag(from, jump_at, release_at)?;
+            Ok(format!("the probe icon pressed at {},{}, first moved to {},{} in the row above, then let go at {},{}, where the prediction lands it in cell {guess} and Plasma, which takes the drag from the first motion, in cell {truth}", from.0, from.1, jump_at.0, jump_at.1, release_at.0, release_at.1))
+        });
+        let fresh = log_lines(&bench.log);
+        let fresh = fresh.get(mark..).unwrap_or_default();
+        let sets = set_times(fresh, dropped);
+        let off = fresh.iter().any(|line| line.contains(&rules_off_line()));
+        let missed = fresh.iter().any(|line| line.contains("predicted drop missed"));
+        let now = places(bench.linux);
+        let landed = now.contains(&truth_rect);
+        p.line(format!("    - wallpaper sets at {sets:?} ms after the drop, the miss logged {missed}, the line that turns prediction off logged {off}, the icon in Plasma's cell {landed} and in the guessed cell {}", now.contains(&guess_rect)));
+        if !hooked.0 {
+            p.soft("the forced miss", "the daemon made no guess for the hook drag");
+        } else if !missed && landed {
+            p.fail("the hook drag landed where Plasma's rule says and yet the net found no miss");
+        } else if !missed {
+            p.soft("the forced miss", "Plasma did not take the hook drag from its first motion, so the guess held");
+        } else if !off || sets.len() < 2 || !sets.get(1).is_some_and(|second| *second >= 1500.0) || !landed {
+            p.fail(format!("the forced miss was not corrected at the save, sets {sets:?} ms, off line {off}, icon in Plasma's cell {landed}"));
+        }
+        let _ = clicks(&[at(0.92, 0.92)]);
+        let now = places(bench.linux);
+        let Some(icon) = nearest(&now, center(&truth_rect)) else { return };
+        let from = grab(&icon, scale);
+        let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
+        let escape = special(p, bench, "drag ended with Escape", || {
+            drag_ending(from, free, true)?;
+            Ok(format!("the probe icon from {},{} toward {},{}, Escape before the release", from.0, from.1, free.0, free.1))
+        });
+        untouched(p, "drag ended with Escape", escape, false);
+    }
+
+    fn rules_off_line() -> String {
+        scooch::platform::linux::parse::drops::off_line("Plasma")
+    }
+
     fn steady_lines(p: &mut Probe, tally: &mut Tally, plan: &Plan, reads: &[Taken<Rects>], last: &[[i64; 4]], slot: usize) {
         let partial: Vec<&Taken<Rects>> = reads.iter().filter(|taken| taken.seen.as_slice() != last && taken.seen != plan.before).collect();
         tally.partly[slot] += usize::from(!partial.is_empty());
@@ -1345,15 +1700,15 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         if let Some(why) = quick_limit(p) {
             set_limit(p, &format!("section 7b on {why}"), &tally.sets, 600.0);
         }
-        if bench.lattice.is_some() {
-            let limit = if bench.scale > 1.0 { 900.0 } else { 700.0 };
-            set_limit(p, "the predicted single drags of section 7b on XFCE", &tally.guessed_sets, limit);
+        if bench.predicts() {
+            let (name, limit) = if bench.plasma5 { ("Plasma 5", KDE_DROP_BAR) } else { ("XFCE", if bench.scale > 1.0 { 900.0 } else { 700.0 }) };
+            set_limit(p, &format!("the predicted single drags of section 7b on {name}"), &tally.guessed_sets, limit);
             let (guessed, held) = (tally.guessed[0] + tally.guessed[1], tally.held[0] + tally.held[1]);
             if held < guessed {
-                p.fail(format!("{} of {guessed} guesses of a move on XFCE did not agree with the file", guessed - held));
+                p.fail(format!("{} of {guessed} guesses of a move on {name} did not agree with the file", guessed - held));
             }
             if tally.guessed[0] < 6 {
-                p.fail(format!("the daemon predicted only {} of 10 single drags on XFCE, where at least 6 must be predicted", tally.guessed[0]));
+                p.fail(format!("the daemon predicted only {} of 10 single drags on {name}, where at least 6 must be predicted", tally.guessed[0]));
             }
         }
         if bench.steady {
@@ -1370,6 +1725,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 shown_ms(median(&costs)),
                 shown_ms(tally.cost.iter().max().map(|cost| *cost as f64))
             ));
+        }
+        if bench.plasma5 {
+            p.line(format!("- the daemon predicted {} of 10 single drags and {} of 5 group drags, and its net found {} and {} of those guesses agreed", tally.guessed[0], tally.guessed[1], tally.held[0], tally.held[1]));
+            p.line(format!("- the Plasma 5 landing rule from the press equalled the final places in {} of 10 single drags", tally.predicted[0]));
         }
         if bench.lattice.is_some() {
             p.line(format!("- the daemon predicted {} of 10 single drags and {} of 5 group drags, and its net found {} and {} of those guesses agreed", tally.guessed[0], tally.guessed[1], tally.held[0], tally.held[1]));
@@ -2099,6 +2458,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         std::thread::sleep(Duration::from_secs(2));
         let mut times = Vec::new();
         let mut sets = Vec::new();
+        let mut each: Vec<Option<f64>> = Vec::new();
+        let plasma5 = p.kind == Some(Kind::Kde) && drops::applies(p.kind, p.session);
         let frame = primary_frame(p).unwrap_or(screen.frame);
         let log = p.out.join("watch.log");
         for round in 1..=5 {
@@ -2117,6 +2478,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let detail = tried.unwrap_or_else(|error| format!("failed {error:#}"));
             let changed = wait_until(Duration::from_secs(10), || linux.wallpaper(&screen).ok().flatten() != before);
             let latency = changed.map(|_| moved.elapsed().as_millis());
+            std::thread::sleep(if plasma5 { Duration::from_millis(2600) } else { Duration::from_millis(1800) });
             let moved_icons = icons(&linux) != rects_before;
             let place = seen.map_or("not found, so the picture's own spot".to_string(), |(x, y)| format!("{x:.0},{y:.0}"));
             p.line(format!("- move {round} onto the subject seen at {place}, {detail}, icons moved by the adapter's reading {moved_icons}, new wallpaper after {latency:?} ms"));
@@ -2128,10 +2490,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 p.fail(format!("move {round} onto the subject brought no new wallpaper within 10 s, {detail}"));
             }
             times.extend(latency);
-            std::thread::sleep(Duration::from_millis(1800));
             let lines = log_lines(&log);
             let (wakes, set) = daemon_after(lines.get(mark..).unwrap_or_default(), dropped);
             sets.extend(set);
+            each.push(set);
             let woke = if wakes.is_empty() { "none".to_string() } else { wakes.join(", ") };
             p.line(format!("  - wakes after the drop {woke}, the daemon set the wallpaper at {} ms", shown_ms(set)));
         }
@@ -2140,6 +2502,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         p.line(format!("- the daemon set the wallpaper at a median {} ms after the drop, in {} of 5 moves", shown_ms(median(&sets)), sets.len()));
         if let Some(why) = quick_limit(p) {
             set_limit(p, &format!("section 6 on {why}"), &sets, 600.0);
+        }
+        if p.kind == Some(Kind::Kde) && p.session == Session::X11 {
+            let later: Vec<f64> = each.iter().skip(1).flatten().copied().collect();
+            p.line(format!("- named apart, move 1 set the wallpaper at {} ms, since the daemon starts with no knowledge of the selection, and moves 2 to 5 at a median {} ms in {} of 4", shown_ms(each.first().copied().flatten()), shown_ms(median(&later)), later.len()));
+            set_limit(p, "moves 2 to 5 of section 6 on KDE", &later, KDE_DROP_BAR);
         }
         heard_saves(p);
         switch_check(p, &linux, &screen, (&program, process))?;

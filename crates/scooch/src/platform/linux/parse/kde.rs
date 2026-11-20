@@ -270,11 +270,11 @@ pub struct Grid {
 }
 
 impl Grid {
-    fn size(&self) -> (f64, f64) {
+    pub fn size(&self) -> (f64, f64) {
         self.layout.cell(self.area.w as f64, self.area.h as f64)
     }
 
-    fn per(&self) -> i64 {
+    pub fn per(&self) -> i64 {
         self.layout.per_stripe(self.area.w as f64, self.area.h as f64).max(1)
     }
 
@@ -317,6 +317,13 @@ impl Grid {
         }
     }
 
+    pub fn target(&self, release: (f32, f32)) -> Option<i64> {
+        let (across, down) = self.local(release)?;
+        let (wide, tall) = self.size();
+        let small = self.layout.small_spacing();
+        self.index(((across + small + wide / 2.0) / wide).floor() as i64, ((down + 2.0 * small + self.layout.icon / 2.0) / tall).floor() as i64)
+    }
+
     pub fn landing(&self, from: i64, press: (f32, f32), release: (f32, f32)) -> Result<i64, &'static str> {
         if self.layout.right_to_left {
             return Err("the icons are aligned right to left");
@@ -329,17 +336,15 @@ impl Grid {
         if x < DRAG_EDGE || y < DRAG_EDGE || x > f64::from(cell.w) - DRAG_EDGE || y > f64::from(cell.h) - DRAG_EDGE {
             return Err("the press sat too near the edge of its cell to know where Plasma takes the drag from");
         }
-        let Some((across, down)) = self.local(release) else { return Err("the release left the desktop of the screen the drag began on") };
+        if self.local(release).is_none() {
+            return Err("the release left the desktop of the screen the drag began on");
+        }
         match self.cell_at(release) {
             Some(index) if index == from => return Err("the release stayed in the icon's own cell"),
             Some(index) if self.taken.contains(&index) => return Err("the release was over another icon"),
             _ => {}
         }
-        let (wide, tall) = self.size();
-        let small = self.layout.small_spacing();
-        let column = ((across + small + wide / 2.0) / wide).floor() as i64;
-        let row = ((down + 2.0 * small + self.layout.icon / 2.0) / tall).floor() as i64;
-        let to = self.index(column, row).ok_or("the landing cell lies past the end of its row or column")?;
+        let to = self.target(release).ok_or("the landing cell lies past the end of its row or column")?;
         if to == from {
             return Err("the icon would land in its own cell");
         }
