@@ -89,6 +89,10 @@ mod system {
             watch::run(wake)
         }
 
+        fn put_back_detached(&self, id: &str, picture: &Path) -> Result<bool> {
+            picture::put_back_detached(id, picture)
+        }
+
         fn autostart(&self, exe: Option<&Path>) -> Result<()> {
             match exe {
                 Some(exe) => startup::install(exe),

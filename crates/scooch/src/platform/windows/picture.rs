@@ -108,6 +108,25 @@ pub fn set_wallpaper(screen: &Screen, path: &Path) -> Result<()> {
     unsafe { wallpaper.SetWallpaper(pointer(&id), &file) }.with_context(|| format!("Windows did not show {} as the wallpaper, so pick another picture.", path.display()))
 }
 
+pub fn put_back_detached(id: &str, picture: &Path) -> Result<bool> {
+    let wallpaper = object()?;
+    if slideshow(&wallpaper) {
+        return Ok(false);
+    }
+    let count = unsafe { wallpaper.GetMonitorDevicePathCount() }?;
+    let listed = (0..count).any(|index| unsafe { wallpaper.GetMonitorDevicePathAt(index) }.is_ok_and(|path| take(path).to_string_lossy() == id));
+    if !listed {
+        return Ok(false);
+    }
+    let monitor = HSTRING::from(id);
+    let file = layout::plain(picture);
+    if unsafe { wallpaper.SetWallpaper(&monitor, &HSTRING::from(file.as_path())) }.is_err() {
+        return Ok(false);
+    }
+    let read = unsafe { wallpaper.GetWallpaper(&monitor) }.map(take);
+    Ok(read.is_ok_and(|read| !read.is_empty() && layout::same_file(Path::new(&read), &file)))
+}
+
 pub fn decode(path: &Path) -> Result<RgbImage> {
     if let Ok(image) = scooch_core::open(path) {
         return Ok(image);

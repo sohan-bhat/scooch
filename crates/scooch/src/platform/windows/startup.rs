@@ -138,6 +138,10 @@ pub fn entry() -> Option<String> {
     read(HKEY_CURRENT_USER, RUN, VALUE)
 }
 
+pub fn named() -> Option<PathBuf> {
+    layout::program_in(&entry()?)
+}
+
 pub fn build() -> Option<u32> {
     read(HKEY_LOCAL_MACHINE, VERSION, w!("CurrentBuildNumber"))?.trim().parse().ok()
 }
