@@ -1,0 +1,156 @@
+@import "tailwindcss";
+@import "../../../../../site/src/styles/tokens.css";
+
+@source "../../../../../site/src/components/ui";
+
+@custom-variant hover-fine {
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      @slot;
+    }
+  }
+}
+
+@custom-variant cramped {
+  @media (max-width: 760px), (max-height: 540px) {
+    @slot;
+  }
+}
+
+@font-face {
+  font-family: "Anybody Variable";
+  font-style: normal;
+  font-display: block;
+  font-weight: 100 900;
+  font-stretch: 50% 150%;
+  src: url("@fontsource-variable/anybody/files/anybody-latin-wdth-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Instrument Sans Variable";
+  font-style: normal;
+  font-display: block;
+  font-weight: 400 700;
+  font-stretch: 75% 100%;
+  src: url("@fontsource-variable/instrument-sans/files/instrument-sans-latin-wdth-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Martian Mono Variable";
+  font-style: normal;
+  font-display: block;
+  font-weight: 100 800;
+  src: url("@fontsource-variable/martian-mono/files/martian-mono-latin-wght-normal.woff2") format("woff2");
+}
+
+@layer base {
+  html {
+    background: var(--color-room);
+    color: var(--color-paper);
+    font-family: var(--font-text);
+    font-size: calc(100% * var(--text-scale, 1));
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    scrollbar-color: var(--color-steel) var(--color-room);
+    -webkit-text-size-adjust: 100%;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: default;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    background: var(--color-room);
+  }
+
+  ::selection {
+    background: var(--color-lamp);
+    color: var(--color-ink);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-pad);
+    outline-offset: 4px;
+    border-radius: 6px;
+  }
+
+  img {
+    -webkit-user-drag: none;
+  }
+}
+
+@utility wordmark {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-stretch: 122%;
+  letter-spacing: -0.045em;
+  line-height: 1;
+}
+
+@keyframes picture-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes tip-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes line-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.picture-in {
+  animation: picture-in 420ms var(--ease-out) both;
+}
+
+.line-in {
+  animation: line-in 260ms var(--ease-out) both;
+}
+
+.icon-mark {
+  transition: transform 450ms var(--ease-in-out);
+}
+
+html[data-still] *,
+html[data-still] *::before,
+html[data-still] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
