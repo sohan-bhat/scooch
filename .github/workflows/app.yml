@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: app-${{ github.ref }}
+  group: app-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -139,7 +139,7 @@ jobs:
 
   probe-macos:
     needs: build-macos
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ github.workflow == 'app' }}
     strategy:
       fail-fast: false
       matrix:
@@ -168,18 +168,26 @@ jobs:
 
   probe-windows:
     needs: build-windows
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-    runs-on: windows-2025
+    if: ${{ github.workflow == 'app' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            runner: windows-2025
+          - name: windows-arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: app-windows-x64
+          name: app-${{ matrix.name }}
           path: built
       - uses: actions/download-artifact@v4
         with:
-          name: programs-windows-x64
+          name: programs-${{ matrix.name }}
           path: programs
       - name: Probe
         timeout-minutes: 20
@@ -189,7 +197,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: appprobe-windows
+          name: appprobe-${{ matrix.name }}
           path: appprobe
           if-no-files-found: warn
       - name: Summary
@@ -199,20 +207,28 @@ jobs:
 
   probe-linux:
     needs: build-linux
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-    runs-on: ubuntu-24.04
+    if: ${{ github.workflow == 'app' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-24.04
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: app-linux-x64
+          name: app-${{ matrix.name }}
           path: built
       - name: Probe
         timeout-minutes: 20
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11
+          sudo apt-get install -y xvfb x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11 libglib2.0-bin file
           sudo apt-get install -y ./built/*.deb
           XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
@@ -222,7 +238,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: appprobe-linux
+          name: appprobe-${{ matrix.name }}
           path: appprobe
           if-no-files-found: warn
       - name: Summary
@@ -231,20 +247,28 @@ jobs:
 
   rpm-fedora:
     needs: build-linux
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-    runs-on: ubuntu-24.04
+    if: ${{ github.workflow == 'app' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-24.04
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     container: fedora:latest
     timeout-minutes: 20
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: app-linux-x64
+          name: app-${{ matrix.name }}
           path: built
       - name: Install, answer and remove
         run: |
           mkdir -p appprobe
           report=appprobe/report.md
-          rpm=$(ls built/*.x86_64.rpm | head -1)
+          rpm=$(ls built/*.rpm | head -1)
           name=$(rpm -qp --qf '%{NAME}' "$rpm")
           echo "## rpm on $(. /etc/os-release && echo "$PRETTY_NAME")" > "$report"
           echo >> "$report"
@@ -264,7 +288,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: appprobe-rpm
+          name: appprobe-rpm-${{ matrix.name }}
           path: appprobe
           if-no-files-found: warn
       - name: Summary
