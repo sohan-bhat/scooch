@@ -238,6 +238,13 @@ fn main() {
                 #[cfg(target_os = "linux")]
                 appimage::seal();
                 let _ = facade::set_origin(std::env::var_os("APPIMAGE").map(PathBuf::from).as_deref());
+                if !place::misplaced() {
+                    if let Ok(program) = place::program() {
+                        if facade::reclaim(&program) {
+                            let _ = handle.emit("changed", ());
+                        }
+                    }
+                }
                 if !place::misplaced() && facade::is_on() {
                     if let Ok(program) = place::ready() {
                         if adopted(facade::repair(&program)).unwrap_or(false) {
