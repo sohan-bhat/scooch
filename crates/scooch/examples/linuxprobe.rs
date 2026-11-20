@@ -3042,7 +3042,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         if let Some(folder) = entry.parent() {
             fs::create_dir_all(folder)?;
         }
-        fs::write(&entry, scooch::platform::linux::parse::entry::text(&copy))?;
+        fs::write(&entry, scooch::platform::linux::parse::entry::text(&copy, &entry))?;
         let login = fs::read(&entry)?;
         let before = linux.wallpaper(&screen).ok().flatten();
         let log = p.out.join("program-watch.log");
