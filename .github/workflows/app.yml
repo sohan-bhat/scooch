@@ -1,0 +1,256 @@
+name: app
+
+on:
+  push:
+    branches: [app]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "site/src/styles/tokens.css"
+      - "site/src/components/ui/**"
+      - "site/scripts/make-brand.mjs"
+      - ".github/workflows/app.yml"
+      - ".github/app/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            runner: macos-15
+            target: universal-apple-darwin
+            bundles: app,dmg
+          - name: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - name: windows-arm64
+            runner: windows-2025
+            target: aarch64-pc-windows-msvc
+            bundles: nsis
+          - name: linux-x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            musl: x86_64-unknown-linux-musl
+            bundles: deb,rpm,appimage
+          - name: linux-arm64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            musl: aarch64-unknown-linux-musl
+            bundles: deb,rpm,appimage
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      APP: crates/scooch-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Same version as the workspace
+        shell: bash
+        run: |
+          want=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          have=$(grep -m1 '^version' "$APP/Cargo.toml" | cut -d'"' -f2)
+          if [ "$want" != "$have" ]; then
+            echo "The workspace says $want and the app says $have."
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.musl || matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            crates/scooch-app -> target
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/scooch-app/ui/package-lock.json
+
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf musl-tools file
+
+      - name: Scooch program for macOS
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release -p scooch --bin scooch --target aarch64-apple-darwin
+          cargo build --release -p scooch --bin scooch --target x86_64-apple-darwin
+          mkdir -p "$APP/binaries"
+          lipo -create -output "$APP/binaries/scooch-universal-apple-darwin" target/aarch64-apple-darwin/release/scooch target/x86_64-apple-darwin/release/scooch
+          cp "$APP/binaries/scooch-universal-apple-darwin" "$APP/binaries/scooch-aarch64-apple-darwin"
+          cp "$APP/binaries/scooch-universal-apple-darwin" "$APP/binaries/scooch-x86_64-apple-darwin"
+
+      - name: Scooch programs for Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --release -p scooch --bins --target ${{ matrix.target }}
+          New-Item -ItemType Directory -Force "$env:APP/binaries" | Out-Null
+          foreach ($name in 'scooch', 'scoochw') {
+            Copy-Item "target/${{ matrix.target }}/release/$name.exe" "$env:APP/binaries/$name-${{ matrix.target }}.exe"
+          }
+
+      - name: Scooch program for Linux
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release -p scooch --bin scooch --target ${{ matrix.musl }}
+          mkdir -p "$APP/binaries"
+          cp "target/${{ matrix.musl }}/release/scooch" "$APP/binaries/scooch-${{ matrix.target }}"
+
+      - name: Window packages
+        working-directory: crates/scooch-app/ui
+        run: npm ci
+
+      - name: Window check
+        working-directory: crates/scooch-app/ui
+        run: npm run typecheck
+
+      - name: Shell clippy
+        if: matrix.name != 'windows-arm64'
+        working-directory: crates/scooch-app
+        shell: bash
+        run: |
+          npm --prefix ui run build
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Updater switch
+        id: updater
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          if [ -n "$KEY" ] && [ -n "$PUBKEY" ]; then
+            printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s","endpoints":["https://github.com/sohan-bhat/scooch/releases/latest/download/latest.json"]}}}' "$PUBKEY" > "$APP/updater.conf.json"
+            echo "args=--features updater --config updater.conf.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Installers
+        working-directory: crates/scooch-app
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH; do
+            if [ -z "${!name}" ]; then unset "$name"; fi
+          done
+          node ui/node_modules/@tauri-apps/cli/tauri.js build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} ${{ steps.updater.outputs.args }}
+
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir -p dist
+          bundle="$APP/target/${{ matrix.target }}/release/bundle"
+          find "$bundle" -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.sig' -o -name '*.tar.gz' \) -exec cp {} dist/ \;
+          {
+            echo "## ${{ matrix.name }}"
+            echo
+            echo "| file | bytes |"
+            echo "|---|---|"
+            for file in dist/*; do
+              echo "| $(basename "$file") | $(wc -c < "$file" | tr -d ' ') |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.name }}
+          path: dist
+          if-no-files-found: error
+
+  probe:
+    needs: build
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            runner: macos-15
+            artifact: app-macos
+          - name: macos-intel
+            runner: macos-15-intel
+            artifact: app-macos
+          - name: windows
+            runner: windows-2025
+            artifact: app-windows-x64
+          - name: linux
+            runner: ubuntu-24.04
+            artifact: app-linux-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: built
+
+      - name: Probe macOS
+        if: runner.os == 'macOS'
+        run: bash .github/app/probe-macos.sh built appprobe
+
+      - name: Probe Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/app/probe-windows.ps1 -Built built -Out appprobe
+
+      - name: Probe Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11
+          sudo apt-get install -y ./built/*.deb
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          dbus-run-session -- bash .github/linux/xfce.sh .github/app/probe-linux.sh appprobe
+
+      - name: Upload
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: appprobe-${{ matrix.name }}
+          path: appprobe
+          if-no-files-found: warn
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if [ -f appprobe/report.md ]; then
+            cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi

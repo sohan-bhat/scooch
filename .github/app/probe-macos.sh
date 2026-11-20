@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+set -u
+
+built="$1"
+out="$2"
+mkdir -p "$out"
+report="$out/report.md"
+app=/Applications/Scooch.app
+daemon="$app/Contents/MacOS/scooch"
+data="$HOME/Library/Application Support/Scooch"
+plist="$HOME/Library/LaunchAgents/me.sohanbhat.scooch.plist"
+photo="$PWD/assets/photos/seagull-sky.jpg"
+label="me.sohanbhat.scooch"
+
+line() { echo "$*" | tee -a "$report"; }
+limit() { line "- limit: $*"; }
+
+wallpaper() {
+  osascript -e 'with timeout of 10 seconds' -e 'tell application "Finder" to get POSIX path of (desktop picture as alias)' -e 'end timeout' 2>/dev/null
+}
+
+window_id() {
+  osascript -l JavaScript -e '
+    ObjC.import("CoreGraphics");
+    const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0))) || [];
+    const mine = list.filter((w) => (w.kCGWindowOwnerName === "Scooch" || w.kCGWindowOwnerName === "scooch-app") && w.kCGWindowLayer === 0);
+    mine.length ? String(mine[0].kCGWindowNumber) : "";
+  ' 2>/dev/null
+}
+
+window_size() {
+  osascript -l JavaScript -e '
+    ObjC.import("CoreGraphics");
+    const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0))) || [];
+    const mine = list.filter((w) => (w.kCGWindowOwnerName === "Scooch" || w.kCGWindowOwnerName === "scooch-app") && w.kCGWindowLayer === 0);
+    mine.length ? `${mine[0].kCGWindowBounds.Width}x${mine[0].kCGWindowBounds.Height}` : "";
+  ' 2>/dev/null
+}
+
+shot() {
+  local id
+  id=$(window_id)
+  if [ -n "$id" ]; then
+    screencapture -x -o -l "$id" "$out/$1.png" && line "- window shot $1.png at $(window_size)"
+  else
+    screencapture -x -D 1 "$out/$1-screen.png"
+    line "- no window found for $1, took the whole screen instead"
+  fi
+}
+
+press() {
+  osascript - "$1" <<'APPLESCRIPT' 2>&1
+on run argv
+  set wanted to item 1 of argv
+  tell application "System Events"
+    set target to first process whose bundle identifier is "me.sohanbhat.scooch.window"
+    set frontmost of target to true
+    set everything to entire contents of window 1 of target
+    repeat with element in everything
+      try
+        if role of element is "AXButton" then
+          set words to ""
+          try
+            set words to words & (name of element as text)
+          end try
+          try
+            set words to words & (description of element as text)
+          end try
+          try
+            set words to words & (title of element as text)
+          end try
+          if words contains wanted then
+            click element
+            return "pressed " & wanted
+          end if
+        end if
+      end try
+    end repeat
+  end tell
+  return "no button " & wanted
+end run
+APPLESCRIPT
+}
+
+wait_for() {
+  local limit="$1"
+  shift
+  local waited=0
+  while [ "$waited" -lt "$limit" ]; do
+    if "$@"; then
+      echo "$waited"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
+state_on() { grep -q '"on": true' "$data/state.json" 2>/dev/null; }
+state_off() { ! grep -q '"on": true' "$data/state.json" 2>/dev/null; }
+rendered() { grep -q '"fingerprint": "' "$data/state.json" 2>/dev/null; }
+has_window() { [ -n "$(window_id)" ]; }
+no_plist() { [ ! -f "$plist" ]; }
+wallpaper_is_photo() { [ "$(wallpaper)" = "$photo" ]; }
+
+close_prompts() {
+  for owner in UserNotificationCenter universalAccessAuthWarn CoreServicesUIAgent; do
+    killall "$owner" >/dev/null 2>&1 && line "- closed a consent window by quitting $owner, which answers nothing"
+  done
+}
+
+stand_in() {
+  launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1
+  close_prompts
+  sleep 2
+  rm -f "$data/watch.pid"
+  "$daemon" watch >>"$out/watch.log" 2>&1 &
+  line "- booted out the login item job and started $daemon watch from the probe as $!, which inherits the runner's Finder automation"
+}
+
+: >"$report"
+line "## App probe on $(sw_vers -productName) $(sw_vers -productVersion) $(uname -m)"
+line
+dmg=$(ls "$built"/*.dmg | head -1)
+line "- disk image $(basename "$dmg"), $(wc -c <"$dmg" | tr -d ' ') bytes"
+
+osascript -e "tell application \"Finder\" to set desktop picture to POSIX file \"$photo\"" >/dev/null 2>&1
+line "- wallpaper before install $(wallpaper)"
+
+mount=$(mktemp -d)
+hdiutil attach -nobrowse -quiet -mountpoint "$mount" "$dmg"
+ditto "$mount/Scooch.app" "$app"
+hdiutil detach -quiet "$mount"
+line "- copied Scooch.app to Applications, $(du -sk "$app" | cut -f1) KB"
+line "- programs inside $(ls "$app/Contents/MacOS" | tr '\n' ' ')"
+codesign -dv "$app" 2>&1 | grep -E "Identifier|Signature|TeamIdentifier" | sed 's/^/- signature /' | tee -a "$report"
+
+xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$app"
+line "- Gatekeeper on a downloaded copy: $(spctl --assess --type execute -vv "$app" 2>&1 | tr '\n' ' ')"
+xattr -dr com.apple.quarantine "$app"
+limit "the Open Anyway approval needs a person, so the probe clears the quarantine flag the way that approval does"
+
+open "$app"
+if took=$(wait_for 40 has_window); then
+  line "- window showed after $took s"
+else
+  line "- no window after 40 s"
+fi
+sleep 4
+shot first-open
+if took=$(wait_for 30 state_on); then line "- first open turned Scooch on after $took s"; else line "- first open did not turn Scooch on within 30 s"; fi
+if [ -f "$plist" ]; then
+  line "- login item points at $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null)"
+else
+  line "- no login item was written"
+fi
+sleep 5
+shot asking
+
+stand_in
+if took=$(wait_for 40 rendered); then line "- Scooch drew the desktop after $took s"; else line "- no render within 40 s"; fi
+sleep 3
+shot on
+line "- wallpaper while on $(wallpaper)"
+
+line "- $(press 'Turn off')"
+if took=$(wait_for 30 state_off); then line "- off after $took s"; else line "- still on after 30 s"; fi
+sleep 3
+shot off
+if wallpaper_is_photo; then line "- the wallpaper is the photo again"; else line "- the wallpaper is $(wallpaper), not the photo"; fi
+if no_plist; then line "- the login item is gone"; else line "- the login item is still there"; fi
+
+line "- $(press 'Turn on')"
+if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
+sleep 3
+osascript -e 'tell application id "me.sohanbhat.scooch.window" to quit' >/dev/null 2>&1
+if wait_for 15 sh -c '! pgrep -f "Scooch.app/Contents/MacOS/scooch-app" >/dev/null' >/dev/null; then line "- closing the window ended the app process"; else line "- the app process outlived its window"; fi
+line "- daemon processes after close $(pgrep -fl 'Scooch.app/Contents/MacOS/scooch watch' | wc -l | tr -d ' ')"
+
+before=$(wallpaper)
+mv "$app" "$HOME/.Trash/Scooch.app"
+line "- moved Scooch.app to the Trash with Scooch on, wallpaper was $before"
+sleep 15
+after=$(wallpaper)
+if [ "$after" = "$photo" ]; then
+  line "- 15 s later the wallpaper is the photo again"
+else
+  line "- 15 s later the wallpaper is still $after"
+  limit "putting the app in the Trash while Scooch is on leaves Scooch's picture until the daemon watch for its own program lands"
+fi
+pkill -f "Scooch.app/Contents/MacOS/scooch" >/dev/null 2>&1
+launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1
+cp "$data/state.json" "$out/state.json" 2>/dev/null
+exit 0
