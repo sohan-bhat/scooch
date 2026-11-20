@@ -129,6 +129,28 @@ async fn first_open<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
     Ok(true)
 }
 
+#[cfg(target_os = "linux")]
+fn open_link<R: Runtime>(_: &AppHandle<R>, url: String) -> anyhow::Result<()> {
+    let mut last = None;
+    for program in [&["xdg-open"][..], &["gio", "open"][..]] {
+        let mut command = std::process::Command::new(program[0]);
+        command.args(&program[1..]).arg(&url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        match appimage::apply(&mut command).spawn() {
+            Ok(mut child) => {
+                std::thread::spawn(move || child.wait());
+                return Ok(());
+            }
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(last.map(anyhow::Error::from).unwrap_or_else(|| anyhow::anyhow!("no opener")))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_link<R: Runtime>(app: &AppHandle<R>, url: String) -> anyhow::Result<()> {
+    app.opener().open_url(url, None::<&str>).map_err(anyhow::Error::from)
+}
+
 #[tauri::command]
 async fn fix<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     let Some(problem) = off_main("view", || Ok(current().problem)).await? else { return Ok(()) };
@@ -137,7 +159,7 @@ async fn fix<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         Problem::Automation => said("open", opener.open_url(AUTOMATION, None::<&str>).map_err(anyhow::Error::from)),
         Problem::Finder => said("open", opener.open_path(FINDER, None::<&str>).map_err(anyhow::Error::from)),
         Problem::Startup => said("open", opener.open_url(STARTUP, None::<&str>).map_err(anyhow::Error::from)),
-        Problem::Unknown { desktop } => said("open", opener.open_url(format!("{ISSUES}{}", percent_encoding::utf8_percent_encode(&desktop, percent_encoding::NON_ALPHANUMERIC)), None::<&str>).map_err(anyhow::Error::from)),
+        Problem::Unknown { desktop } => said("open", open_link(&app, format!("{ISSUES}{}", percent_encoding::utf8_percent_encode(&desktop, percent_encoding::NON_ALPHANUMERIC)))),
         Problem::Move => {
             let target = off_main("move", place::move_to_applications).await?;
             tauri_plugin_single_instance::destroy(&app);
