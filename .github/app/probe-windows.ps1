@@ -34,6 +34,10 @@ public static class Desk {
     public static extern bool PrintWindow(IntPtr window, IntPtr hdc, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr wide, string text, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetDesktopWindow();
     public static void Announce(string what) {
         UIntPtr result;
         SendMessageTimeout(new IntPtr(0xffff), 0x1A, UIntPtr.Zero, what, 2, 5000, out result);
@@ -278,6 +282,47 @@ Line "- a terminal finds scooch at $((Get-Command scooch -ErrorAction SilentlyCo
 Line "- the folder is on PATH $(Path-Count) times, copies of scooch.exe under LOCALAPPDATA $(@(Get-ChildItem $env:LOCALAPPDATA -Recurse -Filter scooch.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike '*\\Temp\\*' } | ForEach-Object FullName) -join ', ')"
 Start-Sleep -Seconds 2
 Line "- the app says $((Get-Content (Join-Path $Out 'app.log') -ErrorAction SilentlyContinue | Select-String 'scooch-app') -join ' ')"
+$access = 'HKCU:\Software\Microsoft\Accessibility'
+if (-not (Test-Path $access)) { New-Item -Path $access -Force | Out-Null }
+$textBefore = (Get-ItemProperty -Path $access -Name TextScaleFactor -ErrorAction SilentlyContinue).TextScaleFactor
+$sized = Find-Window
+$box = $sized.Current.BoundingRectangle
+$handle = [IntPtr]$sized.Current.NativeWindowHandle
+function Pill-Inside {
+    $window = Find-Window
+    $frame = $window.Current.BoundingRectangle
+    foreach ($label in 'Turn off', 'Turn on', 'Open Startup apps', 'Start again') {
+        $byName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $label)
+        foreach ($found in $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byName)) {
+            if ($found.Current.ControlType -ne [System.Windows.Automation.ControlType]::Button) { continue }
+            $pill = $found.Current.BoundingRectangle
+            return "$label inside the window $(($pill.Left -ge $frame.Left) -and ($pill.Right -le $frame.Right) -and ($pill.Bottom -le $frame.Bottom))"
+        }
+    }
+    return 'no main button found'
+}
+Line ''
+Line '### Large text'
+foreach ($scale in 150, 200) {
+    Set-ItemProperty -Path $access -Name TextScaleFactor -Value $scale -Type DWord
+    [Desk]::Announce('WindowMetrics')
+    foreach ($size in @(@(1, 1, 'smallest'), @([int]$box.Width, [int]$box.Height, 'default'))) {
+        [Desk]::SetWindowPos($handle, [IntPtr]::Zero, [int]$box.X, [int]$box.Y, $size[0], $size[1], 0x0014) | Out-Null
+        [Desk]::SetForegroundWindow([Desk]::GetDesktopWindow()) | Out-Null
+        Start-Sleep -Milliseconds 500
+        [Desk]::SetForegroundWindow($handle) | Out-Null
+        Start-Sleep -Seconds 3
+        Shot "text-$scale-$($size[2])"
+        Line "- text at $scale percent, $($size[2]) size, $(Pill-Inside)"
+    }
+}
+if ($null -eq $textBefore) { Remove-ItemProperty -Path $access -Name TextScaleFactor -ErrorAction SilentlyContinue } else { Set-ItemProperty -Path $access -Name TextScaleFactor -Value $textBefore -Type DWord }
+[Desk]::Announce('WindowMetrics')
+[Desk]::SetWindowPos($handle, [IntPtr]::Zero, [int]$box.X, [int]$box.Y, [int]$box.Width, [int]$box.Height, 0x0014) | Out-Null
+[Desk]::SetForegroundWindow($handle) | Out-Null
+Start-Sleep -Seconds 2
+Line ''
+Line '### Switches, off and removal'
 $glideBefore = (Get-Content -Raw "$data\state.json") -match '"glide": true'
 Line "- $(Press 'Slide' 1)"
 Start-Sleep -Seconds 2
