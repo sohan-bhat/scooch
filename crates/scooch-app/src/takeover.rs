@@ -14,7 +14,7 @@ fn same(a: &Path, b: &Path) -> bool {
     matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
-fn answers_as_scooch(path: &Path) -> bool {
+pub fn answers_as_scooch(path: &Path) -> bool {
     let Ok(mut child) = Command::new(path).arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return false };
     let started = Instant::now();
     loop {
@@ -34,20 +34,39 @@ fn answers_as_scooch(path: &Path) -> bool {
 }
 
 fn linked(stale: &Path, target: &Path) -> std::io::Result<()> {
-    let staged = stale.with_file_name(".scooch.link");
+    let staged = stale.with_file_name(format!(".scooch.link.{}", std::process::id()));
     let _ = std::fs::remove_file(&staged);
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, &staged)?;
     std::fs::rename(&staged, stale)
 }
 
+fn copies() -> Vec<PathBuf> {
+    let home = dirs::home_dir().unwrap_or_default();
+    vec![home.join(".local/bin/scooch"), scooch::facade::folder().join("bin").join("scooch")]
+}
+
+pub fn was_ours(target: &Path, copies: &[PathBuf]) -> bool {
+    let text = target.to_string_lossy();
+    text.ends_with(".app/Contents/MacOS/scooch") || copies.iter().any(|copy| copy == target)
+}
+
+fn dangling_ours(path: &Path, copies: &[PathBuf]) -> bool {
+    let link = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    link && !path.exists() && std::fs::read_link(path).is_ok_and(|target| was_ours(&target, copies))
+}
+
 pub fn stale(program: &Path) -> Vec<PathBuf> {
+    let copies = copies();
     places()
         .into_iter()
         .map(|folder| folder.join("scooch"))
-        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file()))
-        .filter(|path| !same(path, program))
-        .filter(|path| answers_as_scooch(path))
+        .filter(|path| {
+            if dangling_ours(path, &copies) {
+                return path != program;
+            }
+            std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file()) && !same(path, program) && answers_as_scooch(path)
+        })
         .collect()
 }
 
@@ -60,4 +79,29 @@ pub fn take_over(program: &Path, link: bool) -> Vec<String> {
         }
     }
     done
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn links_to_a_gone_bundle_or_copy_count_as_ours() {
+        let copies = vec![PathBuf::from("/home/ada/.local/bin/scooch"), PathBuf::from("/home/ada/.local/share/scooch/bin/scooch")];
+        assert!(was_ours(Path::new("/Applications/Old/Scooch.app/Contents/MacOS/scooch"), &copies));
+        assert!(was_ours(Path::new("/home/ada/.local/bin/scooch"), &copies));
+        assert!(was_ours(Path::new("/home/ada/.local/share/scooch/bin/scooch"), &copies));
+        assert!(!was_ours(Path::new("/opt/other/scooch"), &copies));
+        let folder = std::env::temp_dir().join(format!("scooch-takeover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let gone = folder.join("Gone.app/Contents/MacOS/scooch");
+        let link = folder.join("scooch");
+        std::os::unix::fs::symlink(&gone, &link).unwrap();
+        assert!(dangling_ours(&link, &copies));
+        let other = folder.join("other");
+        std::os::unix::fs::symlink(folder.join("missing"), &other).unwrap();
+        assert!(!dangling_ours(&other, &copies));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
 }

@@ -15,29 +15,53 @@ pub fn bundled() -> Result<PathBuf> {
 
 pub fn program() -> Result<PathBuf> {
     let inside = bundled()?;
-    if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("APPIMAGE").is_some() {
+        return copy_place(&inside);
+    }
+    Ok(inside)
+}
+
+pub fn ready() -> Result<PathBuf> {
+    let inside = bundled()?;
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("APPIMAGE").is_some() {
         return copied_out(&inside);
     }
     Ok(inside)
 }
 
-fn copied_out(inside: &Path) -> Result<PathBuf> {
+#[cfg(target_os = "linux")]
+fn copy_place(inside: &Path) -> Result<PathBuf> {
     let home = dirs::home_dir().context("The app could not find your home folder.")?;
-    let folder = home.join(".local").join("bin");
-    let target = folder.join(DAEMON);
+    let usual = home.join(".local").join("bin").join(DAEMON);
+    let free = match std::fs::symlink_metadata(&usual) {
+        Err(_) => true,
+        Ok(meta) if meta.file_type().is_symlink() => true,
+        Ok(meta) if meta.file_type().is_file() => std::fs::read(&usual).ok() == std::fs::read(inside).ok() || crate::takeover::answers_as_scooch(&usual),
+        Ok(_) => false,
+    };
+    Ok(if free { usual } else { scooch::facade::folder().join("bin").join(DAEMON) })
+}
+
+#[cfg(target_os = "linux")]
+fn copied_out(inside: &Path) -> Result<PathBuf> {
+    let target = copy_place(inside)?;
     let fresh = std::fs::read(inside).context("The app could not read the scooch program inside it.")?;
-    if std::fs::read(&target).ok().as_deref() == Some(fresh.as_slice()) {
+    let regular = std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_file());
+    if regular && std::fs::read(&target).ok().as_deref() == Some(fresh.as_slice()) {
         return Ok(target);
     }
-    std::fs::create_dir_all(&folder)?;
-    let staged = folder.join(".scooch.new");
+    let folder = target.parent().context("The copy of scooch has no folder.")?;
+    std::fs::create_dir_all(folder)?;
+    let staged = folder.join(format!(".scooch.new.{}", std::process::id()));
     std::fs::write(&staged, &fresh)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+    if let Err(error) = std::fs::rename(&staged, &target) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error.into());
     }
-    std::fs::rename(&staged, &target)?;
     Ok(target)
 }
 

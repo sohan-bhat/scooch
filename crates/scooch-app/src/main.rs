@@ -41,6 +41,21 @@ fn adopted<T>(result: anyhow::Result<T>) -> anyhow::Result<T> {
     result
 }
 
+fn taken_over(program: &std::path::Path) {
+    #[cfg(unix)]
+    for done in takeover::take_over(program, cfg!(target_os = "macos") || std::env::var_os("APPIMAGE").is_some()) {
+        eprintln!("scooch-app {done}");
+    }
+    #[cfg(not(unix))]
+    let _ = program;
+}
+
+fn ready() -> anyhow::Result<PathBuf> {
+    let program = place::ready()?;
+    taken_over(&program);
+    Ok(program)
+}
+
 async fn off_main<T: Send + 'static>(work: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
     #[cfg(target_os = "linux")]
     appimage::seal();
@@ -66,7 +81,7 @@ async fn view() -> Result<View, String> {
 
 #[tauri::command]
 async fn turn_on() -> Result<Started, String> {
-    off_main(|| adopted(facade::turn_on(&place::program()?))).await
+    off_main(|| adopted(facade::turn_on(&ready()?))).await
 }
 
 #[tauri::command]
@@ -83,7 +98,7 @@ async fn set(switch: Switch, on: bool) -> Result<(), String> {
 async fn use_picture<R: Runtime>(app: AppHandle<R>, path: PathBuf) -> Result<(), String> {
     let folder = data_folder(&app);
     off_main(move || {
-        adopted(facade::use_picture(&place::program()?, &path))?;
+        adopted(facade::use_picture(&ready()?, &path))?;
         pictures::remember(&folder, &path);
         Ok(())
     })
@@ -132,7 +147,7 @@ async fn fix<R: Runtime>(app: AppHandle<R>, problem: Problem) -> Result<(), Stri
             Ok(())
         }
         Problem::Gnome => off_main(gnome_icons).await,
-        Problem::Stopped | Problem::Other => off_main(|| adopted(facade::turn_on(&place::program()?)).map(drop)).await,
+        Problem::Stopped | Problem::Other => off_main(|| adopted(facade::turn_on(&ready()?)).map(drop)).await,
         Problem::Asking | Problem::Screen | Problem::Wallpaper { .. } => Ok(()),
     }
 }
@@ -195,15 +210,12 @@ fn main() {
                 #[cfg(target_os = "linux")]
                 appimage::seal();
                 let _ = facade::set_origin(std::env::var_os("APPIMAGE").map(PathBuf::from).as_deref());
-                if !place::misplaced() {
-                    if let Ok(program) = place::program() {
+                if !place::misplaced() && facade::is_on() {
+                    if let Ok(program) = place::ready() {
                         if adopted(facade::repair(&program)).unwrap_or(false) {
                             let _ = handle.emit("changed", ());
                         }
-                        #[cfg(unix)]
-                        for done in takeover::take_over(&program, cfg!(target_os = "macos") || std::env::var_os("APPIMAGE").is_some()) {
-                            eprintln!("scooch-app {done}");
-                        }
+                        taken_over(&program);
                     }
                 }
                 let view = facade::view();
