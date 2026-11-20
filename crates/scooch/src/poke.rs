@@ -96,7 +96,8 @@ mod unix {
 
     #[cfg(target_os = "linux")]
     fn named_scooch(process: u32) -> bool {
-        std::fs::read_link(format!("/proc/{process}/exe")).is_ok_and(|exe| super::scooch_name(&exe)) || std::fs::read_to_string(format!("/proc/{process}/comm")).is_ok_and(|name| name.trim().starts_with("scooch"))
+        let ended = std::fs::read_to_string(format!("/proc/{process}/stat")).ok().and_then(|stat| stat.rsplit_once(')').map(|(_, rest)| rest.trim_start().starts_with('Z'))).unwrap_or(false);
+        !ended && (std::fs::read_link(format!("/proc/{process}/exe")).is_ok_and(|exe| super::scooch_name(&exe)) || std::fs::read_to_string(format!("/proc/{process}/comm")).is_ok_and(|name| name.trim().starts_with("scooch")))
     }
 
     pub fn kill(process: u32) -> bool {

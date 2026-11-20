@@ -2958,6 +2958,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     fn thrown_off(p: &mut Probe, run: &mut Thrown) -> Result<()> {
         let started = Instant::now();
         let out = Command::new(&run.copy).arg("off").env_remove("SCOOCH_HOME").env("SCOOCH_LINK_PLACES", &run.places).stdin(Stdio::null()).output()?;
+        let error = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let exited = wait_until(Duration::from_secs(10), || !still_running(&mut run.child)).map(|_| started.elapsed().as_millis());
         let copy_gone = !run.copy.exists();
         let link_gone = fs::symlink_metadata(run.bin.join("scooch")).is_err();
@@ -2965,7 +2966,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let entry_gone = !run.entry.exists();
         let origin = saved_origin(&run.real);
         p.line(format!(
-            "- scooch off run from the copy with origin {origin:?} and nothing pending, exit {:?}, said {:?}: the daemon exited after {exited:?} ms, the copy removed {copy_gone}, the link at the copy removed {link_gone}, a foreign link and a regular file untouched {others}, the login item removed {entry_gone}",
+            "- scooch off run from the copy with origin {origin:?} and nothing pending, exit {:?}, said {:?} {error:?}: the daemon exited after {exited:?} ms, the copy removed {copy_gone}, the link at the copy removed {link_gone}, a foreign link and a regular file untouched {others}, the login item removed {entry_gone}",
             out.status.code(),
             String::from_utf8_lossy(&out.stdout).trim()
         ));
@@ -3168,6 +3169,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let record = serde_json::json!({"version": 1, "on": true, "screens": {"probe-absent": {"source": picture, "original": picture, "output": parked_out}}});
         fs::write(real.join("state.json"), serde_json::to_vec(&record)?)?;
         p.line(format!("- the real data folder {} holds a record for a screen probe-absent that no desktop shows, its own picture {} and its output {}, the wallpaper set to that picture {set:?}", real.display(), picture.display(), parked_out.display()));
+        let before = linux.wallpaper(&screen).ok().flatten();
         let on = real_scooch(&program, &[])?;
         let id = screen.id.clone();
         let drawn = wait_until(Duration::from_secs(60), || !real_state(&real)["screens"][id.as_str()]["fingerprint"].is_null());
@@ -3182,14 +3184,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let parked = state["on"] != serde_json::Value::Bool(true) && state["restoring"] != serde_json::Value::Bool(true) && kept && state["screens"].get(id.as_str()).is_none();
         let back = linux.wallpaper(&screen).ok().flatten();
         p.line(format!(
-            "- scooch off --final exit {:?} after {took} ms, said {:?}: daemon left {left:?}, login item left {}, record of probe-absent kept with its own picture {kept}, state parked {parked}, its output still there {}, the shown screen back on its own picture {}",
+            "- scooch off --final exit {:?} after {took} ms, said {:?}: daemon left {left:?}, login item left {}, record of probe-absent kept with its own picture {kept}, state parked {parked}, its output still there {}, the shown screen back on the wallpaper it had before Scooch {}, {back:?}",
             off.status.code(),
             said(&off),
             entry.exists(),
             parked_out.exists(),
-            back.as_deref() == Some(picture.as_path())
+            back == before
         ));
-        if off.status.code() != Some(0) || left.is_some() || entry.exists() || !parked || !parked_out.exists() || !said(&off).contains("could not reach") {
+        if off.status.code() != Some(0) || left.is_some() || entry.exists() || !parked || !parked_out.exists() || back != before || !said(&off).contains("could not reach") {
             p.fail("the final off left a daemon or a login item, or did not keep the record of the screen it could not reach");
         }
         let status = real_scooch(&program, &["status"])?;
