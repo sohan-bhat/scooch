@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import content from '@/content.json';
+import { asset } from '@/lib/base';
 
 type Arch = 'x64' | 'arm64';
 type Hints = { platform?: string; getHighEntropyValues?: (hints: string[]) => Promise<{ architecture?: string; platform?: string }> };
@@ -83,6 +84,22 @@ export function Install() {
                       </Button>
                     )}
                   </nav>
+                )}
+                {item.pictures && item.pictures.length > 0 && (
+                  <div className="flex flex-wrap items-start gap-4">
+                    {item.pictures.map((picture) => (
+                      <img
+                        key={picture.src}
+                        src={asset(picture.src)}
+                        alt={picture.alt}
+                        width={picture.width}
+                        height={picture.height}
+                        loading="lazy"
+                        decoding="async"
+                        className="h-auto w-[min(13rem,100%)] rounded-field shadow-[0_0_0_1px_rgb(243_236_220/0.1),0_18px_40px_-24px_rgb(0_0_0/0.9)]"
+                      />
+                    ))}
+                  </div>
                 )}
               </TabsContent>
             );

@@ -70,6 +70,14 @@
             "format": "Mac",
             "file": "Scooch.dmg"
           }
+        ],
+        "pictures": [
+          {
+            "src": "install/mac-not-opened.webp",
+            "width": 292,
+            "height": 264,
+            "alt": "The first open shows Scooch Not Opened with Done and Move to Trash, so choose Done."
+          }
         ]
       },
       {
