@@ -110,6 +110,7 @@ press_pill alt+F4
 if wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null; then line "- closing the window ended the app process"; else line "- the app process outlived its window"; fi
 line "- daemons running $(daemons)"
 
+cp /usr/bin/scooch "$HOME/.stale-scooch"
 sudo apt-get remove -y scooch >"$out/remove.log" 2>&1
 line "- package removal exit $?"
 line "- removal log $(journalctl -t scooch-remove --no-pager -o cat 2>/dev/null | tail -5 | tr '\n' ' ')"
@@ -120,6 +121,9 @@ cp "$data/state.json" "$out/state.json" 2>/dev/null
 
 line
 line "### AppImage"
+mkdir -p "$HOME/bin"
+mv "$HOME/.stale-scooch" "$HOME/bin/scooch"
+line "- an older command install sits at ~/bin/scooch, $(file -b "$HOME/bin/scooch" | cut -c1-30), answering $("$HOME/bin/scooch" --version 2>&1)"
 appimage=$(ls "$PWD"/built/*.AppImage 2>/dev/null | head -1)
 line "- file $(basename "$appimage"), $(wc -c <"$appimage" | tr -d ' ') bytes"
 chmod +x "$appimage"
@@ -154,6 +158,7 @@ hash -r
 line "- ~/.local/bin/scooch is $(file -b "$HOME/.local/bin/scooch" 2>/dev/null | cut -c1-40) answering $("$HOME/.local/bin/scooch" --version 2>&1)"
 line "- login item $(login), daemons $(daemons), a terminal finds $(command -v scooch)"
 line "- origin in the saved state $(grep -o '"origin": "[^"]*"' "$data/state.json")"
+line "- ~/bin/scooch is now $(if [ -L "$HOME/bin/scooch" ]; then echo "a link to $(readlink "$HOME/bin/scooch")"; else file -b "$HOME/bin/scooch" | cut -c1-30; fi)"
 press_pill Return
 if took=$(wait_for 30 state_off); then line "- off again after $took s"; else line "- not off within 30 s"; fi
 press_pill Return
@@ -163,6 +168,40 @@ if wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null; then line "-
 for daemon in $(pgrep -f '.local/bin/scooch watch'); do
   line "- the daemon holds $(ls -l "/proc/$daemon/fd" 2>/dev/null | grep -c '.mount_') files inside the AppImage $(ls -l "/proc/$daemon/fd" 2>/dev/null | grep '.mount_' | awk '{ print $NF }' | head -3 | tr '\n' ' ')"
 done
-"$HOME/.local/bin/scooch" off >"$out/appimage-off.txt" 2>&1
-line "- the command turned Scooch off, wallpaper $(wallpaper)"
+now() { date +%s.%N; }
+since() { awk -v a="$1" -v b="$(now)" 'BEGIN { printf "%.1f", b - a }'; }
+origin_is() { grep -q "\"origin\": \"$1\"" "$data/state.json" 2>/dev/null; }
+
+line
+line "### AppImage renamed"
+mkdir -p "$HOME/Apps"
+renamed="$HOME/Apps/Scooch.AppImage"
+mv "$appimage" "$renamed"
+started=$(now)
+followed=""
+for step in $(seq 1 60); do
+  if origin_is "$renamed"; then followed=$(since "$started"); break; fi
+  sleep 0.5
+done
+if [ -n "$followed" ]; then line "- renamed to ~/Apps/Scooch.AppImage, origin followed after $followed s"; else line "- renamed to ~/Apps/Scooch.AppImage, origin still $(grep -o '"origin": "[^"]*"' "$data/state.json") after 30 s"; fi
+line "- login item $(login), daemons $(daemons)"
+
+line
+line "### AppImage in the Trash"
+line "- before, wallpaper $(wallpaper), login item $(login), copy $([ -e "$HOME/.local/bin/scooch" ] && echo present), link $(readlink "$HOME/bin/scooch"), daemons $(daemons)"
+gio trash "$renamed" >"$out/trash.log" 2>&1
+line "- gio trash exit $?, the file is now $(ls "$HOME/.local/share/Trash/files" 2>/dev/null | tr '\n' ' ')"
+started=$(now)
+back="" item="" copy="" link="" gone=""
+for step in $(seq 1 80); do
+  [ -z "$back" ] && [ "$(wallpaper)" = "$photo" ] && back=$(since "$started")
+  [ -z "$item" ] && [ ! -e "$autostart" ] && item=$(since "$started")
+  [ -z "$copy" ] && [ ! -e "$HOME/.local/bin/scooch" ] && copy=$(since "$started")
+  [ -z "$link" ] && [ ! -L "$HOME/bin/scooch" ] && [ ! -e "$HOME/bin/scooch" ] && link=$(since "$started")
+  [ -z "$gone" ] && ! pgrep -x scooch >/dev/null && gone=$(since "$started")
+  if [ -n "$back" ] && [ -n "$item" ] && [ -n "$copy" ] && [ -n "$link" ] && [ -n "$gone" ]; then break; fi
+  sleep 0.5
+done
+line "- wallpaper back after ${back:-never} s, login item gone after ${item:-never} s, copy gone after ${copy:-never} s, ~/bin link gone after ${link:-never} s, no daemon after ${gone:-never} s, all within 40 s"
+line "- after, wallpaper $(wallpaper), state on $(grep -c '"on": true' "$data/state.json")"
 exit 0
