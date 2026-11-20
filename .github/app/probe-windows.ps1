@@ -298,15 +298,18 @@ $sized = Find-Window
 $box = $sized.Current.BoundingRectangle
 $handle = [IntPtr]$sized.Current.NativeWindowHandle
 function Pill-Inside {
-    $window = Find-Window
-    $frame = $window.Current.BoundingRectangle
-    foreach ($label in 'Turn off', 'Turn on', 'Open Startup apps', 'Start again') {
-        $byName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $label)
-        foreach ($found in $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byName)) {
-            if ($found.Current.ControlType -ne [System.Windows.Automation.ControlType]::Button) { continue }
-            $pill = $found.Current.BoundingRectangle
-            return "$label inside the window $(($pill.Left -ge $frame.Left) -and ($pill.Right -le $frame.Right) -and ($pill.Bottom -le $frame.Bottom))"
+    for ($attempt = 0; $attempt -lt 6; $attempt++) {
+        $window = Find-Window
+        $frame = $window.Current.BoundingRectangle
+        foreach ($label in 'Turn off', 'Turn on', 'Open Startup apps', 'Start again') {
+            $byName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $label)
+            foreach ($found in $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byName)) {
+                if ($found.Current.ControlType -ne [System.Windows.Automation.ControlType]::Button) { continue }
+                $pill = $found.Current.BoundingRectangle
+                return "$label inside the window $(($pill.Left -ge $frame.Left) -and ($pill.Right -le $frame.Right) -and ($pill.Bottom -le $frame.Bottom))"
+            }
         }
+        Start-Sleep -Seconds 1
     }
     return 'no main button found'
 }
