@@ -10,6 +10,24 @@ const out = resolve(root, '..', 'macos');
 const size = { width: 660, height: 400 };
 const tokens = await readFile(join(site, 'src', 'styles', 'tokens.css'), 'utf8');
 const color = (name) => tokens.match(new RegExp(`--color-${name}:\\s*(#[0-9a-f]{6})`, 'i'))[1];
+const hex = (value) => value.match(/[0-9a-f]{2}/gi).map((pair) => parseInt(pair, 16));
+const linear = (channel) => {
+  const value = channel / 255;
+  return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+};
+const luminance = ([r, g, b]) => 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+const steel = hex(color('steel-2'));
+const plastic = hex(color('plastic'));
+let plate = steel;
+for (let share = 0; share <= 1; share += 0.01) {
+  const mixed = steel.map((channel, index) => Math.round(channel + (plastic[index] - channel) * share));
+  if (luminance(mixed) >= 0.175) {
+    plate = mixed;
+    break;
+  }
+}
+const light = luminance(plate);
+console.log(`label plate rgb(${plate.join(',')}), black text ${((light + 0.05) / 0.05).toFixed(2)} to 1, white text ${(1.05 / (light + 0.05)).toFixed(2)} to 1`);
 const copy = JSON.parse(await readFile(join(root, 'src', 'copy', 'en.json'), 'utf8'));
 const require = createRequire(join(root, 'package.json'));
 const font = async (name) => (await readFile(require.resolve(name))).toString('base64');
@@ -22,8 +40,9 @@ const page = `<!doctype html><style>
   html,body{margin:0;width:${size.width}px;height:${size.height}px;overflow:hidden}
   body{position:relative;background:radial-gradient(110% 85% at 50% 48%,${color('room-2')},${color('room')} 72%)}
   h1{position:absolute;left:36px;top:26px;margin:0;font-family:Display;font-weight:800;font-stretch:122%;font-size:30px;letter-spacing:-0.045em;line-height:1;color:${color('paper')}}
+  i{position:absolute;top:281px;width:132px;height:26px;margin-left:-66px;border-radius:13px;background:rgb(${plate.join(',')})}
   p{position:absolute;left:0;right:0;bottom:34px;margin:0;text-align:center;font-family:Text;font-weight:600;font-size:15px;line-height:1.3;color:${color('plastic')}}
-</style><h1>${copy.name}</h1><p>${copy.dmg.first}</p>`;
+</style><h1>${copy.name}</h1><i style="left:180px"></i><i style="left:480px"></i><p>${copy.dmg.first}</p>`;
 
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 try {
