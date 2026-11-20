@@ -63,7 +63,7 @@ export function said(view: View, act: (problem: Problem) => void, pick: () => vo
 
 export function Status({ line, pill, quiet }: { line: string; pill: Act | null; quiet: Act | null }) {
   return (
-    <div className="flex min-h-16 items-center gap-x-4 gap-y-2 px-6 cramped:min-h-14 cramped:px-4">
+    <div className="flex min-h-16 flex-wrap items-center gap-x-4 gap-y-2 px-6 py-2 cramped:min-h-14 cramped:px-4">
       <p key={line} role="status" aria-live="polite" className="line-in m-0 min-w-0 text-[1.125rem] leading-snug font-semibold text-paper cramped:text-base">
         {line}
       </p>

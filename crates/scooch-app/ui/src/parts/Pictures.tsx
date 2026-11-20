@@ -10,7 +10,7 @@ const nameOf = (path: string) => path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, 
 export function Pictures({ pictures, current, onUse, onPick }: { pictures: Picture[]; current: string | null; onUse: (path: string) => void; onPick: () => void }) {
   const selected = current ?? '';
   return (
-    <ScrollArea className="w-full">
+    <ScrollArea className="min-h-0 w-full">
       <div className="flex items-center gap-3 px-6 pt-2 pb-4 cramped:px-4 cramped:pb-3">
         <Button variant="quiet" onClick={onPick} className="h-[4.375rem] w-28 shrink-0 flex-col gap-1 px-0 text-[0.8125rem] cramped:h-15 cramped:w-24">
           <Plus weight="bold" aria-hidden />

@@ -71,10 +71,14 @@ export function App({ backend, first }: { backend: Backend; first: View }) {
 
   return (
     <TooltipProvider delayDuration={500}>
-      <main className="grid h-full grid-rows-[auto_minmax(0,1fr)_auto_auto] bg-[radial-gradient(110%_80%_at_50%_42%,var(--color-room-2),var(--color-room)_72%)]" data-system={view.system}>
+      <main className="grid h-full grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)_auto_minmax(0,auto)] bg-[radial-gradient(110%_80%_at_50%_42%,var(--color-room-2),var(--color-room)_72%)]" data-system={view.system}>
         <header data-tauri-drag-region className={`flex h-16 items-center justify-between gap-6 px-6 cramped:h-14 cramped:px-4 ${view.system === 'macos' ? 'pl-24 cramped:pl-[5.5rem]' : ''}`}>
           <h1 data-tauri-drag-region className="wordmark m-0 text-[1.625rem] text-paper cramped:text-[1.375rem]">{copy.name}</h1>
-          {!blocked && <Switches values={view.switches} onChange={(name: SwitchName, value) => backend.set(name, value)} />}
+          {!blocked && (
+            <div className="-m-2 min-w-0 overflow-x-auto p-2 [scrollbar-width:none]">
+              <Switches values={view.switches} onChange={(name: SwitchName, value) => backend.set(name, value)} />
+            </div>
+          )}
         </header>
         <div className="min-h-0 px-10 py-3 cramped:px-6 cramped:py-2">
           <Desk monitors={view.monitors} system={view.system} empty={view.problem?.kind === 'wallpaper' ? EMPTY[view.problem.what] : undefined} />
