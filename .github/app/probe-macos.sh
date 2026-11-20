@@ -59,7 +59,7 @@ on run argv
     set everything to entire contents of window 1 of scoochApp
     repeat with element in everything
       try
-        if role of element is "AXButton" then
+        if role of element is in {"AXButton", "AXCheckBox"} then
           set seen to ""
           try
             set seen to seen & (name of element as text)
@@ -129,10 +129,29 @@ line "- disk image $(basename "$dmg"), $(wc -c <"$dmg" | tr -d ' ') bytes"
 limited 20 osascript -e "tell application \"Finder\" to set desktop picture to POSIX file \"$photo\"" >/dev/null 2>&1
 line "- wallpaper before install $(wallpaper)"
 
-mount=$(mktemp -d)
-hdiutil attach -nobrowse -quiet -mountpoint "$mount" "$dmg"
+mount=$(hdiutil attach "$dmg" | awk -F'\t' '/\/Volumes\// { print $NF }' | tail -1)
+line "- the disk image mounted at $mount"
+limited 15 open "$mount" >/dev/null 2>&1
+sleep 5
+finder_window() {
+  limited 15 osascript -l JavaScript -e '
+    ObjC.import("CoreGraphics");
+    const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0))) || [];
+    const mine = list.filter((w) => w.kCGWindowOwnerName === "Finder" && w.kCGWindowName === "Scooch" && w.kCGWindowLayer === 0);
+    mine.length ? `${mine[0].kCGWindowNumber} ${mine[0].kCGWindowBounds.Width}x${mine[0].kCGWindowBounds.Height}` : "";
+  ' 2>/dev/null
+}
+found=$(finder_window)
+if [ -n "$found" ]; then
+  limited 20 screencapture -x -o -l "${found%% *}" "$out/disk-image.png" && line "- disk image window shot disk-image.png at ${found#* }"
+else
+  limited 20 screencapture -x -D 1 "$out/disk-image-screen.png"
+  line "- no disk image window found, took the whole screen instead"
+fi
+line "- disk image holds $(ls -a "$mount" | tr '\n' ' ')"
 ditto "$mount/Scooch.app" "$app"
-hdiutil detach -quiet "$mount"
+limited 15 osascript -e 'tell application "Finder" to close every window' >/dev/null 2>&1
+hdiutil detach -quiet "$mount" || hdiutil detach -force -quiet "$mount"
 line "- copied Scooch.app to Applications, $(du -sk "$app" | cut -f1) KB"
 line "- programs inside $(ls "$app/Contents/MacOS" | tr '\n' ' ')"
 codesign -dv "$app" 2>&1 | grep -E "Identifier|Signature|TeamIdentifier" | sed 's/^/- signature /' | tee -a "$report"
@@ -145,40 +164,21 @@ limited 20 screencapture -x -D 1 "$out/gatekeeper-open.png"
 line "- opened the quarantined copy, screen kept as gatekeeper-open.png, windows now $(limited 20 osascript -e 'tell application "System Events" to get name of every process whose visible is true' 2>&1)"
 line "- Gatekeeper log $(limited 60 log show --last 30s --style compact --predicate 'process == "syspolicyd" OR process == "CoreServicesUIAgent"' 2>/dev/null | grep -i -E 'scooch|deny|reject|notariz' | tail -3 | tr '\n' ' ')"
 killall CoreServicesUIAgent >/dev/null 2>&1
-limited 15 open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension" >/dev/null 2>&1 &
-sleep 10
-line "- Privacy and Security says $(limited 60 osascript <<'APPLESCRIPT' 2>&1
-tell application "System Events"
-  tell process "System Settings"
-    set frontmost to true
-    set said to ""
-    repeat with element in (entire contents of window 1)
-      try
-        if role of element is "AXStaticText" and (value of element as text) contains "Scooch" then set said to said & (value of element as text) & " | "
-      end try
-      try
-        if role of element is "AXButton" and (name of element as text) contains "Open Anyway" then
-          perform action "AXScrollToVisible" of element
-          set said to said & "button " & (name of element as text) & " | "
-        end if
-      end try
-    end repeat
-    return said
-  end tell
-end tell
-APPLESCRIPT
-)"
-sleep 2
-limited 20 screencapture -x -D 1 "$out/gatekeeper-settings.png"
-line "- Privacy and Security after the blocked open kept as gatekeeper-settings.png"
-limited 20 osascript -e 'tell application "System Settings" to quit' >/dev/null 2>&1
 killall CoreServicesUIAgent >/dev/null 2>&1
 pkill -f "Scooch.app/Contents/MacOS/scooch-app" >/dev/null 2>&1
 xattr -dr com.apple.quarantine "$app"
 xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$daemon"
 limit "the Open Anyway approval needs a person, so the probe clears the quarantine flag of the app and keeps it on the scooch program inside, the case where only the app was approved"
 
-limited 20 open "$app" >/dev/null 2>&1
+mkdir -p "$HOME/.local/bin"
+cp -X "$daemon" "$HOME/.local/bin/scooch"
+export PATH="$HOME/.local/bin:$PATH"
+"$HOME/.local/bin/scooch" use "$photo" >"$out/old-use.txt" 2>&1
+line "- older command install at ~/.local/bin/scooch, as install.sh lays it out, turned Scooch on, login item at $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null), daemons $(pgrep -fl 'scooch watch' | awk '{ print $2 }' | tr '\n' ' ')"
+line "- reduce motion before $(defaults read com.apple.universalaccess reduceMotion 2>&1)"
+defaults write com.apple.universalaccess reduceMotion -bool false >"$out/motion.txt" 2>&1
+line "- reduce motion after the probe set it off $(defaults read com.apple.universalaccess reduceMotion 2>&1) $(cat "$out/motion.txt")"
+limited 20 open --stderr "$out/app.log" "$app" >/dev/null 2>&1
 if took=$(wait_for 40 has_window); then
   line "- window showed after $took s"
 else
@@ -205,6 +205,14 @@ if took=$(wait_for 40 rendered); then line "- Scooch drew the desktop after $too
 sleep 3
 shot on
 line "- wallpaper while on $(wallpaper)"
+hash -r
+line "- after the app opened, login item at $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null), daemons $(pgrep -fl 'scooch watch' | awk '{ print $2 }' | tr '\n' ' '), a terminal finds $(command -v scooch) linked to $(readlink "$HOME/.local/bin/scooch")"
+line "- the app says $(grep 'scooch-app' "$out/app.log" | tr '\n' ' ')"
+glide_before=$(grep -c '"glide": true' "$data/state.json")
+line "- $(press 'Slide')"
+sleep 2
+line "- Slide on before $glide_before, after one press $(grep -c '"glide": true' "$data/state.json")"
+shot slide
 
 line "- $(press 'Turn off')"
 if took=$(wait_for 30 state_off); then line "- off after $took s"; else line "- still on after 30 s"; fi
