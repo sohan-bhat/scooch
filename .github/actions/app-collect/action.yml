@@ -1,0 +1,43 @@
+name: Collect the Scooch app
+description: Gathers the installers and update files of one target and uploads them.
+
+inputs:
+  name:
+    description: Name of the artifact suffix
+    required: true
+  target:
+    description: Rust target the app is built for
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Collect
+      shell: bash
+      run: |
+        mkdir -p dist
+        bundle="crates/scooch-app/target/${{ inputs.target }}/release/bundle"
+        find "$bundle" -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.sig' -o -name '*.tar.gz' \) -exec cp {} dist/ \;
+        {
+          echo "## ${{ inputs.name }}"
+          echo
+          echo "| file | bytes |"
+          echo "|---|---|"
+          for file in dist/*; do
+            echo "| $(basename "$file") | $(wc -c < "$file" | tr -d ' ') |"
+          done
+        } | tee -a "$GITHUB_STEP_SUMMARY"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: app-${{ inputs.name }}
+        path: dist
+        if-no-files-found: error
+
+    - name: Programs for the probe
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: programs-${{ inputs.name }}
+        path: crates/scooch-app/binaries
+        if-no-files-found: error

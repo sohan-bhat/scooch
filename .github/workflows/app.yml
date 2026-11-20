@@ -23,23 +23,14 @@ concurrency:
   group: app-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-  APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-  APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-  APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-  APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-  APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-  APPLE_ID: ${{ secrets.APPLE_ID }}
-  APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-  WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-  WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-  TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
-
 jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Signing names stay in signing steps
+        run: bash .github/app/secrets-check.sh
+
   build-macos:
     runs-on: macos-15
     timeout-minutes: 60
@@ -50,6 +41,46 @@ jobs:
           name: macos
           target: universal-apple-darwin
           bundles: app,dmg
+          updater-pubkey: ${{ vars.TAURI_UPDATER_PUBKEY }}
+      - name: Sign for macOS
+        working-directory: crates/scooch-app
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_BUNDLER_DMG_IGNORE_CI: "true"
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "No Apple certificate, so the app keeps its ad hoc signature."
+            exit 0
+          fi
+          if [ -n "$APPLE_API_PRIVATE_KEY" ]; then
+            printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/AuthKey.p8"
+            export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          fi
+          unset APPLE_API_PRIVATE_KEY
+          for name in APPLE_API_ISSUER APPLE_API_KEY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then unset "$name"; fi
+          done
+          node ui/node_modules/@tauri-apps/cli/tauri.js bundle --ci --target universal-apple-darwin --bundles app,dmg $TAURI_ARGS
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+      - name: Updater signatures
+        shell: bash
+        working-directory: crates/scooch-app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash ../../.github/app/updater-sign.sh universal-apple-darwin
+      - uses: ./.github/actions/app-collect
+        with:
+          name: macos
+          target: universal-apple-darwin
 
   build-windows:
     strategy:
@@ -72,6 +103,30 @@ jobs:
           target: ${{ matrix.target }}
           bundles: nsis
           clippy: ${{ matrix.clippy }}
+          updater-pubkey: ${{ vars.TAURI_UPDATER_PUBKEY }}
+      - name: Sign for Windows
+        shell: bash
+        working-directory: crates/scooch-app
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$WINDOWS_CERTIFICATE" ]; then
+            echo "No Windows certificate, so the installer stays unsigned."
+            exit 0
+          fi
+          node ui/node_modules/@tauri-apps/cli/tauri.js bundle --ci --target ${{ matrix.target }} --bundles nsis $TAURI_ARGS
+      - name: Updater signatures
+        shell: bash
+        working-directory: crates/scooch-app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash ../../.github/app/updater-sign.sh ${{ matrix.target }}
+      - uses: ./.github/actions/app-collect
+        with:
+          name: ${{ matrix.name }}
+          target: ${{ matrix.target }}
 
   build-linux:
     strategy:
@@ -93,9 +148,21 @@ jobs:
           name: ${{ matrix.name }}
           target: ${{ matrix.target }}
           bundles: deb,rpm,appimage
+          updater-pubkey: ${{ vars.TAURI_UPDATER_PUBKEY }}
+      - name: Updater signatures
+        shell: bash
+        working-directory: crates/scooch-app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash ../../.github/app/updater-sign.sh ${{ matrix.target }}
+      - uses: ./.github/actions/app-collect
+        with:
+          name: ${{ matrix.name }}
+          target: ${{ matrix.target }}
 
   files:
-    needs: [build-macos, build-windows, build-linux]
+    needs: [secrets, build-macos, build-windows, build-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

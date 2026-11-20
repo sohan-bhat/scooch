@@ -15,6 +15,10 @@ inputs:
     description: Whether to run clippy on the shell
     required: false
     default: "true"
+  updater-pubkey:
+    description: Public key of the updater, empty for a build without the updater
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -106,13 +110,20 @@ runs:
     - name: Updater switch
       id: updater
       shell: bash
+      env:
+        TAURI_UPDATER_PUBKEY: ${{ inputs.updater-pubkey }}
       run: |
-        if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -n "${TAURI_UPDATER_PUBKEY:-}" ]; then
-          printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s","endpoints":["https://github.com/sohan-bhat/scooch/releases/latest/download/latest.json"]}}}' "$TAURI_UPDATER_PUBKEY" > crates/scooch-app/updater.conf.json
+        if [ -n "${TAURI_UPDATER_PUBKEY:-}" ]; then
+          printf '{"plugins":{"updater":{"pubkey":"%s","endpoints":["https://github.com/sohan-bhat/scooch/releases/latest/download/latest.json"]}}}' "$TAURI_UPDATER_PUBKEY" > crates/scooch-app/updater.conf.json
           echo "args=--features updater --config updater.conf.json" >> "$GITHUB_OUTPUT"
         else
           echo "args=" >> "$GITHUB_OUTPUT"
         fi
+
+    - name: Compile
+      shell: bash
+      working-directory: crates/scooch-app
+      run: node ui/node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle --target ${{ inputs.target }} ${{ steps.updater.outputs.args }}
 
     - name: Installers
       shell: bash
@@ -120,42 +131,5 @@ runs:
       env:
         TAURI_BUNDLER_DMG_IGNORE_CI: "true"
       run: |
-        if [ -n "${APPLE_API_PRIVATE_KEY:-}" ]; then
-          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/AuthKey.p8"
-          export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
-        fi
-        unset APPLE_API_PRIVATE_KEY
-        for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
-          if [ -z "${!name:-}" ]; then unset "$name"; fi
-        done
-        node ui/node_modules/@tauri-apps/cli/tauri.js build --ci --target ${{ inputs.target }} --bundles ${{ inputs.bundles }} ${{ steps.updater.outputs.args }}
-
-    - name: Collect
-      shell: bash
-      run: |
-        mkdir -p dist
-        bundle="crates/scooch-app/target/${{ inputs.target }}/release/bundle"
-        find "$bundle" -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.sig' -o -name '*.tar.gz' \) -exec cp {} dist/ \;
-        {
-          echo "## ${{ inputs.name }}"
-          echo
-          echo "| file | bytes |"
-          echo "|---|---|"
-          for file in dist/*; do
-            echo "| $(basename "$file") | $(wc -c < "$file" | tr -d ' ') |"
-          done
-        } | tee -a "$GITHUB_STEP_SUMMARY"
-
-    - uses: actions/upload-artifact@v4
-      with:
-        name: app-${{ inputs.name }}
-        path: dist
-        if-no-files-found: error
-
-    - name: Programs for the probe
-      if: runner.os == 'Windows'
-      uses: actions/upload-artifact@v4
-      with:
-        name: programs-${{ inputs.name }}
-        path: crates/scooch-app/binaries
-        if-no-files-found: error
+        node ui/node_modules/@tauri-apps/cli/tauri.js bundle --ci --target ${{ inputs.target }} --bundles ${{ inputs.bundles }} ${{ steps.updater.outputs.args }}
+        echo "TAURI_ARGS=${{ steps.updater.outputs.args }}" >> "$GITHUB_ENV"
