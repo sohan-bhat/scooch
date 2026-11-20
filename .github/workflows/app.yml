@@ -355,12 +355,14 @@ jobs:
           XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
           export XDG_RUNTIME_DIR
-          PASS=missing dbus-run-session -- bash .github/linux/gnome.sh .github/app/probe-gnome.sh appprobe
+          failed=0
+          PASS=missing dbus-run-session -- bash .github/linux/gnome.sh .github/app/probe-gnome.sh appprobe || failed=1
           sudo apt-get install -y gnome-shell-extension-desktop-icons-ng
           XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
           export XDG_RUNTIME_DIR
-          PASS=off dbus-run-session -- bash .github/linux/gnome.sh .github/app/probe-gnome.sh appprobe
+          PASS=off dbus-run-session -- bash .github/linux/gnome.sh .github/app/probe-gnome.sh appprobe || failed=1
+          exit "$failed"
       - name: Upload
         if: always()
         uses: actions/upload-artifact@v4
