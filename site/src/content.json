@@ -53,26 +53,86 @@
   ],
   "install": {
     "title": "Install Scooch",
-    "tabs": [
+    "release": "https://github.com/sohan-bhat/scooch/releases/latest/download/",
+    "others": "Other files",
+    "processors": {
+      "x64": "Intel or AMD",
+      "arm64": "Arm"
+    },
+    "systems": [
       {
         "id": "macos",
         "label": "macOS",
-        "command": "curl -LsSf https://sohanbhat.me/scooch/install.sh | sh"
+        "downloads": [
+          {
+            "arch": "any",
+            "label": "Download for Mac",
+            "format": "Mac",
+            "file": "Scooch.dmg"
+          }
+        ]
       },
       {
         "id": "windows",
         "label": "Windows",
-        "command": "irm https://sohanbhat.me/scooch/install.ps1 | iex"
+        "downloads": [
+          {
+            "arch": "x64",
+            "label": "Download for Windows",
+            "format": "Windows",
+            "file": "Scooch-Setup-x64.exe"
+          },
+          {
+            "arch": "arm64",
+            "label": "Download for Windows on Arm",
+            "format": "Windows",
+            "file": "Scooch-Setup-arm64.exe"
+          }
+        ]
       },
       {
         "id": "linux",
         "label": "Linux",
-        "command": "curl -LsSf https://sohanbhat.me/scooch/install.sh | sh"
+        "downloads": [
+          {
+            "arch": "x64",
+            "label": "Download for Linux",
+            "format": ".deb",
+            "file": "scooch_amd64.deb"
+          },
+          {
+            "arch": "x64",
+            "label": "Download the Linux RPM",
+            "format": ".rpm",
+            "file": "scooch.x86_64.rpm"
+          },
+          {
+            "arch": "x64",
+            "label": "Download the Linux AppImage",
+            "format": "AppImage",
+            "file": "Scooch-x86_64.AppImage"
+          },
+          {
+            "arch": "arm64",
+            "label": "Download for Linux on Arm",
+            "format": ".deb",
+            "file": "scooch_arm64.deb"
+          },
+          {
+            "arch": "arm64",
+            "label": "Download the Linux RPM for Arm",
+            "format": ".rpm",
+            "file": "scooch.aarch64.rpm"
+          },
+          {
+            "arch": "arm64",
+            "label": "Download the Linux AppImage for Arm",
+            "format": "AppImage",
+            "file": "Scooch-aarch64.AppImage"
+          }
+        ]
       }
-    ],
-    "after": "Then run scooch.",
-    "copy": "Copy command",
-    "copied": "Copied"
+    ]
   },
   "facts": [
     "Works with the picture you already have.",
