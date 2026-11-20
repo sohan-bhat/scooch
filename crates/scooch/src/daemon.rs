@@ -2162,6 +2162,22 @@ pub mod tests {
     }
 
     #[test]
+    fn an_idle_pool_thread_of_the_blocking_crate_ends() {
+        struct Gone(std::sync::mpsc::Sender<()>);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        thread_local! {
+            static GONE: std::cell::RefCell<Option<Gone>> = const { std::cell::RefCell::new(None) };
+        }
+        let (sender, ended) = std::sync::mpsc::channel();
+        blocking::unblock(move || GONE.with(|gone| *gone.borrow_mut() = Some(Gone(sender)))).detach();
+        assert!(ended.recv_timeout(Duration::from_secs(5)).is_ok(), "a pool thread of the blocking crate stayed after its work, so it would wake twice a second at rest");
+    }
+
+    #[test]
     fn the_tick_reads_origin_from_the_state_it_loads_with_no_new_read_or_save() {
         let (daemon, fake, _) = rig("origin-read", vec![screen("main", 0.0, 1.0)]);
         let mut state = daemon.store.load();
