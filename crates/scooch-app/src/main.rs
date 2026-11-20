@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appimage;
 #[cfg(target_os = "linux")]
 mod children;
 mod pictures;
@@ -50,6 +51,7 @@ fn data_folder<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
 
 #[tauri::command]
 async fn view() -> Result<View, String> {
+    appimage::settle();
     off_main(|| {
         let mut view = facade::view();
         if place::misplaced() {
@@ -187,6 +189,7 @@ fn main() {
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || {
+                appimage::wait();
                 let _ = facade::set_origin(std::env::var_os("APPIMAGE").map(PathBuf::from).as_deref());
                 if !place::misplaced() {
                     if let Ok(program) = place::program() {
