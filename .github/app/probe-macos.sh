@@ -138,6 +138,20 @@ codesign -dv "$app" 2>&1 | grep -E "Identifier|Signature|TeamIdentifier" | sed '
 
 xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$app"
 line "- Gatekeeper on a downloaded copy: $(spctl --assess --type execute -vv "$app" 2>&1 | tr '\n' ' ')"
+open "$app"
+sleep 6
+screencapture -x -D 1 "$out/gatekeeper-open.png"
+line "- opened the quarantined copy, screen kept as gatekeeper-open.png, windows now $(osascript -e 'tell application "System Events" to get name of every process whose visible is true' 2>/dev/null)"
+line "- Gatekeeper log $(log show --last 30s --style compact --predicate 'process == "syspolicyd" OR process == "CoreServicesUIAgent"' 2>/dev/null | grep -i -E 'scooch|deny|reject|notariz' | tail -3 | tr '\n' ' ')"
+open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"
+sleep 8
+osascript -e 'tell application "System Settings" to activate' -e 'tell application "System Events" to key code 119' >/dev/null 2>&1
+sleep 2
+screencapture -x -D 1 "$out/gatekeeper-settings.png"
+line "- Privacy and Security after the blocked open kept as gatekeeper-settings.png"
+osascript -e 'tell application "System Settings" to quit' >/dev/null 2>&1
+killall CoreServicesUIAgent >/dev/null 2>&1
+pkill -f "Scooch.app/Contents/MacOS/scooch-app" >/dev/null 2>&1
 xattr -dr com.apple.quarantine "$app"
 limit "the Open Anyway approval needs a person, so the probe clears the quarantine flag the way that approval does"
 
