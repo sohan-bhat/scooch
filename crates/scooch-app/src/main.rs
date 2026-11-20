@@ -4,6 +4,8 @@
 mod children;
 mod pictures;
 mod place;
+#[cfg(unix)]
+mod takeover;
 #[cfg(feature = "updater")]
 mod update;
 mod watch;
@@ -114,7 +116,7 @@ async fn fix<R: Runtime>(app: AppHandle<R>, problem: Problem) -> Result<(), Stri
         Problem::Automation => said(opener.open_url(AUTOMATION, None::<&str>).map_err(anyhow::Error::from)),
         Problem::Finder => said(opener.open_path(FINDER, None::<&str>).map_err(anyhow::Error::from)),
         Problem::Startup => said(opener.open_url(STARTUP, None::<&str>).map_err(anyhow::Error::from)),
-        Problem::Unknown { desktop } => said(opener.open_url(format!("{ISSUES}{}", desktop.replace(' ', "%20")), None::<&str>).map_err(anyhow::Error::from)),
+        Problem::Unknown { desktop } => said(opener.open_url(format!("{ISSUES}{}", percent_encoding::utf8_percent_encode(&desktop, percent_encoding::NON_ALPHANUMERIC)), None::<&str>).map_err(anyhow::Error::from)),
         Problem::Move => {
             off_main(place::move_to_applications).await?;
             app.exit(0);
@@ -183,16 +185,23 @@ fn main() {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
-            if !place::misplaced() {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || {
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let _ = facade::set_origin(std::env::var_os("APPIMAGE").map(PathBuf::from).as_deref());
+                if !place::misplaced() {
                     if let Ok(program) = place::program() {
                         if adopted(facade::repair(&program)).unwrap_or(false) {
                             let _ = handle.emit("changed", ());
                         }
+                        #[cfg(unix)]
+                        for done in takeover::take_over(&program, cfg!(target_os = "macos") || std::env::var_os("APPIMAGE").is_some()) {
+                            eprintln!("scooch-app {done}");
+                        }
                     }
-                });
-            }
+                }
+                let view = facade::view();
+                eprintln!("scooch-app live {} reduce motion {}", view.live, view.reduce_motion);
+            });
             Ok(())
         })
         .build(tauri::generate_context!())
