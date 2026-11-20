@@ -154,7 +154,8 @@ limited 20 osascript -e 'tell application "System Settings" to quit' >/dev/null 
 killall CoreServicesUIAgent >/dev/null 2>&1
 pkill -f "Scooch.app/Contents/MacOS/scooch-app" >/dev/null 2>&1
 xattr -dr com.apple.quarantine "$app"
-limit "the Open Anyway approval needs a person, so the probe clears the quarantine flag the way that approval does"
+xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$daemon"
+limit "the Open Anyway approval needs a person, so the probe clears the quarantine flag of the app and keeps it on the scooch program inside, the case where only the app was approved"
 
 open "$app"
 if took=$(wait_for 40 has_window); then
@@ -170,6 +171,11 @@ if [ -f "$plist" ]; then
 else
   line "- no login item was written"
 fi
+sleep 3
+line "- launchd job $(launchctl print "gui/$(id -u)/$label" 2>&1 | grep -E 'state =|pid =|last exit|spawn type|immediate reason' | tr -s ' ' | tr '\n' ';')"
+line "- scooch processes from inside the app $(pgrep -fl "$daemon watch" | tr '\n' ';')"
+line "- Gatekeeper log for the program inside $(log show --last 2m --style compact --predicate 'process == "syspolicyd" OR process == "launchd"' 2>/dev/null | grep -i 'scooch' | grep -i -E 'deny|reject|quarantin|assess|spawn' | tail -3 | tr '\n' ' ')"
+xattr -d com.apple.quarantine "$daemon" 2>/dev/null
 sleep 5
 shot asking
 
