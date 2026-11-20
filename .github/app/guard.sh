@@ -80,3 +80,25 @@ if ruby "$here/guard.rb" "$copy/.github" >"$copy/out.txt" 2>&1; then
   exit 1
 fi
 echo "The guard stopped a cargo build planted in a job that holds a secret: $(grep -m1 'Planted build' "$copy/out.txt")"
+
+work=$(mktemp -d)
+if bash -c 'line() { echo "$*"; }; . "$1"; expect "a planted false expectation" false; finish' sh "$here/expect.sh" >"$work/bash.txt" 2>&1; then
+  echo "The bash expectation helper passed a false expectation."
+  exit 1
+fi
+grep -q "Expectations 1, failed 1." "$work/bash.txt" || { echo "The bash expectation helper did not count the planted failure."; exit 1; }
+echo "The bash expectation helper failed a false expectation: $(tail -1 "$work/bash.txt")"
+if bash -c 'line() { echo "$*"; }; . "$1"; finish' sh "$here/expect.sh" >"$work/none.txt" 2>&1; then
+  echo "The bash expectation helper passed a probe with no expectation."
+  exit 1
+fi
+if ! command -v pwsh >/dev/null; then
+  echo "PowerShell is missing here, so its helper is checked on the runner only."
+  exit 0
+fi
+if pwsh -NoProfile -Command "function Line([string]\$Text) { Write-Output \$Text }; . '$here/expect.ps1'; Expect 'a planted false expectation' \$false; Finish" >"$work/pwsh.txt" 2>&1; then
+  echo "The PowerShell expectation helper passed a false expectation."
+  exit 1
+fi
+echo "The PowerShell expectation helper failed a false expectation: $(tail -1 "$work/pwsh.txt")"
+grep -q "Expectations 1, failed 1." "$work/pwsh.txt" || { echo "The PowerShell expectation helper did not count the planted failure."; exit 1; }
