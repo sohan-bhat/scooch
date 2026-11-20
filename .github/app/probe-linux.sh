@@ -16,6 +16,7 @@ luma() { convert "$out/$1.png" -crop 6x6+4+4 -resize 1x1\! -format '%[fx:luminan
 light_shot() { awk -v v="$(luma "$1")" 'BEGIN { exit !(v > 0.55) }'; }
 dark_shot() { awk -v v="$(luma "$1")" 'BEGIN { exit !(v < 0.35) }'; }
 gone_app() { [ -z "$(pgrep -x scooch-app)" ]; }
+entry_names() { grep -q -F "exec '$1' watch" "$autostart" 2>/dev/null || grep -qx "Exec=\"$1\" watch" "$autostart" 2>/dev/null; }
 no_daemon() { [ -z "$(pgrep -x scooch)" ]; }
 
 allowed="HOME USER LOGNAME PATH LANG DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE NO_AT_BRIDGE WEBKIT_DISABLE_COMPOSITING_MODE LIBGL_ALWAYS_SOFTWARE"
@@ -114,7 +115,7 @@ expect "first open turned Scooch on and drew" rendered
 sleep 4
 hash -r
 line "- after the app opened, login item $(login), daemons $(daemons), a terminal finds $(command -v scooch)"
-expect "the login item points at /usr/bin/scooch" grep -qx 'Exec="/usr/bin/scooch" watch' "$autostart"
+expect "the login item points at /usr/bin/scooch" entry_names /usr/bin/scooch
 expect "the deb removed the older command install from ~/.local/bin" [ ! -e "$HOME/.local/bin/scooch" ]
 line "- the app says $(grep 'scooch-app' "$out/app.log" | tr '\n' ' ')"
 shot on
@@ -295,7 +296,7 @@ line "- login item $(login), daemons $(daemons), a terminal finds $(command -v s
 line "- origin in the saved state $(grep -o '"origin": "[^"]*"' "$data/state.json")"
 line "- ~/bin/scooch is now $(if [ -L "$HOME/bin/scooch" ]; then echo "a link to $(readlink "$HOME/bin/scooch")"; else file -b "$HOME/bin/scooch" | cut -c1-30; fi)"
 expect "turning on copied the program to ~/.local/bin/scooch" "$HOME/.local/bin/scooch" --version
-expect "the login item points at the copy" grep -qx "Exec=\"$HOME/.local/bin/scooch\" watch" "$autostart"
+expect "the login item points at the copy" entry_names "$HOME/.local/bin/scooch"
 expect "origin names the AppImage" grep -q "\"origin\": \"$appimage\"" "$data/state.json"
 expect "the stale ~/bin/scooch became a link to the copy" [ "$(readlink "$HOME/bin/scooch")" = "$HOME/.local/bin/scooch" ]
 press_pill Return
@@ -389,7 +390,7 @@ line "- ~/.local/bin/scooch kept its bytes $([ "$(sha256sum "$HOME/.local/bin/sc
 line "- the copy went to ~/.local/share/scooch/bin/scooch $([ -x "$data/bin/scooch" ] && echo yes || echo no), answering $("$data/bin/scooch" --version 2>&1), login item $(login), daemons $(daemons)"
 expect "someone else's ~/.local/bin/scooch kept its bytes" [ "$(sha256sum "$HOME/.local/bin/scooch" | cut -d' ' -f1)" = "$mine" ]
 expect "the copy went to Scooch's own folder" "$data/bin/scooch" --version
-expect "the login item points at Scooch's own copy" grep -qx "Exec=\"$data/bin/scooch\" watch" "$autostart"
+expect "the login item points at Scooch's own copy" entry_names "$data/bin/scooch"
 press_pill Return
 wait_for 30 state_off >/dev/null
 press_pill alt+F4
