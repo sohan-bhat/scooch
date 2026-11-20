@@ -104,23 +104,51 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Package list
+        id: list
+        if: ${{ !matrix.container }}
+        env:
+          LIST: ${{ matrix.packages }} ${{ matrix.extras }} ${{ hashFiles('.github/linux/apt.sh') }}
+        run: |
+          prefix="apt-$ImageOS-$(printf '%s' "$LIST" | sha256sum | cut -c1-16)-"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "key=$prefix$(date -u +%G%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Package cache
+        id: cache
+        if: ${{ !matrix.container }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: /var/tmp/apt-archives
+          key: ${{ steps.list.outputs.key }}
+          restore-keys: ${{ steps.list.outputs.prefix }}
+
       - name: Packages
+        id: apt
         if: ${{ !matrix.container }}
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
+        env:
+          PACKAGES: ${{ matrix.packages }}
+          EXTRAS: ${{ matrix.extras }}
         with:
           timeout_minutes: 10
           max_attempts: 3
-          on_retry_command: sudo dpkg --configure -a
-          command: |
-            set -e
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends dbus dbus-x11 dbus-user-session xdg-user-dirs procps
-            sudo apt-get install -y ${{ matrix.packages }}
-            for extra in ${{ matrix.extras }}; do
-              sudo apt-get install -y --no-install-recommends "$extra" || echo "skipped $extra"
-            done
+          on_retry_command: sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
+          command: sudo timeout -k 20s 8m env PACKAGES="$PACKAGES" EXTRAS="$EXTRAS" bash .github/linux/apt.sh /var/tmp/apt-archives
+
+      - name: Package cache owner
+        if: ${{ !cancelled() && !matrix.container && steps.cache.outputs.cache-hit != 'true' }}
+        run: sudo chown -R "$(id -u):$(id -g)" /var/tmp/apt-archives || true
+
+      - name: Package cache save
+        if: ${{ !cancelled() && !matrix.container && steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: /var/tmp/apt-archives
+          key: ${{ steps.apt.outcome == 'success' && steps.list.outputs.key || format('{0}-part-{1}-{2}', steps.list.outputs.key, github.run_id, github.run_attempt) }}
 
       - name: Packages
+        id: image
         if: ${{ matrix.container }}
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
         env:
@@ -145,7 +173,7 @@ jobs:
         run: cargo test --release -p scooch
 
       - name: Probe
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.apt.outcome != 'failure' && steps.image.outcome != 'failure' }}
         env:
           SCOOCH_SCALE: ${{ matrix.scale || 1 }}
           SCOOCH_MONITORS: ${{ matrix.monitors || 1 }}
