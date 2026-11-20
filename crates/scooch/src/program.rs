@@ -36,6 +36,15 @@ pub fn watched(program: &Path, custom_home: bool, read_only: bool) -> Option<Pat
     Some(outermost.unwrap_or(program).to_path_buf())
 }
 
+pub fn resolved(path: &Path) -> PathBuf {
+    crate::state::canonical(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn data_home(home: &Path, xdg: Option<std::ffi::OsString>) -> PathBuf {
+    resolved(&xdg.map(PathBuf::from).filter(|path| path.is_absolute()).unwrap_or_else(|| home.join(".local").join("share")))
+}
+
 fn plain(path: &Path) -> PathBuf {
     match path.strip_prefix("/System/Volumes/Data") {
         Ok(rest) => Path::new("/").join(rest),
@@ -83,6 +92,11 @@ pub fn seen_from(unmount: bool, delete_self: bool, move_self: bool, close_write:
     } else {
         None
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub fn rearm(seen: Seen, back: bool) -> bool {
+    matches!(seen, Seen::Deleted | Seen::Revoked) || (seen == Seen::Renamed && back)
 }
 
 pub fn decide(original: &Path, seen: Seen, after: &After, is_trash: &dyn Fn(&Path) -> bool) -> Decision {
@@ -188,7 +202,7 @@ pub fn watch_self(trashed: std::sync::Arc<std::sync::atomic::AtomicBool>, signal
     let Ok(exe) = std::env::current_exe() else { return };
     let program = crate::state::canonical(&exe).unwrap_or(exe);
     let custom = std::env::var_os("SCOOCH_HOME").is_some_and(|value| !value.is_empty());
-    let Some(home) = crate::platform::macos::real_home() else { return };
+    let Some(home) = crate::platform::macos::real_home().map(|home| resolved(&home)) else { return };
     let Some(target) = watched(&program, custom, mac::read_only(&program)) else {
         if trace() {
             eprintln!("{} program not watched at {}", stamp(), program.display());
@@ -220,13 +234,13 @@ pub fn watch_self(trashed: std::sync::Arc<std::sync::atomic::AtomicBool>, signal
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use super::{decide, moved_program, trashed, After, Decision, Seen};
+    use super::{decide, moved_program, rearm, trashed, After, Decision, Seen};
     use std::ffi::{CString, OsStr};
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    const SETTLE: Duration = Duration::from_secs(10);
+    const SETTLE: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(10) };
 
     pub fn read_only(path: &Path) -> bool {
         let Ok(name) = CString::new(path.as_os_str().as_bytes()) else { return false };
@@ -243,67 +257,113 @@ mod mac {
         Some(PathBuf::from(OsStr::from_bytes(&buffer[..end])))
     }
 
-    pub fn run(mut program: PathBuf, mut target: PathBuf, home: PathBuf, act: impl Fn(&Decision, &Path, &Path)) {
-        let Ok(name) = CString::new(target.as_os_str().as_bytes()) else { return };
+    fn open(path: &Path) -> Option<libc::c_int> {
+        let name = CString::new(path.as_os_str().as_bytes()).ok()?;
         let fd = unsafe { libc::open(name.as_ptr(), libc::O_EVTONLY) };
-        if fd < 0 {
-            return;
-        }
-        let queue = unsafe { libc::kqueue() };
+        (fd >= 0).then_some(fd)
+    }
+
+    fn register(queue: libc::c_int, fd: libc::c_int, fflags: u32) -> bool {
         let mut change: libc::kevent = unsafe { std::mem::zeroed() };
         change.ident = fd as libc::uintptr_t;
         change.filter = libc::EVFILT_VNODE;
         change.flags = libc::EV_ADD | libc::EV_CLEAR;
-        change.fflags = libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE | libc::NOTE_WRITE | libc::NOTE_EXTEND;
-        if queue >= 0 && unsafe { libc::kevent(queue, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } == 0 {
+        change.fflags = fflags;
+        unsafe { libc::kevent(queue, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0 }
+    }
+
+    fn next(queue: libc::c_int) -> Option<u32> {
+        loop {
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            let got = unsafe { libc::kevent(queue, std::ptr::null(), 0, &mut event, 1, std::ptr::null()) };
+            if got < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return (got > 0).then_some(event.fflags);
+        }
+    }
+
+    const GONE: u32 = libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE;
+
+    pub fn run(mut program: PathBuf, mut target: PathBuf, home: PathBuf, act: impl Fn(&Decision, &Path, &Path)) {
+        let queue = unsafe { libc::kqueue() };
+        if queue < 0 {
+            return;
+        }
+        loop {
+            let again = match open(&target) {
+                Some(fd) => {
+                    let again = watch(queue, fd, (&mut program, &mut target), &home, &act);
+                    unsafe { libc::close(fd) };
+                    again
+                }
+                None => wait_for(queue, &target),
+            };
+            if !again {
+                break;
+            }
+        }
+        unsafe { libc::close(queue) };
+    }
+
+    fn watch(queue: libc::c_int, fd: libc::c_int, (program, target): (&mut PathBuf, &mut PathBuf), home: &Path, act: &impl Fn(&Decision, &Path, &Path)) -> bool {
+        if !register(queue, fd, GONE | libc::NOTE_WRITE | libc::NOTE_EXTEND) {
+            return false;
+        }
+        if crate::daemon::trace() {
+            eprintln!("{} program watched at {}", crate::daemon::stamp(), target.display());
+        }
+        loop {
+            let Some(flags) = next(queue) else { return false };
             if crate::daemon::trace() {
-                eprintln!("{} program watched at {}", crate::daemon::stamp(), target.display());
+                eprintln!("{} program event flags {flags:#x} on {}", crate::daemon::stamp(), target.display());
             }
-            loop {
-                let mut event: libc::kevent = unsafe { std::mem::zeroed() };
-                let got = unsafe { libc::kevent(queue, std::ptr::null(), 0, &mut event, 1, std::ptr::null()) };
-                if got < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                    continue;
+            let seen = if flags & libc::NOTE_REVOKE != 0 {
+                Seen::Revoked
+            } else if flags & libc::NOTE_DELETE != 0 {
+                Seen::Deleted
+            } else if flags & libc::NOTE_RENAME != 0 {
+                Seen::Renamed
+            } else {
+                Seen::Written
+            };
+            if seen == Seen::Renamed {
+                std::thread::sleep(SETTLE);
+            }
+            let now = path_of(fd);
+            let back = target.exists();
+            let decision = decide(target, seen, &After { now: now.as_deref(), back }, &|path| trashed(path, home));
+            act(&decision, target, program);
+            match decision {
+                Decision::Repoint(now) => {
+                    *program = moved_program(program, target, &now);
+                    *target = now;
                 }
-                if got <= 0 {
-                    break;
-                }
-                let flags = event.fflags;
-                if crate::daemon::trace() {
-                    eprintln!("{} program event flags {flags:#x} on {}", crate::daemon::stamp(), target.display());
-                }
-                let seen = if flags & libc::NOTE_REVOKE != 0 {
-                    Seen::Revoked
-                } else if flags & libc::NOTE_DELETE != 0 {
-                    Seen::Deleted
-                } else if flags & libc::NOTE_RENAME != 0 {
-                    Seen::Renamed
-                } else {
-                    Seen::Written
-                };
-                if seen == Seen::Renamed {
-                    std::thread::sleep(SETTLE);
-                }
-                let now = path_of(fd);
-                let decision = decide(&target, seen, &After { now: now.as_deref(), back: target.exists() }, &|path| trashed(path, &home));
-                act(&decision, &target, &program);
-                match decision {
-                    Decision::Repoint(now) => {
-                        program = moved_program(&program, &target, &now);
-                        target = now;
-                    }
-                    Decision::Off(_) => break,
-                    Decision::Nothing(_) if matches!(seen, Seen::Deleted | Seen::Revoked) => break,
-                    Decision::Nothing(_) => {}
-                }
+                Decision::Off(_) => return false,
+                Decision::Nothing(_) if rearm(seen, back) => return true,
+                Decision::Nothing(_) => {}
             }
         }
-        unsafe {
-            if queue >= 0 {
-                libc::close(queue);
-            }
-            libc::close(fd);
+    }
+
+    fn wait_for(queue: libc::c_int, target: &Path) -> bool {
+        let Some(folder) = target.parent().and_then(open) else { return false };
+        let armed = register(queue, folder, GONE | libc::NOTE_WRITE);
+        if armed && crate::daemon::trace() {
+            eprintln!("{} program folder watched at {}, waiting for {}", crate::daemon::stamp(), target.parent().unwrap_or(target).display(), target.display());
         }
+        let back = armed
+            && loop {
+                if target.exists() {
+                    break true;
+                }
+                match next(queue) {
+                    Some(flags) if flags & GONE == 0 => {}
+                    _ => break false,
+                }
+            };
+        unsafe { libc::close(folder) };
+        back
     }
 }
 
@@ -369,7 +429,7 @@ pub mod linux {
             if std::env::var_os("SCOOCH_HOME").is_some_and(|value| !value.is_empty()) {
                 return None;
             }
-            let home = dirs::home_dir()?;
+            let home = super::resolved(&dirs::home_dir()?);
             let inotify = Inotify::init().ok()?;
             let watcher = Arc::new(Watcher { watches: Mutex::new(inotify.watches()), armed: Mutex::new(None), wanted: Mutex::new(None), home: home.clone() });
             let places = places(&home, std::env::var_os(PLACES));
@@ -437,8 +497,8 @@ pub mod linux {
             let wd = lock(&self.watches).add(origin, WatchMask::MOVE_SELF | WatchMask::DELETE_SELF | WatchMask::ATTRIB | WatchMask::CLOSE_WRITE).map_err(|error| error.to_string())?;
             let same = std::fs::metadata(&self.home).is_ok_and(|home| home.dev() == meta.dev());
             let fd = if same { std::fs::OpenOptions::new().read(true).custom_flags(libc::O_PATH).open(origin).ok() } else { None };
-            let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|path| path.is_absolute()).unwrap_or_else(|| self.home.join(".local").join("share"));
-            let roots = trash_roots(&data, &top_of(origin, meta.dev()), unsafe { libc::getuid() });
+            let data = super::data_home(&self.home, std::env::var_os("XDG_DATA_HOME"));
+            let roots = trash_roots(&data, &top_of(&super::resolved(origin), meta.dev()), unsafe { libc::getuid() });
             Ok(Armed { origin: origin.to_path_buf(), wd, fd, dev: meta.dev(), ino: meta.ino(), roots })
         }
 
@@ -550,6 +610,74 @@ mod tests {
         for path in ["/Users/ada/Documents/Trash/Scooch.app", "/Users/ada/Documents/.Trash/Scooch.app", "/Users/bo/.Trash/Scooch.app", "/Applications/Scooch.app", "/Users/ada/.Trash", "/Volumes/Spare/Trash/Scooch.app", "/Volumes/Spare/.Trashes", "/Applications/.Trashes/Scooch.app"] {
             assert!(!trashed(Path::new(path), &home), "{path}");
         }
+    }
+
+    #[test]
+    fn the_watch_arms_again_after_a_delete_a_revoke_or_a_replace_in_place() {
+        assert!(rearm(Seen::Deleted, false) && rearm(Seen::Revoked, false) && rearm(Seen::Renamed, true));
+        assert!(!rearm(Seen::Renamed, false) && !rearm(Seen::Written, true) && !rearm(Seen::Written, false));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_mac_watch_follows_a_delete_and_a_replace_in_place_and_still_sees_the_trash() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let root = crate::state::scratch("mac-rearm");
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".Trash")).unwrap();
+        let apps = root.join("Applications");
+        let bundle = apps.join("Scooch.app");
+        let make = || std::fs::create_dir_all(bundle.join("Contents").join("MacOS")).unwrap();
+        make();
+        let (sender, heard) = channel();
+        let (program, target, watched_home) = (bundle.join("Contents/MacOS/scooch"), bundle.clone(), home.clone());
+        std::thread::spawn(move || mac::run(program, target, watched_home, move |decision: &Decision, _: &Path, _: &Path| {
+            let _ = sender.send(decision.clone());
+        }));
+        let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
+        let next = || loop {
+            match heard.recv_timeout(Duration::from_secs(5)).ok() {
+                Some(Decision::Nothing("changed in place")) => continue,
+                other => break other,
+            }
+        };
+        pause(300);
+        std::fs::remove_dir_all(&bundle).unwrap();
+        assert_eq!(next(), Some(Decision::Nothing("was deleted")));
+        pause(300);
+        make();
+        pause(300);
+        std::fs::rename(&bundle, apps.join("Scooch old.app")).unwrap();
+        make();
+        assert_eq!(next(), Some(Decision::Nothing("moved but a program is back at its old place")));
+        pause(300);
+        let thrown = home.join(".Trash").join("Scooch.app");
+        std::fs::rename(&bundle, &thrown).unwrap();
+        assert_eq!(next(), Some(Decision::Off(resolved(&thrown))), "the watch was not armed again on the copy that replaced the old one");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_home_behind_a_link_is_compared_as_the_folder_it_points_at() {
+        let root = crate::state::scratch("home-link");
+        let real = root.join("real").join("ada");
+        std::fs::create_dir_all(real.join(".Trash")).unwrap();
+        std::fs::create_dir_all(real.join(".local").join("share").join("Trash").join("files")).unwrap();
+        let link = root.join("ada");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let thrown = real.join(".Trash").join("Scooch.app");
+        assert!(!trashed(&thrown, &link), "the bare link names no Trash the resolved path lies in");
+        assert!(trashed(&thrown, &resolved(&link)));
+        let data = data_home(&link, None);
+        assert_eq!(data, real.join(".local").join("share"));
+        let roots = trash_roots(&data, Path::new("/"), 1000);
+        assert!(inside_any(&real.join(".local/share/Trash/files/Scooch.AppImage"), &roots));
+        let custom = root.join("data");
+        std::os::unix::fs::symlink(real.join(".local").join("share"), &custom).unwrap();
+        assert_eq!(data_home(&link, Some(custom.into_os_string())), real.join(".local").join("share"));
+        assert_eq!(data_home(&link, Some("relative/share".into())), real.join(".local").join("share"), "a relative XDG_DATA_HOME is ignored");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
