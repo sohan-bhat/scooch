@@ -1,5 +1,5 @@
 name: Build the Scooch app
-description: Builds the scooch programs, checks the window and shell, and makes the installers for one target.
+description: Builds the scooch programs and the window program for one target and uploads them, with no installer and no signature.
 
 inputs:
   name:
@@ -7,9 +7,6 @@ inputs:
     required: true
   target:
     description: Rust target the app is built for
-    required: true
-  bundles:
-    description: Tauri bundles to make
     required: true
   clippy:
     description: Whether to run clippy on the shell
@@ -125,21 +122,30 @@ runs:
       working-directory: crates/scooch-app
       run: node ui/node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle --target ${{ inputs.target }} ${{ steps.updater.outputs.args }}
 
-    - name: Installers
+    - name: Compiled programs
       shell: bash
-      working-directory: crates/scooch-app
-      env:
-        TAURI_BUNDLER_DMG_IGNORE_CI: "true"
       run: |
-        if [ "$RUNNER_OS" = macOS ]; then
-          bash ../../.github/app/mac-helper.sh -
-        fi
-        for attempt in 1 2 3; do
-          if node ui/node_modules/@tauri-apps/cli/tauri.js bundle --ci --target ${{ inputs.target }} --bundles ${{ inputs.bundles }} ${{ steps.updater.outputs.args }}; then
-            break
-          fi
-          if [ "$attempt" = 3 ]; then exit 1; fi
-          echo "The bundle failed, trying again in 15 s."
-          sleep 15
-        done
-        echo "TAURI_ARGS=${{ steps.updater.outputs.args }}" >> "$GITHUB_ENV"
+        mkdir -p compiled
+        release="crates/scooch-app/target/${{ inputs.target }}/release"
+        case "$RUNNER_OS" in
+          macOS)
+            cp "$release/scooch-app" compiled/scooch-app
+            cp crates/scooch-app/binaries/scooch-universal-apple-darwin compiled/scooch
+            ;;
+          Windows)
+            cp "$release/scooch-app.exe" compiled/scooch-app.exe
+            cp "crates/scooch-app/binaries/scooch-${{ inputs.target }}.exe" compiled/scooch.exe
+            cp "crates/scooch-app/binaries/scoochw-${{ inputs.target }}.exe" compiled/scoochw.exe
+            ;;
+          Linux)
+            cp "$release/scooch-app" compiled/scooch-app
+            cp "crates/scooch-app/binaries/scooch-${{ inputs.target }}" compiled/scooch
+            ;;
+        esac
+        ls -l compiled
+
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: compiled-${{ inputs.name }}
+        path: compiled
+        if-no-files-found: error

@@ -93,8 +93,15 @@ jobs:
           name: windows-${{ matrix.arch }}
           path: scooch-windows-${{ matrix.arch }}.zip
 
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Signing names stay in their jobs
+        run: bash .github/app/guard.sh
+
   app:
-    needs: version
+    needs: [version, guard]
     uses: ./.github/workflows/app.yml
     secrets: inherit
 

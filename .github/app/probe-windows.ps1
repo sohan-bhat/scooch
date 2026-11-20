@@ -210,7 +210,7 @@ function Daemon-Paths { (@(Get-CimInstance Win32_Process -Filter "Name = 'scooch
 if ($Programs) {
     New-Item -ItemType Directory -Force $folder | Out-Null
     foreach ($name in 'scooch', 'scoochw') {
-        $from = Get-ChildItem $Programs -Filter "$name-*.exe" | Select-Object -First 1
+        $from = Get-ChildItem $Programs -Filter "$name.exe" | Select-Object -First 1
         Copy-Item -Force $from.FullName (Join-Path $folder "$name.exe")
     }
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
