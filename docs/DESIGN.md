@@ -191,6 +191,8 @@ A screen entry belongs to one desktop. On macOS that is one display on one Space
 
 **Off.** `scooch off` restores every entry that is showing and removes it. An entry that is not showing, such as another Space or an unplugged monitor, stays as pending. With pending entries the daemon keeps running in a restoring mode. It never renders, restores each pending entry when its desktop or screen next shows, and removes the login item and itself when none are left. A second `scooch off` gives up on the pending ones, keeps their files and says how many.
 
+**When the program goes.** On macOS the daemon watches its own app folder, or its program file for a terminal install, with a kqueue vnode filter, so the watch costs nothing at rest. It makes no watch when `SCOOCH_HOME` is set or when it runs from a read-only disk or a translocated path. After a rename it waits 10 s and looks again. If the program is then in the user's Trash or a volume's Trashes folder and no program is back at the old place, the daemon does what `scooch off` does from inside its own process and never starts itself again. The login item goes with it. A rename to anywhere else points the login item at the new place. A delete, a move to another disk, a replace in place and an unmount change nothing. Each outcome is one log line that starts with `program` and names the path.
+
 A restore ends one of three ways, and the closing line counts each. The original is back. Or the original was a kind no app can put back, so the plain picture is shown. Or no file is left to show, so Scooch's picture stays and its file is kept. A picture file that a desktop may still show is never deleted.
 
 **With the glide on.** A tick does this instead of a plain set:
