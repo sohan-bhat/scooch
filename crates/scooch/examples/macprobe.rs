@@ -1775,6 +1775,7 @@ mod probe {
         callbacks: usize,
         rate: f64,
         hidden: usize,
+        crossed: Instant,
     }
 
     fn animate(renderer: Renderer, display: u32, cross: f64, hold: f64, park: Option<f32>) -> std::thread::JoinHandle<(Renderer, Run)> {
@@ -1783,6 +1784,7 @@ mod probe {
             let pace = layer::Pace::start(display);
             let rate = pace.as_ref().map_or(0.0, |pace| pace.rate);
             let begin = Instant::now();
+            let crossed = begin + Duration::from_secs_f64(cross);
             let mut frames = Vec::new();
             let mut hidden = 0;
             loop {
@@ -1806,12 +1808,13 @@ mod probe {
             let paced = pace.map(|pace| pace.stop());
             let millis = |values: Vec<f64>| values.into_iter().map(|seconds| seconds * 1000.0).collect::<Vec<f64>>();
             let (arrivals, outputs, callbacks) = paced.map_or((Vec::new(), Vec::new(), 0), |paced| (millis(paced.arrivals), millis(paced.outputs), paced.callbacks));
-            (renderer, Run { frames, arrivals, outputs, callbacks, rate, hidden })
+            (renderer, Run { frames, arrivals, outputs, callbacks, rate, hidden, crossed })
         })
     }
 
     struct Look {
         at: f64,
+        done: f64,
         bar: Option<f32>,
         changed: Vec<f32>,
         covered: Vec<f32>,
@@ -2008,6 +2011,7 @@ mod probe {
         while !worker.is_finished() {
             let at = opened.elapsed().as_secs_f64() * 1000.0;
             let Some(shot) = grab(display) else { continue };
+            let done = opened.elapsed().as_secs_f64() * 1000.0;
             let bar = bar_at(&shot, row);
             let share = |test: &dyn Fn(usize, usize) -> bool| -> Vec<f32> { masks.iter().map(|(_, ink)| ink.iter().filter(|(x, y)| test(*x, *y)).count() as f32 / ink.len().max(1) as f32).collect() };
             let changed = share(&|x, y| !near(shot.at(x, y), baseline.at(x, y)));
@@ -2017,7 +2021,7 @@ mod probe {
                 let _ = scooch_core::encode_png(&shot.image()).map(|bytes| fs::write(p.out.join(format!("live-during-{saved}.png")), bytes));
                 saved += 1;
             }
-            looks.push(Look { at, bar, changed, covered, through });
+            looks.push(Look { at, done, bar, changed, covered, through });
             if set_at.is_none() && at > set_after {
                 desktop.set_wallpaper(&screen, &cyan)?;
                 set_at = Some(Instant::now());
@@ -2046,9 +2050,10 @@ mod probe {
         p.line(format!("- cold open to first presented frame {:?} ms, last frame at {:?} ms, captures used the screencapture tool as a fallback {}", first.map(|value| value.round()), last.map(|value| value.round()), SLOW.load(std::sync::atomic::Ordering::SeqCst)));
         report_run(p, &run);
         let period = if run.rate > 0.0 { 1000.0 / run.rate } else { 1000.0 / 60.0 };
-        let crossing: Vec<(f64, f32)> = looks.iter().filter(|look| first.is_some_and(|first| look.at >= first && look.at <= first + cross * 1000.0)).filter_map(|look| look.bar.map(|bar| (look.at, bar))).collect();
+        let crossed = run.crossed.saturating_duration_since(opened).as_secs_f64() * 1000.0;
+        let crossing: Vec<(f64, f32)> = looks.iter().filter(|look| first.is_some_and(|first| look.at >= first) && look.done <= crossed).filter_map(|look| look.bar.map(|bar| (look.at, bar))).collect();
         let steady = crossing.windows(2).all(|pair| pair[1].1 >= pair[0].1 - 2.0);
-        p.line(format!("- {} captures in all, {} during the {:.0} ms crossing, bar centres in pixels {:?}, increasing {steady}", looks.len(), crossing.len(), cross * 1000.0, crossing.iter().map(|(at, bar)| format!("{:.0} ms {:.0}", at, bar)).collect::<Vec<_>>()));
+        p.line(format!("- {} captures in all, {} taken whole between the first presented frame and the end of the pattern's {:.0} ms crossing at {crossed:.0} ms, bar centres in pixels {:?}, increasing {steady}", looks.len(), crossing.len(), cross * 1000.0, crossing.iter().map(|(at, bar)| format!("{:.0} ms {:.0}", at, bar)).collect::<Vec<_>>()));
         let inside: Vec<&Look> = looks.iter().filter(|look| first.zip(last).is_some_and(|(first, last)| look.at >= first && look.at <= last)).collect();
         let settled_from = first.map(|first| first + 4.0 * period);
         let bare_times: Vec<f64> = inside.iter().filter(|look| look.bar.is_none()).map(|look| look.at).collect();
