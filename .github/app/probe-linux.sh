@@ -235,6 +235,15 @@ expect "removal put the photo back" [ "$(wallpaper)" = "$photo" ]
 expect "removal left no login item" [ ! -f "$autostart" ]
 expect "removal left no daemon" no_daemon
 cp "$data/state.json" "$out/state.json" 2>/dev/null
+expect "the final off kept the record of the screen nobody shows" grep -q '"probe-absent"' "$data/state.json"
+python3 - "$data/state.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+state = json.load(open(path))
+state.get("screens", {}).pop("probe-absent", None)
+json.dump(state, open(path, "w"), indent=2)
+PY
+line "- cleared the parked record of probe-absent so the AppImage passes start with no screen that cannot be reached"
 
 line
 line "### AppImage"
