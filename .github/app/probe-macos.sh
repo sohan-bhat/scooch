@@ -13,6 +13,7 @@ photo="$PWD/assets/photos/seagull-sky.jpg"
 label="me.sohanbhat.scooch"
 
 line() { echo "$*" | tee -a "$report"; }
+. "$(dirname "$0")/expect.sh"
 limited() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 limit() { line "- limit: $*"; }
 
@@ -104,6 +105,14 @@ rendered() { grep -q '"fingerprint": "' "$data/state.json" 2>/dev/null; }
 has_window() { [ -n "$(window_id)" ]; }
 no_plist() { [ ! -f "$plist" ]; }
 wallpaper_is_photo() { [ "$(wallpaper)" = "$photo" ]; }
+luma() {
+  limited 20 osascript -l JavaScript -e "ObjC.import('AppKit'); const r = \$.NSBitmapImageRep.imageRepWithContentsOfFile('$out/$1.png'); const c = r.colorAtXY(Math.floor(r.pixelsWide / 2), 16).colorUsingColorSpace(\$.NSColorSpace.sRGBColorSpace); c.brightnessComponent" 2>/dev/null || echo 0.5
+}
+light_shot() { awk -v v="$(luma "$1")" 'BEGIN { exit !(v > 0.6) }'; }
+dark_shot() { awk -v v="$(luma "$1")" 'BEGIN { exit !(v < 0.3) }'; }
+login_at() { [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null)" = "$1" ]; }
+no_window_app() { ! pgrep -f "MacOS/scooch-app" >/dev/null; }
+no_staged() { ! ls -d /Applications/.Scooch.app.new.* "$HOME/Applications/.Scooch.app.new."* >/dev/null 2>&1; }
 
 close_prompts() {
   for owner in UserNotificationCenter universalAccessAuthWarn CoreServicesUIAgent; do
@@ -148,6 +157,7 @@ else
   limited 20 screencapture -x -D 1 "$out/disk-image-screen.png"
   line "- no disk image window found, took the whole screen instead"
 fi
+expect "the disk image opened its window" [ -n "$found" ]
 line "- disk image holds $(ls -a "$mount" | tr '\n' ' ')"
 ditto "$mount/Scooch.app" "$app"
 limited 15 osascript -e 'tell application "Finder" to close every window' >/dev/null 2>&1
@@ -161,6 +171,13 @@ line "- codesign --verify --deep --strict on the app $(codesign --verify --deep 
 line "- the helper $(codesign -dv "$helper" 2>&1 | grep -E '^Identifier=|^Info.plist|^Runtime|^CodeDirectory' | tr '\n' ' ')"
 line "- the helper names $(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$helper/Contents/Info.plist" 2>&1), version $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$helper/Contents/Info.plist" 2>&1), sentence $(/usr/libexec/PlistBuddy -c 'Print :NSAppleEventsUsageDescription' "$helper/Contents/Info.plist" 2>&1)"
 line "- the helper's entitlements $(codesign -d --entitlements :- "$helper" 2>/dev/null | grep -o 'automation.apple-events' | head -1)"
+expect "codesign --verify --deep --strict passes on the app" codesign --verify --deep --strict "$app"
+expect "the helper is signed as me.sohanbhat.scooch" sh -c "codesign -dv '$helper' 2>&1 | grep -qx 'Identifier=me.sohanbhat.scooch'"
+expect "the helper's Info.plist is bound to its signature" sh -c "codesign -dv '$helper' 2>&1 | grep -q '^Info.plist entries='"
+expect "the helper is named Scooch" [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$helper/Contents/Info.plist" 2>&1)" = Scooch ]
+expect "the helper carries the purpose sentence" [ "$(/usr/libexec/PlistBuddy -c 'Print :NSAppleEventsUsageDescription' "$helper/Contents/Info.plist" 2>&1)" = "Scooch reads where your desktop icons sit." ]
+expect "the helper holds the Apple events entitlement" sh -c "codesign -d --entitlements :- '$helper' 2>/dev/null | grep -q automation.apple-events"
+expect "no scooch program is left in the app's own Contents/MacOS" [ ! -e "$app/Contents/MacOS/scooch" ]
 
 xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$app"
 line "- Gatekeeper on a downloaded copy, word for word: $(spctl --assess --type execute -vvv "$app" 2>&1 | tr '\n' ' ')"
@@ -181,6 +198,7 @@ cp -X "$daemon" "$HOME/.local/bin/scooch"
 export PATH="$HOME/.local/bin:$PATH"
 "$HOME/.local/bin/scooch" use "$photo" >"$out/old-use.txt" 2>&1
 line "- older command install at ~/.local/bin/scooch, as install.sh lays it out, turned Scooch on, login item at $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null), daemons $(pgrep -fl 'scooch watch' | awk '{ print $2 }' | tr '\n' ' ')"
+expect "the older command install turned Scooch on" state_on
 line "- reduce motion before $(defaults read com.apple.universalaccess reduceMotion 2>&1)"
 defaults write com.apple.universalaccess reduceMotion -bool false >"$out/motion.txt" 2>&1
 line "- reduce motion after the probe set it off $(defaults read com.apple.universalaccess reduceMotion 2>&1) $(cat "$out/motion.txt")"
@@ -190,12 +208,17 @@ if took=$(wait_for 40 has_window); then
 else
   line "- no window after 40 s"
 fi
+expect "the app opened its window" has_window
 sleep 4
 shot first-open
 limited 20 open -n "$app" >/dev/null 2>&1
 sleep 6
 line "- a second launch with open -n left $(pgrep -f 'MacOS/scooch-app' | wc -l | tr -d ' ') window process"
+expect "a second launch leaves one window process" [ "$(pgrep -f 'MacOS/scooch-app' | wc -l | tr -d ' ')" = 1 ]
 if took=$(wait_for 30 state_on); then line "- first open turned Scooch on after $took s"; else line "- first open did not turn Scooch on within 30 s"; fi
+expect "first open turned Scooch on" state_on
+expect "the login item points at the helper's program" login_at "$daemon"
+expect "the terminal link points at the helper's program" [ "$(readlink "$HOME/.local/bin/scooch")" = "$daemon" ]
 if [ -f "$plist" ]; then
   line "- login item points at $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null)"
 else
@@ -216,6 +239,8 @@ shot look-light-problem
 look true
 shot look-dark-problem
 look false
+expect "the window is light in the light look with a problem" light_shot look-light-problem
+expect "the window is dark in the dark look with a problem" dark_shot look-dark-problem
 
 consent_owner() {
   for owner in UserNotificationCenter universalAccessAuthWarn CoreServicesUIAgent; do
@@ -236,18 +261,26 @@ if took=$(wait_for 30 has_consent); then
   line "- the consent window came after $took s from $owner, $count window there, screen kept as consent.png"
   line "- it says: $words"
   line "- its buttons: $buttons"
+  expect "one consent window" [ "$count" = 1 ]
+  expect "the consent window names Scooch" grep -q '“Scooch”' <<<"$words"
+  expect "the consent window shows the purpose sentence" grep -q "Scooch reads where your desktop icons sit." <<<"$words"
 else
   screencapture -x "$out/consent-none.png"
   line "- no consent window within 30 s, the daemon's log says $(tail -6 "$data/watch.log" 2>/dev/null | tr '\n' ' ')"
+  line "- tccd says $(limited 60 log show --last 2m --style compact --predicate 'process == "tccd"' 2>/dev/null | grep -i -E 'scooch|AppleEvents' | tail -5 | tr '\n' ' ')"
+  expect "a consent window came from the login item's daemon" false
 fi
 
 stand_in
 if took=$(wait_for 40 rendered); then line "- Scooch drew the desktop after $took s"; else line "- no render within 40 s"; fi
+expect "Scooch drew the desktop" rendered
 sleep 3
 shot on
 shot look-light-on
+expect "the window is light in the light look while on" light_shot look-light-on
 look true
 shot look-dark-on
+expect "the window is dark in the dark look while on" dark_shot look-dark-on
 look false
 line "- wallpaper while on $(wallpaper)"
 hash -r
@@ -257,29 +290,37 @@ glide_before=$(grep -c '"glide": true' "$data/state.json")
 line "- $(press 'Slide')"
 sleep 2
 line "- Slide on before $glide_before, after one press $(grep -c '"glide": true' "$data/state.json")"
+expect "one press of Slide flipped it" [ "$glide_before" != "$(grep -c '"glide": true' "$data/state.json")" ]
 shot slide
 
 line "- $(press 'Turn off')"
 if took=$(wait_for 30 state_off); then line "- off after $took s"; else line "- still on after 30 s"; fi
+expect "Turn off turned Scooch off" state_off
 sleep 3
 shot off
 shot look-light-off
+expect "the window is light in the light look while off" light_shot look-light-off
 look true
 shot look-dark-off
+expect "the window is dark in the dark look while off" dark_shot look-dark-off
 look false
 if wallpaper_is_photo; then line "- the wallpaper is the photo again"; else line "- the wallpaper is $(wallpaper), not the photo"; fi
 if no_plist; then line "- the login item is gone"; else line "- the login item is still there"; fi
+expect "off put the photo back" wallpaper_is_photo
+expect "off removed the login item" no_plist
 
 line "- $(press 'Turn on')"
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 sleep 3
 stand_in
+expect "Turn on turned Scooch on again" state_on
 wait_for 40 rendered >/dev/null
 sleep 3
 line "- wallpaper before the Trash $(wallpaper)"
 line "- daemon log $(grep 'program watched' "$out/watch.log" | tail -1)"
 line "- closing the window $(limited 30 osascript -e 'tell application "System Events" to tell (first process whose bundle identifier is "me.sohanbhat.scooch.window") to click (first button of window 1 whose subrole is "AXCloseButton")' 2>&1)"
 if wait_for 15 sh -c '! pgrep -f "Scooch.app/Contents/MacOS/scooch-app" >/dev/null' >/dev/null; then line "- closing the window ended the app process"; else line "- the app process outlived its window"; fi
+expect "closing the window ended the app process" no_window_app
 line "- daemons after close $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')"
 
 moved=/Applications/Tools/Scooch.app
@@ -287,12 +328,15 @@ mkdir -p /Applications/Tools
 mv "$app" "$moved"
 points_at_move() { [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null)" = "$moved/Contents/Helpers/Scooch.app/Contents/MacOS/scooch" ] && [ "$(readlink "$HOME/.local/bin/scooch")" = "$moved/Contents/Helpers/Scooch.app/Contents/MacOS/scooch" ]; }
 if took=$(wait_for 25 points_at_move); then line "- moved the app to /Applications/Tools, the login item and the terminal link followed after $took s"; else line "- moved the app to /Applications/Tools, login item $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null), link $(readlink "$HOME/.local/bin/scooch") after 25 s"; fi
+expect "the login item and the terminal link followed a move within /Applications" points_at_move
 line "- Trash through Finder $(limited 30 osascript -e "tell application \"Finder\" to delete POSIX file \"$moved\"" 2>&1)"
 cleared() { wallpaper_is_photo && no_plist && ! pgrep -f 'MacOS/scooch watch' >/dev/null && [ ! -L "$HOME/.local/bin/scooch" ] && [ ! -e "$HOME/.local/bin/scooch" ]; }
 if took=$(wait_for 25 cleared); then
+  expect "the Trash put the photo back, removed the login item and the link and ended the daemon" true
   line "- after the Trash the wallpaper is the photo, the login item and the terminal link are gone and no daemon runs, $took s later"
 else
   line "- 25 s after the Trash the wallpaper is $(wallpaper), login item $([ -f "$plist" ] && echo present || echo gone), link $(readlink "$HOME/.local/bin/scooch" || echo gone), daemons $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')"
+  expect "the Trash put the photo back, removed the login item and the link and ended the daemon" false
 fi
 line "- daemon log after the Trash $(grep -i -E 'program|trash|moved|off' "$out/watch.log" | tail -4 | tr '\n' ' ')"
 pkill -f "Scooch.app/Contents/MacOS/scooch" >/dev/null 2>&1
@@ -334,6 +378,9 @@ line "- opened from the disk image, the window runs from $(from_where)"
 shot move-before
 press_move
 line "- /Applications/Scooch.app carries quarantine $(quarantine_of /Applications/Scooch.app)"
+expect "after Move the new window runs from /Applications/Scooch.app" [ "$(from_where)" = /Applications/Scooch.app ]
+expect "the moved copy carries no quarantine" [ -z "$(xattr -p com.apple.quarantine /Applications/Scooch.app 2>/dev/null)" ]
+expect "Move left no staged copy" no_staged
 shot move-after
 pkill -f "MacOS/scooch-app" >/dev/null 2>&1
 sleep 2
@@ -343,6 +390,24 @@ limited 20 open /Applications/Scooch.app >/dev/null 2>&1
 wait_for 40 has_window >/dev/null
 sleep 4
 line "- without the clear, a copy that keeps quarantine $(quarantine_of /Applications/Scooch.app) runs from $(from_where)"
+expect "a copy that kept the quarantine would run translocated, which is why Move clears it" grep -q AppTranslocation <<<"$(from_where)"
+
+line
+line "### Move when the app in /Applications belongs to another account"
+pkill -f "MacOS/scooch-app" >/dev/null 2>&1
+sleep 2
+rm -rf /Applications/Scooch.app
+sudo ditto "$mount/Scooch.app" /Applications/Scooch.app
+sudo chown -R root:wheel /Applications/Scooch.app
+sudo chmod -R go-w /Applications/Scooch.app
+line "- /Applications/Scooch.app now belongs to $(stat -f %Su /Applications/Scooch.app), removing it as this account fails: $(rm -rf /Applications/Scooch.app/Contents/Info.plist 2>&1 | head -1)"
+open_from_image
+press_move
+expect "Move fell back to ~/Applications when the old app could not be replaced" [ "$(from_where)" = "$HOME/Applications/Scooch.app" ]
+expect "the failed replace left no staged copy" no_staged
+pkill -f "MacOS/scooch-app" >/dev/null 2>&1
+sleep 2
+sudo rm -rf /Applications/Scooch.app "$HOME/Applications/Scooch.app"
 
 line
 line "### Move when /Applications cannot be written"
@@ -354,12 +419,15 @@ line "- /Applications mode $mode set to $(stat -f %Lp /Applications) for the pro
 open_from_image
 press_move
 line "- ~/Applications/Scooch.app is there $([ -d "$HOME/Applications/Scooch.app" ] && echo yes || echo no)"
+expect "with /Applications locked Move went to ~/Applications" [ "$(from_where)" = "$HOME/Applications/Scooch.app" ]
 ln -sf /Applications/Tools/Scooch.app/Contents/Helpers/Scooch.app/Contents/MacOS/scooch "$HOME/.local/bin/scooch"
 line "- a link at ~/.local/bin/scooch points at a bundle that is gone, $(readlink "$HOME/.local/bin/scooch")"
 line "- $(press 'Turn on')"
 wait_for 30 state_on >/dev/null
 sleep 5
 line "- after Turn on the link points at $(readlink "$HOME/.local/bin/scooch"), the login item at $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null)"
+expect "a link to a gone Scooch bundle was linked again to the helper in ~/Applications" [ "$(readlink "$HOME/.local/bin/scooch")" = "$HOME/Applications/Scooch.app/Contents/Helpers/Scooch.app/Contents/MacOS/scooch" ]
+expect "the login item points at the helper in ~/Applications" login_at "$HOME/Applications/Scooch.app/Contents/Helpers/Scooch.app/Contents/MacOS/scooch"
 daemon="$HOME/Applications/Scooch.app/Contents/Helpers/Scooch.app/Contents/MacOS/scooch"
 stand_in
 wait_for 40 rendered >/dev/null
@@ -368,9 +436,11 @@ limited 30 osascript -e 'tell application "System Events" to tell (first process
 sleep 3
 line "- Trash through Finder $(limited 30 osascript -e "tell application \"Finder\" to delete POSIX file \"$HOME/Applications/Scooch.app\"" 2>&1)"
 if took=$(wait_for 25 cleared); then
+  expect "the Trash from ~/Applications turned Scooch off and cleared the login item and the link" true
   line "- from ~/Applications the Trash also turned Scooch off, the login item and the link are gone and no daemon runs, $took s later"
 else
   line "- 25 s after the Trash from ~/Applications the wallpaper is $(wallpaper), login item $([ -f "$plist" ] && echo present || echo gone), link $(readlink "$HOME/.local/bin/scooch" || echo gone), daemons $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')"
+  expect "the Trash from ~/Applications turned Scooch off and cleared the login item and the link" false
 fi
 
 line
@@ -383,10 +453,12 @@ open_from_image
 line "- $(press 'Move to Applications')"
 sleep 6
 line "- the window still runs from $(from_where)"
+expect "with no folder to take it the window stays where it was" grep -q -E 'AppTranslocation|^/Volumes/' <<<"$(from_where)"
+expect "the failed Move left no staged copy" no_staged
 shot move-failed
 chmod 755 "$HOME/Applications"
 sudo chmod "$mode" /Applications
 line "- /Applications mode back to $(stat -f %Lp /Applications)"
 pkill -f "MacOS/scooch-app" >/dev/null 2>&1
 hdiutil detach -quiet "$mount" || hdiutil detach -force -quiet "$mount"
-exit 0
+finish
