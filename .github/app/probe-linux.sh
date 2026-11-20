@@ -11,6 +11,15 @@ export WEBKIT_DISABLE_COMPOSITING_MODE=1
 export LIBGL_ALWAYS_SOFTWARE=1
 
 line() { echo "$*" | tee -a "$report"; }
+
+allowed="HOME USER LOGNAME PATH LANG DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE NO_AT_BRIDGE WEBKIT_DISABLE_COMPOSITING_MODE LIBGL_ALWAYS_SOFTWARE"
+clean() {
+  local pass=() name
+  for name in $allowed; do
+    if [ -n "${!name:-}" ]; then pass+=("$name=${!name}"); fi
+  done
+  env -i "${pass[@]}" "$@"
+}
 limit() { line "- limit: $*"; }
 
 wait_for() {
@@ -81,11 +90,11 @@ line "- wallpaper before the app $(wallpaper)"
 
 mkdir -p "$HOME/.local/bin"
 cp /usr/bin/scooch "$HOME/.local/bin/scooch"
-"$HOME/.local/bin/scooch" use "$photo" >"$out/old-use.txt" 2>&1
+clean "$HOME/.local/bin/scooch" use "$photo" >"$out/old-use.txt" 2>&1
 wait_for 30 rendered >/dev/null
 line "- older command install at ~/.local/bin/scooch, as install.sh lays it out, turned Scooch on, login item $(login), daemons $(daemons)"
 
-scooch-app >"$out/app.log" 2>&1 &
+clean scooch-app >"$out/app.log" 2>&1 &
 if took=$(wait_for 40 has_window); then line "- window showed after $took s"; else line "- no window after 40 s"; fi
 if took=$(wait_for 40 state_on); then line "- Scooch is on after $took s"; else line "- Scooch is not on within 40 s"; fi
 if took=$(wait_for 40 rendered); then line "- Scooch drew the desktop after $took s"; else line "- no render within 40 s"; fi
@@ -129,25 +138,26 @@ cp "$(ls "$PWD"/built/*.AppImage 2>/dev/null | head -1)" "$HOME/Downloads/"
 appimage=$(ls "$HOME"/Downloads/*.AppImage | head -1)
 line "- file ~/Downloads/$(basename "$appimage"), $(wc -c <"$appimage" | tr -d ' ') bytes, on the home file system $([ "$(stat -c %d "$appimage")" = "$(stat -c %d "$HOME")" ] && echo yes || echo no)"
 chmod +x "$appimage"
-"$appimage" >"$out/appimage.log" 2>&1 &
+clean "$appimage" >"$out/appimage.log" 2>&1 &
 if took=$(wait_for 40 has_window); then
   line "- it started on the runner as it comes, window after $took s"
 else
   line "- it did not start as it comes, the log says $(head -c 400 "$out/appimage.log" | tr '\n' ' ')"
   pkill -f "$appimage" >/dev/null 2>&1
   sudo apt-get install -y libfuse2t64 >"$out/fuse.log" 2>&1
-  "$appimage" >"$out/appimage.log" 2>&1 &
+  clean "$appimage" >"$out/appimage.log" 2>&1 &
   if took=$(wait_for 40 has_window); then line "- with libfuse2t64 installed it started, window after $took s"; else line "- it still did not start with libfuse2t64, the log says $(head -c 400 "$out/appimage.log" | tr '\n' ' ')"; fi
 fi
 sleep 4
 line "- the AppImage says $(grep 'scooch-app' "$out/appimage.log" | tr '\n' ' ')"
 pid=$(pgrep -x scooch-app | head -1)
 if [ -n "$pid" ]; then
-  tr '\0' '\n' <"/proc/$pid/environ" >"$out/appimage-env.txt"
-  line "- environment the AppImage sets $(grep -E '^(LD_|GIO|GTK|GDK|GSETTINGS|XDG_DATA_DIRS|APPDIR|PYTHON|PERL|QT_)' "$out/appimage-env.txt" | cut -d= -f1 | tr '\n' ' ')"
+  tr '\0' '\n' <"/proc/$pid/environ" | cut -d= -f1 | sort >"$out/appimage-env.txt"
+  line "- names in the app's environment beyond the allowed list and the AppImage's own $(grep -v -x -E "$(echo $allowed | tr ' ' '|')" "$out/appimage-env.txt" | grep -v -E '^(LD_|GIO|GTK|GDK|GSETTINGS|XDG_DATA_DIRS|APPDIR|APPIMAGE|ARGV0|OWD|PYTHON|PERL|QT_)' | tr '\n' ' ')"
+  line "- environment the AppImage sets $(grep -E '^(LD_|GIO|GTK|GDK|GSETTINGS|XDG_DATA_DIRS|APPDIR|PYTHON|PERL|QT_)' "$out/appimage-env.txt" | tr '\n' ' ')"
   xargs -0 -a "/proc/$pid/environ" sh -c 'exec env -i "$@" xfconf-query -c xfce4-desktop -l' sh >"$out/xfconf-in-appimage.txt" 2>&1
   line "- xfconf-query under that environment exit $?, $(head -c 300 "$out/xfconf-in-appimage.txt" | tr '\n' ' ')"
-  appdir=$(grep '^APPDIR=' "$out/appimage-env.txt" | cut -d= -f2-)
+  appdir=$(tr '\0' '\n' <"/proc/$pid/environ" | sed -n 's/^APPDIR=//p')
   line "- the scooch inside is $(file -b "$appdir/usr/bin/scooch" | cut -c1-80), --version says $("$appdir/usr/bin/scooch" --version 2>&1; echo " exit $?")"
 fi
 shot appimage-off
