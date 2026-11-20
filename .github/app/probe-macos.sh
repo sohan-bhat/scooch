@@ -42,9 +42,9 @@ shot() {
   local id
   id=$(window_id)
   if [ -n "$id" ]; then
-    screencapture -x -o -l "$id" "$out/$1.png" && line "- window shot $1.png at $(window_size)"
+    limited 20 screencapture -x -o -l "$id" "$out/$1.png" && line "- window shot $1.png at $(window_size)"
   else
-    screencapture -x -D 1 "$out/$1-screen.png"
+    limited 20 screencapture -x -D 1 "$out/$1-screen.png"
     line "- no window found for $1, took the whole screen instead"
   fi
 }
@@ -138,17 +138,17 @@ line "- programs inside $(ls "$app/Contents/MacOS" | tr '\n' ' ')"
 codesign -dv "$app" 2>&1 | grep -E "Identifier|Signature|TeamIdentifier" | sed 's/^/- signature /' | tee -a "$report"
 
 xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$app"
-line "- Gatekeeper on a downloaded copy: $(spctl --assess --type execute -vv "$app" 2>&1 | tr '\n' ' ')"
-open "$app"
-sleep 6
-screencapture -x -D 1 "$out/gatekeeper-open.png"
-line "- opened the quarantined copy, screen kept as gatekeeper-open.png, windows now $(limited 20 osascript -e 'tell application "System Events" to get name of every process whose visible is true' 2>&1)"
-line "- Gatekeeper log $(log show --last 30s --style compact --predicate 'process == "syspolicyd" OR process == "CoreServicesUIAgent"' 2>/dev/null | grep -i -E 'scooch|deny|reject|notariz' | tail -3 | tr '\n' ' ')"
-open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"
+line "- Gatekeeper on a downloaded copy, word for word: $(spctl --assess --type execute -vvv "$app" 2>&1 | tr '\n' ' ')"
+limited 15 open "$app" >/dev/null 2>&1 &
 sleep 8
+limited 20 screencapture -x -D 1 "$out/gatekeeper-open.png"
+line "- opened the quarantined copy, screen kept as gatekeeper-open.png, windows now $(limited 20 osascript -e 'tell application "System Events" to get name of every process whose visible is true' 2>&1)"
+line "- Gatekeeper log $(limited 60 log show --last 30s --style compact --predicate 'process == "syspolicyd" OR process == "CoreServicesUIAgent"' 2>/dev/null | grep -i -E 'scooch|deny|reject|notariz' | tail -3 | tr '\n' ' ')"
+limited 15 open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension" >/dev/null 2>&1 &
+sleep 10
 limited 20 osascript -e 'tell application "System Settings" to activate' -e 'tell application "System Events" to key code 119' >/dev/null 2>&1
 sleep 2
-screencapture -x -D 1 "$out/gatekeeper-settings.png"
+limited 20 screencapture -x -D 1 "$out/gatekeeper-settings.png"
 line "- Privacy and Security after the blocked open kept as gatekeeper-settings.png"
 limited 20 osascript -e 'tell application "System Settings" to quit' >/dev/null 2>&1
 killall CoreServicesUIAgent >/dev/null 2>&1
@@ -157,7 +157,7 @@ xattr -dr com.apple.quarantine "$app"
 xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$daemon"
 limit "the Open Anyway approval needs a person, so the probe clears the quarantine flag of the app and keeps it on the scooch program inside, the case where only the app was approved"
 
-open "$app"
+limited 20 open "$app" >/dev/null 2>&1
 if took=$(wait_for 40 has_window); then
   line "- window showed after $took s"
 else
@@ -174,7 +174,7 @@ fi
 sleep 3
 line "- launchd job $(launchctl print "gui/$(id -u)/$label" 2>&1 | grep -E 'state =|pid =|last exit|spawn type|immediate reason' | tr -s ' ' | tr '\n' ';')"
 line "- scooch processes from inside the app $(pgrep -fl "$daemon watch" | tr '\n' ';')"
-line "- Gatekeeper log for the program inside $(log show --last 2m --style compact --predicate 'process == "syspolicyd" OR process == "launchd"' 2>/dev/null | grep -i 'scooch' | grep -i -E 'deny|reject|quarantin|assess|spawn' | tail -3 | tr '\n' ' ')"
+line "- Gatekeeper log for the program inside $(limited 60 log show --last 2m --style compact --predicate 'process == "syspolicyd" OR process == "launchd"' 2>/dev/null | grep -i 'scooch' | grep -i -E 'deny|reject|quarantin|assess|spawn' | tail -3 | tr '\n' ' ')"
 xattr -d com.apple.quarantine "$daemon" 2>/dev/null
 sleep 5
 shot asking
