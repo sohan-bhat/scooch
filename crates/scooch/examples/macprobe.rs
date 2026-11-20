@@ -2864,6 +2864,7 @@ mod probe {
         half: RgbImage,
         inked: f32,
         step: Spot,
+        bare: bool,
     }
 
     #[derive(Clone, Copy, Debug, Default)]
@@ -2978,11 +2979,12 @@ mod probe {
         let mut done: Option<f64> = None;
         let mut checks = 0;
         while started.elapsed() < Duration::from_secs(8) {
+            let bare = !layer::listing().iter().any(|window| window.owner == "scooch");
             let at = epoch();
             let Some(shot) = grab(display) else { continue };
             let inked = masks.iter().map(|ink| ink.iter().filter(|(x, y)| !near(shot.at(*x, *y), baseline.at(*x, *y))).count() as f32 / ink.len().max(1) as f32).fold(0.0, f32::max);
             let step = previous.as_ref().map_or_else(Spot::default, |previous| spot_outside(previous, &shot, menu, skip));
-            seen.push(Seen { at, half: half_shot(&shot), inked, step });
+            seen.push(Seen { at, half: half_shot(&shot), inked, step, bare });
             previous = Some(shot);
             checks += 1;
             if done.is_none() && checks % 3 == 0 && new_lines(&daemon_log(p), lines).iter().any(|line| line.contains(" tick ") && !line.contains("Unchanged")) {
@@ -3072,13 +3074,15 @@ mod probe {
         let glide_at = logged(dragged, "shown and gliding");
         let settled = logged(dragged, " glide settled");
         let given_up = logged(dragged, " glide gave up the settle");
+        let budget = logged(dragged, " glide skipped, settle budget");
+        let landed = settled.or(given_up);
         let closed = logged(dragged, "after its wallpaper was set");
         let set = logged(dragged, " glide settle ");
         let glided = logged(dragged, " glide glided");
         let appeared = classes.iter().position(|class| *class == 'B');
         let returned = appeared.map_or(0, |first| classes[first..].iter().filter(|class| **class == 'A').count());
         let moving: Vec<usize> = (0..classes.len()).filter(|index| classes[*index] == '~' && fitted[*index].is_some_and(|(s, _)| s > 0.04 && s < 0.96)).collect();
-        let window: Vec<f32> = (0..classes.len()).filter(|index| glide_at.is_some_and(|at| dragged.seen[*index].at >= at) && settled.is_none_or(|settled| dragged.seen[*index].at <= settled)).filter_map(|index| fitted[index].map(|(s, _)| s)).collect();
+        let window: Vec<f32> = (0..classes.len()).filter(|index| glide_at.is_some_and(|at| dragged.seen[*index].at >= at) && landed.is_none_or(|landed| dragged.seen[*index].at <= landed)).filter_map(|index| fitted[index].map(|(s, _)| s)).collect();
         let steady = window.windows(2).all(|pair| pair[1] >= pair[0] - 0.1);
         let settled_old = classes.iter().position(|class| *class == 'A');
         let first_move = settled_old.and_then(|from| (from..classes.len()).find(|index| classes[*index] != 'A' && classes[*index] != '=')).map(|index| (dragged.seen[index].at - dragged.dropped) * 1000.0);
@@ -3092,6 +3096,11 @@ mod probe {
         let fade = settled.and_then(|settled| dragged.seen.windows(2).find(|pair| pair[0].at < settled && pair[1].at >= settled).map(|pair| pair[1].step));
         let layered = settled.zip(closed).map(|(settled, closed)| dragged.seen.iter().filter(|seen| seen.at >= settled && seen.at < closed).count());
         let hand_over = settled.map(|_| handed.map_or(0, |seen| seen.step.worst));
+        let bare: Vec<usize> = closed.map_or_else(Vec::new, |closed| (0..dragged.seen.len()).filter(|index| dragged.seen[*index].bare && dragged.seen[*index].at >= closed && dragged.seen[*index].at <= closed + 1.0).collect());
+        let gone = bare.first().map(|index| dragged.seen[*index].at);
+        let bare_new = bare.iter().all(|index| matches!(classes[*index], 'B' | '='));
+        let bare_step = bare.iter().filter(|index| **index > 0 && bare.contains(&(**index - 1))).map(|index| dragged.seen[*index].step.worst).max().unwrap_or(0);
+        let gave_up_cleanly = given_up.is_some() && budget.is_some() && !bare.is_empty() && bare_new && bare_step <= 2;
         let hand_spot = handed.map(|seen| format!("{} ms after the drop at pixel {},{} from {:?} to {:?}", ((seen.at - dragged.dropped) * 1000.0).round(), seen.step.x, seen.step.y, seen.step.before, seen.step.after));
         let at = |time: Option<f64>| time.map(|time| ((time - dragged.dropped) * 1000.0).round());
         p.line(format!(
@@ -3107,6 +3116,14 @@ mod probe {
         p.line(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, settle given up {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(given_up), at(closed)));
         let masked = dragged.skip.map_or("nothing masked, the dropped icon was not found".to_string(), |[left, top, right, bottom]| format!("outside the dropped icon's box of {}x{} px at {left},{top}, its Finder rect grown by 6 px", right - left, bottom - top));
         p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, {masked}, captures of the settled layer before close {layered:?}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
+        let gone_ms = closed.zip(gone).map(|(closed, gone)| ((gone - closed) * 1000.0).round());
+        if given_up.is_some() {
+            let given_ms = dragged.log.iter().find_map(|line| line.split(" glide gave up the settle after ").nth(1)).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<u64>().ok());
+            let stayed = glided.zip(gone).map(|(glided, gone)| ((gone - glided) * 1000.0).round());
+            p.line(format!("  - the daemon gave up the settle after {given_ms:?} ms with its skip line logged {}, the glide's last frame stayed on screen {stayed:?} ms until the layer was gone, the first capture with no layer window left began {gone_ms:?} ms after the close was sent, the hand over judged on the {} captures that began with no layer window left, all of them the new picture {bare_new}, largest change between them {bare_step} of 255", budget.is_some(), bare.len()));
+        } else {
+            p.line(format!("  - the first capture with no layer window left began {gone_ms:?} ms after the close was sent"));
+        }
         p.line(format!("  - the change across the settle fade from the glide's last frame to the still, which ends before settled, {:?} of 255 at pixel {:?} from {:?} to {:?}", fade.map(|step| step.worst), fade.map(|step| (step.x, step.y)), fade.map(|step| step.before), fade.map(|step| step.after)));
         p.line(format!("  - daemon log {:?}", dragged.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         if let Some(name) = evidence {
@@ -3120,7 +3137,7 @@ mod probe {
                 table.push(format!("| {index} | {ms} | {} | {} | {} | {:.2} | {:.2} |", classes[index], fit.map_or("none".into(), |(s, _)| format!("{s:.2}")), fit.map_or("none".into(), |(_, gap)| format!("{gap:.2}")), mean_gap(&seen.half, &old_still, &apart), mean_gap(&seen.half, &new_still, &apart)));
             }
             let _ = fs::write(folder.join("captures.md"), table.join("\n") + "\n");
-            let picked: Vec<&Seen> = dragged.seen.iter().filter(|seen| settled.is_none_or(|settled| seen.at <= settled + 0.1)).collect();
+            let picked: Vec<&Seen> = dragged.seen.iter().filter(|seen| landed.is_none_or(|landed| seen.at <= landed + 0.1)).collect();
             if picked.len() >= 9 {
                 let chosen: Vec<RgbImage> = (0..9).map(|index| halved(&picked[index * (picked.len() - 1) / 8].half)).collect();
                 let (w, h) = (chosen[0].width(), chosen[0].height());
@@ -3139,7 +3156,8 @@ mod probe {
             }
             p.line(format!("  - every capture saved in {name} with captures.md, nine frame strip {name}-strip.png"));
         }
-        Judged { rest: returned == 0 && steady && inked <= 0.1 && hand_over.is_some_and(|value| value <= 2) && settled.is_some(), enough: gap.is_some_and(|gap| gap <= SEEN_GAP), moving: moving.len(), rate, gap, frames: frames_drawn }
+        let landing = (settled.is_some() && hand_over.is_some_and(|value| value <= 2)) || gave_up_cleanly;
+        Judged { rest: returned == 0 && steady && inked <= 0.1 && landing, enough: gap.is_some_and(|gap| gap <= SEEN_GAP), moving: moving.len(), rate, gap, frames: frames_drawn }
     }
 
     fn stuck(p: &mut Probe, pid: i32) {
