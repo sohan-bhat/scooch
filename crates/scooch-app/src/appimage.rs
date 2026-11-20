@@ -115,6 +115,22 @@ pub fn changes() -> Changes {
         .clone()
 }
 
+pub fn start_folder(now: Option<&Path>, owd: Option<&Path>, home: Option<&Path>, appdir: &Path) -> Option<PathBuf> {
+    if now.is_some_and(|now| !within(now, appdir)) {
+        return None;
+    }
+    [owd, home, Some(Path::new("/"))].into_iter().flatten().find(|folder| folder.is_absolute() && folder.is_dir() && !within(folder, appdir)).map(Path::to_path_buf)
+}
+
+#[cfg(target_os = "linux")]
+pub fn leave_mount() {
+    let Some((_, appdir)) = inside() else { return };
+    let owd = std::env::var_os("OWD").map(PathBuf::from);
+    if let Some(folder) = start_folder(std::env::current_dir().ok().as_deref(), owd.as_deref(), dirs::home_dir().as_deref(), &appdir) {
+        let _ = std::env::set_current_dir(folder);
+    }
+}
+
 pub fn apply(command: &mut std::process::Command) -> &mut std::process::Command {
     for (name, value) in changes() {
         match value {
@@ -196,6 +212,22 @@ mod tests {
         assert_eq!(given, env(&[("GDK_BACKEND", "wayland"), ("XDG_DATA_DIRS", "/usr/local/share:/usr/share")]));
         let removed: Vec<_> = command.get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name.to_os_string()).collect();
         assert_eq!(removed, vec![OsString::from("APPDIR"), OsString::from("GTK_THEME")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_app_leaves_a_working_folder_inside_the_mount_for_the_start_folder() {
+        let root = std::env::temp_dir().join(format!("scooch-start-{}", std::process::id()));
+        let (appdir, owd, home) = (root.join(".mount_Scooch"), root.join("Downloads"), root.join("home"));
+        for folder in [&appdir, &owd, &home] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let inside = appdir.join("usr");
+        assert_eq!(start_folder(Some(&inside), Some(&owd), Some(&home), &appdir), Some(owd.clone()));
+        assert_eq!(start_folder(Some(&inside), Some(&appdir), Some(&home), &appdir), Some(home.clone()));
+        assert_eq!(start_folder(None, Some(&root.join("gone")), None, &appdir), Some(PathBuf::from("/")));
+        assert_eq!(start_folder(Some(&owd), Some(&home), Some(&home), &appdir), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(unix)]
