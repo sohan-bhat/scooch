@@ -98,7 +98,7 @@
     },
     "predict": {
       "label": "Quick drop",
-      "tip": "The picture moves the moment an icon lands."
+      "tip": "The picture moves sooner after you drop an icon."
     }
   },
   "pictures": {
