@@ -61,6 +61,31 @@ pub fn raw(event: &[u8], major: u8) -> Option<Raw> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct KeyGate {
+    pub active: bool,
+    pub held: bool,
+    pub on: bool,
+}
+
+impl KeyGate {
+    pub fn change(&mut self) -> Option<bool> {
+        let wanted = self.active || self.held;
+        (wanted != self.on).then(|| {
+            self.on = wanted;
+            wanted
+        })
+    }
+
+    pub fn kinds(&self) -> &'static [u16] {
+        if self.on {
+            &[RAW_KEY_PRESS, RAW_BUTTON_PRESS, RAW_BUTTON_RELEASE]
+        } else {
+            &[RAW_BUTTON_PRESS, RAW_BUTTON_RELEASE]
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layer {
     pub viewable: bool,
@@ -158,6 +183,33 @@ mod tests {
         assert_eq!(topmost(&stack, (672.0, 594.0)), Some(0));
         assert_eq!(topmost(&stack, (672.0, 10.0)), Some(2));
         assert_eq!(topmost(&stack[1..], (672.0, 594.0)), None);
+    }
+
+    #[test]
+    fn keys_are_heard_only_while_the_desktop_is_active_or_a_press_on_it_is_held() {
+        let mut gate = KeyGate::default();
+        assert_eq!(gate.change(), None);
+        assert_eq!(gate.kinds(), &[RAW_BUTTON_PRESS, RAW_BUTTON_RELEASE]);
+        gate.active = true;
+        assert_eq!(gate.change(), Some(true));
+        assert!(gate.kinds().contains(&RAW_KEY_PRESS));
+        assert_eq!(gate.change(), None);
+        gate.held = true;
+        assert_eq!(gate.change(), None);
+        gate.active = false;
+        assert_eq!(gate.change(), None, "a drag on the desktop still hears Escape");
+        gate.held = false;
+        assert_eq!(gate.change(), Some(false));
+        assert!(!gate.kinds().contains(&RAW_KEY_PRESS), "typing in another window must wake nothing");
+    }
+
+    #[test]
+    fn a_key_event_carries_no_key_out_of_the_parse() {
+        let a = raw(&raw_event(131, RAW_KEY_PRESS, 38, 0), 131);
+        let b = raw(&raw_event(131, RAW_KEY_PRESS, 9, 0), 131);
+        assert_eq!(a, Some(Raw::Key));
+        assert_eq!(a, b);
+        assert_eq!(format!("{a:?}"), "Some(Key)");
     }
 
     #[test]
