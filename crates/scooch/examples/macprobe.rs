@@ -1520,9 +1520,9 @@ mod probe {
         Ok(exe)
     }
 
-    fn start_watched(exe: &Path, log: &Path) -> Result<Child> {
+    fn start_watched(exe: &Path, log: &Path, places: &str) -> Result<Child> {
         let file = fs::OpenOptions::new().create(true).append(true).open(log)?;
-        Ok(Command::new(exe).arg("watch").env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(file).spawn()?)
+        Ok(Command::new(exe).arg("watch").env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").env("SCOOCH_LINK_PLACES", places).stdin(Stdio::null()).stdout(Stdio::null()).stderr(file).spawn()?)
     }
 
     fn stop_watched(child: &mut Child) {
@@ -1558,6 +1558,8 @@ mod probe {
     }
 
     struct Watching {
+        local: PathBuf,
+        bin: PathBuf,
         child: Option<Child>,
         exe: PathBuf,
         bundle: PathBuf,
@@ -1594,7 +1596,7 @@ mod probe {
         }
         let from = watch_log(&run.log).len();
         let started = Instant::now();
-        run.child = Some(start_watched(&run.exe, &run.log)?);
+        run.child = Some(start_watched(&run.exe, &run.log, &link_places(run))?);
         let armed = logged_within(&run.log, from, started, Duration::from_secs(15), |line| line.contains(" program watched at "));
         p.line(format!("- started the daemon from {}, watch armed after {armed:?} ms", run.exe.display()));
         armed.map(drop).context("the daemon made no watch on its program")
@@ -1652,8 +1654,32 @@ mod probe {
         Ok(())
     }
 
+    fn link_places(run: &Watching) -> String {
+        format!("{}:{}", run.local.display(), run.bin.display())
+    }
+
+    fn place_links(run: &Watching) -> Result<()> {
+        fs::create_dir_all(&run.local)?;
+        fs::create_dir_all(&run.bin)?;
+        let link = run.local.join("scooch");
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&run.exe, &link)?;
+        fs::write(run.bin.join("scooch"), b"a program of its own")?;
+        let foreign = run.bin.join("foreign");
+        if fs::symlink_metadata(&foreign).is_err() {
+            std::os::unix::fs::symlink("/usr/bin/true", &foreign)?;
+        }
+        Ok(())
+    }
+
+    fn others_stay(run: &Watching) -> bool {
+        fs::read(run.bin.join("scooch")).is_ok_and(|bytes| bytes == b"a program of its own") && fs::read_link(run.bin.join("foreign")).is_ok_and(|points| points == Path::new("/usr/bin/true"))
+    }
+
     fn move_case(p: &mut Probe, run: &mut Watching) -> Result<()> {
         ensure_running(p, run)?;
+        place_links(run)?;
+        let link = run.local.join("scooch");
         let aside = dirs::home_dir().context("no home folder")?.join("ScoochMoved");
         fs::create_dir_all(&aside)?;
         if !p.made.contains(&aside) {
@@ -1666,12 +1692,20 @@ mod probe {
         fs::rename(&run.bundle, &moved)?;
         let away = logged_within(&run.log, from, started, Duration::from_secs(25), |line| line.contains(" program moved from ") && line.contains("ScoochMoved"));
         let followed = names_soon(&run.plist, &moved_exe);
+        let linked = fs::read_link(&link).ok();
         let said = program_lines(&run.log, from);
         let from = watch_log(&run.log).len();
         let started = Instant::now();
         fs::rename(&moved, &run.bundle)?;
         let home_again = logged_within(&run.log, from, started, Duration::from_secs(25), |line| line.contains(" program moved from ") && line.contains("ScoochMoved"));
         let followed_back = names_soon(&run.plist, &run.exe);
+        let linked_back = fs::read_link(&link).ok();
+        let stayed = others_stay(run);
+        let link_followed = linked.as_deref() == Some(moved_exe.as_path()) && linked_back.as_deref() == Some(run.exe.as_path());
+        p.line(format!("- the link {} in a folder standing in for ~/.local/bin pointed at {linked:?} after the move and at {linked_back:?} after the move back, a regular file and a foreign link beside it untouched {stayed}", link.display()));
+        if !link_followed || !stayed {
+            p.fail("a move of the program did not take the link with it, or touched a file it must leave alone");
+        }
         let alive = alive(run);
         p.line(format!("- a move to {}: decided after {away:?} ms, the login item names the new place {followed}, then back: decided after {home_again:?} ms, names the old place again {followed_back}, daemon alive {alive}, log {said:?} then {:?}", moved.display(), program_lines(&run.log, from)));
         if away.is_none() || !followed || home_again.is_none() || !followed_back || !alive {
@@ -1747,7 +1781,7 @@ mod probe {
         fs::write(&run.plist, launchd::plist(&exe, &run.real, None, true))?;
         let from = watch_log(&run.log).len();
         let started = Instant::now();
-        let mut child = start_watched(&exe, &run.log)?;
+        let mut child = start_watched(&exe, &run.log, &link_places(run))?;
         let mark = volume.to_string_lossy().into_owned();
         let armed = logged_within(&run.log, from, started, Duration::from_secs(15), |line| line.contains(" program watched at ") && line.contains(mark.as_str()));
         if armed.is_none() {
@@ -1785,6 +1819,7 @@ mod probe {
 
     fn trash_case(p: &mut Probe, run: &mut Watching, desktop: &dyn platform::Desktop, screen: &Screen, before: Option<&Path>) -> Result<()> {
         ensure_running(p, run)?;
+        place_links(run)?;
         let shown = desktop.wallpaper(screen).ok().flatten();
         let from = watch_log(&run.log).len();
         let started = Instant::now();
@@ -1802,6 +1837,12 @@ mod probe {
         ));
         if trashed.code != Some(0) || decided.is_none() || turned.is_none() || exited.is_none() || removed.is_none() || !restored {
             p.fail("moving the program to the Trash did not turn Scooch off and put the wallpaper back");
+        }
+        let link_gone = fs::symlink_metadata(run.local.join("scooch")).is_err();
+        let stayed = others_stay(run);
+        p.line(format!("- the link into the app in the folder standing in for ~/.local/bin removed {link_gone}, a regular file and a foreign link beside it untouched {stayed}"));
+        if !link_gone || !stayed {
+            p.fail("the Trash did not remove the link into the app, or removed a file it must leave alone");
         }
         Ok(())
     }
@@ -1827,7 +1868,9 @@ mod probe {
         fs::write(real.join("state.json"), "{\"on\": true}\n")?;
         let before = desktop.wallpaper(&screen).ok().flatten();
         let exe = bundle.join("Contents/MacOS/scooch");
-        let mut run = Watching { child: None, exe, bundle, log: p.out.join("program-watch.log"), plist: launchd::plist_path()?, real: real.clone() };
+        let links = std::env::temp_dir().join(format!("scooch-links-{}", std::process::id()));
+        p.made.push(links.clone());
+        let mut run = Watching { local: links.join("local"), bin: links.join("bin"), child: None, exe, bundle, log: p.out.join("program-watch.log"), plist: launchd::plist_path()?, real: real.clone() };
         let started = Instant::now();
         if let Err(error) = ensure_running(p, &mut run) {
             p.fail(format!("the daemon run from an app folder made no watch on its program, {error:#}"));
