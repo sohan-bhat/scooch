@@ -293,6 +293,10 @@ Runner numbers come from GitHub's hosted virtual machines. Their GPUs are virtua
 | `scooch render` | Renders one image from a picture and a list of rectangles, for tests and the website |
 | `scooch watch` | Runs the daemon in the foreground. The login item runs this |
 
+## App
+
+The app is one window a person opens, looks at and closes. It is a Tauri shell in `crates/scooch-app` with its page in `crates/scooch-app/ui`. It links the daemon crate and reaches it only through `crates/scooch/src/facade.rs`, which calls the same functions the commands call, so the app never runs `scooch` and never reads printed text. The installers carry the `scooch` program beside the app and the login item points at that program. While the window is open it follows the data folder for changes. When the window closes the app process ends and only the daemon stays, as it does without the app.
+
 ## Website
 
 The page picks its post chain by measurement. detect-gpu gives the first guess from the GPU name, and a name it cannot match starts on the mid chain. After that the page moves between chains by the share of a frame the GPU spends on the fast chain in motion and on the sharp chain at rest, at rest only and at most three times a visit.
