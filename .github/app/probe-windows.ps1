@@ -131,21 +131,29 @@ function Top-Windows {
     }) -join '; '
 }
 
-function Clear-Setup {
+function Setup-Windows {
     $root = [System.Windows.Automation.AutomationElement]::RootElement
+    foreach ($window in $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
+        $name = $window.Current.Name
+        $process = (Get-Process -Id $window.Current.ProcessId -ErrorAction SilentlyContinue).ProcessName
+        if (-not $name -or $name -eq 'Program Manager' -or $name -eq 'Scooch') { continue }
+        if ($process -in 'scooch-app', 'pwsh', 'powershell', 'conhost', 'SystemPropertiesPerformance') { continue }
+        $window
+    }
+}
+
+function Clear-Setup {
     $pressed = @()
-    for ($round = 0; $round -lt 8; $round++) {
+    for ($round = 0; $round -lt 10; $round++) {
         $hit = $false
-        foreach ($window in $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
-            $process = (Get-Process -Id $window.Current.ProcessId -ErrorAction SilentlyContinue).ProcessName
-            if ($process -in 'explorer', 'scooch-app', 'pwsh', 'powershell', 'Runner.Worker', 'Runner.Listener') { continue }
+        foreach ($window in Setup-Windows) {
             foreach ($label in 'Accept', 'Next', 'Skip', 'Skip for now', 'Not now') {
                 $byName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $label)
                 $found = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $byName)
                 $invoke = $null
                 if ($found -and $found.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
                     $invoke.Invoke()
-                    $pressed += "$label in $process"
+                    $pressed += "$label in $($window.Current.Name)"
                     $hit = $true
                     break
                 }
@@ -153,6 +161,14 @@ function Clear-Setup {
         }
         if (-not $hit) { break }
         Start-Sleep -Seconds 3
+    }
+    foreach ($window in Setup-Windows) {
+        $close = $null
+        if ($window.TryGetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern, [ref]$close)) {
+            $name = $window.Current.Name
+            $close.Close()
+            $pressed += "close on $name"
+        }
     }
     return $pressed
 }
