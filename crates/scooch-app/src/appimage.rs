@@ -51,6 +51,20 @@ pub fn wait() {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub fn seal() {
+    if inside().is_none() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir("/proc/self/fd") else { return };
+    for fd in entries.flatten().filter_map(|entry| entry.file_name().to_str().and_then(|name| name.parse::<i32>().ok())).filter(|fd| *fd > 2) {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

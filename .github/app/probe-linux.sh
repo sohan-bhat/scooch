@@ -160,6 +160,9 @@ press_pill Return
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 press_pill alt+F4
 if wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null; then line "- closing the window ended the app, left running $(pgrep -fa 'AppImage|scooch' | grep -v probe | cut -c1-120 | tr '\n' ';')"; else line "- the app outlived its window"; fi
+for daemon in $(pgrep -f '.local/bin/scooch watch'); do
+  line "- the daemon holds $(ls -l "/proc/$daemon/fd" 2>/dev/null | grep -c '.mount_') files inside the AppImage $(ls -l "/proc/$daemon/fd" 2>/dev/null | grep '.mount_' | awk '{ print $NF }' | head -3 | tr '\n' ' ')"
+done
 "$HOME/.local/bin/scooch" off >"$out/appimage-off.txt" 2>&1
 line "- the command turned Scooch off, wallpaper $(wallpaper)"
 exit 0

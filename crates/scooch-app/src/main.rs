@@ -42,6 +42,8 @@ fn adopted<T>(result: anyhow::Result<T>) -> anyhow::Result<T> {
 }
 
 async fn off_main<T: Send + 'static>(work: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
+    #[cfg(target_os = "linux")]
+    appimage::seal();
     said(tauri::async_runtime::spawn_blocking(work).await.map_err(|error| anyhow::anyhow!(error.to_string())).and_then(|done| done))
 }
 
@@ -190,6 +192,8 @@ fn main() {
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 appimage::wait();
+                #[cfg(target_os = "linux")]
+                appimage::seal();
                 let _ = facade::set_origin(std::env::var_os("APPIMAGE").map(PathBuf::from).as_deref());
                 if !place::misplaced() {
                     if let Ok(program) = place::program() {
