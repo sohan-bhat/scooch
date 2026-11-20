@@ -430,7 +430,8 @@ Line "- silent removal took $([int]$took.TotalSeconds) s"
 Line "- wallpaper after removal $([Desk]::Wallpaper()), back to the photo $([Desk]::Wallpaper() -ieq $photo)"
 Line "- login entry after removal '$(Run-Value)', daemons running $(Daemons)"
 Line "- left in the install folder $(@(Get-ChildItem $folder -ErrorAction SilentlyContinue).Count) files"
-Line "- uninstall entries for Scooch after removal $(Uninstall-Entry), scoochw processes $(@(Get-Process -Name scoochw -ErrorAction SilentlyContinue).Count)"
+$entryGone = Wait-For 60 { (Uninstall-Entry) -eq 0 }
+Line "- uninstall entries for Scooch after removal $(Uninstall-Entry), gone after $entryGone s more, scoochw processes $(@(Get-Process -Name scoochw -ErrorAction SilentlyContinue).Count)"
 Expect "a removal with a screen nobody shows leaves no uninstall entry" ((Uninstall-Entry) -eq 0)
 Expect "a removal with a screen nobody shows leaves no scoochw process" (@(Get-Process -Name scoochw -ErrorAction SilentlyContinue).Count -eq 0)
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
