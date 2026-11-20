@@ -10,7 +10,13 @@ pub fn own_folder() -> Result<PathBuf> {
 }
 
 pub fn bundled() -> Result<PathBuf> {
-    Ok(own_folder()?.join(DAEMON))
+    let folder = own_folder()?;
+    if cfg!(target_os = "macos") {
+        if let Some(contents) = folder.parent() {
+            return Ok(contents.join("Helpers").join("Scooch.app").join("Contents").join("MacOS").join(DAEMON));
+        }
+    }
+    Ok(folder.join(DAEMON))
 }
 
 pub fn program() -> Result<PathBuf> {

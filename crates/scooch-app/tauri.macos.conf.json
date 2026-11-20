@@ -21,7 +21,11 @@
     ]
   },
   "bundle": {
+    "externalBin": [],
     "macOS": {
+      "files": {
+        "Helpers/Scooch.app": "target/helper/Scooch.app"
+      },
       "dmg": {
         "background": "macos/dmg-background.tiff",
         "windowSize": {

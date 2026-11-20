@@ -68,6 +68,17 @@ jobs:
           for name in APPLE_API_ISSUER APPLE_API_KEY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             if [ -z "${!name}" ]; then unset "$name"; fi
           done
+          keychain="$RUNNER_TEMP/helper.keychain-db"
+          secret=$(uuidgen)
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode >"$RUNNER_TEMP/helper.p12"
+          security create-keychain -p "$secret" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$secret" "$keychain"
+          security import "$RUNNER_TEMP/helper.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$secret" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/helper.p12"
+          bash ../../.github/app/mac-helper.sh "$APPLE_SIGNING_IDENTITY"
           signed=no
           for attempt in 1 2 3; do
             if node ui/node_modules/@tauri-apps/cli/tauri.js bundle --ci --target universal-apple-darwin --bundles app,dmg $TAURI_ARGS; then
@@ -77,6 +88,7 @@ jobs:
             sleep 15
           done
           rm -f "$RUNNER_TEMP/AuthKey.p8"
+          security delete-keychain "$keychain" || true
           [ "$signed" = yes ]
       - name: Updater signatures
         shell: bash

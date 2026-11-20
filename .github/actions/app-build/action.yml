@@ -131,6 +131,9 @@ runs:
       env:
         TAURI_BUNDLER_DMG_IGNORE_CI: "true"
       run: |
+        if [ "$RUNNER_OS" = macOS ]; then
+          bash ../../.github/app/mac-helper.sh -
+        fi
         for attempt in 1 2 3; do
           if node ui/node_modules/@tauri-apps/cli/tauri.js bundle --ci --target ${{ inputs.target }} --bundles ${{ inputs.bundles }} ${{ steps.updater.outputs.args }}; then
             break
