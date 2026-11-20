@@ -1,13 +1,13 @@
 use crate::commands::{self, FirstRun, Off};
 use crate::platform::{self, Desktop, Screen};
-use crate::state::{self, Store};
+use crate::state::{self, Entry, Store};
 use crate::{daemon, poke, scene};
 use anyhow::{anyhow, bail, Result};
 use scooch_core::{Options, Rect, Scene};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub use crate::state::{Tally, PROGRAM};
+pub use crate::state::{Places, Tally, PROGRAM};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -17,12 +17,6 @@ pub enum System {
     Linux,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Places {
-    pub width: u32,
-    pub height: u32,
-    pub icons: Vec<Rect>,
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Monitor {
@@ -132,9 +126,8 @@ pub fn host() {
     platform::macos::RUNNING.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-pub fn places_of(bytes: Option<&[u8]>, id: &str) -> Option<Places> {
-    let value: serde_json::Value = serde_json::from_slice(bytes?).ok()?;
-    serde_json::from_value(value.get("screens")?.get(id)?.get("places")?.clone()).ok()
+pub fn places_of(entry: Option<&Entry>, on: bool) -> Option<Places> {
+    entry.filter(|_| on).and_then(|entry| entry.places.clone())
 }
 
 fn local(screen: &Screen, icons: &[Rect]) -> Places {
@@ -336,8 +329,7 @@ fn problem_of(view: &View, layout: Option<&Layout>, desktop: &dyn Desktop, store
 
 pub fn view() -> View {
     let store = Store::open();
-    let bytes = store.read();
-    let state = state::parse(bytes.as_deref());
+    let state = store.load();
     let running = store.watcher().is_some();
     let desktop = platform::current().ok();
     let reduce_motion = desktop.as_ref().is_some_and(|desktop| desktop.reduce_motion());
@@ -380,7 +372,7 @@ pub fn view() -> View {
             };
             let places = match (&snapshot_icons, entry) {
                 (Some(icons), _) => Some(local(screen, icons)),
-                (None, Some(_)) => places_of(bytes.as_deref(), &screen.id),
+                (None, Some(entry)) => places_of(Some(entry), state.on),
                 (None, None) => None,
             };
             if let Some(entry) = entry {
@@ -610,15 +602,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn places_read_from_the_saved_entry_and_nothing_else() {
-        let bytes = br#"{"on":true,"screens":{"main":{"source":"/p/a.jpg","places":{"width":2880,"height":1800,"icons":[{"x":10,"y":20,"w":90,"h":90}]}},"side":{"source":"/p/a.jpg"}}}"#;
-        let places = places_of(Some(bytes), "main").expect("places are read");
+    fn places_show_only_while_on_and_only_when_saved() {
+        let mut entry = Entry::new(Path::new("/p/a.jpg"));
+        assert_eq!(places_of(Some(&entry), true), None);
+        entry.places = Some(Places { width: 2880, height: 1800, icons: vec![Rect { x: 10.0, y: 20.0, w: 90.0, h: 90.0 }] });
+        let places = places_of(Some(&entry), true).expect("places are read");
         assert_eq!((places.width, places.height, places.icons.len()), (2880, 1800, 1));
-        assert_eq!(places.icons[0], Rect { x: 10.0, y: 20.0, w: 90.0, h: 90.0 });
-        assert_eq!(places_of(Some(bytes), "side"), None);
-        assert_eq!(places_of(Some(bytes), "gone"), None);
-        assert_eq!(places_of(None, "main"), None);
-        assert_eq!(places_of(Some(b"not json"), "main"), None);
+        assert_eq!(places_of(Some(&entry), false), None);
+        assert_eq!(places_of(None, true), None);
     }
 
     #[test]
