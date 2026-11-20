@@ -80,6 +80,7 @@ mod tests {
         assert!(entry.contains("/home/ada/.local/bin/scooch"), "the program path stays readable for prerm and the app");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_script_runs_the_program_or_removes_the_entry() {
         let root = crate::state::scratch("entry-script");

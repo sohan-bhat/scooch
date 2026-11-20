@@ -70,16 +70,37 @@ mod unix {
     }
 
     #[cfg(target_os = "macos")]
-    fn named_scooch(process: u32) -> bool {
+    pub fn program_of(process: u32) -> Option<std::path::PathBuf> {
         use std::os::unix::ffi::OsStrExt;
         let mut buffer = vec![0u8; 4096];
         let length = unsafe { libc::proc_pidpath(process as c_int, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
-        length > 0 && super::scooch_name(std::path::Path::new(std::ffi::OsStr::from_bytes(&buffer[..length as usize])))
+        (length > 0).then(|| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&buffer[..length as usize])))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn program_of(process: u32) -> Option<std::path::PathBuf> {
+        let exe = std::fs::read_link(format!("/proc/{process}/exe")).ok()?;
+        let text = exe.to_string_lossy();
+        Some(text.strip_suffix(" (deleted)").map_or(exe.clone(), std::path::PathBuf::from))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    pub fn program_of(_process: u32) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    #[cfg(target_os = "macos")]
+    fn named_scooch(process: u32) -> bool {
+        program_of(process).is_some_and(|exe| super::scooch_name(&exe))
     }
 
     #[cfg(target_os = "linux")]
     fn named_scooch(process: u32) -> bool {
         std::fs::read_link(format!("/proc/{process}/exe")).is_ok_and(|exe| super::scooch_name(&exe)) || std::fs::read_to_string(format!("/proc/{process}/comm")).is_ok_and(|name| name.trim().starts_with("scooch"))
+    }
+
+    pub fn kill(process: u32) -> bool {
+        process > 1 && process <= i32::MAX as u32 && unsafe { libc::kill(process as libc::pid_t, libc::SIGKILL) } == 0
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -92,8 +113,13 @@ pub fn scooch_name(exe: &std::path::Path) -> bool {
     exe.file_name().is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().starts_with("scooch"))
 }
 
+pub fn proven(process: u32, programs: &[std::path::PathBuf]) -> bool {
+    let Some(running) = program_of(process) else { return false };
+    programs.iter().any(|program| crate::state::same(program, &running))
+}
+
 #[cfg(unix)]
-pub use unix::{alive, send, stop};
+pub use unix::{alive, kill, program_of, send, stop};
 
 #[cfg(unix)]
 pub fn listen(wake: impl Fn() + Send + 'static, stop: impl Fn() + Send + 'static) -> Result<()> {
@@ -109,8 +135,8 @@ mod named {
     use windows::core::{HSTRING, PWSTR};
     use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows::Win32::System::Threading::{
-        CreateEventW, OpenEventW, OpenProcess, QueryFullProcessImageNameW, SetEvent, WaitForMultipleObjects, WaitForSingleObject, EVENT_MODIFY_STATE, INFINITE, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        CreateEventW, OpenEventW, OpenProcess, QueryFullProcessImageNameW, SetEvent, TerminateProcess, WaitForMultipleObjects, WaitForSingleObject, EVENT_MODIFY_STATE, INFINITE, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
     };
 
     pub const POKE: &str = "poke";
@@ -155,6 +181,23 @@ mod named {
         let set = unsafe { SetEvent(event) }.is_ok();
         let _ = unsafe { CloseHandle(event) };
         set
+    }
+
+    pub fn program_of(process: u32) -> Option<PathBuf> {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process) }.ok()?;
+        let found = image(handle);
+        let _ = unsafe { CloseHandle(handle) };
+        found
+    }
+
+    pub fn kill(process: u32) -> bool {
+        if process == 0 {
+            return false;
+        }
+        let Ok(handle) = (unsafe { OpenProcess(PROCESS_TERMINATE, false, process) }) else { return false };
+        let ended = unsafe { TerminateProcess(handle, 1) }.is_ok();
+        let _ = unsafe { CloseHandle(handle) };
+        ended
     }
 
     pub fn alive(process: u32) -> bool {
@@ -233,6 +276,16 @@ pub fn alive(process: u32) -> bool {
     named::alive(process)
 }
 
+#[cfg(windows)]
+pub fn program_of(process: u32) -> Option<std::path::PathBuf> {
+    named::program_of(process)
+}
+
+#[cfg(windows)]
+pub fn kill(process: u32) -> bool {
+    named::kill(process)
+}
+
 #[cfg(not(any(unix, windows)))]
 pub fn listen(_wake: impl Fn() + Send + 'static, _stop: impl Fn() + Send + 'static) -> Result<()> {
     Ok(())
@@ -250,6 +303,16 @@ pub fn stop(_process: u32) -> bool {
 
 #[cfg(not(any(unix, windows)))]
 pub fn alive(_process: u32) -> bool {
+    false
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn program_of(_process: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn kill(_process: u32) -> bool {
     false
 }
 
