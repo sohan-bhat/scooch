@@ -334,6 +334,7 @@ struct Flight {
     screen: String,
     size: [u32; 2],
     settled: bool,
+    heard: bool,
     set: Option<Instant>,
 }
 
@@ -1124,7 +1125,7 @@ impl Glider {
                 self.late = 0;
                 self.revived = false;
                 note(&mut self.said, format!("open {id} shown and gliding after {} ms{}", prepared.started.elapsed().as_millis(), if prepared.reused { ", opened after the snapshot" } else { "" }));
-                self.flights.push(Flight { id, screen: prepared.screen, size: prepared.size, settled: false, set: None });
+                self.flights.push(Flight { id, screen: prepared.screen, size: prepared.size, settled: false, heard: false, set: None });
                 true
             }
             Err(error) => {
@@ -1279,6 +1280,7 @@ impl Glider {
                 Ok(Heard::Settled(id)) => {
                     if let Some(flight) = self.flights.iter_mut().find(|flight| flight.id == id) {
                         flight.settled = true;
+                        flight.heard = true;
                     }
                 }
                 Ok(Heard::Glided { id, frames, slow, scale, first }) => {
@@ -1307,7 +1309,8 @@ impl Glider {
                 }
             }
         }
-        note(&mut self.said, format!("settled after {} ms", started.elapsed().as_millis()));
+        let words = if !self.flights.is_empty() && self.flights.iter().all(|flight| flight.heard) { "settled after" } else { "gave up the settle after" };
+        note(&mut self.said, format!("{words} {} ms", started.elapsed().as_millis()));
         let mut due: Vec<(Instant, u32)> = self.flights.drain(..).map(|flight| (flight.set.map_or_else(Instant::now, |set| set + hold), flight.id)).collect();
         due.sort();
         for (when, id) in due {

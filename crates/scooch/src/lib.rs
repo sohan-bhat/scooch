@@ -9,6 +9,8 @@ pub mod live;
 pub mod platform;
 #[doc(hidden)]
 pub mod poke;
+#[cfg(any(target_os = "macos", test))]
+mod program;
 mod scene;
 mod state;
 

@@ -94,6 +94,19 @@ mod probe {
         SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |since| since.as_secs_f64())
     }
 
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmFlush() -> i32;
+    }
+
+    fn composed() {
+        for _ in 0..2 {
+            if unsafe { DwmFlush() } < 0 {
+                break;
+            }
+        }
+    }
+
     #[derive(Clone, Debug)]
     struct Seen {
         at: u128,
@@ -3493,6 +3506,7 @@ mod probe {
     struct Watched {
         dropped: f64,
         shots: Vec<(f64, RgbImage)>,
+        layered: Vec<(f64, usize)>,
         log: Vec<String>,
         old: Option<PathBuf>,
         kept: Option<PathBuf>,
@@ -3525,12 +3539,22 @@ mod probe {
         let dropped = DROPPED.lock().ok().and_then(|mut dropped| dropped.take()).unwrap_or_else(epoch);
         let started = Instant::now();
         let mut shots = Vec::new();
+        let mut layered = Vec::new();
+        let mut up_before = 0usize;
         let mut done: Option<Instant> = None;
         let mut count = 0usize;
         while started.elapsed() < Duration::from_secs(12) {
             if capture_screen {
+                let mut up = layer::ours_left();
+                if up == 0 && up_before > 0 {
+                    composed();
+                    up = layer::ours_left();
+                }
+                up_before = up;
+                let began = epoch();
                 if let Ok(shot) = capture(area) {
                     shots.push((epoch(), shot));
+                    layered.push((began, up));
                 }
             } else {
                 pump(Duration::from_millis(30));
@@ -3547,7 +3571,7 @@ mod probe {
         let log: Vec<String> = log_lines(log).into_iter().skip(start).filter(|line| line.contains(" glide ") || line.contains(" tick ") || line.contains(" wake ") || line.contains(" set ")).collect();
         let set = log.iter().rev().find_map(|line| line.split_once(' ').and_then(|(_, rest)| rest.strip_prefix("set ")).map(|path| PathBuf::from(path.trim())));
         let new = set.or_else(|| desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten()));
-        Watched { dropped, shots, log, old, kept, new, sent }
+        Watched { dropped, shots, layered, log, old, kept, new, sent }
     }
 
     fn logged(watched: &Watched, word: &str) -> Option<f64> {
@@ -3557,6 +3581,10 @@ mod probe {
     fn logged_from(watched: &Watched, word: &str, from: f64) -> Option<f64> {
         let word = word.trim_start();
         watched.log.iter().filter(|line| line.split_once(' ').is_some_and(|(_, rest)| rest.starts_with(word))).filter_map(|line| stamp_of(line)).find(|stamp| *stamp >= from)
+    }
+
+    fn lands(line: &str) -> bool {
+        line.contains(" glide settled") || line.contains(" glide gave up the settle")
     }
 
     fn gliding(line: &str) -> bool {
@@ -3625,12 +3653,15 @@ mod probe {
         let glided = named("glided");
         let closed = named("closed");
         let settled = settle.or(open).and_then(|from| logged_from(watched, "glide settled", from));
+        let given_up = settle.or(open).and_then(|from| logged_from(watched, "glide gave up the settle", from));
+        let budget = settle.or(open).and_then(|from| logged_from(watched, "glide skipped, settle budget", from));
+        let landed = settled.or(given_up);
         let ready = logged(watched, " glide ready");
         let set = logged(watched, " set ");
         let tick = watched.log.iter().filter(|line| line.contains(" tick ")).find(|line| set.is_none_or(|set| stamp_of(line).is_some_and(|stamp| stamp >= set))).cloned();
         let wake = logged(watched, " wake ");
         let fitted: Vec<Option<(f32, f32)>> = watched.shots.iter().map(|(_, shot)| (!frames.is_empty()).then(|| best_frame(shot, &frames, &keep))).collect();
-        let window: Vec<f32> = watched.shots.iter().enumerate().filter(|(_, (at, _))| open.is_some_and(|open| *at >= open) && settled.is_none_or(|settled| *at <= settled)).filter_map(|(index, _)| fitted[index].map(|(s, _)| s)).collect();
+        let window: Vec<f32> = watched.shots.iter().enumerate().filter(|(_, (at, _))| open.is_some_and(|open| *at >= open) && landed.is_none_or(|landed| *at <= landed)).filter_map(|(index, _)| fitted[index].map(|(s, _)| s)).collect();
         let steady = window.windows(2).all(|pair| pair[1] >= pair[0] - 0.1);
         let distinct = {
             let mut seen: Vec<i32> = window.iter().map(|s| (s * 20.0).round() as i32).collect();
@@ -3649,9 +3680,10 @@ mod probe {
             hidden = hidden.max(covered(shot, before, &expected, &mask).0);
         }
         let wide = outside(width, height, &avoid, 1);
-        let after: Vec<(usize, (f32, u8, u8))> = settled.map_or_else(Vec::new, |settled| {
-            watched.shots.iter().enumerate().filter(|(_, (at, _))| *at > settled && closed.is_none_or(|closed| *at <= closed + 1.0)).map(|(index, (_, shot))| (index, difference(shot, &new, &wide))).collect()
-        });
+        let bare = |index: usize| closed.zip(watched.layered.get(index)).is_some_and(|(closed, (began, up))| *began >= closed && *up == 0);
+        let counted = |index: usize, at: f64| closed.is_none_or(|closed| at <= closed + 1.0) && (settled.is_some_and(|settled| at > settled) || bare(index));
+        let after: Vec<(usize, (f32, u8, u8))> = watched.shots.iter().enumerate().filter(|(index, (at, _))| counted(*index, *at)).map(|(index, (_, shot))| (index, difference(shot, &new, &wide))).collect();
+        let gone = closed.and_then(|closed| watched.layered.iter().find(|(began, up)| *began >= closed && *up == 0).map(|(began, _)| *began));
         let hand_over: Option<(f32, u8, u8)> = (!after.is_empty()).then(|| after.iter().fold((0.0f32, 0u8, 0u8), |w, (_, d)| (w.0.max(d.0), w.1.max(d.1), w.2.max(d.2))));
         let worst_after = after.iter().max_by_key(|(_, d)| d.1).map(|(index, d)| (*index, *d));
         let since = |time: Option<f64>| time.map(|time| ((time - watched.dropped) * 1000.0).round());
@@ -3660,8 +3692,8 @@ mod probe {
             (None, true) => "ready earlier".to_string(),
             (None, false) => "ready missing".to_string(),
         };
-        let order: Vec<String> = std::iter::once(ready_text).chain([("open and glide", open), ("settle after the set", settle), ("glided", glided), ("settled", settled), ("closed", closed)].into_iter().map(|(name, at)| format!("{name} {:?}", since(at)))).collect();
-        let in_order = match (open, settle, settled, closed) {
+        let order: Vec<String> = std::iter::once(ready_text).chain([("open and glide", open), ("settle after the set", settle), ("glided", glided), ("settled", settled), ("gave up the settle", given_up), ("closed", closed)].into_iter().map(|(name, at)| format!("{name} {:?}", since(at)))).collect();
+        let in_order = match (open, settle, landed, closed) {
             (Some(open), Some(settle), Some(settled), Some(closed)) => open <= settle && settled >= settle && closed >= settled && closed + 0.02 >= settle + HOLD as f64 / 1000.0,
             _ => false,
         };
@@ -3689,6 +3721,14 @@ mod probe {
         ));
         p.line(format!("  - {} captures fitted to {} CPU frames during the glide, {distinct} distinct s, steady {steady}: {:?}", window.len(), frames.len(), window.iter().map(|s| (s * 100.0).round() / 100.0).collect::<Vec<_>>()));
         p.line(format!("  - icon pixels covered {hidden} of {}, {} captures from settled to a second after close, worst against the new still {hand_over:?}, old picture after the new {returned}", total(&mask), after.len()));
+        let gone_ms = closed.zip(gone).map(|(closed, gone)| ((gone - closed) * 1000.0).round());
+        if given_up.is_some() {
+            let given_ms = watched.log.iter().find_map(|line| line.split(" glide gave up the settle after ").nth(1)).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<u64>().ok());
+            let stayed = glided.zip(gone).map(|(glided, gone)| ((gone - glided) * 1000.0).round());
+            p.line(format!("  - the daemon gave up the settle after {given_ms:?} ms with its skip line logged {}, the glide's last frame stayed on screen {stayed:?} ms until the layer was gone, the first capture with no layer window left began {gone_ms:?} ms after the close was sent, the hand over judged on the {} captures that began with no layer window left", budget.is_some(), after.len()));
+        } else {
+            p.line(format!("  - the first capture with no layer window left began {gone_ms:?} ms after the close was sent"));
+        }
         if let Some((index, d)) = worst_after.filter(|(_, d)| d.1 > 2) {
             let at = watched.shots[index].0;
             let marks = [("after the drop", Some(((at - watched.dropped) * 1000.0) as i128)), ("after settled", settled.map(|settled| ((at - settled) * 1000.0) as i128)), ("after close", closed.map(|closed| ((at - closed) * 1000.0) as i128))];
@@ -3716,7 +3756,7 @@ mod probe {
         p.line(format!("  - the daemon's file is {} bytes, the system's decode against ours {:?}, Themes copies since the drop {copies:?}", file_bytes.len(), system.map_err(|error| error.to_string())));
         p.line(format!("  - daemon log {:?}", watched.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         if let Some(name) = strip_name {
-            let picked: Vec<(f64, RgbImage)> = watched.shots.iter().filter(|(at, _)| open.is_none_or(|open| *at >= open - 0.05) && settled.is_none_or(|settled| *at <= settled + 0.1)).map(|(at, shot)| (*at, shot.clone())).collect();
+            let picked: Vec<(f64, RgbImage)> = watched.shots.iter().filter(|(at, _)| open.is_none_or(|open| *at >= open - 0.05) && landed.is_none_or(|landed| *at <= landed + 0.1)).map(|(at, shot)| (*at, shot.clone())).collect();
             let timed: Vec<(u128, RgbImage)> = picked.into_iter().map(|(at, shot)| (((at - watched.dropped) * 1000.0).max(0.0) as u128, shot)).collect();
             if let (Some(first), Some(last)) = (timed.first().map(|(at, _)| *at), timed.last().map(|(at, _)| *at)) {
                 if let Some(image) = strip(&timed, first, last) {
@@ -3725,7 +3765,8 @@ mod probe {
                 }
             }
         }
-        returned == 0 && steady && distinct >= 3 && hidden * 100 <= total(&mask).max(1) && hand_over.is_some_and(|d| d.1 <= 2) && in_order
+        let landing = settled.is_some() || (given_up.is_some() && budget.is_some());
+        returned == 0 && steady && distinct >= 3 && hidden * 100 <= total(&mask).max(1) && hand_over.is_some_and(|d| d.1 <= 2) && in_order && landing
     }
 
     fn icons_except(screen: &Screen, moving: &str) -> Vec<Rect> {
@@ -4094,7 +4135,7 @@ mod probe {
             quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
             tries += 1;
             let again = watch_change(&log, &screen, || drag_icon(name, folder, target), false);
-            glided_again = again.log.iter().any(|line| line.contains(" glide settled"));
+            glided_again = again.log.iter().any(|line| lands(line));
             let reasons: Vec<String> = again.log.iter().filter(|line| line.contains("glide skipped")).map(|line| line.chars().take(200).collect()).collect();
             p.line(format!("- drag {tries} after the kill glides {glided_again}, skip reasons {reasons:?}, log {:?}", again.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
             decisions(p, &again);
@@ -4170,7 +4211,7 @@ mod probe {
         let rest_target = if last_target.x == centre.x && last_target.y == centre.y { aside } else { centre };
         let rested = watch_change(&log, &screen, || drag_icon(name, folder, rest_target), false);
         let stamp = |word: &str| rested.log.iter().find(|line| line.contains(word)).and_then(|line| stamp_of(line));
-        let rest_glided = rested.log.iter().any(|line| line.contains(" glide settled"));
+        let rest_glided = rested.log.iter().any(|line| lands(line));
         let rest_skips: Vec<String> = rested.log.iter().filter(|line| line.contains("glide skipped")).map(|line| line.chars().take(200).collect()).collect();
         let cold = stamp(" glide early launch").or_else(|| stamp(" glide helper launched")).zip(stamp(" glide ready")).map(|(started, ready)| ((ready - started) * 1000.0).round());
         let shown = stamp(" glide open after snapshot").zip(rested.log.iter().find(|line| gliding(line)).and_then(|line| stamp_of(line))).map(|(asked, shown)| ((shown - asked) * 1000.0).round());
