@@ -40,13 +40,13 @@ function Picture({ src }: { src: string }) {
   ));
 }
 
-function IconMark({ rect, scale }: { rect: Rect; scale: number }) {
-  const width = rect.w * scale;
-  const height = rect.h * scale;
+function IconMark({ rect, sx, sy }: { rect: Rect; sx: number; sy: number }) {
+  const width = rect.w * sx;
+  const height = rect.h * sy;
   const tile = Math.max(3, Math.min(width * 0.7, height * 0.62));
   const label = Math.max(1.5, height * 0.09);
   return (
-    <div className="icon-mark absolute top-0 left-0 flex flex-col items-center" style={{ width, height, transform: `translate(${rect.x * scale}px, ${rect.y * scale}px)`, gap: height * 0.08, paddingTop: height * 0.04 }}>
+    <div className="icon-mark absolute top-0 left-0 flex flex-col items-center" style={{ width, height, transform: `translate(${rect.x * sx}px, ${rect.y * sy}px)`, gap: height * 0.08, paddingTop: height * 0.04 }}>
       <span className="block bg-paper/88 shadow-[0_1px_2px_rgb(20_17_14/0.4),inset_0_0_0_0.5px_rgb(255_255_255/0.6),0_0_0_0.5px_rgb(20_17_14/0.25)]" style={{ width: tile, height: tile, borderRadius: tile * 0.24 }} />
       <span className="block rounded-pill bg-paper/75 shadow-[0_0_0_0.5px_rgb(20_17_14/0.25)]" style={{ width: width * 0.74, height: label }} />
     </div>
@@ -75,6 +75,7 @@ export function Desk({ monitors, system, empty }: { monitors: Monitor[]; system:
           const height = monitor.frame.h * scale - seam * 2;
           const showBar = bar.everywhere || index === 0;
           const barHeight = Math.max(2, bar.points * scale);
+          const places = monitor.places;
           return (
             <div
               key={monitor.id}
@@ -94,10 +95,10 @@ export function Desk({ monitors, system, empty }: { monitors: Monitor[]; system:
                   style={{ [bar.edge]: 0, height: barHeight }}
                 />
               )}
-              {monitor.icons && (
+              {places && places.width > 0 && places.height > 0 && (
                 <div aria-hidden className="absolute inset-0">
-                  {monitor.icons.map((icon, iconIndex) => (
-                    <IconMark key={iconIndex} rect={icon} scale={width / monitor.frame.w} />
+                  {places.icons.map((icon, iconIndex) => (
+                    <IconMark key={iconIndex} rect={icon} sx={width / places.width} sy={height / places.height} />
                   ))}
                 </div>
               )}

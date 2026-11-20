@@ -2,14 +2,16 @@ export type System = 'macos' | 'windows' | 'linux';
 
 export type Rect = { x: number; y: number; w: number; h: number };
 
+export type Places = { width: number; height: number; icons: Rect[] };
+
 export type Monitor = {
   id: string;
   frame: Rect;
   picture: string | null;
-  icons: Rect[] | null;
+  places: Places | null;
 };
 
-export type WallpaperKind = 'slideshow' | 'video' | 'color' | 'moving' | 'unreadable' | 'made';
+export type WallpaperKind = 'slideshow' | 'video' | 'color' | 'moving' | 'unreadable' | 'made' | 'other';
 
 export type Problem =
   | { kind: 'automation' }
@@ -40,6 +42,8 @@ export type View = {
   problem: Problem | null;
   flipHelps: boolean;
   current: string | null;
+  counted: { icons: number; screens: number } | null;
+  reduceMotion: boolean;
   textScale: number;
 };
 
@@ -54,6 +58,7 @@ export interface Backend {
   use(path: string): Promise<void>;
   pick(): Promise<string | null>;
   fix(problem: Problem): Promise<void>;
+  firstOpen(): Promise<boolean>;
   subscribe(listener: () => void): () => void;
   onDrop(listener: (hovering: boolean, path: string | null) => void): () => void;
 }

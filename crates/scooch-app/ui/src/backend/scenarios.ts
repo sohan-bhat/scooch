@@ -1,9 +1,10 @@
 import layouts from '../../mock/layouts.json';
-import type { Monitor, Problem, Rect, Switches, System, View } from './types';
+import type { Monitor, Places, Problem, Rect, Switches, System, View } from './types';
 
 type Layout = { width: number; height: number; icons: number[][] };
 
-const rects = (layout: Layout): Rect[] => layout.icons.map(([x, y, w, h]) => ({ x, y, w, h }));
+const rects = (layout: Layout): Places => ({ width: layout.width, height: layout.height, icons: layout.icons.map(([x, y, w, h]) => ({ x, y, w, h })) });
+const bare = (layout: Layout): Places => ({ width: layout.width, height: layout.height, icons: [] });
 const frame = (layout: Layout, x = 0, y = 0): Rect => ({ x, y, w: layout.width, h: layout.height });
 
 export const photoPath = (photo: string) => `/Users/ada/Pictures/${photo}.jpg`;
@@ -35,7 +36,7 @@ type Desk = { system: System; current: string; monitors: (on: boolean) => Monito
 const mac: Desk = {
   system: 'macos',
   current: 'seagull-sky',
-  monitors: (on) => [{ id: 'main', frame: frame(layouts.mac), picture: on ? 'drawn/seagull-sky-mac.jpg' : 'drawn/seagull-sky-mac-plain.jpg', icons: on ? rects(layouts.mac) : null }],
+  monitors: (on) => [{ id: 'main', frame: frame(layouts.mac), picture: on ? 'drawn/seagull-sky-mac.jpg' : 'drawn/seagull-sky-mac-plain.jpg', places: on ? rects(layouts.mac) : null }],
 };
 
 const macTwo: Desk = {
@@ -43,14 +44,14 @@ const macTwo: Desk = {
   current: 'seagull-sky',
   monitors: (on) => [
     ...mac.monitors(on),
-    { id: 'side', frame: frame(layouts.wide, -layouts.wide.width, -236), picture: on ? 'drawn/seagull-sky-wide.jpg' : 'drawn/seagull-sky-wide-plain.jpg', icons: on ? [] : null },
+    { id: 'side', frame: frame(layouts.wide, -layouts.wide.width, -236), picture: on ? 'drawn/seagull-sky-wide.jpg' : 'drawn/seagull-sky-wide-plain.jpg', places: on ? bare(layouts.wide) : null },
   ],
 };
 
 const windows: Desk = {
   system: 'windows',
   current: 'golden-tree',
-  monitors: (on) => [{ id: 'main', frame: frame(layouts.win), picture: on ? 'drawn/golden-tree-win.jpg' : 'drawn/golden-tree-win-plain.jpg', icons: rects(layouts.win) }],
+  monitors: (on) => [{ id: 'main', frame: frame(layouts.win), picture: on ? 'drawn/golden-tree-win.jpg' : 'drawn/golden-tree-win-plain.jpg', places: rects(layouts.win) }],
 };
 
 const gnome: Desk = {
@@ -59,8 +60,8 @@ const gnome: Desk = {
   monitors: (on) => {
     const picture = on ? 'drawn/lone-canoe-gnome.jpg' : 'drawn/lone-canoe-gnome-plain.jpg';
     return [
-      { id: 'DP-1', frame: frame(layouts.gnome), picture, icons: rects(layouts.gnome) },
-      { id: 'HDMI-1', frame: frame(layouts.gnome, layouts.gnome.width, 0), picture, icons: [] },
+      { id: 'DP-1', frame: frame(layouts.gnome), picture, places: rects(layouts.gnome) },
+      { id: 'HDMI-1', frame: frame(layouts.gnome, layouts.gnome.width, 0), picture, places: null },
     ];
   },
 };
@@ -68,7 +69,7 @@ const gnome: Desk = {
 const xfce: Desk = {
   system: 'linux',
   current: 'great-wave',
-  monitors: (on) => [{ id: 'eDP-1', frame: frame(layouts.xfce), picture: on ? 'drawn/great-wave-xfce.jpg' : 'drawn/great-wave-xfce-plain.jpg', icons: rects(layouts.xfce) }],
+  monitors: (on) => [{ id: 'eDP-1', frame: frame(layouts.xfce), picture: on ? 'drawn/great-wave-xfce.jpg' : 'drawn/great-wave-xfce-plain.jpg', places: rects(layouts.xfce) }],
 };
 
 const switchesFor = (system: System, extra: { xfce?: boolean; reduced?: boolean } = {}): Switches => {
@@ -122,13 +123,17 @@ export const scenarios: Record<string, Scenario> = {
   'no-screen': { desk: mac, problem: { kind: 'screen' }, none: true },
 };
 
+export function counted(monitors: Monitor[]) {
+  return { icons: monitors.reduce((sum, monitor) => sum + (monitor.places?.icons.length ?? 0), 0), screens: new Set(monitors.map((monitor) => monitor.picture)).size };
+}
+
 export function build(name: string): View {
   const scenario = scenarios[name] ?? scenarios['mac-on'];
   const phase = scenario.phase ?? 'on';
   const lit = phase === 'on' || phase === 'stopping';
   let monitors = scenario.desk.monitors(lit);
-  if (scenario.hideIcons) monitors = monitors.map((monitor) => ({ ...monitor, icons: null }));
-  if (scenario.blank) monitors = monitors.map((monitor) => ({ ...monitor, picture: null, icons: null }));
+  if (scenario.hideIcons) monitors = monitors.map((monitor) => ({ ...monitor, places: null }));
+  if (scenario.blank) monitors = monitors.map((monitor) => ({ ...monitor, picture: null, places: null }));
   if (scenario.none) monitors = [];
   return {
     system: scenario.desk.system,
@@ -139,6 +144,8 @@ export function build(name: string): View {
     problem: scenario.problem ?? null,
     flipHelps: scenario.flipHelps ?? false,
     current: scenario.blank || scenario.none ? null : photoPath(scenario.desk.current),
+    counted: phase === 'on' && !scenario.hideIcons && !scenario.blank && !scenario.none ? counted(monitors) : null,
+    reduceMotion: scenario.reduced ?? false,
     textScale: scenario.textScale ?? 1,
   };
 }

@@ -1,4 +1,4 @@
-import { build, photoPath, photos, relit } from './scenarios';
+import { build, counted, photoPath, photos, relit } from './scenarios';
 import type { Backend, Picture, Problem, SwitchName, View } from './types';
 
 const query = new URLSearchParams(window.location.search);
@@ -23,10 +23,11 @@ export const mock: Backend = {
   async turnOn() {
     change({ phase: 'starting', problem: null, pending: 0 });
     await pause(900);
-    change({ phase: 'on', monitors: relit(view, name, true) });
+    const monitors = relit(view, name, true);
+    change({ phase: 'on', monitors, counted: counted(monitors) });
   },
   async turnOff() {
-    change({ phase: 'stopping', flipHelps: false });
+    change({ phase: 'stopping', flipHelps: false, counted: null });
     await pause(700);
     change({ phase: 'off', monitors: relit(view, name, false) });
   },
@@ -45,6 +46,9 @@ export const mock: Backend = {
     if (problem.kind === 'stopped') return mock.turnOn();
     if (problem.kind === 'move' || problem.kind === 'unknown') return change({ problem: null });
     change({ problem: null, monitors: relit(view, name, view.phase !== 'off') });
+  },
+  async firstOpen() {
+    return false;
   },
   subscribe(listener) {
     listeners.add(listener);
