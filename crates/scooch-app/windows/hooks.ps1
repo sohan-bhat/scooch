@@ -95,7 +95,7 @@ if ($on) {
     Set-Content -Path $marker -Value ([DateTime]::UtcNow.ToString('o'))
 }
 if (Test-Path $daemon) {
-    $off = Start-Process -FilePath $daemon -ArgumentList 'off' -WindowStyle Hidden -PassThru
+    $off = Start-Process -FilePath $daemon -ArgumentList 'off', '--final' -WindowStyle Hidden -PassThru
     if (-not $off.WaitForExit(60000)) {
         Stop-Process -Id $off.Id -Force -ErrorAction SilentlyContinue
     }
