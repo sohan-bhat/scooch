@@ -107,12 +107,35 @@ hash -r
 line "- after the app opened, login item $(login), daemons $(daemons), a terminal finds $(command -v scooch)"
 line "- the app says $(grep 'scooch-app' "$out/app.log" | tr '\n' ' ')"
 shot on
+pgrep -x xfsettingsd >/dev/null || { xfsettingsd >"$out/xfsettingsd.log" 2>&1 & sleep 2; }
+look() { xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s "$1" >/dev/null 2>&1; sleep 3; }
+line "- the desktop look before the probe $(xfconf-query -c xsettings -p /Net/ThemeName 2>/dev/null || echo unset)"
+look Adwaita
+shot look-light-on
+look Adwaita-dark
+shot look-dark-on
+pkill -x scooch
+sleep 2
+xdotool windowactivate --sync "$(window)" >/dev/null 2>&1
+sleep 3
+line "- killed the daemon so the window shows a problem, state on $(grep -c '"on": true' "$data/state.json")"
+shot look-dark-problem
+look Adwaita
+shot look-light-problem
+clean /usr/bin/scooch >"$out/restart.txt" 2>&1
+wait_for 30 sh -c 'pgrep -x scooch >/dev/null' >/dev/null
+xdotool windowactivate --sync "$(window)" >/dev/null 2>&1
+sleep 3
 line "- wallpaper while on $(wallpaper)"
 
 press_pill Tab Tab Tab Tab Return
 if took=$(wait_for 30 state_off); then line "- the keyboard turned Scooch off after $took s"; else line "- still on after the key presses"; fi
 sleep 3
 shot off
+shot look-light-off
+look Adwaita-dark
+shot look-dark-off
+look Adwaita
 line "- wallpaper after off $(wallpaper), back to the photo $([ "$(wallpaper)" = "$photo" ] && echo yes || echo no)"
 line "- login item after off $([ -f "$autostart" ] && echo present || echo gone)"
 

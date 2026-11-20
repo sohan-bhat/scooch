@@ -202,6 +202,13 @@ line "- Gatekeeper log for the program inside $(limited 60 log show --last 2m --
 xattr -d com.apple.quarantine "$daemon" 2>/dev/null
 sleep 5
 shot asking
+look() { limited 20 osascript -e "tell application \"System Events\" to tell appearance preferences to set dark mode to $1" >/dev/null 2>&1; sleep 3; }
+line "- the system look before the probe, dark $(limited 20 osascript -e 'tell application "System Events" to tell appearance preferences to get dark mode' 2>&1)"
+look false
+shot look-light-problem
+look true
+shot look-dark-problem
+look false
 
 consent_owner() {
   for owner in UserNotificationCenter universalAccessAuthWarn CoreServicesUIAgent; do
@@ -227,6 +234,10 @@ stand_in
 if took=$(wait_for 40 rendered); then line "- Scooch drew the desktop after $took s"; else line "- no render within 40 s"; fi
 sleep 3
 shot on
+shot look-light-on
+look true
+shot look-dark-on
+look false
 line "- wallpaper while on $(wallpaper)"
 hash -r
 line "- after the app opened, login item at $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null), daemons $(pgrep -fl 'scooch watch' | awk '{ print $2 }' | tr '\n' ' '), a terminal finds $(command -v scooch) linked to $(readlink "$HOME/.local/bin/scooch")"
@@ -241,6 +252,10 @@ line "- $(press 'Turn off')"
 if took=$(wait_for 30 state_off); then line "- off after $took s"; else line "- still on after 30 s"; fi
 sleep 3
 shot off
+shot look-light-off
+look true
+shot look-dark-off
+look false
 if wallpaper_is_photo; then line "- the wallpaper is the photo again"; else line "- the wallpaper is $(wallpaper), not the photo"; fi
 if no_plist; then line "- the login item is gone"; else line "- the login item is still there"; fi
 

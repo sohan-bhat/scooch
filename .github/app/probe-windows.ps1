@@ -32,6 +32,12 @@ public static class Desk {
     public static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")]
     public static extern bool PrintWindow(IntPtr window, IntPtr hdc, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr wide, string text, uint flags, uint timeout, out UIntPtr result);
+    public static void Announce(string what) {
+        UIntPtr result;
+        SendMessageTimeout(new IntPtr(0xffff), 0x1A, UIntPtr.Zero, what, 2, 5000, out result);
+    }
     static IDesktopWallpaper Shell() { return (IDesktopWallpaper)new DesktopWallpaperClass(); }
     public static string Wallpaper() {
         var shell = Shell();
@@ -239,6 +245,32 @@ $drawn = Wait-For 40 { (Test-Path "$data\state.json") -and ((Get-Content -Raw "$
 Line "- Scooch drew the desktop after $drawn s"
 Start-Sleep -Seconds 3
 Shot 'on'
+$looks = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+function Set-Look([int]$Light) {
+    if (-not (Test-Path $looks)) { New-Item -Path $looks -Force | Out-Null }
+    Set-ItemProperty -Path $looks -Name AppsUseLightTheme -Value $Light -Type DWord
+    Set-ItemProperty -Path $looks -Name SystemUsesLightTheme -Value $Light -Type DWord
+    [Desk]::Announce('ImmersiveColorSet')
+    Start-Sleep -Seconds 3
+}
+Line "- the system look before the probe, apps light $((Get-ItemProperty -Path $looks -Name AppsUseLightTheme -ErrorAction SilentlyContinue).AppsUseLightTheme)"
+Set-Look 1
+Shot 'look-light-on'
+Set-Look 0
+Shot 'look-dark-on'
+Get-CimInstance Win32_Process -Filter "Name = 'scoochw.exe'" | Where-Object { $_.CommandLine -match ' watch' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Start-Sleep -Seconds 2
+$front = Find-Window
+if ($front) { [Desk]::SetForegroundWindow([IntPtr]$front.Current.NativeWindowHandle) | Out-Null }
+Start-Sleep -Seconds 3
+Line "- stopped the daemon so the window shows a problem, daemons now $(Daemons)"
+Shot 'look-dark-problem'
+Set-Look 1
+Shot 'look-light-problem'
+Start-Process -FilePath (Join-Path $folder 'scoochw.exe') -ArgumentList 'watch' -WindowStyle Hidden
+Wait-For 30 { (Daemons) -ge 1 } | Out-Null
+if ($front) { [Desk]::SetForegroundWindow([IntPtr]$front.Current.NativeWindowHandle) | Out-Null }
+Start-Sleep -Seconds 3
 Line "- login entry $(Run-Value)"
 Line "- wallpaper while on $([Desk]::Wallpaper())"
 Line "- daemons running $(Daemons) from $(Daemon-Paths)"
@@ -258,6 +290,10 @@ $off = Wait-For 30 { -not (State-On) }
 Line "- off after $off s"
 Start-Sleep -Seconds 3
 Shot 'off'
+Shot 'look-light-off'
+Set-Look 0
+Shot 'look-dark-off'
+Set-Look 1
 Line "- wallpaper after off $([Desk]::Wallpaper()), back to the photo $([Desk]::Wallpaper() -ieq $photo)"
 Line "- login entry after off '$(Run-Value)'"
 
