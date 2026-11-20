@@ -39,7 +39,7 @@ mod probe {
     use ::windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First, Thread32Next, PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32};
     use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use ::windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
-    use ::windows::Win32::System::Registry::{RegCloseKey, RegDeleteKeyValueW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_BINARY, REG_DWORD, RRF_RT_REG_DWORD};
+    use ::windows::Win32::System::Registry::{RegCloseKey, RegDeleteKeyValueW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_BINARY, REG_DWORD, REG_SZ, RRF_RT_REG_DWORD};
     use ::windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount, GetProcessTimes, OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, PROCESS_VM_READ};
     use scooch::live::{Command as LiveCommand, Helper, Hints, Reply};
     use scooch::platform::windows::layer::{self, Method};
@@ -245,6 +245,7 @@ mod probe {
         probe.section("6c Explorer after the drop", explorer_after_drop);
         probe.section("9 Live layer", live);
         probe.section("8 Display scaling", scaling);
+        probe.section("6d The final off", final_off_check);
         probe.section("7 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -4450,6 +4451,66 @@ mod probe {
         for line in quiet.iter().take(20) {
             p.line(format!("  - `{line}`"));
         }
+        Ok(())
+    }
+
+    fn real_state(real: &Path) -> serde_json::Value {
+        fs::read(real.join("state.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn final_off_check(p: &mut Probe) -> Result<()> {
+        if let Some(mut child) = p.daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let desktop = platform::current()?;
+        let screen = desktop.screens()?.first().context("no screen")?.clone();
+        let twin = twin()?;
+        let cli = twin.with_file_name("scooch.exe");
+        let real = dirs::data_local_dir().context("no data folder")?.join("Scooch");
+        let _ = fs::remove_dir_all(&real);
+        fs::create_dir_all(real.join("out"))?;
+        p.made.push(real.clone());
+        let picture = p.home.join("probe-final.jpg");
+        fs::write(&picture, jpeg(&subject_picture(screen.frame.w as u32, screen.frame.h as u32))?)?;
+        desktop.set_wallpaper(&screen, &picture)?;
+        let absent = r"\\?\DISPLAY#PROBE0000#5&1a2b3c4d&0&UID4357#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
+        let parked_out = real.join("out").join("probe-absent-1.png");
+        fs::copy(&picture, &parked_out)?;
+        let record = serde_json::json!({"version": 1, "on": true, "screens": {absent: {"source": picture, "original": picture, "output": parked_out}}});
+        fs::write(real.join("state.json"), serde_json::to_vec(&record)?)?;
+        p.line(format!("- the real data folder {} holds a record for a monitor that is not attached, {absent}, with its own picture and its output", real.display()));
+        let command: Vec<u16> = layout::command_line(&twin).encode_utf16().chain(Some(0)).collect();
+        let written = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, startup::RUN, startup::VALUE, REG_SZ.0, Some(command.as_ptr() as *const c_void), (command.len() * 2) as u32) };
+        let log = fs::File::create(p.out.join("final-off.log"))?;
+        let launched = Command::new(&twin).arg("watch").env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn().map(|child| child.id());
+        std::env::remove_var("SCOOCH_HOME");
+        let installed = (written, launched.map_err(|error| error.to_string()));
+        let id = screen.id.clone();
+        let drawn = wait_until(Duration::from_secs(60), || !real_state(&real)["screens"][id.as_str()]["fingerprint"].is_null());
+        let entry = startup::entry();
+        let daemons = running("scoochw.exe");
+        p.line(format!("- turned on through the login item {installed:?}, Run entry {entry:?}, scoochw processes {daemons:?}, the screen drawn after {:?} ms", drawn.map(|time| time.as_millis())));
+        let started = Instant::now();
+        let off = Command::new(&cli).args(["off", "--final"]).env_remove("SCOOCH_HOME").stdin(Stdio::null()).output();
+        let took = started.elapsed().as_millis();
+        let gone = wait_until(Duration::from_secs(10), || running("scoochw.exe").is_empty()).is_some();
+        let entry = startup::entry();
+        let state = real_state(&real);
+        let kept = state["screens"][absent]["original"].as_str().map(PathBuf::from).as_deref() == Some(picture.as_path());
+        let parked = state["on"] != serde_json::Value::Bool(true) && state["restoring"] != serde_json::Value::Bool(true) && kept && state["screens"].get(id.as_str()).is_none();
+        let back = desktop.wallpaper(&screen).ok().flatten();
+        let said = off.as_ref().map(|out| String::from_utf8_lossy(&out.stdout).trim().replace("\r\n", " / ")).unwrap_or_default();
+        p.line(format!(
+            "- scoochw off --final through scooch.exe exit {:?} after {took} ms, said {said:?}: no scoochw process left {gone}, Run entry left {entry:?}, the record of the detached monitor kept with its own picture {kept}, state parked {parked}, its output still there {}, the attached screen shows {back:?}",
+            off.as_ref().map(|out| out.status.code()).map_err(|error| error.to_string()),
+            parked_out.exists()
+        ));
+        std::env::set_var("SCOOCH_HOME", &p.home);
+        if !off.as_ref().is_ok_and(|out| out.status.success()) || !gone || entry.is_some() || !parked || !parked_out.exists() {
+            p.failed.push("the final off left a scoochw process or the Run entry, or did not keep the record of the monitor it could not reach".into());
+        }
+        let _ = startup::remove();
         Ok(())
     }
 

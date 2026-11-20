@@ -171,6 +171,8 @@ impl Helper {
     pub fn launch_with(program: &Path, env: &[(&str, &str)]) -> Result<Helper> {
         let launched = Instant::now();
         let mut command = std::process::Command::new(program);
+        #[cfg(target_os = "linux")]
+        crate::platform::linux::children::clean(&mut command);
         command.arg(HELPER).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).envs(env.iter().copied());
         #[cfg(windows)]
         {

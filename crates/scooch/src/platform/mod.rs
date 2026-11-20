@@ -141,6 +141,12 @@ pub trait Desktop: Send + Sync {
     fn predicted(&self, _shown: &dyn Fn() -> bool) -> Option<Snapshot> {
         None
     }
+    fn put_back_detached(&self, _id: &str, _picture: &Path) -> Result<bool> {
+        Ok(false)
+    }
+    fn leave_login(&self) -> Result<()> {
+        leave_login()
+    }
     fn pointer(&self) -> Option<(f32, f32)> {
         None
     }
@@ -196,6 +202,46 @@ pub fn folder_and_children(root: &Path) -> Vec<PathBuf> {
         folders.extend(children);
     }
     folders
+}
+
+pub fn login_program() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return macos::launchd::program();
+    #[cfg(target_os = "windows")]
+    return windows::startup::named();
+    #[cfg(target_os = "linux")]
+    return linux::autostart::program();
+    #[allow(unreachable_code)]
+    None
+}
+
+pub fn login_exists() -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::launchd::installed();
+    #[cfg(target_os = "windows")]
+    return windows::startup::entry().is_some();
+    #[cfg(target_os = "linux")]
+    return linux::autostart::installed();
+    #[allow(unreachable_code)]
+    false
+}
+
+pub fn remove_login() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    return macos::launchd::remove();
+    #[cfg(target_os = "windows")]
+    return windows::startup::remove();
+    #[cfg(target_os = "linux")]
+    return linux::autostart::remove();
+    #[allow(unreachable_code)]
+    Ok(())
+}
+
+pub fn leave_login() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    return macos::launchd::forget();
+    #[allow(unreachable_code)]
+    remove_login()
 }
 
 pub fn current() -> Result<Box<dyn Desktop>> {
