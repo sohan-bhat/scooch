@@ -34,10 +34,12 @@ jobs:
 
       - name: GPU bench
         if: ${{ !cancelled() }}
+        timeout-minutes: 10
         run: ./target/release/examples/macprobe gpu-bench macprobe/bench
 
       - name: Cold start
         if: ${{ !cancelled() }}
+        timeout-minutes: 10
         run: ./target/release/examples/macprobe cold-start macprobe/cold
 
       - name: Upload
