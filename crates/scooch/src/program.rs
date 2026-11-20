@@ -75,6 +75,79 @@ pub fn trash_roots(data_home: &Path, top: &Path, uid: u32) -> Vec<PathBuf> {
 }
 
 #[cfg(any(target_os = "linux", test))]
+pub fn trash_dirs(data_home: &Path, top: &Path, uid: u32) -> Vec<(PathBuf, PathBuf)> {
+    vec![(data_home.join("Trash"), PathBuf::from("/")), (top.join(".Trash").join(uid.to_string()), top.to_path_buf()), (top.join(format!(".Trash-{uid}")), top.to_path_buf())]
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn info_path(text: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let raw = text.lines().skip_while(|line| line.trim() != "[Trash Info]").find_map(|line| line.strip_prefix("Path="))?.trim();
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut rest = raw.as_bytes();
+    while let Some((&first, tail)) = rest.split_first() {
+        match (first, tail) {
+            (b'%', [high, low, after @ ..]) => {
+                bytes.push(u8::from_str_radix(std::str::from_utf8(&[*high, *low]).ok()?, 16).ok()?);
+                rest = after;
+            }
+            _ => {
+                bytes.push(first);
+                rest = tail;
+            }
+        }
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn thrown(origin: &Path, trashes: &[(PathBuf, PathBuf)]) -> Option<PathBuf> {
+    for (trash, top) in trashes {
+        let Ok(entries) = std::fs::read_dir(trash.join("info")) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(".trashinfo")) else { continue };
+            let Some(path) = std::fs::read_to_string(entry.path()).ok().and_then(|text| info_path(&text)) else { continue };
+            let full = if path.is_absolute() { path } else { top.join(path) };
+            let file = trash.join("files").join(stem);
+            if full == origin && std::fs::symlink_metadata(&file).is_ok() {
+                return Some(file);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+pub fn copies(store: &crate::state::Store) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = dirs::home_dir().map(|home| home.join(".local").join("bin").join("scooch")).into_iter().collect();
+    found.push(store.root.join("bin").join("scooch"));
+    found
+}
+
+#[cfg(target_os = "linux")]
+pub fn link_places() -> Vec<PathBuf> {
+    dirs::home_dir().map(|home| places(&resolved(&home), std::env::var_os(PLACES))).unwrap_or_default()
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn remove_copies(copies: &[PathBuf], proven: &[PathBuf], places: &[PathBuf]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for copy in copies {
+        let regular = std::fs::symlink_metadata(copy).is_ok_and(|meta| meta.is_file());
+        if !regular || !proven.iter().any(|program| crate::state::same(program, copy)) {
+            continue;
+        }
+        lines.extend(remove_links(&links_into(places, copy)));
+        lines.push(match std::fs::remove_file(copy) {
+            Ok(()) => format!("program copy {} removed", copy.display()),
+            Err(error) => format!("program copy {} could not be removed, {error}", copy.display()),
+        });
+    }
+    lines
+}
+
+#[cfg(any(target_os = "linux", test))]
 pub fn inside_any(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path.starts_with(root) && path != root.as_path())
 }
@@ -369,7 +442,7 @@ mod mac {
 
 #[cfg(target_os = "linux")]
 pub mod linux {
-    use super::{decide, follow_origin, inside_any, links_into, places, remove_links, said, seen_from, trash_roots, After, Decision, Seen, PLACES};
+    use super::{copies, decide, follow_origin, inside_any, places, remove_copies, said, seen_from, trash_roots, After, Decision, Seen, PLACES};
     use crate::daemon::{stamp, trace, Signal};
     use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask, Watches};
     use std::ffi::CString;
@@ -392,11 +465,14 @@ pub mod linux {
         roots: Vec<PathBuf>,
     }
 
+    type Act = Arc<dyn Fn(&Decision, &Path) + Send + Sync>;
+
     pub struct Watcher {
         watches: Mutex<Watches>,
         armed: Mutex<Option<Armed>>,
         wanted: Mutex<Option<PathBuf>>,
         home: PathBuf,
+        act: Act,
     }
 
     fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -431,10 +507,9 @@ pub mod linux {
             }
             let home = super::resolved(&dirs::home_dir()?);
             let inotify = Inotify::init().ok()?;
-            let watcher = Arc::new(Watcher { watches: Mutex::new(inotify.watches()), armed: Mutex::new(None), wanted: Mutex::new(None), home: home.clone() });
             let places = places(&home, std::env::var_os(PLACES));
             let program = std::env::current_exe().ok().map(|exe| crate::state::canonical(&exe).unwrap_or(exe));
-            let act = move |decision: &Decision, at: &Path| {
+            let act: Act = Arc::new(move |decision: &Decision, at: &Path| {
                 if let Decision::Repoint(now) = decision {
                     if let Err(error) = follow_origin(&crate::state::Store::open(), now) {
                         eprintln!("{} program moved from {} to {} but Scooch could not follow it, {error:#}", stamp(), at.display(), now.display());
@@ -443,23 +518,17 @@ pub mod linux {
                 }
                 eprintln!("{} {}", stamp(), said(decision, at));
                 if let Decision::Off(_) = decision {
-                    if let Some((copy, others)) = places.split_first().map(|(first, others)| (first.join("scooch"), others)) {
-                        if program.as_deref().is_some_and(|program| crate::state::canonical(&copy).is_ok_and(|real| real == program)) {
-                            for line in remove_links(&links_into(others, &copy)) {
-                                eprintln!("{} {line}", stamp());
-                            }
-                            match std::fs::remove_file(&copy) {
-                                Ok(()) => eprintln!("{} program copy {} removed", stamp(), copy.display()),
-                                Err(error) => eprintln!("{} program copy {} could not be removed, {error}", stamp(), copy.display()),
-                            }
-                        }
+                    let proven: Vec<PathBuf> = program.iter().cloned().chain(crate::platform::login_program()).collect();
+                    for line in remove_copies(&copies(&crate::state::Store::open()), &proven, &places) {
+                        eprintln!("{} {line}", stamp());
                     }
                     trashed.store(true, Ordering::SeqCst);
                     signal.wake();
                 }
-            };
+            });
+            let watcher = Arc::new(Watcher { watches: Mutex::new(inotify.watches()), armed: Mutex::new(None), wanted: Mutex::new(None), home, act });
             let runner = watcher.clone();
-            std::thread::Builder::new().name("scooch-program".into()).spawn(move || runner.run(inotify, act)).ok()?;
+            std::thread::Builder::new().name("scooch-program".into()).spawn(move || runner.run(inotify)).ok()?;
             Some(watcher)
         }
 
@@ -485,8 +554,23 @@ pub mod linux {
                     if trace() {
                         eprintln!("{} program not watched at {}, {why}", stamp(), origin.display());
                     }
+                    drop(armed);
+                    drop(wanted);
+                    if let Some(file) = self.thrown_away(origin) {
+                        (self.act)(&Decision::Off(file), origin);
+                    }
                 }
             }
+        }
+
+        fn thrown_away(&self, origin: &Path) -> Option<PathBuf> {
+            if std::fs::symlink_metadata(origin).is_ok() {
+                return None;
+            }
+            let folder = origin.parent()?;
+            let dev = std::fs::metadata(folder).ok()?.dev();
+            let data = super::data_home(&self.home, std::env::var_os("XDG_DATA_HOME"));
+            super::thrown(origin, &super::trash_dirs(&data, &top_of(&folder.join("."), dev), unsafe { libc::getuid() }))
         }
 
         fn make(&self, origin: &Path) -> Result<Armed, String> {
@@ -545,7 +629,8 @@ pub mod linux {
             }
         }
 
-        fn run(&self, mut inotify: Inotify, act: impl Fn(&Decision, &Path)) {
+        fn run(&self, mut inotify: Inotify) {
+            let act = self.act.clone();
             let mut buffer = [0u8; 4096];
             loop {
                 let events: Vec<(WatchDescriptor, EventMask)> = match inotify.read_events_blocking(&mut buffer) {
@@ -610,6 +695,62 @@ mod tests {
         for path in ["/Users/ada/Documents/Trash/Scooch.app", "/Users/ada/Documents/.Trash/Scooch.app", "/Users/bo/.Trash/Scooch.app", "/Applications/Scooch.app", "/Users/ada/.Trash", "/Volumes/Spare/Trash/Scooch.app", "/Volumes/Spare/.Trashes", "/Applications/.Trashes/Scooch.app"] {
             assert!(!trashed(Path::new(path), &home), "{path}");
         }
+    }
+
+    #[test]
+    fn a_foreign_file_at_the_first_place_stays_and_the_copy_in_the_data_folder_goes_with_its_links() {
+        let root = crate::state::scratch("copies");
+        let (local, bin, data) = (root.join(".local/bin"), root.join("bin"), root.join("data/bin"));
+        for folder in [&local, &bin, &data] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let foreign = local.join("scooch");
+        std::fs::write(&foreign, b"someone else's scooch").unwrap();
+        let copy = data.join("scooch");
+        std::fs::write(&copy, b"the program Scooch runs from").unwrap();
+        std::os::unix::fs::symlink(&copy, bin.join("scooch")).unwrap();
+        std::os::unix::fs::symlink(&foreign, bin.join("other")).unwrap();
+        let places = vec![local.clone(), bin.clone()];
+        let copies = vec![foreign.clone(), copy.clone()];
+        assert!(remove_copies(&copies, &[], &places).is_empty(), "nothing is removed that is not proven to be the program");
+        assert!(copy.exists() && foreign.exists());
+        let lines = remove_copies(&copies, std::slice::from_ref(&copy), &places);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(!copy.exists() && std::fs::symlink_metadata(bin.join("scooch")).is_err());
+        assert!(foreign.exists() && std::fs::symlink_metadata(bin.join("other")).is_ok(), "the foreign file or a link to it was touched");
+        std::fs::write(&copy, b"again").unwrap();
+        std::os::unix::fs::symlink(&copy, local.join("scooch-link")).unwrap();
+        assert!(remove_copies(&[local.join("scooch-link")], &[local.join("scooch-link")], &places).is_empty(), "a link is never taken for the copy");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_appimage_thrown_away_while_nothing_ran_is_found_by_its_trashinfo() {
+        let root = crate::state::scratch("trashinfo");
+        let origin = root.join("Apps").join("Scooch 1.AppImage");
+        let data = root.join("share");
+        let top = root.join("disk");
+        let home_trash = data.join("Trash");
+        std::fs::create_dir_all(home_trash.join("info")).unwrap();
+        std::fs::create_dir_all(home_trash.join("files")).unwrap();
+        let trashes = trash_dirs(&data, &top, 1000);
+        assert_eq!(thrown(&origin, &trashes), None, "a plain delete leaves no trashinfo");
+        let encoded = origin.to_string_lossy().replace(' ', "%20");
+        std::fs::write(home_trash.join("info").join("Scooch 1.AppImage.trashinfo"), format!("[Trash Info]\nPath={encoded}\nDeletionDate=2026-11-20T10:00:00\n")).unwrap();
+        assert_eq!(thrown(&origin, &trashes), None, "a trashinfo without its file counts for nothing");
+        std::fs::write(home_trash.join("files").join("Scooch 1.AppImage"), b"x").unwrap();
+        assert_eq!(thrown(&origin, &trashes), Some(home_trash.join("files").join("Scooch 1.AppImage")));
+        assert_eq!(thrown(&root.join("Apps").join("Other.AppImage"), &trashes), None);
+        let disk_trash = top.join(".Trash-1000");
+        std::fs::create_dir_all(disk_trash.join("info")).unwrap();
+        std::fs::create_dir_all(disk_trash.join("files")).unwrap();
+        let on_disk = top.join("Apps").join("Scooch.AppImage");
+        std::fs::write(disk_trash.join("info").join("Scooch.AppImage.trashinfo"), "[Trash Info]\nPath=Apps/Scooch.AppImage\n").unwrap();
+        std::fs::write(disk_trash.join("files").join("Scooch.AppImage"), b"x").unwrap();
+        assert_eq!(thrown(&on_disk, &trashes), Some(disk_trash.join("files").join("Scooch.AppImage")), "a path in a disk trash is relative to the top of the disk");
+        assert_eq!(info_path("[Trash Info]\nPath=/a%2Fb%25c\n"), Some(PathBuf::from("/a/b%c")));
+        assert_eq!(info_path("Path=/no/header"), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
