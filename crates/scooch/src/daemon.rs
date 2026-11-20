@@ -4812,6 +4812,30 @@ pub mod tests {
         }
     }
 
+    fn landing_words(daemon: &Daemon) -> (bool, bool) {
+        let said = daemon.glider.lock().unwrap().said.clone();
+        (said.iter().any(|line| line.starts_with("settled after ")), said.iter().any(|line| line.starts_with("gave up the settle after ")))
+    }
+
+    #[test]
+    fn a_settle_the_helper_reports_writes_the_settled_words() {
+        let (daemon, fake, _, _) = glide_rig("glide-settle-words", true);
+        assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
+        assert!(events(&fake).iter().any(|event| event == "settled 1"), "{:?}", events(&fake));
+        assert_eq!(landing_words(&daemon), (true, false), "{:?}", daemon.glider.lock().unwrap().said);
+    }
+
+    #[test]
+    fn a_settle_given_up_writes_its_own_words_and_not_the_settled_words() {
+        let (daemon, fake, script, _) = glide_rig("glide-settle-given-up", true);
+        script.lock().unwrap().settle_never = true;
+        assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.starts_with("skipped, settle budget")), "{said:?}");
+        assert!(events(&fake).iter().any(|event| event.starts_with("close")), "{:?}", events(&fake));
+        assert_eq!(landing_words(&daemon), (false, true), "{said:?}");
+    }
+
     #[test]
     fn a_failed_open_waits_inside_the_budget_and_then_sets_the_still() {
         let ((daemon, fake, script, _), waits) = glide_rig_waits("glide-budget", true);
