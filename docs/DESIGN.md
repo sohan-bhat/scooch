@@ -221,6 +221,8 @@ Measured on Windows 11, a dragged icon becomes a new wallpaper in 317 to 435 ms,
 
 Measured on Linux, a quiet minute uses 0 to 10 ms of CPU and about 20 MB resident. Scooch's own share of a move is 0.3 to 0.7 s. The rest of the 2 to 4 s from drop to new wallpaper is the desktop saving its positions.
 
+On Linux crates/scooch asks for `blocking` `~1.6.2`, the thread pool zbus uses to open and close its connections, because from 1.7.0 an idle pool thread never ends and wakes every 500 ms, which breaks the promise that nothing runs at rest. The requirement may be lifted only once a newer `blocking` ends idle threads again, which the test `an_idle_pool_thread_of_the_blocking_crate_ends` checks and the judged quiet minute of the Linux probe confirms on every desktop.
+
 ## Live glide
 
 On macOS and Windows a move can slide the picture into its new place. A layer over the wallpaper and below the icons draws the old picture warping into the new one, and the wallpaper changes underneath it. On Linux the swap stays plain.
