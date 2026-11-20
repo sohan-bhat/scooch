@@ -1598,13 +1598,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let onto = physical_point(spot, scale);
         let before = places(bench.linux);
         let mark = log_lines(&bench.log).len();
-        let dropped = wall();
+        let released = std::cell::Cell::new(wall());
         let taken = special(p, bench, "a drop whose landing cell is taken, which gives no guess and follows the save", || {
             drag(from, onto)?;
+            released.set(wall());
             Ok(format!("the probe icon from {},{} to {},{}, where Plasma's rule lands it on the taken cell {landing} and walks it on to cell {walk}", from.0, from.1, onto.0, onto.1))
         });
         let fresh = log_lines(&bench.log);
-        let sets = set_times(fresh.get(mark..).unwrap_or_default(), dropped);
+        let sets = set_times(fresh.get(mark..).unwrap_or_default(), released.get());
         let why = unguessed(fresh.get(mark..).unwrap_or_default());
         if taken.0 {
             p.fail("the daemon predicted a drop whose landing cell is taken, which it must never do");
@@ -1636,14 +1637,15 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let (hooked_rect, straight_rect) = (rounded(&board.grid.icon(hooked)), rounded(&board.grid.icon(straight)));
         let (jump_at, release_at) = (physical_point(jump, scale), physical_point(release, scale));
         let mark = log_lines(&bench.log).len();
-        let dropped = wall();
+        let released = std::cell::Cell::new(wall());
         let hook = special(p, bench, "a hook drag whose first motion leaves the icon's row, which the prediction follows", || {
             hook_drag(from, jump_at, release_at)?;
+            released.set(wall());
             Ok(format!("the probe icon pressed at {},{}, first moved to {},{} in the row above, then let go at {},{}, where Plasma, which takes the drag from that first motion, lands it in cell {hooked} and a drag taken from the press would land in cell {straight}", from.0, from.1, jump_at.0, jump_at.1, release_at.0, release_at.1))
         });
         let fresh = log_lines(&bench.log);
         let fresh = fresh.get(mark..).unwrap_or_default();
-        let sets = set_times(fresh, dropped);
+        let sets = set_times(fresh, released.get());
         let (agreed, began) = (fresh.iter().any(|line| line.contains("predicted drop agreed")), fresh.iter().filter(|line| line.contains(" drop drag began at ")).cloned().collect::<Vec<_>>());
         let now = places(bench.linux);
         let (landed, astray) = (now.contains(&hooked_rect), now.contains(&straight_rect));
