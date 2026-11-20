@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Scooch",
+  "mainBinaryName": "scooch-app",
+  "identifier": "me.sohanbhat.scooch.window",
+  "build": {
+    "frontendDist": "ui/dist",
+    "devUrl": "http://localhost:5181",
+    "beforeBuildCommand": "npm --prefix ui run build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Scooch",
+        "width": 900,
+        "height": 620,
+        "minWidth": 640,
+        "minHeight": 480,
+        "visible": false,
+        "theme": "Dark",
+        "backgroundColor": "#14110e",
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' scooch: http://scooch.localhost https://scooch.localhost data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "shortDescription": "Moves the wallpaper so icons stay off the subject.",
+    "longDescription": "Moves the desktop wallpaper so icons do not cover the subject of the picture.",
+    "copyright": "Sohan Bhat",
+    "homepage": "https://sohanbhat.me/scooch/",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "externalBin": ["binaries/scooch"],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-",
+      "hardenedRuntime": true,
+      "entitlements": "macos/Entitlements.plist"
+    },
+    "linux": {
+      "deb": {
+        "preRemoveScript": "linux/prerm.sh"
+      },
+      "rpm": {
+        "preRemoveScript": "linux/prerm.sh"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
+  }
+}

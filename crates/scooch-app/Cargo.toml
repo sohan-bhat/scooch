@@ -1,0 +1,49 @@
+[package]
+name = "scooch-app"
+description = "The Scooch window."
+version = "0.1.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/sohan-bhat/scooch"
+authors = ["Sohan Bhat"]
+publish = false
+default-run = "scooch-app"
+
+[workspace]
+
+[[bin]]
+name = "scooch-app"
+path = "src/main.rs"
+
+[features]
+updater = ["dep:tauri-plugin-updater"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+scooch = { path = "../scooch" }
+anyhow = "1"
+dirs = "6"
+percent-encoding = "2"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-updater = { version = "2", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "abort"
+
+[profile.dev]
+debug = 0
+
+[profile.dev.package."*"]
+opt-level = 2

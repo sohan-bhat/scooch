@@ -1,0 +1,21 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Scooch",
+        "width": 900,
+        "height": 620,
+        "minWidth": 640,
+        "minHeight": 480,
+        "visible": false,
+        "theme": "Dark",
+        "backgroundColor": "#14110e",
+        "dragDropEnabled": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 22, "y": 26 }
+      }
+    ]
+  }
+}
