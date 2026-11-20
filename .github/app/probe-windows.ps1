@@ -229,6 +229,9 @@ $app = Get-ChildItem $folder -Filter 'scooch-app.exe' | Select-Object -First 1
 Start-Process -FilePath $app.FullName -RedirectStandardError (Join-Path $Out 'app.log')
 $shown = Wait-For 40 { [bool](Find-Window) }
 Line "- window showed after $shown s"
+Start-Process -FilePath $app.FullName
+Start-Sleep -Seconds 6
+Line "- a second launch left $(@(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count) window process"
 Start-Sleep -Seconds 3
 $on = Wait-For 40 { State-On }
 Line "- first open turned Scooch on after $on s"

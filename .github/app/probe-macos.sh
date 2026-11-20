@@ -186,6 +186,9 @@ else
 fi
 sleep 4
 shot first-open
+limited 20 open -n "$app" >/dev/null 2>&1
+sleep 6
+line "- a second launch with open -n left $(pgrep -f 'MacOS/scooch-app' | wc -l | tr -d ' ') window process"
 if took=$(wait_for 30 state_on); then line "- first open turned Scooch on after $took s"; else line "- first open did not turn Scooch on within 30 s"; fi
 if [ -f "$plist" ]; then
   line "- login item points at $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null)"
@@ -199,6 +202,26 @@ line "- Gatekeeper log for the program inside $(limited 60 log show --last 2m --
 xattr -d com.apple.quarantine "$daemon" 2>/dev/null
 sleep 5
 shot asking
+
+consent_owner() {
+  for owner in UserNotificationCenter universalAccessAuthWarn CoreServicesUIAgent; do
+    count=$(limited 10 osascript -e "tell application \"System Events\" to if exists process \"$owner\" then count windows of process \"$owner\"" 2>/dev/null)
+    if [ "${count:-0}" -gt 0 ] 2>/dev/null; then echo "$owner"; return 0; fi
+  done
+  return 1
+}
+if took=$(wait_for 30 consent_owner); then
+  owner=$(consent_owner)
+  screencapture -x "$out/consent.png"
+  words=$(limited 15 osascript -e "tell application \"System Events\" to tell process \"$owner\" to get value of every static text of window 1" 2>&1 | tr '\n' ' ')
+  buttons=$(limited 15 osascript -e "tell application \"System Events\" to tell process \"$owner\" to get name of every button of window 1" 2>&1 | tr '\n' ' ')
+  line "- the consent window came after $took s from $owner, screen kept as consent.png"
+  line "- it says: $words"
+  line "- its buttons: $buttons"
+else
+  screencapture -x "$out/consent-none.png"
+  line "- no consent window within 30 s, the daemon's log says $(tail -6 "$data/watch.log" 2>/dev/null | tr '\n' ' ')"
+fi
 
 stand_in
 if took=$(wait_for 40 rendered); then line "- Scooch drew the desktop after $took s"; else line "- no render within 40 s"; fi
@@ -250,4 +273,99 @@ pkill -f "Scooch.app/Contents/MacOS/scooch" >/dev/null 2>&1
 launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1
 rm -rf "$HOME/.Trash/Scooch.app" /Applications/Tools
 cp "$data/state.json" "$out/state.json" 2>/dev/null
+
+status_text() {
+  limited 60 osascript <<'APPLESCRIPT' 2>&1 | tr '\n' ' '
+tell application "System Events"
+  set scoochApp to first process whose bundle identifier is "me.sohanbhat.scooch.window"
+  set found to {}
+  repeat with element in (entire contents of window 1 of scoochApp)
+    try
+      if role of element is "AXStaticText" then
+        set seen to value of element as text
+        if seen ends with "." then copy seen to end of found
+      end if
+    end try
+  end repeat
+  set AppleScript's text item delimiters to " | "
+  return found as text
+end tell
+APPLESCRIPT
+}
+from_where() { ps -axo command= | grep "MacOS/scooch-app" | grep -v grep | head -1 | sed 's|/Contents/MacOS/scooch-app.*||'; }
+has_window() { [ -n "$(window_id)" ]; }
+outside_mount() { where=$(from_where); [ -n "$where" ] && [ "${where#"$mount"}" = "$where" ]; }
+quarantine_of() { xattr -p com.apple.quarantine "$1" 2>/dev/null | cut -d';' -f1,3 || echo none; }
+open_from_image() {
+  pkill -f "MacOS/scooch-app" >/dev/null 2>&1
+  sleep 2
+  limited 20 open "$mount/Scooch.app" >/dev/null 2>&1
+  wait_for 40 has_window >/dev/null
+  sleep 4
+}
+press_move() {
+  line "- $(press 'Move to Applications')"
+  if took=$(wait_for 40 outside_mount); then line "- a new window runs from $(from_where) after $took s"; else line "- no window outside the disk image within 40 s, still $(from_where)"; fi
+  sleep 5
+}
+
+line
+line "### Move from a downloaded disk image"
+pkill -f "MacOS/scooch-app" >/dev/null 2>&1
+xattr -w com.apple.quarantine "0083;$(printf '%x' "$(date +%s)");Safari;$(uuidgen)" "$dmg"
+line "- the disk image carries quarantine $(quarantine_of "$dmg"), as a browser download does"
+mount=$(hdiutil attach -nobrowse "$dmg" | awk -F'\t' '/\/Volumes\// { print $NF }' | tail -1)
+line "- mounted at $mount, the app inside carries quarantine $(quarantine_of "$mount/Scooch.app")"
+open_from_image
+line "- opened from the disk image, the window runs from $(from_where) and says $(status_text)"
+shot move-before
+press_move
+line "- /Applications/Scooch.app carries quarantine $(quarantine_of /Applications/Scooch.app), the window says $(status_text)"
+shot move-after
+
+line
+line "### Move when /Applications cannot be written"
+mode=$(stat -f %Lp /Applications)
+pkill -f "MacOS/scooch-app" >/dev/null 2>&1
+rm -rf /Applications/Scooch.app
+sudo chmod 755 /Applications
+line "- /Applications mode $mode set to $(stat -f %Lp /Applications) for the probe"
+open_from_image
+press_move
+line "- ~/Applications/Scooch.app is there $([ -d "$HOME/Applications/Scooch.app" ] && echo yes || echo no), the window says $(status_text)"
+ln -sf /Applications/Tools/Scooch.app/Contents/MacOS/scooch "$HOME/.local/bin/scooch"
+line "- a link at ~/.local/bin/scooch points at a bundle that is gone, $(readlink "$HOME/.local/bin/scooch")"
+line "- $(press 'Turn on')"
+wait_for 30 state_on >/dev/null
+sleep 5
+line "- after Turn on the link points at $(readlink "$HOME/.local/bin/scooch"), the login item at $(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null)"
+daemon="$HOME/Applications/Scooch.app/Contents/MacOS/scooch"
+stand_in
+wait_for 40 rendered >/dev/null
+sleep 5
+limited 30 osascript -e 'tell application "System Events" to tell (first process whose bundle identifier is "me.sohanbhat.scooch.window") to click (first button of window 1 whose subrole is "AXCloseButton")' >/dev/null 2>&1
+sleep 3
+line "- Trash through Finder $(limited 30 osascript -e "tell application \"Finder\" to delete POSIX file \"$HOME/Applications/Scooch.app\"" 2>&1)"
+if took=$(wait_for 25 cleared); then
+  line "- from ~/Applications the Trash also turned Scooch off, the login item and the link are gone and no daemon runs, $took s later"
+else
+  line "- 25 s after the Trash from ~/Applications the wallpaper is $(wallpaper), login item $([ -f "$plist" ] && echo present || echo gone), link $(readlink "$HOME/.local/bin/scooch" || echo gone), daemons $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')"
+fi
+
+line
+line "### Move when no Applications folder can be written"
+pkill -f "Scooch.app/Contents/MacOS/scooch" >/dev/null 2>&1
+launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1
+rm -rf "$HOME/.Trash/Scooch.app" "$HOME/Applications/Scooch.app"
+chmod 555 "$HOME/Applications"
+open_from_image
+line "- $(press 'Move to Applications')"
+sleep 6
+line "- the window still runs from $(from_where) and says $(status_text)"
+shot move-failed
+chmod 755 "$HOME/Applications"
+sudo chmod "$mode" /Applications
+line "- /Applications mode back to $(stat -f %Lp /Applications)"
+pkill -f "MacOS/scooch-app" >/dev/null 2>&1
+hdiutil detach -quiet "$mount" || hdiutil detach -force -quiet "$mount"
 exit 0

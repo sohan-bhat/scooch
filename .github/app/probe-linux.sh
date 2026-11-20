@@ -96,6 +96,10 @@ line "- older command install at ~/.local/bin/scooch, as install.sh lays it out,
 
 clean scooch-app >"$out/app.log" 2>&1 &
 if took=$(wait_for 40 has_window); then line "- window showed after $took s"; else line "- no window after 40 s"; fi
+clean scooch-app >"$out/app-second.log" 2>&1 &
+second=$!
+sleep 6
+line "- a second launch left $(pgrep -xc scooch-app) window process, the second one $(kill -0 "$second" 2>/dev/null && echo still runs || echo ended)"
 if took=$(wait_for 40 state_on); then line "- Scooch is on after $took s"; else line "- Scooch is not on within 40 s"; fi
 if took=$(wait_for 40 rendered); then line "- Scooch drew the desktop after $took s"; else line "- no render within 40 s"; fi
 sleep 4
