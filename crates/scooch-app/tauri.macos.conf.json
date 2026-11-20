@@ -9,7 +9,6 @@
         "minWidth": 640,
         "minHeight": 480,
         "visible": false,
-        "theme": "Dark",
         "backgroundColor": "#14110e",
         "dragDropEnabled": true,
         "titleBarStyle": "Overlay",

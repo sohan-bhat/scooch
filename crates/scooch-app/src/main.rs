@@ -15,7 +15,8 @@ use scooch::facade::{self, Problem, Started, Switch, View};
 use scooch::facade::Tally;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Runtime, WebviewWindow};
+use tauri::window::Color;
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Runtime, Theme, WebviewWindow, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_window_state::StateFlags;
@@ -167,6 +168,11 @@ fn gnome_icons() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn paint<R: Runtime>(window: &WebviewWindow<R>, theme: Theme) {
+    let color = if theme == Theme::Light { Color(239, 231, 214, 255) } else { Color(20, 17, 14, 255) };
+    let _ = window.set_background_color(Some(color));
+}
+
 fn place_on_pointer<R: Runtime>(window: &WebviewWindow<R>) {
     let Ok(pointer) = window.cursor_position() else { return };
     let Ok(monitors) = window.available_monitors() else { return };
@@ -200,6 +206,13 @@ fn main() {
         .register_asynchronous_uri_scheme_protocol(pictures::SCHEME, |_context, request, responder| {
             std::thread::spawn(move || responder.respond(pictures::answer(&request)));
         })
+        .on_window_event(|window, event| {
+            if let WindowEvent::ThemeChanged(theme) = event {
+                if let Some(webview) = window.app_handle().get_webview_window(window.label()) {
+                    paint(&webview, *theme);
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![view, turn_on, turn_off, set, use_picture, pictures, pick, first_open, fix])
         .setup(|app| {
             facade::host();
@@ -212,6 +225,9 @@ fn main() {
             .ok();
             app.manage(Kept(Mutex::new(watcher)));
             if let Some(window) = app.get_webview_window("main") {
+                if let Ok(theme) = window.theme() {
+                    paint(&window, theme);
+                }
                 place_on_pointer(&window);
                 let _ = window.show();
                 let _ = window.set_focus();

@@ -6,6 +6,7 @@ import { createServer } from 'vite';
 const root = resolve(import.meta.dirname, '..');
 const out = resolve(process.env.SHOTS_DIR ?? join(root, 'shots'));
 const only = process.argv.slice(2);
+const scheme = process.env.SHOTS_SCHEME ?? 'dark';
 mkdirSync(out, { recursive: true });
 
 const sizes = [
@@ -41,6 +42,8 @@ const states = [
   ['win-startup'],
   ['gnome-two'],
   ['gnome-icons'],
+  ['gnome-missing'],
+  ['mac-move-failed'],
   ['gnome-color'],
   ['linux-unknown'],
   ['xfce-on'],
@@ -55,7 +58,7 @@ try {
   browser = await chromium.launch({ channel: 'chrome', headless: true });
   for (const [width, height] of sizes) {
     for (const [name, options = {}] of states) {
-      const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 2, reducedMotion: options.reducedMotion ?? 'no-preference' });
+      const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 2, colorScheme: scheme, reducedMotion: options.reducedMotion ?? 'no-preference' });
       try {
         const page = await context.newPage();
         page.on('pageerror', (error) => console.error(name, error.message));
@@ -73,7 +76,7 @@ try {
         );
         for (let step = 0; step < (options.tabs ?? 0); step += 1) await page.keyboard.press('Tab');
         if (options.tip) await page.waitForSelector('[data-slot="tooltip-content"]', { timeout: 5000 }).catch(() => console.error(name, 'no tooltip'));
-        const file = join(out, `${name}-${width}x${height}.png`);
+        const file = join(out, `${name}-${scheme}-${width}x${height}.png`);
         await page.screenshot({ path: file });
         console.log(file);
       } finally {

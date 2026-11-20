@@ -43,6 +43,39 @@
   src: url("@fontsource-variable/martian-mono/files/martian-mono-latin-wght-normal.woff2") format("woff2");
 }
 
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --color-room: #efe7d6;
+    --color-room-2: #f8f3ea;
+    --color-room-3: #e2d7c2;
+    --color-steel: #cfc3ac;
+    --color-steel-2: #a3967e;
+    --color-plastic: #4f4438;
+    --color-paper: #14110e;
+    --color-ink: #f8f3ea;
+    --color-pad: #14110e;
+  }
+
+  [data-depiction] {
+    --color-paper: #f3ecdc;
+    --color-ink: #14110e;
+  }
+
+  [data-screen] {
+    box-shadow: 0 0 0 1px rgb(20 17 14 / 0.1), 0 24px 44px -26px rgb(20 17 14 / 0.45), 0 8px 18px -12px rgb(20 17 14 / 0.3);
+  }
+
+  [data-slot="button"][data-variant="pill"] {
+    color: var(--color-paper);
+  }
+
+  [data-slot="button"][data-variant="quiet"],
+  [data-slot="switch"][data-state="unchecked"] {
+    box-shadow: inset 0 0 0 1px rgb(20 17 14 / 0.16);
+  }
+}
+
 @layer base {
   html {
     background: var(--color-room);
