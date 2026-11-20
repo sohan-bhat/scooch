@@ -16,6 +16,8 @@ def walk(node, found, depth=0):
         return
     if name in wanted and role in roles and name not in found:
         found[name] = node
+    if role in ("status bar", "statusbar") and "status" not in found:
+        found["status"] = node
     for index in range(node.childCount):
         try:
             walk(node.getChildAtIndex(index), found, depth + 1)
@@ -24,6 +26,7 @@ def walk(node, found, depth=0):
 
 
 desktop = pyatspi.Registry.getDesktop(0)
+pressing = len(sys.argv) > 2 and sys.argv[2] == "press"
 app = None
 for candidate in desktop:
     if candidate is not None and candidate.name in ("scooch-app", "Scooch"):
@@ -33,10 +36,23 @@ if app is None:
     print("- no accessible Scooch window, apps " + ", ".join(str(item.name) for item in desktop if item is not None))
     sys.exit(0)
 frame = app.getChildAtIndex(0)
+if pressing:
+    found = {}
+    walk(frame, found)
+    node = found.get(wanted[0]) if wanted else None
+    if node is None:
+        print("- no control named " + ",".join(wanted))
+        sys.exit(0)
+    action = node.queryAction()
+    names = [action.getName(index) for index in range(action.nActions)]
+    pick = next((index for index, name in enumerate(names) if name in ("click", "press", "activate")), 0)
+    print("- %s %s" % ("pressed" if action.nActions and action.doAction(pick) else "could not press", wanted[0]))
+    sys.exit(0)
 box = frame.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
 found = {}
 walk(frame, found)
-whole = True
+needed = 5
+inside_all = True
 parts = []
 for name in wanted:
     node = found.get(name)
@@ -44,7 +60,11 @@ for name in wanted:
         parts.append(name + " not shown")
         continue
     rect = node.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
-    inside = rect.x >= box.x and rect.y >= box.y and rect.x + rect.width <= box.x + box.width and rect.y + rect.height <= box.y + box.height
-    whole = whole and inside
+    inside = rect.width > 0 and rect.x >= box.x and rect.y >= box.y and rect.x + rect.width <= box.x + box.width and rect.y + rect.height <= box.y + box.height
+    inside_all = inside_all and inside
     parts.append("%s %s" % (name, "inside" if inside else "cut"))
-print("- every control whole inside the window %s, %s" % (whole, ", ".join(parts)))
+status = found.pop("status", None)
+line = status.queryComponent().getExtents(pyatspi.DESKTOP_COORDS).height if status is not None else 0
+shown = len(found)
+whole = inside_all and shown >= needed
+print("- every control whole inside the window %s, found %d of at least %d, status line %d high, %s" % (whole, shown, needed, line, ", ".join(parts)))

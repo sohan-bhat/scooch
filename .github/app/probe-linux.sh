@@ -18,6 +18,22 @@ dark_shot() { awk -v v="$(luma "$1")" 'BEGIN { exit !(v < 0.35) }'; }
 gone_app() { [ -z "$(pgrep -x scooch-app)" ]; }
 entry_names() { grep -q -F "exec '$1' watch" "$autostart" 2>/dev/null || grep -qx "Exec=\"$1\" watch" "$autostart" 2>/dev/null; }
 no_daemon() { [ -z "$(pgrep -x scooch)" ]; }
+runtime_names="APPIMAGE APPDIR OWD ARGV0"
+judged() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+
+mount = sys.argv[2].encode()
+for item in open(sys.argv[1], "rb").read().split(b"\0"):
+    if b"=" not in item:
+        continue
+    name, value = item.split(b"=", 1)
+    print(name.decode(errors="replace"), "inside" if mount and mount in value else "outside")
+PY
+}
+none_inside() { [ -n "$mount" ] && [ -s "$1" ] && ! grep -q ' inside$' "$1"; }
+no_runtime_name() { [ -s "$1" ] && ! grep -q -E "^($(echo $runtime_names | tr ' ' '|')) " "$1"; }
+session_backend() { [ -s "$1" ] && ! grep -q '^GDK_BACKEND ' "$1"; }
 
 allowed="HOME USER LOGNAME PATH LANG DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE NO_AT_BRIDGE WEBKIT_DISABLE_COMPOSITING_MODE LIBGL_ALWAYS_SOFTWARE"
 clean() {
@@ -174,7 +190,10 @@ clean env NO_AT_BRIDGE=0 scooch-app >"$out/app-text.log" 2>&1 &
 wait_for 40 has_window >/dev/null
 sleep 3
 controls="Slide,Clouds,Flip,Quick drop,Turn off,Turn on,Start again,Pick a file"
-for scale in 1.5 2.0; do
+height_of() { sed -n 's/.*, status line \([0-9]*\) high,.*/\1/p' <<<"$1"; }
+grew() { [ "${base:-0}" -gt 0 ] && [ "${grown:-0}" -gt "$((base * 5 / 4))" ]; }
+base=""
+for scale in 1.0 1.5 2.0; do
   gsettings set org.gnome.desktop.interface text-scaling-factor "$scale"
   for size in "640 480 smallest" "900 620 default"; do
     set -- $size
@@ -183,10 +202,19 @@ for scale in 1.5 2.0; do
     sleep 1
     xdotool windowactivate --sync "$(window)" >/dev/null 2>&1
     sleep 3
-    shot "text-$scale-$3"
     said=$(python3 "$PWD/.github/app/controls.py" "$controls" 2>&1 | tail -1)
     line "- text at $scale, $3 size, read back $(gsettings get org.gnome.desktop.interface text-scaling-factor) $said"
-    expect "every control is whole inside the window at text $scale, $3 size" grep -q "every control whole inside the window True" <<<"$said"
+    if [ "$scale" = 1.0 ]; then
+      [ "$3" = default ] && base=$(height_of "$said")
+      continue
+    fi
+    shot "text-$scale-$3"
+    expect "every control is whole inside the window at text $scale, $3 size" grep -q "every control whole inside the window True, found [5-9]" <<<"$said"
+    if [ "$3" = default ]; then
+      grown=$(height_of "$said")
+      line "- the status line stands ${base:-unread} high at text 1.0 and ${grown:-unread} at $scale"
+      expect "the text scale $scale reached the window, the status line grew taller" grew
+    fi
   done
 done
 gsettings reset org.gnome.desktop.interface text-scaling-factor
@@ -289,6 +317,33 @@ expect "opening the AppImage with Scooch off wrote no ~/.local/bin/scooch" [ ! -
 expect "opening the AppImage with Scooch off left ~/bin/scooch a plain file" test -f "$HOME/bin/scooch" -a ! -L "$HOME/bin/scooch"
 expect "opening the AppImage with Scooch off wrote no login item" [ ! -f "$autostart" ]
 line "- after closing it, ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo absent), files Scooch wrote outside its folders $(find "$HOME/.local" "$HOME/bin" "$HOME/.config" -newer "$appimage" \( -type f -o -type l \) -not -path "$data/*" -not -path "$HOME/.local/share/me.sohanbhat.scooch.window/*" -not -path "$HOME/.cache/*" -not -path "$HOME/.config/me.sohanbhat.scooch.window/*" -not -path "$HOME/.local/share/gvfs-metadata/*" -not -path "$HOME/.config/xfce4/*" -not -path "$HOME/work/*" -not -path "$HOME/Downloads/*" 2>/dev/null | head -5 | tr '\n' ' ')"
+
+mkdir -p "$HOME/probe-bin"
+cat >"$HOME/probe-bin/xdg-open" <<'OPEN'
+#!/bin/sh
+env -0 >"$HOME/.probe-link-env"
+OPEN
+chmod +x "$HOME/probe-bin/xdg-open"
+rm -f "$HOME/.probe-link-env"
+PATH="$HOME/probe-bin:$PATH" XDG_CURRENT_DESKTOP=Nowhere clean "$appimage" >>"$out/appimage.log" 2>&1 &
+wait_for 40 has_window >/dev/null
+sleep 4
+mount=$(tr '\0' '\n' <"/proc/$(pgrep -x scooch-app | head -1)/environ" 2>/dev/null | sed -n 's/^APPDIR=//p')
+line "- on a desktop named Nowhere $(python3 "$PWD/.github/app/controls.py" "Ask for Nowhere" press 2>&1 | tail -1)"
+wait_for 15 test -s "$HOME/.probe-link-env" >/dev/null
+[ -s "$HOME/.probe-link-env" ] && judged "$HOME/.probe-link-env" "$mount" >"$out/link-env.txt"
+rm -f "$HOME/.probe-link-env"
+line "- the link opener got $(wc -l <"$out/link-env.txt" 2>/dev/null || echo 0) names, inside the mount $(grep ' inside$' "$out/link-env.txt" 2>/dev/null | cut -d' ' -f1 | tr '\n' ' ')"
+expect "the link opened from the AppImage got no value inside the mount" none_inside "$out/link-env.txt"
+expect "the link opened from the AppImage got none of the runtime's names" no_runtime_name "$out/link-env.txt"
+expect "the link opened from the AppImage got GDK_BACKEND as the session has it, unset" session_backend "$out/link-env.txt"
+press_pill alt+F4
+wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+sleep 2
+mkdir -p "$out/apprun"
+(cd "$out/apprun" && "$appimage" --appimage-extract AppRun >/dev/null 2>&1; "$appimage" --appimage-extract 'apprun-hooks/*' >/dev/null 2>&1)
+line "- AppRun and its hooks export $(cat "$out/apprun/squashfs-root/AppRun" "$out/apprun/squashfs-root/apprun-hooks/"* 2>/dev/null | grep -o -E '^[[:space:]]*export [A-Za-z_][A-Za-z0-9_]*' | awk '{ print $2 }' | sort -u | tr '\n' ' ')"
+
 clean "$appimage" >>"$out/appimage.log" 2>&1 &
 wait_for 40 has_window >/dev/null
 sleep 3
@@ -303,6 +358,13 @@ hash -r
 line "- ~/.local/bin/scooch is $(file -b "$HOME/.local/bin/scooch" 2>/dev/null | cut -c1-40) answering $("$HOME/.local/bin/scooch" --version 2>&1)"
 line "- login item $(login), daemons $(daemons), a terminal finds $(command -v scooch)"
 line "- origin in the saved state $(grep -o '"origin": "[^"]*"' "$data/state.json")"
+mount=$(tr '\0' '\n' <"/proc/$(pgrep -x scooch-app | head -1)/environ" 2>/dev/null | sed -n 's/^APPDIR=//p')
+watcher=$(pgrep -f '.local/bin/scooch watch' | head -1)
+[ -n "$watcher" ] && [ -n "$mount" ] && judged "/proc/$watcher/environ" "$mount" >"$out/daemon-env.txt"
+line "- the daemon the AppImage started has $(wc -l <"$out/daemon-env.txt" 2>/dev/null || echo 0) names, inside the mount $(grep ' inside$' "$out/daemon-env.txt" 2>/dev/null | cut -d' ' -f1 | tr '\n' ' ')"
+expect "the daemon started from the AppImage has no value inside the mount" none_inside "$out/daemon-env.txt"
+expect "the daemon started from the AppImage has none of the runtime's names" no_runtime_name "$out/daemon-env.txt"
+expect "the daemon started from the AppImage has GDK_BACKEND as the session has it, unset" session_backend "$out/daemon-env.txt"
 line "- ~/bin/scooch is now $(if [ -L "$HOME/bin/scooch" ]; then echo "a link to $(readlink "$HOME/bin/scooch")"; else file -b "$HOME/bin/scooch" | cut -c1-30; fi)"
 expect "turning on copied the program to ~/.local/bin/scooch" "$HOME/.local/bin/scooch" --version
 expect "the login item points at the copy" entry_names "$HOME/.local/bin/scooch"
