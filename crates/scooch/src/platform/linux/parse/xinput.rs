@@ -4,6 +4,7 @@ pub const SELECT_EVENTS: u8 = 46;
 pub const RAW_KEY_PRESS: u16 = 13;
 pub const RAW_BUTTON_PRESS: u16 = 15;
 pub const RAW_BUTTON_RELEASE: u16 = 16;
+pub const RAW_MOTION: u16 = 17;
 pub const ALL_MASTER_DEVICES: u16 = 1;
 pub const POINTER_EMULATED: u32 = 1 << 16;
 pub const PRIMARY_BUTTON: u32 = 1;
@@ -44,6 +45,7 @@ pub enum Raw {
     Press(u32),
     Release(u32),
     Key,
+    Motion,
 }
 
 pub fn raw(event: &[u8], major: u8) -> Option<Raw> {
@@ -55,6 +57,7 @@ pub fn raw(event: &[u8], major: u8) -> Option<Raw> {
     let flags = u32::from_ne_bytes([event[24], event[25], event[26], event[27]]);
     match kind {
         RAW_KEY_PRESS => Some(Raw::Key),
+        RAW_MOTION => Some(Raw::Motion),
         RAW_BUTTON_PRESS if flags & POINTER_EMULATED == 0 => Some(Raw::Press(detail)),
         RAW_BUTTON_RELEASE if flags & POINTER_EMULATED == 0 => Some(Raw::Release(detail)),
         _ => None,
@@ -65,24 +68,27 @@ pub fn raw(event: &[u8], major: u8) -> Option<Raw> {
 pub struct KeyGate {
     pub active: bool,
     pub held: bool,
+    pub tracking: bool,
     pub on: bool,
+    pub motion: bool,
 }
 
 impl KeyGate {
     pub fn change(&mut self) -> Option<bool> {
         let wanted = self.active || self.held;
-        (wanted != self.on).then(|| {
-            self.on = wanted;
-            wanted
-        })
+        if wanted == self.on && self.tracking == self.motion {
+            return None;
+        }
+        self.on = wanted;
+        self.motion = self.tracking;
+        Some(wanted)
     }
 
-    pub fn kinds(&self) -> &'static [u16] {
-        if self.on {
-            &[RAW_KEY_PRESS, RAW_BUTTON_PRESS, RAW_BUTTON_RELEASE]
-        } else {
-            &[RAW_BUTTON_PRESS, RAW_BUTTON_RELEASE]
-        }
+    pub fn kinds(&self) -> Vec<u16> {
+        let mut kinds = vec![RAW_BUTTON_PRESS, RAW_BUTTON_RELEASE];
+        kinds.extend(self.on.then_some(RAW_KEY_PRESS));
+        kinds.extend(self.motion.then_some(RAW_MOTION));
+        kinds
     }
 }
 
@@ -189,7 +195,7 @@ mod tests {
     fn keys_are_heard_only_while_the_desktop_is_active_or_a_press_on_it_is_held() {
         let mut gate = KeyGate::default();
         assert_eq!(gate.change(), None);
-        assert_eq!(gate.kinds(), &[RAW_BUTTON_PRESS, RAW_BUTTON_RELEASE]);
+        assert_eq!(gate.kinds(), vec![RAW_BUTTON_PRESS, RAW_BUTTON_RELEASE]);
         gate.active = true;
         assert_eq!(gate.change(), Some(true));
         assert!(gate.kinds().contains(&RAW_KEY_PRESS));
@@ -201,6 +207,13 @@ mod tests {
         gate.held = false;
         assert_eq!(gate.change(), Some(false));
         assert!(!gate.kinds().contains(&RAW_KEY_PRESS), "typing in another window must wake nothing");
+        gate.tracking = true;
+        assert_eq!(gate.change(), Some(false));
+        assert_eq!(gate.kinds(), vec![RAW_BUTTON_PRESS, RAW_BUTTON_RELEASE, RAW_MOTION], "motion only while a drag may be starting");
+        gate.tracking = false;
+        assert_eq!(gate.change(), Some(false));
+        assert!(!gate.kinds().contains(&RAW_MOTION));
+        assert_eq!(raw(&raw_event(131, RAW_MOTION, 0, 0), 131), Some(Raw::Motion));
     }
 
     #[test]

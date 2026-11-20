@@ -131,7 +131,7 @@ pub fn run(predicted: &Shared, net: &Shared) -> bool {
     let factor = xfce::scale().max(1) as f32;
     let tracker = Arc::new(Mutex::new(Tracker::new()));
     let mut held: Option<Snapshot> = None;
-    pointer::inputs(&mut |input| match input {
+    pointer::inputs(None, &mut |input| match input {
         Input::Press { button, at, control, shift, desktop } => {
             let point = (at.0 / factor, at.1 / factor);
             let snapshot = if button == 1 && desktop { linux.snapshot().ok() } else { None };
@@ -144,6 +144,7 @@ pub fn run(predicted: &Shared, net: &Shared) -> bool {
             held = snapshot;
         }
         Input::Key { desktop_active } => guard(&tracker).key(desktop_active),
+        Input::Start { .. } => {}
         Input::Release { at, desktop, .. } => {
             let point = (at.0 / factor, at.1 / factor);
             let snapshot = held.take();
@@ -170,6 +171,7 @@ pub fn run(predicted: &Shared, net: &Shared) -> bool {
 
 struct Pressed {
     at: (f32, f32),
+    start: Option<(f32, f32)>,
     snapshot: Snapshot,
     boards: Vec<Board>,
     positions: String,
@@ -184,7 +186,7 @@ impl Pressed {
         let screens = linux.pick(found);
         let icons = screens.iter().flat_map(|screen| shell.icons_on(&state, screen, false, &mapping)).collect();
         let boards = shell.boards(&state, &screens, &mapping);
-        Some(Pressed { at, snapshot: Snapshot { screens, icons }, boards, positions })
+        Some(Pressed { at, start: None, snapshot: Snapshot { screens, icons }, boards, positions })
     }
 
     fn board(&self, point: (f32, f32)) -> Option<&Board> {
@@ -205,7 +207,8 @@ impl Pressed {
             return Err(why);
         }
         let index = board.cells.iter().find(|(_, rect)| key(rect) == key(from)).map(|(index, _)| *index).ok_or("the pressed icon was not on the grid")?;
-        board.grid.landing(index, self.at, release).map(|to| board.grid.icon(to))
+        let start = self.start.ok_or("the pointer never went far enough for Plasma to begin a drag")?;
+        board.grid.landing(index, start, release).map(|to| board.grid.icon(to))
     }
 }
 
@@ -215,7 +218,8 @@ pub fn run_plasma(predicted: &Shared, net: &Shared) -> bool {
     let tracker = Arc::new(Mutex::new(Tracker::new()));
     let released = Arc::new(Mutex::new(Instant::now()));
     let mut held: Option<Pressed> = None;
-    pointer::inputs(&mut |input| match input {
+    let distance = plasma_rules::drag_distance(&plasma::groups("kdeglobals"));
+    pointer::inputs(Some(distance), &mut |input| match input {
         Input::Press { button, at, control, shift, desktop } => {
             let pressed = if button == 1 && desktop { Pressed::read(&linux, &shell, at) } else { None };
             let (spot, icon) = pressed.as_ref().map_or((Spot::Elsewhere, None), Pressed::spot);
@@ -227,6 +231,11 @@ pub fn run_plasma(predicted: &Shared, net: &Shared) -> bool {
             held = pressed;
         }
         Input::Key { desktop_active } => guard(&tracker).key(desktop_active),
+        Input::Start { at } => {
+            if let Some(pressed) = held.as_mut() {
+                pressed.start = Some(at);
+            }
+        }
         Input::Release { at, desktop, .. } => {
             if desktop {
                 *guard(&released) = Instant::now();
