@@ -6,19 +6,14 @@ Moves the desktop wallpaper so icons do not cover the subject of the picture. ma
 
 ## Install
 
-macOS and Linux
+| System | Download |
+|---|---|
+| macOS | [Scooch.dmg](https://github.com/sohan-bhat/scooch/releases/latest/download/Scooch.dmg) |
+| Windows | [Intel or AMD](https://github.com/sohan-bhat/scooch/releases/latest/download/Scooch-Setup-x64.exe), [Arm](https://github.com/sohan-bhat/scooch/releases/latest/download/Scooch-Setup-arm64.exe) |
+| Linux, Intel or AMD | [.deb](https://github.com/sohan-bhat/scooch/releases/latest/download/scooch_amd64.deb), [.rpm](https://github.com/sohan-bhat/scooch/releases/latest/download/scooch.x86_64.rpm), [AppImage](https://github.com/sohan-bhat/scooch/releases/latest/download/Scooch-x86_64.AppImage) |
+| Linux, Arm | [.deb](https://github.com/sohan-bhat/scooch/releases/latest/download/scooch_arm64.deb), [.rpm](https://github.com/sohan-bhat/scooch/releases/latest/download/scooch.aarch64.rpm), [AppImage](https://github.com/sohan-bhat/scooch/releases/latest/download/Scooch-aarch64.AppImage) |
 
-```sh
-curl -LsSf https://sohanbhat.me/scooch/install.sh | sh
-```
-
-Windows
-
-```powershell
-irm https://sohanbhat.me/scooch/install.ps1 | iex
-```
-
-Then run `scooch`.
+Then open Scooch.
 
 ## Commands
 
