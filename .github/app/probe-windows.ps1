@@ -148,7 +148,7 @@ if ($Programs) {
     Line "- the folder is on PATH $(Path-Count) times before the app"
 }
 
-$took = Measure-Command { Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait }
+$took = Measure-Command { (Start-Process -FilePath $setup.FullName -ArgumentList '/S' -PassThru).WaitForExit(300000) | Out-Null }
 Line "- silent install took $([int]$took.TotalSeconds) s"
 Line "- installed into $folder holding $((Get-ChildItem $folder -File | ForEach-Object Name) -join ', ')"
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -203,7 +203,7 @@ $closed = Wait-For 15 { @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyCo
 Line "- closing the window ended the app process after $closed s, daemons still running $(Daemons)"
 
 $uninstaller = Join-Path $folder 'uninstall.exe'
-$took = Measure-Command { Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait }
+$took = Measure-Command { (Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru).WaitForExit(300000) | Out-Null }
 Start-Sleep -Seconds 5
 Line "- silent removal took $([int]$took.TotalSeconds) s"
 Line "- wallpaper after removal $([Desk]::Wallpaper()), back to the photo $([Desk]::Wallpaper() -ieq $photo)"
