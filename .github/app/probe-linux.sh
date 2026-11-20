@@ -11,6 +11,12 @@ export WEBKIT_DISABLE_COMPOSITING_MODE=1
 export LIBGL_ALWAYS_SOFTWARE=1
 
 line() { echo "$*" | tee -a "$report"; }
+. "$(dirname "$0")/expect.sh"
+luma() { convert "$out/$1.png" -crop 6x6+4+4 -resize 1x1\! -format '%[fx:luminance]' info: 2>/dev/null || echo 0.5; }
+light_shot() { awk -v v="$(luma "$1")" 'BEGIN { exit !(v > 0.55) }'; }
+dark_shot() { awk -v v="$(luma "$1")" 'BEGIN { exit !(v < 0.35) }'; }
+gone_app() { [ -z "$(pgrep -x scooch-app)" ]; }
+no_daemon() { [ -z "$(pgrep -x scooch)" ]; }
 
 allowed="HOME USER LOGNAME PATH LANG DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE NO_AT_BRIDGE WEBKIT_DISABLE_COMPOSITING_MODE LIBGL_ALWAYS_SOFTWARE"
 clean() {
@@ -93,6 +99,7 @@ cp /usr/bin/scooch "$HOME/.local/bin/scooch"
 clean "$HOME/.local/bin/scooch" use "$photo" >"$out/old-use.txt" 2>&1
 wait_for 30 rendered >/dev/null
 line "- older command install at ~/.local/bin/scooch, as install.sh lays it out, turned Scooch on, login item $(login), daemons $(daemons)"
+expect "the older command install turned Scooch on and drew" rendered
 
 clean scooch-app >"$out/app.log" 2>&1 &
 if took=$(wait_for 40 has_window); then line "- window showed after $took s"; else line "- no window after 40 s"; fi
@@ -100,11 +107,15 @@ clean scooch-app >"$out/app-second.log" 2>&1 &
 second=$!
 sleep 6
 line "- a second launch left $(pgrep -xc scooch-app) window process, the second one $(kill -0 "$second" 2>/dev/null && echo still runs || echo ended)"
+expect "a second launch leaves one window process" [ "$(pgrep -xc scooch-app)" = 1 ]
 if took=$(wait_for 40 state_on); then line "- Scooch is on after $took s"; else line "- Scooch is not on within 40 s"; fi
 if took=$(wait_for 40 rendered); then line "- Scooch drew the desktop after $took s"; else line "- no render within 40 s"; fi
+expect "first open turned Scooch on and drew" rendered
 sleep 4
 hash -r
 line "- after the app opened, login item $(login), daemons $(daemons), a terminal finds $(command -v scooch)"
+expect "the login item points at /usr/bin/scooch" grep -qx 'Exec="/usr/bin/scooch" watch' "$autostart"
+expect "the deb removed the older command install from ~/.local/bin" [ ! -e "$HOME/.local/bin/scooch" ]
 line "- the app says $(grep 'scooch-app' "$out/app.log" | tr '\n' ' ')"
 shot on
 pgrep -x xfsettingsd >/dev/null || { xfsettingsd >"$out/xfsettingsd.log" 2>&1 & sleep 2; }
@@ -112,16 +123,20 @@ look() { xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s "$1" >/dev/
 line "- the desktop look before the probe $(xfconf-query -c xsettings -p /Net/ThemeName 2>/dev/null || echo unset)"
 look Adwaita
 shot look-light-on
+expect "the window is light in the light look while on" light_shot look-light-on
 look Adwaita-dark
 shot look-dark-on
+expect "the window is dark in the dark look while on" dark_shot look-dark-on
 pkill -x scooch
 sleep 2
 xdotool windowactivate --sync "$(window)" >/dev/null 2>&1
 sleep 3
 line "- killed the daemon so the window shows a problem, state on $(grep -c '"on": true' "$data/state.json")"
 shot look-dark-problem
+expect "the window is dark in the dark look with a problem" dark_shot look-dark-problem
 look Adwaita
 shot look-light-problem
+expect "the window is light in the light look with a problem" light_shot look-light-problem
 clean /usr/bin/scooch >"$out/restart.txt" 2>&1
 wait_for 30 sh -c 'pgrep -x scooch >/dev/null' >/dev/null
 xdotool windowactivate --sync "$(window)" >/dev/null 2>&1
@@ -130,20 +145,26 @@ line "- wallpaper while on $(wallpaper)"
 
 press_pill Tab Tab Tab Tab Return
 if took=$(wait_for 30 state_off); then line "- the keyboard turned Scooch off after $took s"; else line "- still on after the key presses"; fi
+expect "the keyboard turned Scooch off" state_off
 sleep 3
 shot off
 shot look-light-off
+expect "the window is light in the light look while off" light_shot look-light-off
 look Adwaita-dark
 shot look-dark-off
+expect "the window is dark in the dark look while off" dark_shot look-dark-off
 look Adwaita
 line "- wallpaper after off $(wallpaper), back to the photo $([ "$(wallpaper)" = "$photo" ] && echo yes || echo no)"
 line "- login item after off $([ -f "$autostart" ] && echo present || echo gone)"
+expect "off put the photo back" [ "$(wallpaper)" = "$photo" ]
+expect "off removed the login item" [ ! -f "$autostart" ]
 
 press_pill Return
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 wait_for 30 rendered >/dev/null
 press_pill alt+F4
 if wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null; then line "- closing the window ended the app process"; else line "- the app process outlived its window"; fi
+expect "closing the window ended the app process" gone_app
 line "- daemons running $(daemons)"
 
 line
@@ -162,7 +183,9 @@ for scale in 1.5 2.0; do
     xdotool windowactivate --sync "$(window)" >/dev/null 2>&1
     sleep 3
     shot "text-$scale-$3"
-    line "- text at $scale, $3 size, read back $(gsettings get org.gnome.desktop.interface text-scaling-factor) $(python3 "$PWD/.github/app/controls.py" "$controls" 2>&1 | tail -1)"
+    said=$(python3 "$PWD/.github/app/controls.py" "$controls" 2>&1 | tail -1)
+    line "- text at $scale, $3 size, read back $(gsettings get org.gnome.desktop.interface text-scaling-factor) $said"
+    expect "every control is whole inside the window at text $scale, $3 size" grep -q "every control whole inside the window True" <<<"$said"
   done
 done
 gsettings reset org.gnome.desktop.interface text-scaling-factor
@@ -177,16 +200,22 @@ clean scooch-app >"$out/app-upgrade.log" 2>&1 &
 wait_for 40 has_window >/dev/null
 replaced() { now=$(pgrep -x scooch | head -1); [ -n "$now" ] && [ "$now" != "$before" ]; }
 if took=$(wait_for 30 replaced); then line "- reopening the app replaced the daemon after $took s, now $(pgrep -x scooch | head -1), saved $(grep -o '"daemon": "[^"]*"' "$data/state.json")"; else line "- reopening the app left daemon $(pgrep -x scooch | tr '\n' ' '), saved $(grep -o '"daemon": "[^"]*"' "$data/state.json")"; fi
+expect "reopening the app replaced a daemon of an older version" replaced
 press_pill alt+F4
 wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
 
 cp /usr/bin/scooch "$HOME/.stale-scooch"
 sudo apt-get remove -y scooch >"$out/remove.log" 2>&1
-line "- package removal exit $?"
+removed=$?
+line "- package removal exit $removed"
+expect "the package removal succeeded" [ "$removed" = 0 ]
 line "- removal log $(journalctl -t scooch-remove --no-pager -o cat 2>/dev/null | tail -5 | tr '\n' ' ')"
 sleep 3
 line "- wallpaper after removal $(wallpaper), back to the photo $([ "$(wallpaper)" = "$photo" ] && echo yes || echo no)"
 line "- login item after removal $([ -f "$autostart" ] && echo present || echo gone), daemons running $(daemons)"
+expect "removal put the photo back" [ "$(wallpaper)" = "$photo" ]
+expect "removal left no login item" [ ! -f "$autostart" ]
+expect "removal left no daemon" no_daemon
 cp "$data/state.json" "$out/state.json" 2>/dev/null
 
 line
@@ -214,6 +243,9 @@ line "- the AppImage says $(grep 'scooch-app' "$out/appimage.log" | tr '\n' ' ')
 pid=$(pgrep -x scooch-app | head -1)
 if [ -n "$pid" ]; then
   tr '\0' '\n' <"/proc/$pid/environ" | cut -d= -f1 | sort >"$out/appimage-env.txt"
+  extra=$(grep -v -x -E "$(echo $allowed | tr ' ' '|')" "$out/appimage-env.txt" | grep -v -E '^(LD_|GIO|GTK|GDK|GSETTINGS|XDG_DATA_DIRS|APPDIR|APPIMAGE|ARGV0|OWD|PYTHON|PERL|QT_|GI_TYPELIB_PATH|GST_PLUGIN_|PWD$|SHLVL$|_$)')
+  expect "the AppImage's environment was read" [ -s "$out/appimage-env.txt" ]
+  expect "no name outside the allowed list reached the app" [ -z "$extra" ]
   line "- names in the app's environment beyond the allowed list and the AppImage's own $(grep -v -x -E "$(echo $allowed | tr ' ' '|')" "$out/appimage-env.txt" | grep -v -E '^(LD_|GIO|GTK|GDK|GSETTINGS|XDG_DATA_DIRS|APPDIR|APPIMAGE|ARGV0|OWD|PYTHON|PERL|QT_)' | tr '\n' ' ')"
   line "- environment the AppImage sets $(grep -E '^(LD_|GIO|GTK|GDK|GSETTINGS|XDG_DATA_DIRS|APPDIR|PYTHON|PERL|QT_)' "$out/appimage-env.txt" | tr '\n' ' ')"
   xargs -0 -a "/proc/$pid/environ" sh -c 'exec env -i "$@" xfconf-query -c xfce4-desktop -l' sh >"$out/xfconf-in-appimage.txt" 2>&1
@@ -221,10 +253,14 @@ if [ -n "$pid" ]; then
   appdir=$(tr '\0' '\n' <"/proc/$pid/environ" | sed -n 's/^APPDIR=//p')
   line "- the scooch inside is $(file -b "$appdir/usr/bin/scooch" | cut -c1-80), --version says $("$appdir/usr/bin/scooch" --version 2>&1; echo " exit $?")"
 fi
+expect "the AppImage opened its window" has_window
 line "- opened with Scooch off, ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo absent), ~/bin/scooch $(if [ -L "$HOME/bin/scooch" ]; then echo a link; else file -b "$HOME/bin/scooch" | cut -c1-20; fi), login item $(login)"
 press_pill alt+F4
 wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
 sleep 2
+expect "opening the AppImage with Scooch off wrote no ~/.local/bin/scooch" [ ! -e "$HOME/.local/bin/scooch" ]
+expect "opening the AppImage with Scooch off left ~/bin/scooch a plain file" test -f "$HOME/bin/scooch" -a ! -L "$HOME/bin/scooch"
+expect "opening the AppImage with Scooch off wrote no login item" [ ! -f "$autostart" ]
 line "- after closing it, ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo absent), files Scooch wrote outside its folders $(find "$HOME/.local" "$HOME/bin" "$HOME/.config" -newer "$appimage" \( -type f -o -type l \) -not -path "$data/*" -not -path "$HOME/.local/share/me.sohanbhat.scooch.window/*" -not -path "$HOME/.cache/*" -not -path "$HOME/.config/me.sohanbhat.scooch.window/*" -not -path "$HOME/.local/share/gvfs-metadata/*" -not -path "$HOME/.config/xfce4/*" -not -path "$HOME/work/*" -not -path "$HOME/Downloads/*" 2>/dev/null | head -5 | tr '\n' ' ')"
 clean "$appimage" >>"$out/appimage.log" 2>&1 &
 wait_for 40 has_window >/dev/null
@@ -232,6 +268,7 @@ sleep 3
 shot appimage-off
 press_pill Tab Tab Tab Tab Return
 if took=$(wait_for 30 state_on); then line "- the keyboard turned Scooch on after $took s"; else line "- not on after the key presses"; fi
+expect "the keyboard turned Scooch on from the AppImage" state_on
 wait_for 30 rendered >/dev/null
 sleep 3
 shot appimage-on
@@ -240,14 +277,20 @@ line "- ~/.local/bin/scooch is $(file -b "$HOME/.local/bin/scooch" 2>/dev/null |
 line "- login item $(login), daemons $(daemons), a terminal finds $(command -v scooch)"
 line "- origin in the saved state $(grep -o '"origin": "[^"]*"' "$data/state.json")"
 line "- ~/bin/scooch is now $(if [ -L "$HOME/bin/scooch" ]; then echo "a link to $(readlink "$HOME/bin/scooch")"; else file -b "$HOME/bin/scooch" | cut -c1-30; fi)"
+expect "turning on copied the program to ~/.local/bin/scooch" "$HOME/.local/bin/scooch" --version
+expect "the login item points at the copy" grep -qx "Exec=\"$HOME/.local/bin/scooch\" watch" "$autostart"
+expect "origin names the AppImage" grep -q "\"origin\": \"$appimage\"" "$data/state.json"
+expect "the stale ~/bin/scooch became a link to the copy" [ "$(readlink "$HOME/bin/scooch")" = "$HOME/.local/bin/scooch" ]
 press_pill Return
 if took=$(wait_for 30 state_off); then line "- off again after $took s"; else line "- not off within 30 s"; fi
 sleep 3
 line "- after off, the copy ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo gone)"
+expect "turning off removed the copy" [ ! -e "$HOME/.local/bin/scooch" ]
 press_pill Return
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 press_pill alt+F4
 if wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null; then line "- closing the window ended the app, left running $(pgrep -fa 'AppImage|scooch' | grep -v probe | cut -c1-120 | tr '\n' ';')"; else line "- the app outlived its window"; fi
+expect "closing the AppImage window ended the app" gone_app
 for daemon in $(pgrep -f '.local/bin/scooch watch'); do
   line "- the daemon holds $(ls -l "/proc/$daemon/fd" 2>/dev/null | grep -c '.mount_') files inside the AppImage $(ls -l "/proc/$daemon/fd" 2>/dev/null | grep '.mount_' | awk '{ print $NF }' | head -3 | tr '\n' ' ')"
 done
@@ -267,6 +310,7 @@ for step in $(seq 1 60); do
   sleep 0.5
 done
 if [ -n "$followed" ]; then line "- renamed to ~/Apps/Scooch.AppImage, origin followed after $followed s"; else line "- renamed to ~/Apps/Scooch.AppImage, origin still $(grep -o '"origin": "[^"]*"' "$data/state.json") after 30 s"; fi
+expect "origin followed the rename" [ -n "$followed" ]
 line "- login item $(login), daemons $(daemons)"
 
 line
@@ -287,6 +331,11 @@ for step in $(seq 1 80); do
 done
 line "- wallpaper back after ${back:-never} s, login item gone after ${item:-never} s, copy gone after ${copy:-never} s, ~/bin link gone after ${link:-never} s, no daemon after ${gone:-never} s, all within 40 s"
 line "- after, wallpaper $(wallpaper), state on $(grep -c '"on": true' "$data/state.json")"
+expect "the Trash put the photo back" [ -n "$back" ]
+expect "the Trash removed the login item" [ -n "$item" ]
+expect "the Trash removed the copy" [ -n "$copy" ]
+expect "the Trash removed the ~/bin link" [ -n "$link" ]
+expect "the Trash ended the daemon" [ -n "$gone" ]
 
 line
 line "### AppImage in the Trash while off"
@@ -301,6 +350,9 @@ wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
 gio trash "$look" >>"$out/trash.log" 2>&1
 sleep 15
 line "- opened once with Scooch off, closed and put in the Trash, then ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo absent), ~/bin/scooch $([ -e "$HOME/bin/scooch" ] || [ -L "$HOME/bin/scooch" ] && echo present || echo absent), login item $([ -f "$autostart" ] && echo present || echo absent), daemons $(daemons)"
+expect "an AppImage only looked at leaves no copy after the Trash" [ ! -e "$HOME/.local/bin/scooch" ]
+expect "an AppImage only looked at leaves no login item after the Trash" [ ! -f "$autostart" ]
+expect "an AppImage only looked at leaves no daemon after the Trash" no_daemon
 
 line
 line "### Someone else's scooch in ~/.local/bin"
@@ -318,9 +370,12 @@ if took=$(wait_for 30 state_on); then line "- turned on after $took s"; else lin
 sleep 4
 line "- ~/.local/bin/scooch kept its bytes $([ "$(sha256sum "$HOME/.local/bin/scooch" | cut -d' ' -f1)" = "$mine" ] && echo yes || echo no), it says $("$HOME/.local/bin/scooch" 2>&1)"
 line "- the copy went to ~/.local/share/scooch/bin/scooch $([ -x "$data/bin/scooch" ] && echo yes || echo no), answering $("$data/bin/scooch" --version 2>&1), login item $(login), daemons $(daemons)"
+expect "someone else's ~/.local/bin/scooch kept its bytes" [ "$(sha256sum "$HOME/.local/bin/scooch" | cut -d' ' -f1)" = "$mine" ]
+expect "the copy went to Scooch's own folder" "$data/bin/scooch" --version
+expect "the login item points at Scooch's own copy" grep -qx "Exec=\"$data/bin/scooch\" watch" "$autostart"
 press_pill Return
 wait_for 30 state_off >/dev/null
 press_pill alt+F4
 wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
 gio trash "$other" >>"$out/trash.log" 2>&1
-exit 0
+finish
