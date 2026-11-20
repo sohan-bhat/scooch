@@ -329,7 +329,49 @@ pub struct Final {
 
 #[allow(dead_code)]
 pub fn reclaim(store: &Store, program: &Path) -> Option<Final> {
-    parked(&store.load()).then(|| final_off(store, program, STOP_PATIENCE))
+    if !parked(&store.load()) {
+        return None;
+    }
+    let desktop = platform::current().ok();
+    reclaim_with(store, program, desktop.as_deref(), STOP_PATIENCE, platform::remove_login)
+}
+
+fn reclaim_with(store: &Store, program: &Path, desktop: Option<&dyn Desktop>, patience: Duration, remove_login: impl FnOnce() -> Result<()>) -> Option<Final> {
+    let _lock = store.command_lock(state::COMMAND_PATIENCE).ok()?;
+    if !parked(&store.load()) {
+        return None;
+    }
+    let named = platform::login_program();
+    let running = store.watcher().and_then(poke::program_of);
+    let mut own: Vec<PathBuf> = vec![program.to_path_buf()];
+    own.extend(named.clone());
+    let mut done = Final { left_running: end_daemon(store, &own, patience), ..Final::default() };
+    let mut notes = Vec::new();
+    let mut unreadable = false;
+    match park(desktop, store) {
+        Ok(Some(tally)) => (done.tally, done.parked) = (tally, tally.abandoned),
+        Ok(None) => {
+            unreadable = true;
+            notes.extend(aside(store));
+            notes.push(UNREADABLE_OFF.into());
+        }
+        Err(error) => notes.push(error.to_string()),
+    }
+    if let Err(error) = remove_login() {
+        notes.push(error.to_string());
+    }
+    if done.left_running.is_some() {
+        notes.push(UNPROVEN.into());
+    }
+    done.lines = if unreadable { notes } else { std::iter::once(closing(&done.tally)).chain(notes).collect() };
+    #[cfg(target_os = "linux")]
+    if copy_goes(&store.load()) {
+        let proven: Vec<PathBuf> = running.into_iter().chain(named).collect();
+        crate::program::remove_copies(&crate::program::copies(store), &proven, &crate::program::link_places());
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = running;
+    Some(done)
 }
 
 pub fn final_off(store: &Store, program: &Path, patience: Duration) -> Final {
@@ -1312,6 +1354,34 @@ mod tests {
         assert_eq!((state.screens["R"].original.clone(), state.screens["R"].output.clone()), (right, Some(store.output("R", 1, "jpg"))));
         assert!(store.output("R", 1, "jpg").exists() && !store.cache().exists());
         assert_eq!(describe(&state, false, None), vec!["Scooch is off. Run scooch to turn it on.", "1 desktop or screen still shows a picture Scooch made."]);
+    }
+
+    #[test]
+    fn reclaim_decides_on_the_state_it_reads_under_the_lock() {
+        let (fake, store, _, _) = pair("reclaim-lock");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        finished(&fake, &store);
+        assert!(parked(&store.load()));
+        let held = store.command_lock(state::COMMAND_PATIENCE).unwrap();
+        let removed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (shared, root, counted) = (fake.clone(), store.root.clone(), removed.clone());
+        let reclaiming = std::thread::spawn(move || {
+            let desktop: &dyn Desktop = shared.as_ref();
+            reclaim_with(&Store::at(&root), Path::new("/nowhere"), Some(desktop), Duration::from_millis(200), || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .is_some()
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let mut turned_on = store.load();
+        turned_on.on = true;
+        store.save(&turned_on).unwrap();
+        drop(held);
+        let acted = reclaiming.join().unwrap();
+        assert!(!acted, "reclaim undid a turn on that took the lock first");
+        assert_eq!(removed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(store.load().on);
     }
 
     #[test]
