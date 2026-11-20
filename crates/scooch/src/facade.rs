@@ -17,7 +17,6 @@ pub enum System {
     Linux,
 }
 
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Monitor {
     pub id: String,
@@ -553,6 +552,22 @@ pub fn preview(path: &Path, long_side: u32) -> Result<Vec<u8>> {
     let (width, height) = (source.width().max(1), source.height().max(1));
     let shrink = (long_side as f32 / width.max(height) as f32).min(1.0);
     framed(&source, (width as f32 * shrink).round() as u32, (height as f32 * shrink).round() as u32)
+}
+
+pub fn set_origin(origin: Option<&Path>) -> Result<bool> {
+    let store = Store::open();
+    let wanted = origin.map(|path| state::canonical(path).unwrap_or_else(|_| path.to_path_buf()));
+    if store.load().origin == wanted {
+        return Ok(false);
+    }
+    let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
+    let mut state = store.load();
+    if state.origin == wanted {
+        return Ok(false);
+    }
+    state.origin = wanted;
+    store.save(&state)?;
+    Ok(true)
 }
 
 pub fn login_points_at(program: &Path) -> Option<bool> {
