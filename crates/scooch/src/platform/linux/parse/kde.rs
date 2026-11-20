@@ -224,6 +224,146 @@ pub fn extra(cell: f64, container: f64) -> f64 {
     ((container - fit * cell).max(0.0) / fit).floor()
 }
 
+pub const EDGE_SLACK: f64 = 2.0;
+pub const DRAG_DISTANCE: f32 = 10.0;
+
+pub fn drag_distance(kdeglobals: &[Group]) -> f32 {
+    find(kdeglobals, &["KDE"]).and_then(|group| group.get("StartDragDist")).and_then(|value| value.trim().parse::<f32>().ok()).filter(|value| *value > 0.0).unwrap_or(DRAG_DISTANCE)
+}
+
+pub fn unpredictable(containment: &Containment, frame: &Rect, area: &Rect, scale: f32) -> Option<&'static str> {
+    if containment.setting("sortMode") != Some(-1) {
+        return Some("the icons are sorted, so Plasma lays them out anew at the drop");
+    }
+    if containment.general.get("locked").is_some_and(|value| value.trim() == "true") {
+        return Some("the icons are locked");
+    }
+    if (scale - 1.0).abs() > 0.01 {
+        return Some("the screen is scaled");
+    }
+    if (area.x - frame.x).abs() > 0.5 || (area.y - frame.y).abs() > 0.5 {
+        return Some("a panel on the top or left edge shifts where Plasma drops icons");
+    }
+    None
+}
+
+pub fn positions_text(groups: &[Group]) -> String {
+    containments(groups).iter().filter(|containment| containment.folder()).map(|containment| format!("{} {}", containment.id, containment.general.get("positions").map(String::as_str).unwrap_or(""))).collect::<Vec<_>>().join("\n")
+}
+
+pub fn action_button(icon: f64) -> f64 {
+    match icon.round() as i64 {
+        i64::MIN..=32 => SMALL_ICON,
+        33..=96 => 22.0,
+        97..=128 => 32.0,
+        _ => 48.0,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Spot {
+    Icon(i64),
+    Corner(i64),
+    Elsewhere,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Grid {
+    pub area: Rect,
+    pub layout: Layout,
+    pub taken: BTreeSet<i64>,
+}
+
+impl Grid {
+    pub fn size(&self) -> (f64, f64) {
+        self.layout.cell(self.area.w as f64, self.area.h as f64)
+    }
+
+    pub fn per(&self) -> i64 {
+        self.layout.per_stripe(self.area.w as f64, self.area.h as f64).max(1)
+    }
+
+    fn local(&self, point: (f32, f32)) -> Option<(f64, f64)> {
+        let (x, y) = (f64::from(point.0 - self.area.x), f64::from(point.1 - self.area.y));
+        (x >= 0.0 && y >= 0.0 && x < f64::from(self.area.w) && y < f64::from(self.area.h)).then_some((x, y))
+    }
+
+    fn index(&self, column: i64, row: i64) -> Option<i64> {
+        let per = self.per();
+        let (along, across) = if self.layout.rows_first { (column, row) } else { (row, column) };
+        (along >= 0 && across >= 0 && along < per).then_some(across * per + along)
+    }
+
+    pub fn cell_at(&self, point: (f32, f32)) -> Option<i64> {
+        let (x, y) = self.local(point)?;
+        let (wide, tall) = self.size();
+        self.index((x / wide).floor() as i64, (y / tall).floor() as i64)
+    }
+
+    pub fn icon(&self, index: i64) -> Rect {
+        INSETS.apply(self.layout.rect(index, &self.area))
+    }
+
+    pub fn spot(&self, point: (f32, f32)) -> Spot {
+        let Some(index) = self.cell_at(point).filter(|index| self.taken.contains(index)) else { return Spot::Elsewhere };
+        let cell = self.layout.rect(index, &self.area);
+        let (x, y) = (f64::from(point.0 - cell.x), f64::from(point.1 - cell.y));
+        let (small, icon) = (self.layout.small_spacing(), self.layout.icon);
+        let button = action_button(icon);
+        if x <= small + button && y <= small + 2.0 * button {
+            return Spot::Corner(index);
+        }
+        let left = (f64::from(cell.w) - icon) / 2.0;
+        let over = x >= left && x <= left + icon && y >= 2.0 * small && y <= 3.0 * small + icon + self.layout.grid_unit;
+        if over {
+            Spot::Icon(index)
+        } else {
+            Spot::Elsewhere
+        }
+    }
+
+    pub fn target(&self, from: i64, start: (f32, f32), release: (f32, f32)) -> Result<i64, &'static str> {
+        let cell = self.layout.rect(from, &self.area);
+        let (wide, tall) = self.size();
+        let small = self.layout.small_spacing();
+        let across = f64::from(cell.x - self.area.x) + small + f64::from(release.0 - start.0) + wide / 2.0 - 1.0;
+        let down = f64::from(cell.y - self.area.y) + small + f64::from(release.1 - start.1) + small + self.layout.icon / 2.0 - 1.0;
+        if across < 0.0 || down < 0.0 {
+            return Err("the dragged icon left the grid");
+        }
+        let near = |value: f64, size: f64| {
+            let inside = value.rem_euclid(size);
+            inside < EDGE_SLACK || size - inside < EDGE_SLACK
+        };
+        if near(across, wide) || near(down, tall) {
+            return Err("the middle of the dragged icon sat on the edge of a cell");
+        }
+        self.index((across / wide).floor() as i64, (down / tall).floor() as i64).ok_or("the landing cell lies past the end of its row or column")
+    }
+
+    pub fn landing(&self, from: i64, start: (f32, f32), release: (f32, f32)) -> Result<i64, &'static str> {
+        if self.layout.right_to_left {
+            return Err("the icons are aligned right to left");
+        }
+        if self.local(release).is_none() {
+            return Err("the release left the desktop of the screen the drag began on");
+        }
+        match self.cell_at(release) {
+            Some(index) if index == from => return Err("the release stayed in the icon's own cell"),
+            Some(index) if self.taken.contains(&index) => return Err("the release was over another icon"),
+            _ => {}
+        }
+        let to = self.target(from, start, release)?;
+        if to == from {
+            return Err("the icon would land in its own cell");
+        }
+        if self.taken.contains(&to) {
+            return Err("the landing cell is taken");
+        }
+        Ok(to)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Panel {
     pub screen: i64,
@@ -261,7 +401,7 @@ pub fn available(frame: &Rect, screen: i64, panels: &[Panel]) -> Rect {
     super::geometry::subtract(frame, edges)
 }
 
-pub const GENERAL_KEYS: [&str; 9] = ["positions", "sortMode", "iconSize", "labelWidth", "textLines", "arrangement", "alignment", "url", "showHiddenFiles"];
+pub const GENERAL_KEYS: [&str; 10] = ["positions", "sortMode", "iconSize", "labelWidth", "textLines", "arrangement", "alignment", "url", "showHiddenFiles", "locked"];
 
 pub fn state_script() -> String {
     let keys = serde_json::to_string(&GENERAL_KEYS).unwrap_or_else(|_| "[]".into());
@@ -547,6 +687,94 @@ mod tests {
     fn plasma5_cells_match_the_measured_desktop() {
         let layout = Layout { plasma6: false, icon: 64.0, label_width: 1.0, text_lines: 2.0, rows_first: true, right_to_left: false, grid_unit: PLASMA5_GRID_UNIT };
         assert_eq!(layout.cell(1920.0, 1030.0), (120.0, 128.0));
+    }
+
+    fn plasma5_grid(taken: &[i64]) -> Grid {
+        let layout = Layout { plasma6: false, icon: 64.0, label_width: 1.0, text_lines: 2.0, rows_first: true, right_to_left: false, grid_unit: PLASMA5_GRID_UNIT };
+        Grid { area: Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1030.0 }, layout, taken: taken.iter().copied().collect() }
+    }
+
+    #[test]
+    fn plasma5_lands_a_drop_where_folder_view_puts_it() {
+        let grid = plasma5_grid(&[0]);
+        let start = (70.0, 60.0);
+        assert_eq!(grid.landing(0, start, (600.0, 300.0)), Ok(36), "the cell under the middle of the dragged icon, not under the pointer");
+        assert_eq!(grid.landing(0, start, (612.0, 300.0)), Ok(37));
+        assert_eq!(grid.landing(0, start, (605.0, 300.0)), Err("the middle of the dragged icon sat on the edge of a cell"));
+        assert_eq!(grid.landing(0, start, (600.0, 400.0)), Ok(36));
+        assert_eq!(grid.landing(0, start, (600.0, 405.0)), Ok(52));
+        assert_eq!(grid.landing(0, (60.0, 60.0), (600.0, 300.0)), Ok(37), "Plasma takes the drag from where the pointer first went far enough, not from the press");
+        assert_eq!(grid.landing(0, start, (5.0, 300.0)), Err("the dragged icon left the grid"));
+        assert_eq!(grid.icon(37), Rect { x: 606.0, y: 266.0, w: 109.0, h: 113.0 });
+        let columns = Grid { layout: Layout { rows_first: false, ..grid.layout }, ..grid.clone() };
+        assert_eq!(columns.landing(0, start, (600.0, 300.0)), Ok(34));
+    }
+
+    #[test]
+    fn plasma5_lands_the_two_drops_measured_on_plasma_5_27_where_plasma_put_them() {
+        assert_eq!(plasma5_grid(&[69]).landing(69, (675.0, 558.0), (960.0, 540.0)), Ok(71));
+        assert_eq!(plasma5_grid(&[89]).landing(89, (1129.0, 685.0), (912.0, 628.0)), Ok(71));
+    }
+
+    #[test]
+    fn plasma5_gives_no_landing_where_folder_view_would_not_move_or_would_walk() {
+        let grid = plasma5_grid(&[0, 37, 52]);
+        let start = (70.0, 60.0);
+        assert_eq!(grid.landing(0, start, (612.0, 300.0)), Err("the release was over another icon"));
+        assert_eq!(grid.landing(0, start, (603.0, 405.0)), Err("the landing cell is taken"));
+        assert_eq!(grid.landing(0, start, (100.0, 100.0)), Err("the release stayed in the icon's own cell"));
+        assert_eq!(grid.landing(0, (50.0, 60.0), (1910.0, 300.0)), Err("the landing cell lies past the end of its row or column"));
+        assert_eq!(grid.landing(0, start, (2000.0, 300.0)), Err("the release left the desktop of the screen the drag began on"));
+        let mirrored = Grid { layout: Layout { right_to_left: true, ..grid.layout }, ..grid };
+        assert_eq!(mirrored.landing(0, (1860.0, 60.0), (600.0, 500.0)), Err("the icons are aligned right to left"));
+    }
+
+    #[test]
+    fn the_drag_distance_comes_from_kdeglobals_or_is_ten() {
+        assert_eq!(drag_distance(&parse("[KDE]\nStartDragDist=4\n")), 4.0);
+        assert_eq!(drag_distance(&parse("[KDE]\nStartDragDist=none\n")), DRAG_DISTANCE);
+        assert_eq!(drag_distance(&parse("")), 10.0);
+    }
+
+    #[test]
+    fn a_press_counts_on_the_icon_only_inside_its_hover_area_and_off_its_corner_buttons() {
+        let grid = plasma5_grid(&[0]);
+        assert_eq!(grid.spot((60.0, 60.0)), Spot::Icon(0));
+        assert_eq!(grid.spot((30.0, 90.0)), Spot::Icon(0));
+        assert_eq!(grid.spot((10.0, 10.0)), Spot::Corner(0));
+        assert_eq!(grid.spot((20.0, 45.0)), Spot::Corner(0), "the popup button sits under the selection marker");
+        assert_eq!(grid.spot((60.0, 105.0)), Spot::Elsewhere, "below one line of label");
+        assert_eq!(grid.spot((10.0, 80.0)), Spot::Elsewhere);
+        assert_eq!(grid.spot((300.0, 60.0)), Spot::Elsewhere, "a free cell");
+        assert_eq!([22.0, 32.0, 48.0, 64.0, 96.0, 128.0, 256.0].map(action_button), [16.0, 16.0, 22.0, 22.0, 22.0, 32.0, 48.0]);
+    }
+
+    #[test]
+    fn only_a_hand_sorted_unlocked_unscaled_desktop_with_no_top_or_left_panel_is_predicted() {
+        let all = containments(&parse(APPLETS));
+        let manual = all[0].clone();
+        let frame = Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 };
+        let below = Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1036.0 };
+        assert_eq!(unpredictable(&manual, &frame, &below, 1.0), None);
+        let mut sorted = manual.clone();
+        sorted.general.insert("sortMode".into(), "0".into());
+        assert_eq!(unpredictable(&sorted, &frame, &below, 1.0), Some("the icons are sorted, so Plasma lays them out anew at the drop"));
+        let mut locked = manual.clone();
+        locked.general.insert("locked".into(), "true".into());
+        assert_eq!(unpredictable(&locked, &frame, &below, 1.0), Some("the icons are locked"));
+        assert_eq!(unpredictable(&manual, &frame, &below, 2.0), Some("the screen is scaled"));
+        let under_a_top_panel = Rect { y: 30.0, h: 1050.0, ..frame };
+        assert_eq!(unpredictable(&manual, &frame, &under_a_top_panel, 1.0), Some("a panel on the top or left edge shifts where Plasma drops icons"));
+    }
+
+    #[test]
+    fn the_saved_places_of_every_folder_desktop_are_read_together() {
+        let text = positions_text(&parse(APPLETS));
+        assert!(text.starts_with("1 {") && text.contains("desktop:/a.txt"), "{text}");
+        assert!(!text.contains("\n3 "), "a desktop without the folder view has no places");
+        let moved = APPLETS.replace("\"0\"\\,\"3\"", "\"0\"\\,\"4\"");
+        assert_ne!(moved, APPLETS);
+        assert_ne!(positions_text(&parse(&moved)), text);
     }
 
     #[test]

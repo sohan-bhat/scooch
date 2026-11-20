@@ -1,11 +1,11 @@
 use super::parse::xfce::contains;
-use super::parse::xinput::{self, Layer, Raw};
+use super::parse::xinput::{self, KeyGate, Layer, Raw};
 use super::screens::Shared;
 use scooch_core::Rect;
 use std::io::IoSlice;
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::errors::ParseError;
-use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, KeyButMask, MapState, Window};
+use x11rb::protocol::xproto::{Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, KeyButMask, MapState, Window};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::x11_utils::TryParse;
@@ -135,28 +135,91 @@ pub fn watch(wake: &Shared, desktop_only: bool) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Input {
     Press { button: u32, at: (f32, f32), control: bool, shift: bool, desktop: bool },
+    Start { at: (f32, f32) },
     Release { button: u32, at: (f32, f32), desktop: bool },
     Key { desktop_active: bool },
 }
 
-pub fn inputs(handle: &mut dyn FnMut(Input)) -> bool {
-    let (conn, root, major, atoms) = match setup(&[xinput::RAW_KEY_PRESS, xinput::RAW_BUTTON_PRESS, xinput::RAW_BUTTON_RELEASE]) {
+fn gate_keys(conn: &RustConnection, root: Window, major: u8, gate: &mut KeyGate) {
+    let was = gate.on;
+    let Some(on) = gate.change() else { return };
+    let select = xinput::select_raw(major, root, &gate.kinds());
+    let _ = conn.send_request_without_reply(&[IoSlice::new(&select)], Vec::new()).map(|cookie| cookie.ignore_error());
+    let _ = conn.flush();
+    if crate::daemon::trace() && on != was {
+        eprintln!("{} drop keys heard {on}, desktop active {}, left press held {}", crate::daemon::stamp(), gate.active, gate.held);
+    }
+}
+
+fn pointer_at(conn: &RustConnection, root: Window) -> Option<((f32, f32), u16)> {
+    let pointer = conn.query_pointer(root).ok()?.reply().ok()?;
+    Some(((f32::from(pointer.root_x), f32::from(pointer.root_y)), u16::from(pointer.mask)))
+}
+
+pub fn inputs(start_distance: Option<f32>, handle: &mut dyn FnMut(Input)) -> bool {
+    let mut gate = KeyGate::default();
+    let (conn, root, major, atoms) = match setup(&gate.kinds()) {
         Setup::Ready(conn, root, major, atoms) => (conn, root, major, atoms),
         Setup::Absent => return true,
         Setup::Lost => return false,
     };
+    let focus = conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE)).ok().and_then(|cookie| cookie.check().ok()).is_some();
+    gate.active = !focus || active_is_desktop(&conn, root, &atoms);
+    gate_keys(&conn, root, major, &mut gate);
+    let mut pressed_at = (0.0, 0.0);
     loop {
         let Ok(event) = conn.wait_for_event() else { return false };
-        let Event::Unknown(raw) = event else { continue };
+        let raw = match event {
+            Event::PropertyNotify(notify) if focus && notify.window == root => {
+                if notify.atom == atoms.active {
+                    gate.active = active_is_desktop(&conn, root, &atoms);
+                    gate_keys(&conn, root, major, &mut gate);
+                } else if crate::daemon::trace() {
+                    eprintln!("{} drop thread woke for another property of the root window", crate::daemon::stamp());
+                }
+                continue;
+            }
+            Event::Unknown(raw) => raw,
+            other => {
+                if crate::daemon::trace() {
+                    eprintln!("{} drop thread woke for an X event of kind {:?}", crate::daemon::stamp(), other.response_type());
+                }
+                continue;
+            }
+        };
         let Some(kind) = xinput::raw(&raw, major) else { continue };
         let input = match kind {
-            Raw::Key => Input::Key { desktop_active: active_is_desktop(&conn, root, &atoms) },
+            Raw::Key => {
+                let desktop_active = if focus { gate.active } else { active_is_desktop(&conn, root, &atoms) };
+                if crate::daemon::trace() {
+                    eprintln!("{} drop key went down, desktop active {desktop_active}", crate::daemon::stamp());
+                }
+                Input::Key { desktop_active }
+            }
+            Raw::Motion => {
+                let (Some(distance), true) = (start_distance, gate.tracking) else { continue };
+                let Some((at, _)) = pointer_at(&conn, root) else { continue };
+                if (at.0 - pressed_at.0).abs() + (at.1 - pressed_at.1).abs() < distance {
+                    continue;
+                }
+                gate.tracking = false;
+                gate_keys(&conn, root, major, &mut gate);
+                if crate::daemon::trace() {
+                    eprintln!("{} drop drag began at {:.0},{:.0}", crate::daemon::stamp(), at.0, at.1);
+                }
+                Input::Start { at }
+            }
             Raw::Press(button) | Raw::Release(button) => {
-                let Some(pointer) = conn.query_pointer(root).ok().and_then(|cookie| cookie.reply().ok()) else { continue };
-                let at = (f32::from(pointer.root_x), f32::from(pointer.root_y));
+                let Some((at, mask)) = pointer_at(&conn, root) else { continue };
                 let desktop = over_desktop(&conn, root, &atoms);
-                let mask = u16::from(pointer.mask);
-                if matches!(kind, Raw::Press(_)) {
+                let pressed = matches!(kind, Raw::Press(_));
+                if button == xinput::PRIMARY_BUTTON {
+                    gate.held = pressed && desktop;
+                    gate.tracking = gate.held && start_distance.is_some();
+                    pressed_at = at;
+                    gate_keys(&conn, root, major, &mut gate);
+                }
+                if pressed {
                     Input::Press { button, at, control: mask & u16::from(KeyButMask::CONTROL) != 0, shift: mask & u16::from(KeyButMask::SHIFT) != 0, desktop }
                 } else {
                     Input::Release { button, at, desktop }
