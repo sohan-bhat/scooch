@@ -277,4 +277,26 @@ wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
 gio trash "$look" >>"$out/trash.log" 2>&1
 sleep 15
 line "- opened once with Scooch off, closed and put in the Trash, then ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo absent), ~/bin/scooch $([ -e "$HOME/bin/scooch" ] || [ -L "$HOME/bin/scooch" ] && echo present || echo absent), login item $([ -f "$autostart" ] && echo present || echo absent), daemons $(daemons)"
+
+line
+line "### Someone else's scooch in ~/.local/bin"
+printf '#!/bin/sh\necho not the Scooch program\n' >"$HOME/.local/bin/scooch"
+chmod +x "$HOME/.local/bin/scooch"
+mine=$(sha256sum "$HOME/.local/bin/scooch" | cut -d' ' -f1)
+cp "$(ls "$PWD"/built/*.AppImage | head -1)" "$HOME/Downloads/Scooch-other.AppImage"
+other="$HOME/Downloads/Scooch-other.AppImage"
+chmod +x "$other"
+clean "$other" >"$out/appimage-other.log" 2>&1 &
+wait_for 40 has_window >/dev/null
+sleep 3
+press_pill Tab Tab Tab Tab Return
+if took=$(wait_for 30 state_on); then line "- turned on after $took s"; else line "- not on within 30 s"; fi
+sleep 4
+line "- ~/.local/bin/scooch kept its bytes $([ "$(sha256sum "$HOME/.local/bin/scooch" | cut -d' ' -f1)" = "$mine" ] && echo yes || echo no), it says $("$HOME/.local/bin/scooch" 2>&1)"
+line "- the copy went to ~/.local/share/scooch/bin/scooch $([ -x "$data/bin/scooch" ] && echo yes || echo no), answering $("$data/bin/scooch" --version 2>&1), login item $(login), daemons $(daemons)"
+press_pill Return
+wait_for 30 state_off >/dev/null
+press_pill alt+F4
+wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+gio trash "$other" >>"$out/trash.log" 2>&1
 exit 0
