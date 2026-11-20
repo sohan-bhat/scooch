@@ -45,7 +45,7 @@ pub enum Problem {
     Finder,
     Move,
     Wallpaper { what: Wallpaper },
-    Gnome,
+    Gnome { installed: bool },
     Unknown { desktop: String },
     Admin,
     Startup,
@@ -238,6 +238,24 @@ fn gnome_without_icons() -> bool {
     false
 }
 
+#[cfg(target_os = "linux")]
+fn ding_installed() -> bool {
+    let info: Result<std::collections::HashMap<String, zbus::zvariant::OwnedValue>> = platform::linux::bus::call(EXTENSIONS, EXTENSIONS_PATH, EXTENSIONS, "GetExtensionInfo", &(DING,));
+    info.is_ok_and(|info| !info.is_empty())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ding_installed() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+const EXTENSIONS: &str = "org.gnome.Shell.Extensions";
+#[cfg(target_os = "linux")]
+const EXTENSIONS_PATH: &str = "/org/gnome/Shell/Extensions";
+#[cfg(target_os = "linux")]
+const DING: &str = "ding@rastersoft.com";
+
 #[cfg(windows)]
 fn admin() -> bool {
     platform::windows::startup::refused()
@@ -307,7 +325,7 @@ fn problem_of(view: &View, layout: Option<&Layout>, desktop: &dyn Desktop, store
         return Some(Problem::Stopped);
     }
     if gnome_without_icons() {
-        return Some(Problem::Gnome);
+        return Some(Problem::Gnome { installed: ding_installed() });
     }
     if !view.on {
         let arranged = layout.all.iter().filter(|screen| layout.arranged.contains(&screen.id));
@@ -641,19 +659,20 @@ fn entry_program(text: &str) -> Option<PathBuf> {
     let mut plain = String::new();
     let mut letters = value.chars();
     while let Some(letter) = letters.next() {
-        match (letter, letter == '\\' || letter == '%') {
-            ('\\', true) => match letters.next()? {
+        match letter {
+            '\\' => match letters.next()? {
                 's' => plain.push(' '),
                 'n' => plain.push('\n'),
                 't' => plain.push('\t'),
                 'r' => plain.push('\r'),
                 other => plain.push(other),
             },
-            ('%', true) => match letters.next() {
-                Some('%') => plain.push('%'),
-                Some(_) | None => {}
-            },
-            (other, _) => plain.push(other),
+            '%' => {
+                if letters.next() == Some('%') {
+                    plain.push('%');
+                }
+            }
+            other => plain.push(other),
         }
     }
     let mut letters = plain.trim_start().chars();
@@ -725,7 +744,13 @@ pub fn repair(program: &Path) -> Result<bool> {
 
 #[cfg(target_os = "linux")]
 pub fn show_gnome_icons() -> Result<()> {
-    let _: bool = platform::linux::bus::call("org.gnome.Shell.Extensions", "/org/gnome/Shell/Extensions", "org.gnome.Shell.Extensions", "EnableExtension", &("ding@rastersoft.com",))?;
+    if !ding_installed() {
+        bail!("Install the Desktop Icons NG extension to show icons in GNOME.");
+    }
+    let enabled: bool = platform::linux::bus::call(EXTENSIONS, EXTENSIONS_PATH, EXTENSIONS, "EnableExtension", &(DING,))?;
+    if !enabled {
+        bail!("Desktop Icons NG is still off, so turn it on in the Extensions app.");
+    }
     Ok(())
 }
 
