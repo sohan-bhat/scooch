@@ -108,6 +108,7 @@ pub fn move_to_applications() -> Result<PathBuf> {
         let _ = std::fs::remove_dir_all(&staged);
         bail!("The copy to {} did not finish.", folder.display());
     }
+    let _ = Command::new("/usr/bin/xattr").arg("-dr").arg("com.apple.quarantine").arg(&staged).status();
     if target.exists() {
         std::fs::remove_dir_all(&target)?;
     }
