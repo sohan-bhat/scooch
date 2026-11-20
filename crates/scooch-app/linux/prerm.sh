@@ -19,7 +19,12 @@ for proc in /proc/[0-9]*; do
   user=$(getent passwd "$uid" | cut -d: -f1)
   [ -n "$user" ] || continue
   logger -t scooch-remove "turning Scooch off for $user" 2>/dev/null
-  timeout 60 runuser -u "$user" -- xargs -0 -a "$proc/environ" sh -c 'exec env -i "$@" '"$program"' off --final' sh 2>&1 | logger -t scooch-remove || true
+  set --
+  for name in HOME USER LOGNAME DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE XDG_CONFIG_HOME XDG_DATA_HOME XDG_DATA_DIRS SCOOCH_HOME; do
+    value=$(tr '\000' '\n' <"$proc/environ" 2>/dev/null | sed -n "s/^$name=//p" | head -1)
+    [ -n "$value" ] && set -- "$@" "$name=$value"
+  done
+  timeout 60 runuser -u "$user" -- env -i PATH=/usr/local/bin:/usr/bin:/bin "$@" "$program" off --final 2>&1 | logger -t scooch-remove || true
 done
 
 exit 0
