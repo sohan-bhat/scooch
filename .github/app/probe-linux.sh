@@ -119,6 +119,16 @@ press_pill alt+F4
 if wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null; then line "- closing the window ended the app process"; else line "- the app process outlived its window"; fi
 line "- daemons running $(daemons)"
 
+before=$(pgrep -x scooch | head -1)
+sed -i 's/"daemon": "[^"]*"/"daemon": "0.0.0"/' "$data/state.json"
+line "- the saved state now says $(grep -o '"daemon": "[^"]*"' "$data/state.json"), as after an upgrade in place, daemon $before"
+clean scooch-app >"$out/app-upgrade.log" 2>&1 &
+wait_for 40 has_window >/dev/null
+replaced() { now=$(pgrep -x scooch | head -1); [ -n "$now" ] && [ "$now" != "$before" ]; }
+if took=$(wait_for 30 replaced); then line "- reopening the app replaced the daemon after $took s, now $(pgrep -x scooch | head -1), saved $(grep -o '"daemon": "[^"]*"' "$data/state.json")"; else line "- reopening the app left daemon $(pgrep -x scooch | tr '\n' ' '), saved $(grep -o '"daemon": "[^"]*"' "$data/state.json")"; fi
+press_pill alt+F4
+wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+
 cp /usr/bin/scooch "$HOME/.stale-scooch"
 sudo apt-get remove -y scooch >"$out/remove.log" 2>&1
 line "- package removal exit $?"
@@ -160,6 +170,14 @@ if [ -n "$pid" ]; then
   appdir=$(tr '\0' '\n' <"/proc/$pid/environ" | sed -n 's/^APPDIR=//p')
   line "- the scooch inside is $(file -b "$appdir/usr/bin/scooch" | cut -c1-80), --version says $("$appdir/usr/bin/scooch" --version 2>&1; echo " exit $?")"
 fi
+line "- opened with Scooch off, ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo absent), ~/bin/scooch $(if [ -L "$HOME/bin/scooch" ]; then echo a link; else file -b "$HOME/bin/scooch" | cut -c1-20; fi), login item $(login)"
+press_pill alt+F4
+wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+sleep 2
+line "- after closing it, ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo absent), files Scooch wrote outside its folders $(find "$HOME" -newer "$appimage" -type f -not -path "$data/*" -not -path "$HOME/.local/share/me.sohanbhat.scooch.window/*" -not -path "$HOME/.cache/*" -not -path "$HOME/.config/me.sohanbhat.scooch.window/*" -not -path "$HOME/.local/share/gvfs-metadata/*" -not -path "$HOME/.config/xfce4/*" -not -path "$HOME/work/*" -not -path "$HOME/Downloads/*" 2>/dev/null | head -5 | tr '\n' ' ')"
+clean "$appimage" >>"$out/appimage.log" 2>&1 &
+wait_for 40 has_window >/dev/null
+sleep 3
 shot appimage-off
 press_pill Tab Tab Tab Tab Return
 if took=$(wait_for 30 state_on); then line "- the keyboard turned Scooch on after $took s"; else line "- not on after the key presses"; fi
@@ -173,6 +191,8 @@ line "- origin in the saved state $(grep -o '"origin": "[^"]*"' "$data/state.jso
 line "- ~/bin/scooch is now $(if [ -L "$HOME/bin/scooch" ]; then echo "a link to $(readlink "$HOME/bin/scooch")"; else file -b "$HOME/bin/scooch" | cut -c1-30; fi)"
 press_pill Return
 if took=$(wait_for 30 state_off); then line "- off again after $took s"; else line "- not off within 30 s"; fi
+sleep 3
+line "- after off, the copy ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo gone)"
 press_pill Return
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 press_pill alt+F4
@@ -216,4 +236,18 @@ for step in $(seq 1 80); do
 done
 line "- wallpaper back after ${back:-never} s, login item gone after ${item:-never} s, copy gone after ${copy:-never} s, ~/bin link gone after ${link:-never} s, no daemon after ${gone:-never} s, all within 40 s"
 line "- after, wallpaper $(wallpaper), state on $(grep -c '"on": true' "$data/state.json")"
+
+line
+line "### AppImage in the Trash while off"
+cp "$(ls "$PWD"/built/*.AppImage | head -1)" "$HOME/Downloads/Scooch-look.AppImage"
+look="$HOME/Downloads/Scooch-look.AppImage"
+chmod +x "$look"
+clean "$look" >"$out/appimage-look.log" 2>&1 &
+wait_for 40 has_window >/dev/null
+sleep 3
+press_pill alt+F4
+wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+gio trash "$look" >>"$out/trash.log" 2>&1
+sleep 15
+line "- opened once with Scooch off, closed and put in the Trash, then ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo absent), ~/bin/scooch $([ -e "$HOME/bin/scooch" ] || [ -L "$HOME/bin/scooch" ] && echo present || echo absent), login item $([ -f "$autostart" ] && echo present || echo absent), daemons $(daemons)"
 exit 0
