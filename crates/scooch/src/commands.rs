@@ -1900,7 +1900,7 @@ mod tests {
     fn an_unreadable_record_is_mentioned_once_then_left_behind() {
         let (fake, store, _, _) = pair("asideonce");
         std::fs::write(store.state_file(), b"{ broken").unwrap();
-        let lines = turn_off(fake.as_ref(), &store, Duration::ZERO).unwrap();
+        let lines = turn_off(fake.as_ref(), &store, Duration::from_secs(2)).unwrap();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("state.unreadable.json") && lines[1] == UNREADABLE_OFF);
         assert!(!store.aside_file().exists());
@@ -1908,7 +1908,7 @@ mod tests {
         assert_eq!(renamed.len(), 1);
         assert_eq!(std::fs::read(store.root.join(&renamed[0])).unwrap(), b"{ broken");
         assert_eq!(aside(&store), None);
-        assert_eq!(turn_off(fake.as_ref(), &store, Duration::ZERO).unwrap(), vec![closing(&Tally { strays: 2, ..Tally::default() })]);
+        assert_eq!(turn_off(fake.as_ref(), &store, Duration::from_secs(2)).unwrap(), vec![closing(&Tally { strays: 2, ..Tally::default() })]);
         assert!(store.output("L", 1, "jpg").exists() && store.output("R", 1, "jpg").exists());
     }
 
