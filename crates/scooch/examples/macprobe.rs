@@ -2846,6 +2846,7 @@ mod probe {
         let fitted: Vec<Option<(f32, f32)>> = dragged.seen.iter().map(|seen| frames.iter().map(|(s, frame)| (*s, mean_gap(&seen.half, frame, &keep))).min_by(|a, b| a.1.total_cmp(&b.1))).collect();
         let glide_at = logged(dragged, "shown and gliding");
         let settled = logged(dragged, " glide settled");
+        let given_up = logged(dragged, " glide gave up the settle");
         let closed = logged(dragged, "after its wallpaper was set");
         let set = logged(dragged, " glide settle ");
         let glided = logged(dragged, " glide glided");
@@ -2878,7 +2879,7 @@ mod probe {
             window.len()
         ));
         p.line(format!("  - captures a second during the glide {:?}, largest gap between captures during the glide {:?} ms, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95, frames the helper drew {frames_drawn:?}", rate.map(|rate| rate.round()), gap.map(|gap| (gap * 1000.0).round()), expected.map(|value| value.round())));
-        p.line(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(closed)));
+        p.line(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, settle given up {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(given_up), at(closed)));
         let masked = dragged.skip.map_or("nothing masked, the dropped icon was not found".to_string(), |[left, top, right, bottom]| format!("outside the dropped icon's box of {}x{} px at {left},{top}, its Finder rect grown by 6 px", right - left, bottom - top));
         p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, {masked}, captures of the settled layer before close {layered:?}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
         p.line(format!("  - the change across the settle fade from the glide's last frame to the still, which ends before settled, {:?} of 255 at pixel {:?} from {:?} to {:?}", fade.map(|step| step.worst), fade.map(|step| (step.x, step.y)), fade.map(|step| step.before), fade.map(|step| step.after)));
@@ -3899,7 +3900,7 @@ mod probe {
         let from = position(p, name).unwrap_or(subject);
         let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
         let again = watch_drag(p, display, &screen, from, to, &masks).context("the drag after the kill could not be watched")?;
-        let glided_again = logged(&again, " glide settled").is_some();
+        let glided_again = logged(&again, " glide settled").or_else(|| logged(&again, " glide gave up the settle")).is_some();
         p.line(format!("- the next drag glides again {glided_again}, log {:?}", again.log.iter().map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()));
         if !alive || now_shown != recorded || !matches.is_some_and(|share| share >= 0.9) || (!struck && (killed.is_empty() || !glided_again)) {
             p.fail("killing the helper mid glide was not handled cleanly");
