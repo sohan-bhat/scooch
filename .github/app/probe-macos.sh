@@ -354,6 +354,27 @@ open_from_image() {
   wait_for 40 has_window >/dev/null
   sleep 4
 }
+status_text() {
+  limited 60 osascript <<'APPLESCRIPT' 2>&1
+tell application "System Events"
+  set scoochApp to first process whose bundle identifier is "me.sohanbhat.scooch.window"
+  set texts to {}
+  repeat with element in (entire contents of window 1 of scoochApp)
+    try
+      if subrole of element is "AXApplicationStatus" then
+        repeat with part in (entire contents of element)
+          try
+            if role of part is "AXStaticText" then set end of texts to (value of part as text)
+          end try
+        end repeat
+      end if
+    end try
+  end repeat
+end tell
+set AppleScript's text item delimiters to linefeed
+return texts as text
+APPLESCRIPT
+}
 press_move() {
   before=$(pgrep -f "MacOS/scooch-app" | head -1)
   line "- $(press 'Move to Applications')"
@@ -391,6 +412,32 @@ wait_for 40 has_window >/dev/null
 sleep 4
 line "- without the clear, a copy that keeps quarantine $(quarantine_of /Applications/Scooch.app) runs from $(from_where)"
 expect "a copy that kept the quarantine would run translocated, which is why Move clears it" grep -q AppTranslocation <<<"$(from_where)"
+
+line
+line "### Move over an old app holding a file that cannot be deleted"
+pkill -f "MacOS/scooch-app" >/dev/null 2>&1
+sleep 2
+rm -rf /Applications/Scooch.app
+ditto "$mount/Scooch.app" /Applications/Scooch.app
+xattr -dr com.apple.quarantine /Applications/Scooch.app
+mkdir -p /Applications/Scooch.app/Contents/Resources/stuck
+echo stuck >/Applications/Scooch.app/Contents/Resources/stuck/file
+chflags uchg /Applications/Scooch.app/Contents/Resources/stuck/file
+line "- the old app holds a file this account cannot delete, rm says $(rm -f /Applications/Scooch.app/Contents/Resources/stuck/file 2>&1 | head -1)"
+open_from_image
+press_move
+whole_app() { codesign --verify --deep --strict /Applications/Scooch.app && [ ! -e /Applications/Scooch.app/Contents/Resources/stuck ]; }
+line "- old apps set aside $(ls -d /Applications/.Scooch.app.old.* 2>/dev/null | tr '\n' ' ')"
+expect "after a Move over an old app with a stuck file the window runs from /Applications/Scooch.app" [ "$(from_where)" = /Applications/Scooch.app ]
+expect "the app in /Applications is whole and holds nothing of the old one" whole_app
+expect "the replace left no staged copy" no_staged
+pkill -f "MacOS/scooch-app" >/dev/null 2>&1
+sleep 2
+for old in /Applications/.Scooch.app.old.*; do
+  [ -e "$old" ] || continue
+  chflags -R nouchg "$old"
+  rm -rf "$old"
+done
 
 line
 line "### Move when the app in /Applications belongs to another account"
@@ -450,9 +497,16 @@ launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1
 rm -rf "$HOME/.Trash/Scooch.app" "$HOME/Applications/Scooch.app"
 chmod 555 "$HOME/Applications"
 open_from_image
-line "- $(press 'Move to Applications')"
+pressed=$(press 'Move to Applications')
+line "- $pressed"
 sleep 6
 line "- the window still runs from $(from_where)"
+sentence=$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV[0]))["failure"]["move"]' crates/scooch-app/ui/src/copy/en.json)
+shown=$(status_text)
+line "- the status line reads \"$shown\", the copy file says \"$sentence\""
+expect "the Move button was pressed" grep -q "^pressed Move to Applications" <<<"$pressed"
+same_sentence() { [ -n "$sentence" ] && [ "$shown" = "$sentence" ]; }
+expect "the window shows the copy sentence for a failed Move and no other text" same_sentence
 expect "with no folder to take it the window stays where it was" grep -q -E 'AppTranslocation|^/Volumes/' <<<"$(from_where)"
 expect "the failed Move left no staged copy" no_staged
 shot move-failed
