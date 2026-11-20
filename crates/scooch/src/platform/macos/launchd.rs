@@ -121,6 +121,15 @@ pub fn install(exe: &Path, data: &Path) -> Result<()> {
     load(&mut System, &domain(), &target(), &path)
 }
 
+pub fn repoint(exe: &Path) -> Result<()> {
+    let path = plist_path()?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let home = std::env::var_os("SCOOCH_HOME").filter(|value| !value.is_empty()).map(PathBuf::from);
+    crate::state::write_atomic(&path, plist(exe, &crate::state::folder(), home.as_deref(), crate::daemon::trace()).as_bytes())
+}
+
 pub fn remove() -> Result<()> {
     let path = plist_path()?;
     if path.exists() {
