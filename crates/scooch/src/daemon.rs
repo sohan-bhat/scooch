@@ -1628,6 +1628,14 @@ pub fn release(desktop: &dyn Desktop, store: &Store, report: &Report, stop: &Sto
     }
 }
 
+fn off_here(daemon: &Daemon) {
+    let _lock = daemon.store.command_lock(crate::state::COMMAND_PATIENCE).ok();
+    match crate::commands::wind_down(daemon.desktop.as_ref(), &daemon.store) {
+        Ok(off) => eprintln!("{} program in the Trash, Scooch turned off with {off:?}", stamp()),
+        Err(error) => eprintln!("{} program in the Trash, but Scooch could not turn off, {error:#}", stamp()),
+    }
+}
+
 fn finish(store: &Store, stop: &Stop) -> ! {
     retire(store, stop);
     if stop.wait_idle(STOP_CAP) {
@@ -1691,6 +1699,9 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     desktop.drag_starts(DragHooks { on_icon: Box::new(move |point| looker.over_icon(point)), start: Box::new(move |point| starter.drag_starting(point)) });
     let worker = signal.clone();
     let tracing = trace();
+    let trashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(target_os = "macos")]
+    crate::program::watch_self(trashed.clone(), signal.clone());
     std::thread::Builder::new().name("scooch-tick".into()).spawn(move || {
         let mut said: Option<String> = None;
         loop {
@@ -1699,6 +1710,9 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             daemon.gather(&worker);
             if !stop.begin() {
                 return;
+            }
+            if trashed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                off_here(&daemon);
             }
             let started = Instant::now();
             let report = daemon.tick();
