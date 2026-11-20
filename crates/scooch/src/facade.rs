@@ -85,6 +85,7 @@ pub struct View {
     pub current: Option<PathBuf>,
     pub counted: Option<Counted>,
     pub reduce_motion: bool,
+    pub live: bool,
     pub text_scale: f32,
 }
 
@@ -351,6 +352,7 @@ pub fn view() -> View {
         current: None,
         counted: None,
         reduce_motion,
+        live,
         text_scale: text_scale(),
     };
     let Some(desktop) = desktop else {
@@ -602,6 +604,7 @@ pub fn repair(program: &Path) -> Result<bool> {
     }
     let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
     let desktop = platform::current()?;
+    commands::stop(&store)?;
     desktop.autostart(Some(&state::canonical(program).unwrap_or_else(|_| program.to_path_buf())))?;
     Ok(true)
 }
