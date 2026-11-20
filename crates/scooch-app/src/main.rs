@@ -11,7 +11,7 @@ mod takeover;
 mod update;
 mod watch;
 
-use scooch::facade::{self, Problem, Started, Switch, View};
+use scooch::facade::{self, Icons, Problem, Started, Switch, View};
 use scooch::facade::Tally;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -29,10 +29,10 @@ const KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", 
 
 struct Kept(Mutex<Option<notify::RecommendedWatcher>>);
 
-fn said<T>(result: anyhow::Result<T>) -> Result<T, String> {
+fn said<T>(code: &'static str, result: anyhow::Result<T>) -> Result<T, String> {
     result.map_err(|error| {
-        eprintln!("{error}");
-        error.to_string()
+        eprintln!("scooch-app {code} failed: {error:#}");
+        code.to_string()
     })
 }
 
@@ -57,10 +57,10 @@ fn ready() -> anyhow::Result<PathBuf> {
     Ok(program)
 }
 
-async fn off_main<T: Send + 'static>(work: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
+async fn off_main<T: Send + 'static>(code: &'static str, work: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
     #[cfg(target_os = "linux")]
     appimage::seal();
-    said(tauri::async_runtime::spawn_blocking(work).await.map_err(|error| anyhow::anyhow!(error.to_string())).and_then(|done| done))
+    said(code, tauri::async_runtime::spawn_blocking(work).await.map_err(|error| anyhow::anyhow!(error.to_string())).and_then(|done| done))
 }
 
 fn data_folder<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
@@ -78,28 +78,28 @@ fn current() -> View {
 #[tauri::command]
 async fn view() -> Result<View, String> {
     appimage::settle();
-    off_main(|| Ok(current())).await
+    off_main("view", || Ok(current())).await
 }
 
 #[tauri::command]
 async fn turn_on() -> Result<Started, String> {
-    off_main(|| adopted(facade::turn_on(&ready()?))).await
+    off_main("turn-on", || adopted(facade::turn_on(&ready()?))).await
 }
 
 #[tauri::command]
 async fn turn_off() -> Result<Tally, String> {
-    off_main(|| adopted(facade::turn_off(&place::program()?))).await
+    off_main("turn-off", || adopted(facade::turn_off(&place::program()?))).await
 }
 
 #[tauri::command]
 async fn set(switch: Switch, on: bool) -> Result<(), String> {
-    off_main(move || facade::set(switch, on)).await
+    off_main("set", move || facade::set(switch, on)).await
 }
 
 #[tauri::command]
 async fn use_picture<R: Runtime>(app: AppHandle<R>, path: PathBuf) -> Result<(), String> {
     let folder = data_folder(&app);
-    off_main(move || {
+    off_main("use", move || {
         adopted(facade::use_picture(&ready()?, &path))?;
         pictures::remember(&folder, &path);
         Ok(())
@@ -110,7 +110,7 @@ async fn use_picture<R: Runtime>(app: AppHandle<R>, path: PathBuf) -> Result<(),
 #[tauri::command]
 async fn pictures<R: Runtime>(app: AppHandle<R>) -> Result<Vec<String>, String> {
     let folder = data_folder(&app);
-    off_main(move || Ok(pictures::listed(&folder))).await
+    off_main("pictures", move || Ok(pictures::listed(&folder))).await
 }
 
 #[tauri::command]
@@ -132,29 +132,29 @@ async fn first_open<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
 
 #[tauri::command]
 async fn fix<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    let Some(problem) = off_main(|| Ok(current().problem)).await? else { return Ok(()) };
+    let Some(problem) = off_main("view", || Ok(current().problem)).await? else { return Ok(()) };
     let opener = app.opener();
     match problem {
-        Problem::Automation => said(opener.open_url(AUTOMATION, None::<&str>).map_err(anyhow::Error::from)),
-        Problem::Finder => said(opener.open_path(FINDER, None::<&str>).map_err(anyhow::Error::from)),
-        Problem::Startup => said(opener.open_url(STARTUP, None::<&str>).map_err(anyhow::Error::from)),
-        Problem::Unknown { desktop } => said(opener.open_url(format!("{ISSUES}{}", percent_encoding::utf8_percent_encode(&desktop, percent_encoding::NON_ALPHANUMERIC)), None::<&str>).map_err(anyhow::Error::from)),
+        Problem::Automation => said("open", opener.open_url(AUTOMATION, None::<&str>).map_err(anyhow::Error::from)),
+        Problem::Finder => said("open", opener.open_path(FINDER, None::<&str>).map_err(anyhow::Error::from)),
+        Problem::Startup => said("open", opener.open_url(STARTUP, None::<&str>).map_err(anyhow::Error::from)),
+        Problem::Unknown { desktop } => said("open", opener.open_url(format!("{ISSUES}{}", percent_encoding::utf8_percent_encode(&desktop, percent_encoding::NON_ALPHANUMERIC)), None::<&str>).map_err(anyhow::Error::from)),
         Problem::Move => {
-            let target = off_main(place::move_to_applications).await?;
+            let target = off_main("move", place::move_to_applications).await?;
             tauri_plugin_single_instance::destroy(&app);
-            said(place::open_app(&target))?;
+            said("move", place::open_app(&target))?;
             app.exit(0);
             Ok(())
         }
         Problem::Admin => {
             tauri_plugin_single_instance::destroy(&app);
-            off_main(place::open_normally).await?;
+            off_main("admin", place::open_normally).await?;
             app.exit(0);
             Ok(())
         }
-        Problem::Gnome { installed: true } => off_main(gnome_icons).await,
-        Problem::Stopped | Problem::Other => off_main(|| adopted(facade::turn_on(&ready()?)).map(drop)).await,
-        Problem::Asking | Problem::Screen | Problem::Wallpaper { .. } | Problem::Gnome { installed: false } => Ok(()),
+        Problem::Gnome { icons: Icons::Off } => off_main("gnome-icons", gnome_icons).await,
+        Problem::Stopped | Problem::Other => off_main("start", || adopted(facade::turn_on(&ready()?)).map(drop)).await,
+        Problem::Asking | Problem::Screen | Problem::Wallpaper { .. } | Problem::Gnome { .. } => Ok(()),
     }
 }
 
@@ -262,4 +262,15 @@ fn main() {
                 update::install(app);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failure_reaches_the_window_as_its_code_only() {
+        let failed: anyhow::Result<()> = Err(anyhow::anyhow!("Permission denied (os error 13)"));
+        assert_eq!(said("move", failed), Err("move".to_string()));
+    }
 }
