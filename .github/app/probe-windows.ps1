@@ -141,34 +141,27 @@ function Setup-Windows {
 }
 
 function Clear-Setup {
-    $pressed = @()
-    for ($round = 0; $round -lt 10; $round++) {
-        $hit = $false
-        foreach ($window in Setup-Windows) {
-            foreach ($label in 'Accept', 'Next', 'Skip', 'Skip for now', 'Not now') {
-                $byName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $label)
-                $found = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $byName)
-                $invoke = $null
-                if ($found -and $found.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
-                    $invoke.Invoke()
-                    $pressed += "$label in $($window.Current.Name)"
-                    $hit = $true
-                    break
-                }
-            }
-        }
-        if (-not $hit) { break }
-        Start-Sleep -Seconds 3
+    $done = @()
+    if (@(Setup-Windows).Count -eq 0) { return $done }
+    $engagement = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement'
+    if (-not (Test-Path $engagement)) { New-Item $engagement | Out-Null }
+    Set-ItemProperty $engagement -Name ScoobeSystemSettingEnabled -Value 0 -Type DWord
+    $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE'
+    if (-not (Test-Path $policy)) { New-Item $policy -ErrorAction SilentlyContinue | Out-Null }
+    Set-ItemProperty $policy -Name DisablePrivacyExperience -Value 1 -Type DWord -ErrorAction SilentlyContinue
+    $done += 'turned the setup screen off in the registry'
+    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 4
+    if (Get-Process -Name explorer -ErrorAction SilentlyContinue) {
+        $done += 'Explorer came back on its own'
+    } else {
+        Start-Process explorer.exe
+        $done += 'started Explorer again'
     }
-    foreach ($window in Setup-Windows) {
-        $close = $null
-        if ($window.TryGetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern, [ref]$close)) {
-            $name = $window.Current.Name
-            $close.Close()
-            $pressed += "close on $name"
-        }
-    }
-    return $pressed
+    $desk = Wait-For 30 { @(Get-Process -Name explorer -ErrorAction SilentlyContinue).Count -gt 0 -and (Top-Windows) -match 'Program Manager' }
+    $done += "the desktop was back after $desk s"
+    Start-Sleep -Seconds 5
+    return $done
 }
 
 Line "## App probe on $((Get-CimInstance Win32_OperatingSystem).Caption) build $([Environment]::OSVersion.Version.Build) $env:PROCESSOR_ARCHITECTURE"
@@ -177,7 +170,7 @@ Screen-Shot 'screen-at-start'
 Line "- windows at the start $(Top-Windows)"
 $cleared = Clear-Setup
 if ($cleared.Count -gt 0) {
-    Line "- a Windows setup screen covered the desktop, the probe pressed $($cleared -join ', ')"
+    Line "- a Windows setup screen covered the desktop, so the probe $($cleared -join ', ')"
     Start-Sleep -Seconds 3
     Line "- windows after that $(Top-Windows)"
     Screen-Shot 'screen-cleared'
