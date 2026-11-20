@@ -2053,6 +2053,77 @@ pub mod tests {
         assert_eq!(daemon.store.read(), saved);
     }
 
+    fn compact(daemon: &Daemon) -> Vec<u8> {
+        let bytes = serde_json::to_vec(&daemon.store.load()).unwrap();
+        std::fs::write(daemon.store.state_file(), &bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn a_placed_screen_keeps_the_icons_of_that_tick_and_the_scene_size() {
+        let (daemon, fake, _) = rig("places", vec![screen("main", 0.0, 2.0)]);
+        fake.place(vec![subject()]);
+        let reads = fake.snapshots.load(Ordering::SeqCst);
+        let before = compact(&daemon);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 1);
+        assert_ne!(daemon.store.read(), Some(before));
+        let places = daemon.store.load().screens["main"].places.clone();
+        assert_eq!(places, Some(Places { width: 320, height: 200, icons: vec![Rect { x: 120.0, y: 60.0, w: 80.0, h: 80.0 }] }));
+        fake.place(vec![corner()]);
+        daemon.tick();
+        assert_eq!(daemon.store.load().screens["main"].places.clone().map(|places| places.icons), Some(vec![Rect { x: 0.0, y: 0.0, w: 40.0, h: 40.0 }]));
+    }
+
+    #[test]
+    fn a_tick_that_changes_nothing_writes_nothing_and_reads_the_desktop_once() {
+        let (daemon, fake, _) = rig("places-idle", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let placed = daemon.store.load().screens["main"].places.clone();
+        assert!(placed.is_some());
+        fake.place(vec![Rect { x: 60.2, ..subject() }]);
+        let reads = fake.snapshots.load(Ordering::SeqCst);
+        let before = compact(&daemon);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 1);
+        assert_eq!(daemon.store.read(), Some(before));
+        assert_eq!(daemon.store.load().screens["main"].places, placed);
+    }
+
+    #[test]
+    fn an_old_state_file_without_places_loads_and_the_next_placement_adds_them() {
+        let (daemon, fake, _) = rig("places-old", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let mut old: serde_json::Value = serde_json::from_slice(&daemon.store.read().unwrap()).unwrap();
+        old["screens"]["main"].as_object_mut().unwrap().remove("places");
+        std::fs::write(daemon.store.state_file(), serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+        let loaded = daemon.store.load();
+        let entry = &loaded.screens["main"];
+        assert_eq!((entry.places.clone(), entry.counter, entry.icons), (None, 1, 1));
+        assert!(!daemon.store.aside_file().exists());
+        fake.place(vec![corner()]);
+        daemon.tick();
+        let text = String::from_utf8(daemon.store.read().unwrap()).unwrap();
+        assert!(text.contains("\"places\""), "{text}");
+        let mut newer: serde_json::Value = serde_json::from_str(&text).unwrap();
+        newer["screens"]["main"]["later"] = serde_json::json!({ "from": "a newer Scooch" });
+        let read: State = serde_json::from_value(newer).unwrap();
+        assert_eq!(read.screens["main"].places.clone().map(|places| places.icons), Some(vec![corner()]));
+    }
+
+    #[test]
+    fn two_screens_each_keep_their_own_icons() {
+        let (daemon, fake, _) = rig("places-two", vec![screen("main", 0.0, 1.0), screen("side", 160.0, 1.0)]);
+        fake.place(vec![subject(), Rect { x: 230.0, y: 10.0, w: 30.0, h: 30.0 }]);
+        daemon.tick();
+        let state = daemon.store.load();
+        let of = |id: &str| state.screens[id].places.clone().map(|places| (places.width, places.height, places.icons));
+        assert_eq!(of("main"), Some((160, 100, vec![subject()])));
+        assert_eq!(of("side"), Some((160, 100, vec![Rect { x: 70.0, y: 10.0, w: 30.0, h: 30.0 }])));
+    }
+
     #[test]
     fn a_moved_icon_draws_again_and_drops_the_old_output() {
         let (daemon, fake, _) = rig("moved", vec![screen("main", 0.0, 1.0)]);
