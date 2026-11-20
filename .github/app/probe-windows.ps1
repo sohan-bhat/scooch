@@ -317,10 +317,7 @@ foreach ($scale in 150, 200) {
     [Desk]::Announce('WindowMetrics')
     foreach ($size in @(@(1, 1, 'smallest'), @([int]$box.Width, [int]$box.Height, 'default'))) {
         [Desk]::SetWindowPos($handle, [IntPtr]::Zero, [int]$box.X, [int]$box.Y, $size[0], $size[1], 0x0014) | Out-Null
-        [Desk]::SetForegroundWindow([Desk]::GetDesktopWindow()) | Out-Null
-        Start-Sleep -Milliseconds 500
-        [Desk]::SetForegroundWindow($handle) | Out-Null
-        Start-Sleep -Seconds 3
+        Refocus
         Shot "text-$scale-$($size[2])"
         Line "- text at $scale percent, $($size[2]) size, $(Pill-Inside)"
     }
