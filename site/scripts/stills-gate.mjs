@@ -218,3 +218,19 @@ export async function encodeLowest(render, format, low = 60, high = 100) {
   }
   return at(high);
 }
+
+export async function encodeUnder(render, format, maxBytes, low = 40, high = 100) {
+  const tried = new Map();
+  const at = async (quality) => {
+    if (!tried.has(quality)) tried.set(quality, await ENCODERS[format](quality)(sharp(render)).toBuffer());
+    return tried.get(quality);
+  };
+  if ((await at(low)).length > maxBytes) return null;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if ((await at(middle)).length <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  const buffer = await at(low);
+  return { quality: low, buffer, ...(await compare(await sharp(buffer).png().toBuffer(), render)) };
+}
