@@ -131,5 +131,12 @@ runs:
       env:
         TAURI_BUNDLER_DMG_IGNORE_CI: "true"
       run: |
-        node ui/node_modules/@tauri-apps/cli/tauri.js bundle --ci --target ${{ inputs.target }} --bundles ${{ inputs.bundles }} ${{ steps.updater.outputs.args }}
+        for attempt in 1 2 3; do
+          if node ui/node_modules/@tauri-apps/cli/tauri.js bundle --ci --target ${{ inputs.target }} --bundles ${{ inputs.bundles }} ${{ steps.updater.outputs.args }}; then
+            break
+          fi
+          if [ "$attempt" = 3 ]; then exit 1; fi
+          echo "The bundle failed, trying again in 15 s."
+          sleep 15
+        done
         echo "TAURI_ARGS=${{ steps.updater.outputs.args }}" >> "$GITHUB_ENV"
