@@ -125,6 +125,10 @@
   }
 }
 
+[data-slot]:focus-visible {
+  outline-style: solid;
+}
+
 .picture-in {
   animation: picture-in 420ms var(--ease-out) both;
 }
