@@ -200,7 +200,7 @@ line
 line "#### Clouds on a sky photo, with the icon column full"
 desk="$HOME/Desktop"
 mkdir -p "$desk"
-for n in $(seq -w 1 40); do : >"$desk/probe-icon-$n.txt"; done
+for n in $(seq -w 1 90); do : >"$desk/probe-icon-$n.txt"; done
 sleep 6
 before=$(digest)
 line "- $(press 'probe sky')"
@@ -312,6 +312,8 @@ expect "opening the window again with a selection turned nothing on" no_watch
 before=$(md5 -q "$shown_off" 2>/dev/null)
 line "- $(press 'Turn on')"
 wait_for 30 state_on >/dev/null
+wait_for 30 test -f "$plist" >/dev/null
+wait_for 30 launchctl print "gui/$(id -u)/$label" >/dev/null
 sleep 3
 stand_in
 wait_for 40 fresh_from "$pics/probe-canoe.jpg" "$before" >/dev/null
