@@ -1,4 +1,5 @@
-import type { Matrix4, PerspectiveCamera, Quaternion, Texture, Vector2, Vector3, Vector4 } from 'three';
+import { Texture, type Matrix4, type PerspectiveCamera, type Quaternion, type Vector2, type Vector3, type Vector4 } from 'three';
+import { asset } from '@/lib/base';
 import { shot } from '@/lib/audio';
 import { changed, story } from '@/story/state';
 import { ask, begin, dragged, end, held } from './drag';
@@ -37,7 +38,8 @@ type Slot = { id: string; frame: Frame | null; icons: Vector4[]; base: Vector4[]
 const slots = new Map<string, Slot>();
 const view = { frame: null as Frame | null, main: null as Frame | null };
 
-const saved = { frame: null as Texture | null, icons: [] as Vector4[], scale: null as Vector2 | null, grid: null as Vector2 | null };
+const saved = { frame: null as Texture | null, icons: [] as Vector4[], scale: null as Vector2 | null, grid: null as Vector2 | null, atlas: null as Texture | null };
+const sharper = { atlas: null as Texture | null, loading: false };
 const fade = { mix: 0, at: 0, target: 0, span: BLEND };
 const work = {} as { target: Vector3; center: Vector3; normal: Vector3; up: Vector3; point: Vector3; ray: Vector3; quaternion: Quaternion; matrix: Matrix4; answers: number; timer: number; nudged: number };
 
@@ -169,6 +171,50 @@ function slotOf(id: string) {
   return slot;
 }
 
+function neededRows() {
+  const frame = screenFrame();
+  const aspect = frame ? frame.width / frame.height : 4 / 3;
+  const tall = window.innerWidth / window.innerHeight < 0.9;
+  const rows = tall ? (FILL.width * window.innerWidth) / aspect : FILL.height * window.innerHeight;
+  return rows * Math.max(quality.nativeDpr, 1);
+}
+
+async function sharpenAtlas(screen: Uniforms) {
+  const atlas = screen.uAtlas.value as Texture | null;
+  const slot = current();
+  const frame = screenFrame();
+  if (!atlas || !slot || !frame || sharper.loading || sharper.atlas) return;
+  const image = atlas.image as { width: number };
+  const widest = Math.max(...slot.base.map((icon) => icon.z));
+  const iconPixels = widest * neededRows() * (frame.width / frame.height);
+  if (image.width / 4 >= iconPixels) return;
+  sharper.loading = true;
+  const element = new Image();
+  element.src = asset('demo/atlas-2x.png');
+  try {
+    await element.decode();
+  } catch {
+    sharper.loading = false;
+    return;
+  }
+  sharper.loading = false;
+  if (!demo.open) return;
+  const texture = new Texture(element);
+  texture.colorSpace = atlas.colorSpace;
+  texture.flipY = atlas.flipY;
+  texture.generateMipmaps = atlas.generateMipmaps;
+  texture.minFilter = atlas.minFilter;
+  texture.magFilter = atlas.magFilter;
+  texture.anisotropy = atlas.anisotropy;
+  texture.wrapS = atlas.wrapS;
+  texture.wrapT = atlas.wrapT;
+  texture.needsUpdate = true;
+  sharper.atlas = texture;
+  saved.atlas = atlas;
+  screen.uAtlas.value = texture;
+  changed();
+}
+
 async function build(slot: Slot) {
   const gl = hooks.gl;
   const info = infoOf(slot.id);
@@ -177,9 +223,11 @@ async function build(slot: Slot) {
   void warm(info, rects(slot, -1, 0, 0)).catch(() => undefined);
   const size = main.live.image as { width: number; height: number };
   const large = main.rows !== size.height ? { width: Math.round((main.rows * info.width) / info.height), height: main.rows } : undefined;
+  const need = neededRows();
+  const rows = large ? size.height : Math.min(Math.max(size.height, Math.ceil(need)), info.height * 2);
   const scenery = await loadScenery(info, false);
   if (slot.gone) return;
-  const frame = createFrame(scenery, { width: size.width, height: size.height }, large);
+  const frame = createFrame(scenery, { width: Math.round((rows * info.width) / info.height), height: rows }, large);
   frame.pin(0);
   frame.prepare(gl);
   await frame.compile(gl);
@@ -189,7 +237,9 @@ async function build(slot: Slot) {
     return;
   }
   slot.frame = frame;
-  if (large) void frame.sharpen(gl).catch(() => false);
+  const shown = Math.min(large ? large.height : rows, need);
+  const canvas = scenery.canvas.image as { height: number };
+  if (canvas.height < shown * 0.98) void frame.sharpen(gl).catch(() => false);
 }
 
 function discard(frame: Frame) {
@@ -346,6 +396,13 @@ function finish() {
     if (saved.scale) (screen.uFrameScale.value as Vector2).copy(saved.scale);
     if (saved.grid) (screen.uGrid.value as Vector2).copy(saved.grid);
     screen.uFromMix.value = 0;
+    screen.uSharpIcons.value = 0;
+    if (saved.atlas) screen.uAtlas.value = saved.atlas;
+  }
+  saved.atlas = null;
+  if (sharper.atlas) {
+    sharper.atlas.dispose();
+    sharper.atlas = null;
   }
   fade.mix = 0;
   fade.target = 0;
@@ -408,6 +465,8 @@ export function openDemo() {
   window.addEventListener('scroll', onScroll, { passive: true });
   window.addEventListener('keydown', onKey);
   slotOf(demo.picture);
+  screen.uSharpIcons.value = 1;
+  void sharpenAtlas(screen);
   window.dispatchEvent(new Event('scooch:demo'));
   emit();
 }
