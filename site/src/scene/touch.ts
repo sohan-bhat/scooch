@@ -1,4 +1,5 @@
 import { Color, Mesh, type Material, type MeshStandardMaterial, type Object3D, type PerspectiveCamera, type Vector2, type Vector4, type WebGLRenderer } from 'three';
+import type { DemoManifest } from '@/story/demo';
 import type { Frame } from './screen/scenery';
 
 export const things: Record<string, Object3D | undefined> = {};
@@ -20,6 +21,9 @@ export const hooks = {
   view: (_camera: PerspectiveCamera) => {},
   after: () => {},
   fit: null as null | ((buffer: Vector2, size: { width: number; height: number }) => number),
+  gl: null as WebGLRenderer | null,
+  manifest: null as DemoManifest | null,
+  scale: [1, 1] as [number, number],
 };
 
 export const live = {
