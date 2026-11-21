@@ -44,6 +44,47 @@ pub fn answer(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     .unwrap_or_else(|_| Response::new(Vec::new()))
 }
 
+fn selection_file(folder: &Path) -> PathBuf {
+    folder.join("selected.json")
+}
+
+pub fn selected(folder: &Path) -> Option<PathBuf> {
+    let bytes = std::fs::read(selection_file(folder)).ok()?;
+    let path: PathBuf = serde_json::from_slice(&bytes).ok()?;
+    path.is_file().then_some(path)
+}
+
+pub fn select(folder: &Path, path: Option<&Path>) {
+    match path {
+        Some(path) => {
+            if std::fs::create_dir_all(folder).is_ok() {
+                if let Ok(bytes) = serde_json::to_vec(path) {
+                    let _ = std::fs::write(selection_file(folder), bytes);
+                }
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(selection_file(folder));
+        }
+    }
+}
+
+pub fn shown(view: &mut facade::View, selection: Option<&Path>) {
+    if view.on {
+        return;
+    }
+    if let Some(selection) = selection {
+        put(selection, &mut view.current, view.monitors.iter_mut().map(|monitor| &mut monitor.picture));
+    }
+}
+
+fn put<'a>(selection: &Path, current: &mut Option<PathBuf>, pictures: impl Iterator<Item = &'a mut Option<PathBuf>>) {
+    *current = Some(selection.to_path_buf());
+    for picture in pictures {
+        *picture = Some(selection.to_path_buf());
+    }
+}
+
 fn history_file(folder: &Path) -> PathBuf {
     folder.join("pictures.json")
 }
@@ -66,4 +107,34 @@ pub fn remember(folder: &Path, path: &Path) {
 
 pub fn listed(folder: &Path) -> Vec<String> {
     facade::pictures(&history(folder)).into_iter().map(|path| path.to_string_lossy().into_owned()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_selection_is_kept_across_openings_until_it_is_cleared_or_its_file_is_gone() {
+        let folder = std::env::temp_dir().join(format!("scooch-selected-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        let picture = folder.join("sky.jpg");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(&picture, b"x").unwrap();
+        assert_eq!(selected(&folder), None);
+        select(&folder, Some(&picture));
+        assert_eq!(selected(&folder), Some(picture.clone()));
+        select(&folder, None);
+        assert_eq!(selected(&folder), None);
+        select(&folder, Some(&picture));
+        std::fs::remove_file(&picture).unwrap();
+        assert_eq!(selected(&folder), None);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_selection_becomes_the_current_picture_and_every_preview() {
+        let (mut current, mut left, mut right) = (Some(PathBuf::from("/old.jpg")), None, Some(PathBuf::from("/old.jpg")));
+        put(Path::new("/sky.jpg"), &mut current, [&mut left, &mut right].into_iter());
+        assert_eq!((current, left, right), (Some(PathBuf::from("/sky.jpg")), Some(PathBuf::from("/sky.jpg")), Some(PathBuf::from("/sky.jpg"))));
+    }
 }

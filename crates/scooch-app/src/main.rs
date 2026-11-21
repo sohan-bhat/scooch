@@ -67,22 +67,40 @@ fn data_folder<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("scooch-app"))
 }
 
-fn current() -> View {
+fn current(folder: &std::path::Path) -> View {
     let mut view = facade::view();
     if place::misplaced() {
         view.problem = Some(Problem::Move);
+    }
+    if view.on {
+        pictures::select(folder, None);
+    } else {
+        pictures::shown(&mut view, pictures::selected(folder).as_deref());
     }
     view
 }
 
 #[tauri::command]
-async fn view() -> Result<View, String> {
-    off_main("view", || Ok(current())).await
+async fn view<R: Runtime>(app: AppHandle<R>) -> Result<View, String> {
+    let folder = data_folder(&app);
+    off_main("view", move || Ok(current(&folder))).await
 }
 
 #[tauri::command]
-async fn turn_on() -> Result<Started, String> {
-    off_main("turn-on", || adopted(facade::turn_on(&ready()?))).await
+async fn turn_on<R: Runtime>(app: AppHandle<R>) -> Result<Started, String> {
+    let folder = data_folder(&app);
+    off_main("turn-on", move || {
+        let program = ready()?;
+        match pictures::selected(&folder).filter(|_| !facade::is_on()) {
+            Some(selection) => {
+                adopted(facade::use_picture(&program, &selection))?;
+                pictures::select(&folder, None);
+                Ok(Started::Go)
+            }
+            None => adopted(facade::turn_on(&program)),
+        }
+    })
+    .await
 }
 
 #[tauri::command]
@@ -99,7 +117,12 @@ async fn set(switch: Switch, on: bool) -> Result<(), String> {
 async fn use_picture<R: Runtime>(app: AppHandle<R>, path: PathBuf) -> Result<(), String> {
     let folder = data_folder(&app);
     off_main("use", move || {
-        adopted(facade::use_picture(&ready()?, &path))?;
+        if facade::is_on() {
+            adopted(facade::use_picture(&ready()?, &path))?;
+            pictures::select(&folder, None);
+        } else {
+            pictures::select(&folder, Some(&facade::select_picture(&path)?));
+        }
         pictures::remember(&folder, &path);
         Ok(())
     })
@@ -153,7 +176,8 @@ fn open_link<R: Runtime>(app: &AppHandle<R>, url: String) -> anyhow::Result<()> 
 
 #[tauri::command]
 async fn fix<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    let Some(problem) = off_main("view", || Ok(current().problem)).await? else { return Ok(()) };
+    let folder = data_folder(&app);
+    let Some(problem) = off_main("view", move || Ok(current(&folder).problem)).await? else { return Ok(()) };
     let opener = app.opener();
     match problem {
         Problem::Automation => said("open", opener.open_url(AUTOMATION, None::<&str>).map_err(anyhow::Error::from)),
