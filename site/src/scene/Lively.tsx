@@ -9,12 +9,13 @@ import { hooks } from './touch';
 function Pour() {
   const camera = useThree((state) => state.camera);
   const gl = useThree((state) => state.gl);
+  const scene = useThree((state) => state.scene);
   const group = useMemo(() => makeStream(), []);
   useEffect(() => installPour(camera), [camera]);
   useEffect(() => {
-    const timer = window.setTimeout(() => warmStream(gl, camera, group), 1500);
+    const timer = window.setTimeout(() => warmStream(gl, camera, group, scene), 1500);
     return () => window.clearTimeout(timer);
-  }, [gl, camera, group]);
+  }, [gl, camera, group, scene]);
   useFrame((_, delta) => pourFrame(performance.now(), Math.min(delta, 0.05), gl));
   return <primitive object={group} />;
 }
