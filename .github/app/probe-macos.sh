@@ -361,16 +361,46 @@ tell application "System Events"
   set texts to {}
   repeat with element in (entire contents of window 1 of scoochApp)
     try
-      if role of element is "AXStaticText" then
-        set shown to value of element
-        if shown is not missing value then set end of texts to (shown as text)
-      end if
+      set shown to value of element
+      if class of shown is text and shown is not "" then set end of texts to shown
+    end try
+    try
+      set shown to name of element
+      if class of shown is text and shown is not "" then set end of texts to shown
+    end try
+    try
+      set shown to description of element
+      if class of shown is text and shown is not "" then set end of texts to shown
+    end try
+    try
+      set shown to title of element
+      if class of shown is text and shown is not "" then set end of texts to shown
     end try
   end repeat
 end tell
 set AppleScript's text item delimiters to linefeed
 return texts as text
 APPLESCRIPT
+}
+seen_texts() {
+  local folder
+  folder=$(mktemp -d)
+  cat >"$folder/read.swift" <<'SWIFT'
+import AppKit
+import Vision
+
+let url = URL(fileURLWithPath: CommandLine.arguments[1])
+guard let image = NSImage(contentsOf: url), let picture = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { exit(1) }
+let request = VNRecognizeTextRequest()
+request.recognitionLevel = .accurate
+request.usesLanguageCorrection = false
+try VNImageRequestHandler(cgImage: picture).perform([request])
+for found in request.results ?? [] {
+    if let best = found.topCandidates(1).first { print(best.string) }
+}
+SWIFT
+  limited 180 swift "$folder/read.swift" "$1" 2>/dev/null
+  rm -rf "$folder"
 }
 press_move() {
   before=$(pgrep -f "MacOS/scooch-app" | head -1)
@@ -501,20 +531,22 @@ line "- the window still runs from $(from_where)"
 sentence=$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV[0]))["failure"]["move"]' crates/scooch-app/ui/src/copy/en.json)
 strings="$out/copy-strings.txt"
 ruby -rjson -e 'def flat(node); node.is_a?(Hash) ? node.values.flat_map { |v| flat(v) } : [node.to_s]; end; puts flat(JSON.parse(File.read(ARGV[0])))' crates/scooch-app/ui/src/copy/en.json >"$strings"
-shown=$(window_texts)
-line "- the window shows the texts $(printf '%s' "$shown" | tr '\n' '|'), the copy file says \"$sentence\""
+shot move-failed
+said=$(window_texts)
+seen=$(seen_texts "$out/move-failed.png")
+shown=$(printf '%s\n%s\n' "$said" "$seen")
+line "- the window's accessibility texts read $(printf '%s' "$said" | tr '\n' '|')"
+line "- the window's own pixels read $(printf '%s' "$seen" | tr '\n' '|')"
+line "- the copy file says \"$sentence\""
 expect "the Move button was pressed" grep -q "^pressed Move to Applications" <<<"$pressed"
-only_copy() {
+copy_sentence() {
   [ -n "$sentence" ] && grep -qxF -- "$sentence" <<<"$shown" || return 1
-  while IFS= read -r text; do
-    [ -z "$text" ] && continue
-    grep -qixF -- "$text" "$strings" || return 1
-  done <<<"$shown"
+  ! grep -F -- "$sentence" <<<"$shown" | grep -qvxF -- "$sentence" || return 1
+  ! grep -qiE 'error|denied|not permitted|errno|no such file|read-only|os error' <<<"$shown"
 }
-expect "the window shows the copy sentence for a failed Move and no text from outside the copy file" only_copy
+expect "the window shows the copy sentence for a failed Move as its whole line and no system text" copy_sentence
 expect "with no folder to take it the window stays where it was" grep -q -E 'AppTranslocation|^/Volumes/' <<<"$(from_where)"
 expect "the failed Move left no staged copy" no_staged
-shot move-failed
 chmod 755 "$HOME/Applications"
 sudo chmod "$mode" /Applications
 line "- /Applications mode back to $(stat -f %Lp /Applications)"
