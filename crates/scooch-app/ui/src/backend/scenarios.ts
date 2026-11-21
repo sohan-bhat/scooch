@@ -91,6 +91,7 @@ type Scenario = {
   hideIcons?: boolean;
   none?: boolean;
   failure?: string;
+  failedWith?: View['failedWith'];
 };
 
 export const scenarios: Record<string, Scenario> = {
@@ -122,7 +123,7 @@ export const scenarios: Record<string, Scenario> = {
   'gnome-icons': { desk: gnome, problem: { kind: 'gnome', icons: 'off' }, hideIcons: true },
   'gnome-missing': { desk: gnome, problem: { kind: 'gnome', icons: 'missing' }, hideIcons: true },
   'gnome-blocked': { desk: gnome, problem: { kind: 'gnome', icons: 'blocked' }, hideIcons: true },
-  'mac-move-failed': { desk: mac, phase: 'off', problem: { kind: 'move' }, failure: 'move' },
+  'mac-move-failed': { desk: mac, phase: 'off', problem: { kind: 'move' }, failure: 'move', failedWith: 'fix' },
   'gnome-color': { desk: gnome, problem: { kind: 'wallpaper', what: 'color' }, blank: true },
   'linux-unknown': { desk: gnome, phase: 'off', problem: { kind: 'unknown', desktop: 'Budgie' }, none: true },
   'xfce-on': { desk: xfce, xfce: true },
@@ -155,6 +156,7 @@ export function build(name: string): View {
     reduceMotion: scenario.reduced ?? false,
     textScale: scenario.textScale ?? 1,
     failure: scenario.failure ?? null,
+    failedWith: scenario.failedWith ?? (scenario.failure ? 'other' : null),
   };
 }
 

@@ -9,6 +9,9 @@ const KINDS = /\.(jpe?g|png|heic|heif|webp|tiff?|bmp|avif)$/i;
 const listeners = new Set<() => void>();
 let busy: Phase | null = null;
 let failure: string | null = null;
+let failedWith: View['failedWith'] = null;
+let failedOn: boolean | null = null;
+let lastOn: boolean | null = null;
 
 const shown = (path: string, thumb = false) => `${convertFileSrc(path, 'scooch')}${thumb ? '?thumb' : ''}`;
 
@@ -17,6 +20,12 @@ function tell() {
 }
 
 function shaped(raw: Facade): View {
+  if (failure && failedOn !== null && raw.on !== failedOn) {
+    failure = null;
+    failedWith = null;
+    failedOn = null;
+  }
+  lastOn = raw.on;
   return {
     system: raw.system,
     phase: busy ?? (raw.on ? 'on' : 'off'),
@@ -30,6 +39,7 @@ function shaped(raw: Facade): View {
     reduceMotion: raw.reduceMotion,
     textScale: raw.textScale,
     failure,
+    failedWith,
   };
 }
 
@@ -38,25 +48,29 @@ function sentence(error: unknown) {
   return text.trim() || null;
 }
 
-async function attempt(work: () => Promise<unknown>) {
+async function attempt(command: View['failedWith'], work: () => Promise<unknown>) {
   try {
     await work();
     failure = null;
+    failedWith = null;
+    failedOn = null;
   } catch (error) {
     failure = sentence(error);
+    failedWith = command;
+    failedOn = lastOn;
   }
 }
 
-async function during(phase: Phase, work: () => Promise<unknown>) {
+async function during(phase: Phase, command: View['failedWith'], work: () => Promise<unknown>) {
   busy = phase;
   tell();
-  await attempt(work);
+  await attempt(command, work);
   busy = null;
   tell();
 }
 
-async function quietly(work: () => Promise<unknown>) {
-  await attempt(work);
+async function quietly(command: View['failedWith'], work: () => Promise<unknown>) {
+  await attempt(command, work);
   tell();
 }
 
@@ -68,12 +82,12 @@ export const tauri: Backend = {
     const paths = await invoke<string[]>('pictures');
     return paths.map((path) => ({ path, thumb: shown(path, true) }));
   },
-  turnOn: () => during('starting', () => invoke('turn_on')),
-  turnOff: () => during('stopping', () => invoke('turn_off')),
-  set: (name: SwitchName, on: boolean) => quietly(() => invoke('set', { switch: name, on })),
-  use: (path: string) => quietly(() => invoke('use_picture', { path })),
+  turnOn: () => during('starting', 'turn-on', () => invoke('turn_on')),
+  turnOff: () => during('stopping', 'turn-off', () => invoke('turn_off')),
+  set: (name: SwitchName, on: boolean) => quietly('other', () => invoke('set', { switch: name, on })),
+  use: (path: string) => quietly('other', () => invoke('use_picture', { path })),
   pick: () => invoke<string | null>('pick'),
-  fix: (problem: Problem) => (problem.kind === 'stopped' || problem.kind === 'other' ? during('starting', () => invoke('fix')) : quietly(() => invoke('fix'))),
+  fix: (problem: Problem) => (problem.kind === 'stopped' || problem.kind === 'other' ? during('starting', 'fix', () => invoke('fix')) : quietly('fix', () => invoke('fix'))),
   firstOpen: () => invoke<boolean>('first_open'),
   subscribe(listener) {
     listeners.add(listener);
