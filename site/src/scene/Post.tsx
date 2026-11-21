@@ -81,7 +81,6 @@ function patchTargets(pass: object) {
 }
 
 const crispable = new WeakSet<SMAAEffect>();
-const grains = new Set<NoiseEffect>();
 
 function crispen(effect: SMAAEffect) {
   if (crispable.has(effect)) return;
@@ -109,9 +108,7 @@ function Effects({ full }: { full: boolean }) {
     if (effect) crispen(effect);
   }, []);
   const noise = useCallback((effect: NoiseEffect | null) => {
-    if (!effect) return;
-    effect.blendMode.opacity.value = quality.grainOpacity();
-    grains.add(effect);
+    if (effect) effect.blendMode.opacity.value = quality.grainOpacity();
   }, []);
   return (
     <>
@@ -836,8 +833,6 @@ export function Post({ phone }: { phone: boolean }) {
   );
 
   useFrame((state, delta) => {
-    const grain = live.crisp ? 0 : quality.grainOpacity();
-    for (const effect of grains) if (effect.blendMode.opacity.value !== grain) effect.blendMode.opacity.value = grain;
     resized(quality.composer);
     resized(quality.fastComposer);
     const now = performance.now();

@@ -171,6 +171,16 @@ function slotOf(id: string) {
   return slot;
 }
 
+function grain(on: boolean) {
+  for (const composer of [quality.nativeComposer, quality.composer, quality.fastComposer]) {
+    for (const pass of composer?.passes ?? []) {
+      for (const effect of (pass as unknown as { effects?: { name: string; blendMode: { opacity: { value: number } } }[] }).effects ?? []) {
+        if (effect.name === 'NoiseEffect') effect.blendMode.opacity.value = on ? quality.grainOpacity() : 0;
+      }
+    }
+  }
+}
+
 function neededRows() {
   const frame = screenFrame();
   const aspect = frame ? frame.width / frame.height : 4 / 3;
@@ -398,7 +408,7 @@ function finish() {
     if (saved.scale) (screen.uFrameScale.value as Vector2).copy(saved.scale);
     if (saved.grid) (screen.uGrid.value as Vector2).copy(saved.grid);
     screen.uFromMix.value = 0;
-    screen.uSharpIcons.value = 0;
+    screen.uSharp.value = 0;
     if (saved.atlas) screen.uAtlas.value = saved.atlas;
   }
   saved.atlas = null;
@@ -409,6 +419,7 @@ function finish() {
   fade.mix = 0;
   fade.target = 0;
   live.crisp = false;
+  grain(true);
   if (held.active) end();
   if (view.main) hooks.frame = view.main;
   for (const slot of [...slots.values()]) {
@@ -469,7 +480,8 @@ export function openDemo() {
   window.addEventListener('scroll', onScroll, { passive: true });
   window.addEventListener('keydown', onKey);
   slotOf(demo.picture);
-  screen.uSharpIcons.value = 1;
+  screen.uSharp.value = 1;
+  grain(false);
   void sharpenAtlas(screen);
   window.dispatchEvent(new Event('scooch:demo'));
   emit();
