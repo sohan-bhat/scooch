@@ -76,7 +76,7 @@ export default function DemoPanel() {
           }}
           type="button"
           aria-label={names[i] ?? `Icon ${i + 1}`}
-          className="demo-icon absolute top-0 left-0 cursor-grab touch-none rounded-field outline-hidden focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-pad active:cursor-grabbing"
+          className="demo-icon absolute top-0 left-0 cursor-grab touch-none rounded-field focus-visible:outline-2 focus-visible:outline-pad active:cursor-grabbing"
           onPointerDown={(event) => {
             const camera = demo.camera;
             if (!camera) return;
