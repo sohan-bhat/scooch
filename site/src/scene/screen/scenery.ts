@@ -307,6 +307,9 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
   let custom = false;
   let generation = 0;
   let plain: { texture: Texture; lod: number } | null = null;
+  let pinned: number | null = null;
+  let holds = 0;
+  let holding: { a: Look; b: Look; s: number; constants: Float32Array | null; version: number } | null = null;
   const keys = ['unit', 'ramp_low', 'ramp_high', 'reach', 'grain_amount', 'grain_scale', 'grain_floor', 'spare', 'core_lift', 'core_drop', 'volume_lit', 'volume_dark', 'shadow_at', 'rim_at', 'belly_at'] as const;
   const defaults = Object.fromEntries(keys.map((key) => [key, uniforms[key].value]));
 
@@ -319,12 +322,59 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
     uniforms[`ramps_${suffix}`].value = look.ramps;
   };
 
+  const reset = () => {
+    if (!custom) return;
+    custom = false;
+    for (const key of keys) (uniforms[key] as { value: unknown }).value = defaults[key];
+  };
+
+  const apply = (constants: Float32Array) => {
+    custom = true;
+    uniforms.unit.value = constants[7];
+    uniforms.ramp_low.value = constants[8];
+    uniforms.ramp_high.value = constants[9];
+    uniforms.reach.value = constants[10];
+    uniforms.grain_amount.value = constants[11];
+    uniforms.grain_scale.value = constants[12];
+    uniforms.grain_floor.value = constants[13];
+    uniforms.spare.value = constants[19];
+    uniforms.core_lift.value = constants[15];
+    uniforms.core_drop.value = constants[16];
+    uniforms.volume_lit.value = constants[17];
+    uniforms.volume_dark.value = constants[18];
+    uniforms.shadow_at.value = [constants[20], constants[21]];
+    uniforms.rim_at.value = [constants[22], constants[23]];
+    uniforms.belly_at.value = [constants[24], constants[25]];
+  };
+
   const select = (place: number) => {
     const count = scenery.states.length;
     const clamped = Math.min(Math.max(place, 0), count - 1);
     const from = Math.min(Math.floor(clamped), Math.max(count - 2, 0));
     const to = Math.min(from + 1, count - 1);
     return { from, to, s: count > 1 ? clamped - from : 0 };
+  };
+
+  const keyOf = (place: number) => {
+    if (holding) return `held:${holding.version}`;
+    const { from, to, s } = select(pinned ?? place);
+    return `${from}:${to}:${s.toFixed(4)}:${scenery.states.length}`;
+  };
+
+  const bindFor = (place: number) => {
+    if (holding) {
+      bind('a', holding.a);
+      bind('b', holding.b);
+      uniforms.s.value = holding.s;
+      if (holding.constants) apply(holding.constants);
+      else reset();
+      return;
+    }
+    reset();
+    const { from, to, s } = select(pinned ?? place);
+    bind('a', scenery.states[from]);
+    bind('b', scenery.states[to]);
+    uniforms.s.value = s;
   };
 
   const textures = () => {
@@ -356,15 +406,8 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       if (large) gl.initRenderTarget(large);
     },
     renderRows(gl: WebGLRenderer, place: number, from: number, rows: number) {
-      if (custom) {
-        custom = false;
-        for (const key of keys) (uniforms[key] as { value: unknown }).value = defaults[key];
-      }
       const into = large ?? target;
-      const { from: a, to: b, s } = select(place);
-      bind('a', scenery.states[a]);
-      bind('b', scenery.states[b]);
-      uniforms.s.value = s;
+      bindFor(place);
       const done = from + rows >= into.height;
       const size = uniforms.view.value;
       uniforms.view.value = [into.width, into.height];
@@ -378,7 +421,7 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       into.scissorTest = false;
       into.texture.generateMipmaps = true;
       uniforms.view.value = size;
-      if (done && !large) last = `${a}:${b}:${s.toFixed(4)}:${scenery.states.length}:full`;
+      if (done && !large) last = `${keyOf(place)}:full`;
       return done;
     },
     sharpUrl() {
@@ -452,17 +495,10 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       return pending;
     },
     render(gl: WebGLRenderer, place: number, part?: { width: number; height: number }) {
-      if (custom) {
-        custom = false;
-        for (const key of keys) (uniforms[key] as { value: unknown }).value = defaults[key];
-      }
-      const { from, to, s } = select(place);
-      const key = `${from}:${to}:${s.toFixed(4)}:${scenery.states.length}:${part ? `${part.width}x${part.height}` : 'full'}`;
+      const key = `${keyOf(place)}:${part ? `${part.width}x${part.height}` : 'full'}`;
       if (key === last) return false;
       last = key;
-      bind('a', scenery.states[from]);
-      bind('b', scenery.states[to]);
-      uniforms.s.value = s;
+      bindFor(place);
       const full = uniforms.view.value;
       if (part) {
         target.viewport.set(0, 0, part.width, part.height);
@@ -479,8 +515,16 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
       }
       return true;
     },
+    hold(next: { a: Look; b: Look; s: number; constants: Float32Array | null } | null) {
+      holds += 1;
+      holding = next ? { ...next, version: holds } : null;
+    },
+    pin(place: number | null) {
+      pinned = place;
+    },
     async renderIdle(gl: WebGLRenderer, place: number, pixels = 120000) {
-      const { from, to, s } = select(place);
+      reset();
+      const { from, to, s } = select(pinned ?? place);
       last = `${from}:${to}:${s.toFixed(4)}:${scenery.states.length}`;
       const rows = Math.max(8, Math.floor(pixels / target.width));
       for (let y = 0; y < target.height; y += rows) {
@@ -497,44 +541,6 @@ export function createFrame(scenery: Scenery, view?: { width: number; height: nu
         changed();
       }
       target.scissorTest = false;
-    },
-    renderLooks(gl: WebGLRenderer, a: Look, b: Look, s: number, constants: Float32Array | null, part?: { width: number; height: number }) {
-      last = '';
-      bind('a', a);
-      bind('b', b);
-      uniforms.s.value = s;
-      if (constants) {
-        custom = true;
-        uniforms.unit.value = constants[7];
-        uniforms.ramp_low.value = constants[8];
-        uniforms.ramp_high.value = constants[9];
-        uniforms.reach.value = constants[10];
-        uniforms.grain_amount.value = constants[11];
-        uniforms.grain_scale.value = constants[12];
-        uniforms.grain_floor.value = constants[13];
-        uniforms.spare.value = constants[19];
-        uniforms.core_lift.value = constants[15];
-        uniforms.core_drop.value = constants[16];
-        uniforms.volume_lit.value = constants[17];
-        uniforms.volume_dark.value = constants[18];
-        uniforms.shadow_at.value = [constants[20], constants[21]];
-        uniforms.rim_at.value = [constants[22], constants[23]];
-        uniforms.belly_at.value = [constants[24], constants[25]];
-      }
-      const full = uniforms.view.value;
-      if (part) {
-        target.viewport.set(0, 0, part.width, part.height);
-        uniforms.view.value = [part.width, part.height];
-      }
-      const previous = gl.getRenderTarget();
-      gl.setRenderTarget(target);
-      gl.render(scene, camera);
-      gl.setRenderTarget(previous);
-      changed();
-      if (part) {
-        target.viewport.set(0, 0, target.width, target.height);
-        uniforms.view.value = full;
-      }
     },
     states: scenery.states,
     scenery,

@@ -28,6 +28,7 @@ export const held = {
 };
 
 const OPENING = 300;
+const shown = { frame: null as Frame | null, a: null as Look | null, b: null as Look | null, s: -1, constants: null as Float32Array | null };
 
 export function begin(frame: Frame, place: number) {
   if (held.active && held.frame === frame) return;
@@ -125,11 +126,19 @@ export function step(delta: number) {
 
 export function draw(gl: WebGLRenderer, part?: { width: number; height: number }) {
   if (!held.active || !held.frame || !held.a) return false;
-  held.frame.renderLooks(gl, held.a, held.b ?? held.a, held.b ? held.s : 0, held.constants, part);
+  const b = held.b ?? held.a;
+  const s = held.b ? held.s : 0;
+  if (shown.frame !== held.frame || shown.a !== held.a || shown.b !== b || shown.s !== s || shown.constants !== held.constants) {
+    Object.assign(shown, { frame: held.frame, a: held.a, b, s, constants: held.constants });
+    held.frame.hold({ a: held.a, b, s, constants: held.constants });
+  }
+  held.frame.render(gl, 0, part);
   return true;
 }
 
 export function end() {
+  held.frame?.hold(null);
+  Object.assign(shown, { frame: null, a: null, b: null, s: -1, constants: null });
   for (const look of held.owned) disposeLook(look);
   held.owned.clear();
   held.active = false;
