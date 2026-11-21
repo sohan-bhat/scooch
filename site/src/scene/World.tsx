@@ -203,6 +203,8 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       hooks.origin = screens.crt.uniforms.uOrigin.value;
       hooks.extent = screens.crt.uniforms.uExtent.value;
       hooks.place = () => story.place;
+      hooks.laptop = found.laptop.mesh;
+      hooks.screen = { lcd: screens.lcd.uniforms, crt: screens.crt.uniforms };
       found.television.mesh.castShadow = false;
       setBuilt({
         laptop: glassOf(found.laptop.mesh, found.laptop.frame, laptop.screen),
@@ -668,6 +670,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const lookX = pointer.x * motion + live.look.x;
     const lookY = pointer.y * motion + live.look.y;
     rig.apply(camera as PerspectiveCamera, story.camera, time, lookX, lookY, Math.min(delta, 0.1), size.width, size.height, idle, runtime.frozen !== null);
+    hooks.view(camera as PerspectiveCamera);
     runtime.settled = rig.settled(lookX, lookY);
 
     const away = 1 - story.inside;
@@ -782,6 +785,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
 
     scratch.focus.copy(built.laptop.center).lerp(built.television.center, story.focus);
     quality.focus(scratch.focus, camera.position, 1, scratch.focus, scratch.focus, story.dof);
+    hooks.after();
   });
 
   return (

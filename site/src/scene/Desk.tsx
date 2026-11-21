@@ -475,6 +475,7 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
     if (pivot) pivot.rotation.x = LAPTOP.lid;
     makeLive(lamp.scene, 'lamp');
     makeLive(television.scene, 'tv');
+    makeLive(laptop.scene, 'laptop');
     obstacles.push(lamp.scene, television.scene, laptop.scene);
   }, [desk, laptop, lamp, television]);
 

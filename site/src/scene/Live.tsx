@@ -299,6 +299,10 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       if (press.moved) return;
       const act = actions();
       hideHint();
+      if (id === 'laptop') {
+        void import('./demo').then((demo) => demo.openDemo());
+        return;
+      }
       if (id === 'lamp') act.lamp();
       else if (id === 'tv') press.region === 'power' ? act.power() : act.channel();
       else if (id === 'cassette') act.tape();
@@ -378,8 +382,8 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
       hint.done = hinted() || runtime.still >= 0;
       hint.element = document.querySelector<HTMLElement>('[data-overlay="hint"]');
     }
-    if (hint.readyAt && !hint.done && quiet && now - Math.max(live.lastScroll, hint.readyAt) > 2000 && things.lamp && hint.element) {
-      things.lamp.getWorldPosition(hint.point).project(camera);
+    if (hint.readyAt && !hint.done && quiet && now - Math.max(live.lastScroll, hint.readyAt) > 2000 && things.laptop && hint.element) {
+      things.laptop.getWorldPosition(hint.point).project(camera);
       if (Math.abs(hint.point.x) < 0.85 && Math.abs(hint.point.y) < 0.85 && hint.point.z < 1) {
         hint.done = true;
         markHinted();

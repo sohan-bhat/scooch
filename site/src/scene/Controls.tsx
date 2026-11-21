@@ -31,6 +31,7 @@ export default function Controls() {
   };
 
   const list = [
+    { key: 'demo', label: words.demo, run: () => void import('./demo').then((demo) => demo.openDemo()) },
     { key: 'lamp', label: state.lamp ? words.lampOff : words.lampOn, run: press('lamp', 'lamp') },
     { key: 'channel', label: words.channel, run: press('channel', 'channel'), off: !state.power },
     { key: 'power', label: state.power ? words.tvOff : words.tvOn, run: press('power', 'power') },

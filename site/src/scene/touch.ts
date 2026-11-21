@@ -1,4 +1,4 @@
-import { Color, Mesh, type Material, type MeshStandardMaterial, type Object3D, type Vector2, type Vector4, type WebGLRenderer } from 'three';
+import { Color, Mesh, type Material, type MeshStandardMaterial, type Object3D, type PerspectiveCamera, type Vector2, type Vector4, type WebGLRenderer } from 'three';
 import type { Frame } from './screen/scenery';
 
 export const things: Record<string, Object3D | undefined> = {};
@@ -15,6 +15,10 @@ export const hooks = {
   origin: null as Vector2 | null,
   extent: null as Vector2 | null,
   place: () => 0,
+  laptop: null as Mesh | null,
+  screen: null as null | Record<'lcd' | 'crt', Record<string, { value: unknown }>>,
+  view: (_camera: PerspectiveCamera) => {},
+  after: () => {},
 };
 
 export const live = {
