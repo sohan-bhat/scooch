@@ -98,7 +98,9 @@ runs:
     - name: Window check
       shell: bash
       working-directory: crates/scooch-app/ui
-      run: npm run typecheck
+      run: |
+        npm run typecheck
+        node --experimental-strip-types --test tests/choice.test.ts
 
     - name: Shell clippy
       if: inputs.clippy == 'true'
