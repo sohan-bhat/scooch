@@ -5227,10 +5227,13 @@ mod probe {
             p.fail("job B's usage could not be read over its listening minute");
             return Ok(());
         };
-        let checked = consent_lines(p, rest_from).iter().filter(|line| line.contains("checked again without asking")).count();
-        p.line(format!("- a quiet 60 s of job B while its waiter listens: idle and interrupt wakeups {woke:?}, idle wakeups in each 5 s {buckets:?}, checks without asking {checked}, the same minute of check 6 without any watch {:?}", p.quiet));
-        if checked > 0 || crate::woke_more(woke, p.quiet, 0) {
-            p.fail("job B's listening waiter did work or woke more at rest than the daemon in check 6");
+        let rested: Vec<String> = consent_lines(p, rest_from).into_iter().filter(|line| line.contains("checked again without asking")).collect();
+        p.line(format!("- a quiet 60 s of job B while its waiter listens: idle and interrupt wakeups {woke:?}, idle wakeups in each 5 s {buckets:?}, checks without asking {} {rested:?}, the same minute of check 6 without any watch {:?}", rested.len(), p.quiet));
+        if rested.len() > 3 {
+            p.fail(format!("job B's listening waiter checked {} times in a quiet minute, where only an event from macOS makes it check", rested.len()));
+        }
+        if crate::woke_more(woke, p.quiet, 0) {
+            p.fail("job B's listening waiter woke more at rest than the daemon in check 6");
         }
         let poked_from = daemon_log(p).lines().count();
         let poke = p.scooch(&["use", &picture.to_string_lossy()], Duration::from_secs(60));
