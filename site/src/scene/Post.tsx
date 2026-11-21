@@ -586,7 +586,6 @@ export function Post({ phone }: { phone: boolean }) {
         (hold ? !still.lost : still.ready && !still.off) &&
         !moving &&
         !live.pressing &&
-        !live.tape &&
         runtime.settled &&
         !document.hidden &&
         readyAt.current > 0 &&

@@ -1,10 +1,9 @@
 import { ArrowUpRight } from '@phosphor-icons/react/dist/ssr';
 import { Footer } from '@/components/Footer';
 import { Header } from '@/components/Header';
-import content from '@/content.json';
+import sources from './content.json';
 
 export function SourcesPage() {
-  const { sources } = content;
   return (
     <>
       <Header />
@@ -33,7 +32,15 @@ export function SourcesPage() {
                   </th>
                   <td className="px-5 py-4 text-plastic">{row.use}</td>
                   <td className="px-5 py-4 text-plastic">{row.author}</td>
-                  <td className="px-5 py-4 text-plastic">{row.license}</td>
+                  <td className="px-5 py-4 text-plastic">
+                    {'licenseUrl' in row ? (
+                      <a href={row.licenseUrl} className="link-quiet">
+                        {row.license}
+                      </a>
+                    ) : (
+                      row.license
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

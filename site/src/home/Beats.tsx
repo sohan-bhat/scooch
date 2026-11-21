@@ -61,7 +61,7 @@ export function Beats({ refs }: { refs: React.RefObject<HTMLElement[]> }) {
         <div ref={keep(1)} data-overlay="end" className={`${overlay} wide:top-1/2 wide:right-0 wide:w-[min(40vw,36rem)] wide:-translate-y-1/2`}>
           <Closing />
         </div>
-        <p data-overlay="hint" aria-live="polite" className="hint absolute bottom-[max(4svh,1.25rem)] left-1/2 w-max -translate-x-1/2 text-(length:--text-support) text-plastic opacity-0" />
+        <p data-overlay="hint" aria-live="polite" className="hint absolute bottom-[max(4svh,1.25rem)] left-1/2 w-max -translate-x-1/2 text-(length:--text-support) text-plastic opacity-0 tall:top-21 tall:bottom-auto" />
       </div>
     </div>
   );
