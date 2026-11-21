@@ -278,7 +278,7 @@ Line "- the Desktop files of the Flip case are removed, $(@(Get-ChildItem $desk 
 
 Line ''
 Line '#### Turn off while another program holds the saved state'
-$offLine = (Get-Content -Raw 'crates/scooch-app/ui/src/copy/en.json' | ConvertFrom-Json).failure.'turn-off'
+$offLine = (Get-Content -Raw 'crates/scooch-app/ui/src/copy/en.json' | ConvertFrom-Json).failure.held
 function Window-Buttons {
     $window = Find-Window
     if (-not $window) { return @() }
