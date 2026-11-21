@@ -60,7 +60,7 @@ on run argv
     set everything to entire contents of window 1 of scoochApp
     repeat with element in everything
       try
-        if role of element is in {"AXButton", "AXCheckBox"} then
+        if role of element is in {"AXButton", "AXCheckBox", "AXRadioButton"} then
           set seen to ""
           try
             set seen to seen & (name of element as text)
@@ -82,6 +82,27 @@ on run argv
   return "no button " & wanted
 end run
 APPLESCRIPT
+}
+
+seen_texts() {
+  local folder
+  folder=$(mktemp -d)
+  cat >"$folder/read.swift" <<'SWIFT'
+import AppKit
+import Vision
+
+let url = URL(fileURLWithPath: CommandLine.arguments[1])
+guard let image = NSImage(contentsOf: url), let picture = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { exit(1) }
+let request = VNRecognizeTextRequest()
+request.recognitionLevel = .accurate
+request.usesLanguageCorrection = false
+try VNImageRequestHandler(cgImage: picture).perform([request])
+for found in request.results ?? [] {
+    if let best = found.topCandidates(1).first { print(best.string) }
+}
+SWIFT
+  limited 180 swift "$folder/read.swift" "$1" 2>/dev/null
+  rm -rf "$folder"
 }
 
 wait_for() {
@@ -316,6 +337,7 @@ stand_in
 expect "Turn on turned Scooch on again" state_on
 wait_for 40 rendered >/dev/null
 sleep 3
+. "$(dirname "$0")/presses-macos.sh"
 line "- wallpaper before the Trash $(wallpaper)"
 line "- daemon log $(grep 'program watched' "$out/watch.log" | tail -1)"
 line "- closing the window $(limited 30 osascript -e 'tell application "System Events" to tell (first process whose bundle identifier is "me.sohanbhat.scooch.window") to click (first button of window 1 whose subrole is "AXCloseButton")' 2>&1)"
@@ -381,26 +403,6 @@ end tell
 set AppleScript's text item delimiters to linefeed
 return texts as text
 APPLESCRIPT
-}
-seen_texts() {
-  local folder
-  folder=$(mktemp -d)
-  cat >"$folder/read.swift" <<'SWIFT'
-import AppKit
-import Vision
-
-let url = URL(fileURLWithPath: CommandLine.arguments[1])
-guard let image = NSImage(contentsOf: url), let picture = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { exit(1) }
-let request = VNRecognizeTextRequest()
-request.recognitionLevel = .accurate
-request.usesLanguageCorrection = false
-try VNImageRequestHandler(cgImage: picture).perform([request])
-for found in request.results ?? [] {
-    if let best = found.topCandidates(1).first { print(best.string) }
-}
-SWIFT
-  limited 180 swift "$folder/read.swift" "$1" 2>/dev/null
-  rm -rf "$folder"
 }
 press_move() {
   before=$(pgrep -f "MacOS/scooch-app" | head -1)
