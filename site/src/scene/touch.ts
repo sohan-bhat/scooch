@@ -34,8 +34,9 @@ export const live = {
   noiseAt: -1e9,
   ringUntil: 0,
   stapleAt: -1e9,
-  sipAt: -1e9,
+  pourUntil: 0,
   juice: 4,
+  slosh: 0,
   glass: { x: 0, z: 0, ready: false },
   look: { x: 0, y: 0, tx: 0, ty: 0 },
   sway: { x: 0, z: 0, vx: 0, vz: 0 },
@@ -56,7 +57,8 @@ export function animating(now: number) {
     now - live.noiseAt < 380 ||
     now - live.onAt < 1100 ||
     now - live.offAt < 700 ||
-    now - live.sipAt < 1600 ||
+    now < live.pourUntil ||
+    live.slosh > 0.002 ||
     now - live.stapleAt < 500 ||
     now < live.fadeUntil
   );
