@@ -9,7 +9,7 @@ $pick = Join-Path $pics 'probe-pick.jpg'
 $notes = Join-Path $pics 'probe-notes.jpg'
 $flip = Join-Path $pics 'probe-flip.png'
 Copy-Item (Join-Path $photos 'lone-canoe.jpg') $canoe -Force
-Copy-Item (Join-Path $photos 'seagull-sky.jpg') $sky -Force
+Copy-Item (Join-Path $photos 'balloon-sky.jpg') $sky -Force
 Copy-Item (Join-Path $photos 'fox.jpg') $pick -Force
 Set-Content -Path $notes -Value 'these are words and no picture'
 Copy-Item (Join-Path $PSScriptRoot 'flip-left.png') $flip -Force
@@ -23,7 +23,7 @@ $app = Get-ChildItem $folder -Filter 'scooch-app.exe' | Select-Object -First 1
 function Saved { Get-Content -Raw "$data\state.json" | ConvertFrom-Json }
 function Plain([string]$Path) { if (-not $Path) { return '' }; return $Path -replace '^\\\\\?\\', '' }
 function Sources { @((Saved).screens.PSObject.Properties.Value | ForEach-Object { Plain $_.source } | Sort-Object -Unique) }
-function Names([string]$Path) { $found = Sources; return ($found.Count -eq 1) -and ($found[0] -ieq $Path) }
+function Names([string]$Path) { $found = @(Sources); return ($found.Count -eq 1) -and ($found[0] -ieq $Path) }
 function Digest { $path = [Desk]::Wallpaper(); if ($path -and (Test-Path $path)) { return (Get-FileHash -Algorithm MD5 -Path $path).Hash } else { return '' } }
 function Ours { $path = [Desk]::Wallpaper(); return [bool]$path -and ($path -like "$data\out\*") }
 function Fresh-From([string]$Path, [string]$Before) { return (Names $Path) -and (Ours) -and ((Digest) -ne $Before) }
@@ -34,7 +34,23 @@ function Control([string]$Label) {
     $window = Find-Window
     if (-not $window) { return $null }
     $byName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $Label)
-    return $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $byName)
+    $all = @($window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byName))
+    foreach ($found in $all) {
+        $pattern = $null
+        if ($found.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$pattern) -or $found.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) { return $found }
+    }
+    if ($all.Count -gt 0) { return $all[0] }
+    return $null
+}
+function Page-Text {
+    $window = Find-Window
+    if (-not $window) { return '' }
+    $byType = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
+    foreach ($page in @($window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byType))) {
+        $text = $null
+        if ($page.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$text)) { return $text.DocumentRange.GetText(-1) }
+    }
+    return ''
 }
 function Chosen([string]$Label) {
     $found = Control $Label
@@ -55,6 +71,11 @@ function Click-Control([string]$Label) {
     Start-Sleep -Milliseconds 400
     $found = Control $Label
     if (-not $found) { return "no control named $Label" }
+    $legacy = $null
+    if ($found.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacy)) {
+        $legacy.DoDefaultAction()
+        return "pressed $Label through its default action"
+    }
     $rect = $found.Current.BoundingRectangle
     if ($rect.Width -le 0) { return "$Label has no place on the screen" }
     [Desk]::Click([int]($rect.X + $rect.Width / 2), [int]($rect.Y + $rect.Height / 2))
@@ -160,14 +181,19 @@ $shownBefore = [Desk]::Wallpaper()
 $picked = Pick-File $notes
 Line "- $picked"
 Start-Sleep -Seconds 4
-$sentence = [bool](Control $unreadable)
+$page = Page-Text
+$sentence = $page.Contains($unreadable) -or [bool](Control $unreadable)
+Line "- the page text reads $(($page -replace '\s+', ' ').Trim())"
 Line "- the window shows the sentence for an unreadable picture $sentence, the copy file says '$unreadable', the wallpaper is $([Desk]::Wallpaper())"
 Expect "the file window also took a file that is no picture" ($picked -like '*took*and closed')
 Expect "a picked file that is no picture shows the window's sentence for it" $sentence
 Expect "a picked file that is no picture leaves the desktop and the saved picture as they were" (([Desk]::Wallpaper() -ieq $shownBefore) -and ((Digest) -eq $before) -and (Names $pick))
 
 Line ''
-Line '#### Clouds on a sky photo'
+Line '#### Clouds on a sky photo, with the icon column full'
+$desk = [Environment]::GetFolderPath('Desktop')
+1..40 | ForEach-Object { Set-Content -Path (Join-Path $desk ('probe-icon-{0:d2}.txt' -f $_)) -Value '' }
+Start-Sleep -Seconds 6
 $before = Digest
 Line "- $(Click-Control 'probe sky')"
 Wait-For 40 { Fresh-From $sky $before } | Out-Null
@@ -220,9 +246,6 @@ foreach ($pair in @(@('Slide', 'glide'), @('Quick drop', 'predict'))) {
 
 Line ''
 Line '#### Flip with the icon column full'
-$desk = [Environment]::GetFolderPath('Desktop')
-1..40 | ForEach-Object { Set-Content -Path (Join-Path $desk ('probe-icon-{0:d2}.txt' -f $_)) -Value '' }
-Start-Sleep -Seconds 6
 & $scooch use $flip *> (Join-Path $Out 'flip-use.txt')
 function Helps { (Names $flip) -and (Ours) -and (Every-Screen { param($entry) [bool]$entry.flip_helps }) -and ((Status-Text) -like '*Run scooch flip*') }
 Wait-For 60 { Helps } | Out-Null
