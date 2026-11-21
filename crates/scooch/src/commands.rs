@@ -1509,6 +1509,28 @@ mod tests {
         assert!(store.load().screens.is_empty() && !store.out().exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_off_whose_save_failed_after_the_picture_came_back_ends_at_the_next_off() {
+        use std::os::unix::fs::PermissionsExt;
+        let (fake, store, default, chosen) = desk("halfoff");
+        turned_on(&fake, &store, &chosen);
+        let output = shown_output(&fake, &store);
+        std::fs::set_permissions(&store.root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = wind_down(fake.as_ref(), &store);
+        std::fs::set_permissions(&store.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = format!("{:#}", failed.unwrap_err());
+        assert!(error.contains("so check that its folder can be written"), "{error}");
+        assert_eq!(fake.showing("main"), default);
+        let half = store.load();
+        assert!(half.on && half.screens.contains_key("main"), "{half:?}");
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(1, 0, 0, 0, 0)));
+        let ended = store.load();
+        assert!(!ended.on && !ended.restoring && ended.screens.is_empty(), "{ended:?}");
+        assert_eq!(fake.showing("main"), default);
+        assert!(!output.exists());
+    }
+
     #[test]
     fn off_changes_nothing_when_screens_cannot_be_read() {
         let (fake, store, _, _) = pair("blind");

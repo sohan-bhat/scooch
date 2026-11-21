@@ -1030,6 +1030,9 @@ impl Daemon {
         let fingerprint = scene::fingerprint(&entry.source, &scene, options);
         let showing = current.as_deref().is_some_and(|path| same(path, entry.shown()));
         if entry.fingerprint.as_deref() == Some(fingerprint.as_str()) && entry.shown().is_file() {
+            if entry.placed.is_none() && entry.placement.is_some() {
+                entry.placed = Some(solved_with(options));
+            }
             if entry.places.is_none() {
                 entry.places = Some(Places { width: scene.width, height: scene.height, icons: scene.icons.clone() });
             }
@@ -1070,6 +1073,7 @@ impl Daemon {
             Ok(made)
         })?;
         lap("analysis", &mut clock);
+        let placed = solved_with(options);
         let bare_off;
         let options = if self.bare(entry, &screen.id, (&source, key), (&mut image, &analysis, scene, options), &mut clock)? {
             bare_off = Options { scenery: scooch_core::Scenery::Off, ..*options };
@@ -1078,7 +1082,7 @@ impl Daemon {
             options
         };
         let wanted = crate::state::scenery_on(options) && !scene.icons.is_empty();
-        let previous = entry.placement.as_ref().filter(|_| wanted || !entry.painted);
+        let previous = entry.placement.as_ref().filter(|_| wanted || !entry.painted).filter(|_| entry.placed.as_deref().is_none_or(|before| before == placed));
         let placement = scooch_core::solve(&analysis, scene, options, previous);
         lap("solve", &mut clock);
         entry.flip_helps = flip_check(&analysis, scene, options, &placement);
@@ -1093,6 +1097,7 @@ impl Daemon {
             drop(image);
             let copied = showing_output && !entry.painted && entry.placement.as_ref().is_some_and(scene::is_identity);
             entry.placement = Some(placement);
+            entry.placed = Some(placed);
             if current.is_some_and(|path| same(path, &source)) {
                 entry.output = None;
             } else if !copied {
@@ -1111,6 +1116,7 @@ impl Daemon {
             if let Some(glider) = glider.as_deref_mut() {
                 glider.close_early_for(&screen.id);
             }
+            entry.placed = Some(placed);
             return Ok(Outcome::Kept);
         }
         let painted = wanted && scooch_core::scenery_active(&analysis, &placement, scene, options);
@@ -1249,6 +1255,7 @@ impl Daemon {
                 glider.close_early_for(&screen.id);
             }
             entry.placement = Some(placement);
+            entry.placed = Some(placed);
             entry.drawn = Some(drawn);
             return Ok(Outcome::Kept);
         }
@@ -1272,12 +1279,13 @@ impl Daemon {
         }
         let set = Instant::now();
         entry.placement = Some(placement);
+        entry.placed = Some(placed);
         entry.drawn = Some(drawn);
         lap("set", &mut clock);
         if let (Some(bundle), Some(output), Some(tables_key)) = (bundle, entry.output.clone(), tables_key) {
             let wanted = self.store.tables_for(&output, tables_key);
             let written = match &made {
-                Some(made) if *made != wanted => std::fs::rename(made, &wanted).map_err(anyhow::Error::from),
+                Some(made) if *made != wanted => crate::state::replace(made, &wanted).map_err(anyhow::Error::from),
                 Some(_) => Ok(()),
                 None => std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| crate::state::write_unsynced(&wanted, &bundle.tables_to_bytes())),
             };
@@ -1531,13 +1539,21 @@ pub fn flip_helps(hidden: f32, flipped: f32) -> bool {
     flipped < hidden / 2.0
 }
 
+pub fn solved_with(options: &Options) -> String {
+    format!("{}/{}/{}/{:?}", options.strength, options.max_zoom, options.mirror, options.scenery)
+}
+
+pub fn flip_hint(hidden: f32, flipped: &Placement, flipped_hidden: f32) -> bool {
+    flipped.mirrored && flip_helps(hidden, flipped_hidden)
+}
+
 fn flip_check(analysis: &Analysis, scene: &Scene, options: &Options, placement: &Placement) -> bool {
     let hidden = scooch_core::hidden_share(analysis, scene, placement);
     if !worth_flipping(hidden, options.mirror) {
         return false;
     }
     let flipped = scooch_core::solve(analysis, scene, &Options { mirror: true, ..*options }, None);
-    flip_helps(hidden, scooch_core::hidden_share(analysis, scene, &flipped))
+    flip_hint(hidden, &flipped, scooch_core::hidden_share(analysis, scene, &flipped))
 }
 
 pub fn encode(picture: &RgbImage, format: Format, profile: Option<&[u8]>, full_color: bool) -> Result<Vec<u8>> {
@@ -2621,6 +2637,84 @@ pub mod tests {
         fake.place(vec![subject()]);
         daemon.tick();
         assert!(!daemon.store.load().screens["main"].flip_helps);
+    }
+
+    fn flip_case(name: &str) -> (Daemon, Arc<Fake>) {
+        let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/flip-case");
+        let folder = scratch(name);
+        let picture = folder.join("picture.png");
+        std::fs::copy(data.join("picture.png"), &picture).unwrap();
+        let laid: Scene = serde_json::from_slice(&std::fs::read(data.join("scene.json")).unwrap()).unwrap();
+        let fake = Fake::new(vec![Screen { id: "main".into(), frame: Rect { x: 0.0, y: 0.0, w: laid.width as f32, h: laid.height as f32 }, scale: 1.0 }], &picture);
+        let mut daemon = Daemon::new(fake.clone(), Store::at(folder.join("data")));
+        daemon.grace = Duration::ZERO;
+        daemon.store.save(&State { on: true, options: Options { scenery: scooch_core::Scenery::Auto, ..Options::default() }, ..State::default() }).unwrap();
+        fake.place(laid.icons);
+        (daemon, fake)
+    }
+
+    fn switch(daemon: &Daemon, change: impl FnOnce(&mut Options)) {
+        let mut state = daemon.store.load();
+        change(&mut state.options);
+        daemon.store.save(&state).unwrap();
+    }
+
+    fn main_entry(daemon: &Daemon) -> Entry {
+        daemon.store.load().screens["main"].clone()
+    }
+
+    #[test]
+    fn where_the_flip_hint_shows_turning_flip_on_mirrors_the_picture() {
+        let (daemon, _fake) = flip_case("flip-case-on");
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let before = main_entry(&daemon);
+        assert!(before.flip_helps && !before.placement.as_ref().unwrap().mirrored, "{:?}", before.placement);
+        switch(&daemon, |options| options.mirror = true);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let after = main_entry(&daemon);
+        assert!(after.placement.as_ref().unwrap().mirrored && !after.flip_helps && after.output != before.output, "{:?}", after.placement);
+        switch(&daemon, |options| options.scenery = scooch_core::Scenery::Off);
+        let ticked = outcome(&daemon.tick());
+        assert_eq!(main_entry(&daemon).placed, Some(solved_with(&Options { mirror: true, ..Options::default() })));
+        assert!(ticked == Outcome::Rendered || (ticked == Outcome::Kept && !after.painted), "{ticked:?}");
+    }
+
+    #[test]
+    fn the_flip_hint_needs_the_solve_with_flip_allowed_to_end_mirrored() {
+        let mirrored = Placement { fx: Vec::new(), fy: Vec::new(), zoom: 1.0, mirrored: true, crop: [0.0; 4], shift: [0.0; 2] };
+        let straight = Placement { mirrored: false, ..mirrored.clone() };
+        assert!(flip_hint(0.4, &mirrored, 0.1));
+        assert!(!flip_hint(0.4, &straight, 0.1));
+        assert!(!flip_hint(0.4, &mirrored, 0.3));
+    }
+
+    #[test]
+    fn a_placement_is_kept_only_under_the_options_it_was_solved_with() {
+        let base = Options { scenery: scooch_core::Scenery::Auto, ..Options::default() };
+        let key = solved_with(&base);
+        for (what, changed) in [("flip", Options { mirror: true, ..base }), ("scenery", Options { scenery: scooch_core::Scenery::Off, ..base }), ("strength", Options { strength: 0.5, ..base }), ("zoom", Options { max_zoom: 1.1, ..base })] {
+            assert_ne!(solved_with(&changed), key, "{what}");
+        }
+        assert_eq!(solved_with(&Options { pads: 0.2, ..base }), key);
+    }
+
+    #[test]
+    fn a_state_saved_before_the_option_record_starts_without_drawing_and_then_follows_a_flip() {
+        let (daemon, fake) = flip_case("flip-case-old");
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let mut state = daemon.store.load();
+        state.screens.values_mut().for_each(|entry| entry.placed = None);
+        daemon.store.save(&state).unwrap();
+        assert!(!String::from_utf8(std::fs::read(daemon.store.state_file()).unwrap()).unwrap().contains("\"placed\""));
+        let (old, sets) = (main_entry(&daemon), fake.sets.load(Ordering::SeqCst));
+        let restarted = Daemon::new(fake.clone(), daemon.store.clone());
+        assert_eq!(outcome(&restarted.tick()), Outcome::Unchanged);
+        let now = main_entry(&restarted);
+        assert_eq!((fake.sets.load(Ordering::SeqCst), &now.output, &now.placement), (sets, &old.output, &old.placement));
+        assert!(now.placed.is_some());
+        switch(&restarted, |options| options.mirror = true);
+        assert_eq!(outcome(&restarted.tick()), Outcome::Rendered);
+        assert!(main_entry(&restarted).placement.unwrap().mirrored);
     }
 
     #[test]

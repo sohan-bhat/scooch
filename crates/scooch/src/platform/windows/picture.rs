@@ -92,12 +92,7 @@ pub fn keep(path: &Path) -> Result<PathBuf> {
         return Ok(target);
     }
     std::fs::create_dir_all(&folder).with_context(|| format!("Scooch could not make {}, so check the disk.", folder.display()))?;
-    let partial = target.with_extension("part");
-    let written = std::fs::write(&partial, &bytes).and_then(|()| std::fs::rename(&partial, &target));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&partial);
-    }
-    written.with_context(|| format!("Scooch could not copy {}, so check that the disk has room.", path.display()))?;
+    crate::state::write_atomic(&target, &bytes)?;
     Ok(target)
 }
 

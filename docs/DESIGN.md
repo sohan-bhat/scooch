@@ -68,7 +68,7 @@ cost = 4.0  * saliency hidden under icons, as a share of all saliency
 
 **Never worse.** The result never hides more of the subject than the home frame. With no icons, or icons that cover nothing important, the output equals the home frame, which is a normal fill wallpaper whenever the centered crop already shows the subject.
 
-**Stability.** The previous placement is kept unless the new one is clearly better, so a small nudge of one icon does not move the picture.
+**Stability.** The previous placement is kept unless the new one is clearly better, so a small nudge of one icon does not move the picture. The daemon keeps a placement only under the flip, scenery, strength and zoom settings it was solved with, which each screen entry records as `placed`, so a changed setting always gets a fresh solve. An entry saved before that record existed takes the settings of its next unchanged tick.
 
 A `Placement` is separable. `fx` and `fy` are tables of 257 values. `fx[k]` is the source x, from 0 to 1, shown at output x `k / 256`. Mirror and crop are folded into the tables. Both tables are monotone and smooth.
 
@@ -111,7 +111,7 @@ Once a release has shipped tables, any change in what a table holds must raise t
 
 ### What the engine cannot do
 
-A subject that touches the screen edge under the icons cannot slide clear on a screen with the same shape as the picture, because there is no picture beyond that edge to fill in. Flipping the picture clears it. Flipping is off by default, since a flipped photo of a known place or person looks wrong. `scooch flip` turns it on, and the status line says when it would help.
+A subject that touches the screen edge under the icons cannot slide clear on a screen with the same shape as the picture, because there is no picture beyond that edge to fill in. Flipping the picture clears it. Flipping is off by default, since a flipped photo of a known place or person looks wrong. `scooch flip` turns it on, and the status line says when it would help. It says so only when the solve with flipping allowed, and everything else as it is, ends flipped and hides less than half of what the picture on screen hides, which is exactly the picture turning flipping on then shows.
 
 ### What scenery cannot do
 
@@ -185,7 +185,7 @@ Plasma 5 under X11 keeps the new place of a dropped icon to itself for two secon
 
 Where scenery belongs is kept per screen in the cache as `<screen>.<key>.map`. A new session takes it, so the first move after the daemon freed its render data or started again does not work the map out again. The file carries the picture key, the source size, the scenery stamp, the map version and a checksum, and a map that does not fit is worked out again and replaces the file.
 
-State lives in the per-user data folder as `state.json`, with the source per screen, the last placement, and the wallpaper to restore. The file is written to a temporary name and renamed, so a crash never leaves half a file. A file that cannot be read is moved aside and never overwritten. One daemon runs at a time, held by a lock file.
+State lives in the per-user data folder as `state.json`, with the source per screen, the last placement, and the wallpaper to restore. The file is written to a temporary name and renamed, so a crash never leaves half a file. On Windows a rename or the opening of a lock that meets the file held by another program, such as a virus scanner that reads a file the moment it is written, is tried again ten times over half a second, and when it still fails the error says another program had the file open, apart from a full disk or a folder that cannot be written. Every file Scooch replaces goes this way. A file that cannot be read is moved aside and never overwritten. One daemon runs at a time, held by a lock file.
 
 **Icon places.** Each screen entry in `state.json` has `places`, the icons that the screen's last placement used. `width` and `height` give the screen's size in pixels, the size of the picture Scooch draws for it. `icons` lists one rectangle `{x, y, w, h}` per icon, in those pixels, measured from that screen's top left corner with y growing down. The field is written only by the save that follows a placement, so it shows the last tick that placed the screen, and a tick that moves nothing leaves it alone. It holds rectangles only, never names or paths. An entry saved by an older Scooch gets `places` from the first tick that reads its screen, and that tick saves once. Entries stay while a restore is pending, so a reader shows the places only while `on` is true.
 
