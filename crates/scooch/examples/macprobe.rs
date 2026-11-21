@@ -335,6 +335,7 @@ mod probe {
             "8 Second cycle" => 277_539,
             "9 Spaces" => 91_112,
             "9b Program moved" => 300_000,
+            "9c Stop" => 300_000,
             "10 Cleanup" => 308,
             _ => 600_000,
         };
@@ -529,6 +530,7 @@ mod probe {
         probe.section("8 Second cycle", second_cycle);
         probe.section("9 Spaces", spaces_check);
         probe.section("9b Program moved", program_moved);
+        probe.section("9c Stop", stop_check);
         probe.section("10 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -4823,6 +4825,210 @@ mod probe {
         if one.is_none() || two.is_none() || finished.is_none() || back.as_ref() != Some(&subject) {
             p.fail("the Spaces cycle did not finish");
         }
+        Ok(())
+    }
+
+    const STOP_LIMIT: Duration = Duration::from_secs(6);
+
+    fn pid_lives(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    fn where_threads_sit(text: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut thread: Option<(String, usize, Vec<String>)> = None;
+        let mut stack: Vec<(usize, String)> = Vec::new();
+        let finish = |thread: Option<(String, usize, Vec<String>)>, found: &mut Vec<String>| {
+            if let Some((name, _, path)) = thread {
+                if name.contains("main-thread") || name.contains("scooch") {
+                    found.push(format!("{name}: {}", path.join(" > ")));
+                }
+            }
+        };
+        for line in text.lines().skip_while(|line| !line.starts_with("Call graph:")).skip(1) {
+            if line.trim().is_empty() {
+                break;
+            }
+            let content = line.trim_start_matches([' ', '+', '!', ':', '|']);
+            let depth = line.len() - content.len();
+            let rest = content.split_once(' ').map_or(content, |(_, rest)| rest).trim();
+            if rest.starts_with("Thread_") {
+                finish(thread.take(), &mut found);
+                let name = rest.split_once(char::is_whitespace).map_or(rest, |(_, name)| name).split("  (").next().unwrap_or(rest).trim().to_string();
+                thread = Some((name, 0, Vec::new()));
+                stack.clear();
+                continue;
+            }
+            let frame = rest.split("  (in").next().unwrap_or(rest).trim().to_string();
+            while stack.last().is_some_and(|(at, _)| *at >= depth) {
+                stack.pop();
+            }
+            stack.push((depth, frame.clone()));
+            if let Some((_, deepest, path)) = thread.as_mut() {
+                if depth > *deepest {
+                    *deepest = depth;
+                    let ours: Vec<String> = stack.iter().filter(|(_, name)| name.contains("scooch") || name.contains("dispatch_sync") || name.contains("AE")).map(|(_, name)| name.chars().take(90).collect()).collect();
+                    *path = ours.into_iter().rev().take(6).collect::<Vec<_>>().into_iter().rev().chain(std::iter::once(frame)).collect();
+                }
+            }
+        }
+        finish(thread.take(), &mut found);
+        found
+    }
+
+    fn sample_threads(p: &mut Probe, pid: i32, name: &str, seconds: &str) -> Vec<String> {
+        let file = p.out.join(format!("sample-{name}.txt"));
+        let ran = p.tool("/usr/bin/sample", &[&pid.to_string(), seconds, "-file", &file.to_string_lossy()]);
+        let threads = where_threads_sit(&fs::read_to_string(&file).unwrap_or_default());
+        if threads.is_empty() {
+            return vec![format!("no sample, exit {:?} {}", ran.code, ran.text().chars().take(200).collect::<String>())];
+        }
+        threads
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Ending {
+        Bootout,
+        Term,
+    }
+
+    fn close_consent(p: &mut Probe) -> Vec<String> {
+        let mut closed = Vec::new();
+        for owner in ["UserNotificationCenter", "universalAccessAuthWarn", "CoreServicesUIAgent"] {
+            if p.tool("/usr/bin/killall", &[owner]).ok() {
+                closed.push(owner.to_string());
+            }
+        }
+        closed
+    }
+
+    fn stop_round(p: &mut Probe, name: &str, what: &str, start: impl FnOnce(&Path) -> Result<()>, ending: Ending) -> Result<()> {
+        let program = p.bin.clone();
+        if let Err(error) = start(&program) {
+            p.fail(format!("{what}: the start failed, {error:#}"));
+            return Ok(());
+        }
+        let mut job = None;
+        wait_until(Duration::from_secs(10), || {
+            job = daemon_pid(p);
+            job.is_some()
+        });
+        let mut holder = None;
+        wait_until(Duration::from_secs(10), || {
+            holder = scooch_pid(p);
+            holder.is_some()
+        });
+        std::thread::sleep(Duration::from_secs(3));
+        let pending = asking(p) || windows().iter().any(|(owner, _, _)| owner == "UserNotificationCenter");
+        let before = p.tool("/bin/launchctl", &["print", &target()]);
+        let _ = fs::write(p.out.join(format!("launchctl-{name}-before.txt")), &before.out);
+        p.line(format!("- {what}: launchctl names the job pid {job:?}, the lock is held by {holder:?}, a Finder consent window is open {pending}, the saved problem {:?}", problem(p)));
+        if job.is_none() || job != holder {
+            p.fail(format!("{what}: launchctl names the job pid {job:?} while the daemon that holds the lock is {holder:?}"));
+        }
+        let Some(pid) = job.or(holder) else { return Ok(()) };
+        let threads = sample_threads(p, pid, &format!("{name}-before"), "1");
+        p.line(format!("  - where the daemon's threads sit before the end, {threads:?}"));
+        let sent = Instant::now();
+        let mut bootout = None;
+        let how = match ending {
+            Ending::Bootout => {
+                bootout = Command::new("/bin/launchctl").args(["bootout", &target()]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok();
+                "the boot out"
+            }
+            Ending::Term => {
+                unsafe { libc::kill(pid, libc::SIGTERM) };
+                "SIGTERM"
+            }
+        };
+        let gone = wait_until(STOP_LIMIT, || !pid_lives(pid));
+        let took = gone.map(|_| sent.elapsed().as_millis());
+        if took.is_none() {
+            let stuck = sample_threads(p, pid, &format!("{name}-stuck"), "3");
+            let after = p.tool("/bin/launchctl", &["print", &target()]);
+            let _ = fs::write(p.out.join(format!("launchctl-{name}-after.txt")), &after.out);
+            p.line(format!("  - {} s after {how} the daemon {pid} still ran, where its threads sit, {stuck:?}, launchctl print kept in launchctl-{name}-after.txt", STOP_LIMIT.as_secs()));
+            p.fail(format!("{what}: the daemon {pid} still ran {} s after {how}, the stop cap of 5 s and one second more", STOP_LIMIT.as_secs()));
+            if wait_until(Duration::from_secs(25), || !pid_lives(pid)).is_none() {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+        let answered = bootout.and_then(|child| child.wait_with_output().ok()).map(|output| format!(", launchctl bootout exit {:?} {}", output.status.code(), String::from_utf8_lossy(&output.stderr).trim()));
+        p.line(format!("- {what}: after {how} the daemon {pid} was gone after {took:?} ms{}", answered.unwrap_or_default()));
+        let closed = close_consent(p);
+        p.line(format!("  - closed the consent windows of {closed:?}, which answers nothing"));
+        Ok(())
+    }
+
+    fn render_stop(p: &mut Probe, picture: &Path) -> Result<()> {
+        if launchd::loaded() {
+            let _ = p.tool("/bin/launchctl", &["bootout", &target()]);
+        }
+        let _ = fs::remove_file(p.home.join("watch.pid"));
+        let log = fs::OpenOptions::new().create(true).append(true).open(p.home.join("watch.log"))?;
+        let mut child = Command::new(&p.bin).arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn()?;
+        let pid = child.id() as i32;
+        let home = p.home.clone();
+        let held = wait_until(Duration::from_secs(15), || fs::read_to_string(home.join("watch.pid")).ok().and_then(|text| text.trim().parse::<i32>().ok()) == Some(pid));
+        let drawn = wait_render(p, Duration::from_secs(40), None, false);
+        p.line(format!("- a daemon started from the probe as {pid}, which inherits the runner's Finder automation, held the lock after {held:?} and drew after {drawn:?}"));
+        let mark = daemon_log(p).lines().count();
+        let asked = scooch::facade::use_picture(&p.bin, picture);
+        let handed = Instant::now();
+        let busy = wait_until(Duration::from_secs(5), || daemon_log(p).lines().skip(mark).any(|line| line.contains(" snapshot ") || line.contains(" wake ")));
+        let sent = Instant::now();
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+        let mut ended = None;
+        while sent.elapsed() < STOP_LIMIT + Duration::from_secs(4) {
+            if let Ok(Some(status)) = child.try_wait() {
+                ended = Some((status.code(), sent.elapsed().as_millis()));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let stuck = if ended.is_none() { sample_threads(p, pid, "render-stuck", "3") } else { Vec::new() };
+        if ended.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let lines: Vec<String> = daemon_log(p).lines().skip(mark).map(str::to_string).collect();
+        let ticked = lines.iter().any(|line| line.contains(" tick "));
+        let state = state(p);
+        let whole_state = state.is_object();
+        let desktop = platform::current()?;
+        let screen = main_screen(p)?;
+        let shown = desktop.wallpaper(&screen).ok().flatten();
+        let whole_picture = shown.as_deref().is_some_and(|path| scooch_core::open(path).is_ok());
+        p.line(format!(
+            "- SIGTERM {} ms after the new picture was handed over with error {:?}, the tick seen running after {busy:?}: ended with exit and ms {ended:?}, the tick finished first {ticked}, state.json reads whole {whole_state}, daemon mark {:?}, the wallpaper {shown:?} decodes whole {whole_picture}",
+            sent.duration_since(handed).as_millis(),
+            asked.as_ref().err().map(|error| format!("{error:#}")),
+            state["daemon"]
+        ));
+        if !ended.is_some_and(|(code, took)| code == Some(0) && took < STOP_LIMIT.as_millis()) {
+            p.fail(format!("SIGTERM during a tick ended the daemon {ended:?}, where it must end with exit 0 within the stop cap of 5 s and one second more, threads {stuck:?}"));
+        }
+        if !whole_state || !whole_picture {
+            p.fail("a stop during a tick left a state or a wallpaper that does not read whole");
+        }
+        Ok(())
+    }
+
+    fn stop_check(p: &mut Probe) -> Result<()> {
+        if !scooch_processes(p).is_empty() || launchd::loaded() || launchd::plist_path().is_ok_and(|path| path.exists()) {
+            let ran = p.scooch(&["off"], Duration::from_secs(60));
+            p.line(format!("- scooch off before these checks exit {:?}: {}", ran.code, ran.text()));
+            reap(p);
+        }
+        let screen = main_screen(p)?;
+        let (width, height) = pixels(&screen);
+        let first = picture_file(p, "stop-first.jpg", &subject_picture(width, height, (0.3, 0.4)))?;
+        let large = picture_file(p, "stop-large.jpg", &navy_picture(width.max(1) * 3, height.max(1) * 3, (0.7, 0.5)))?;
+        p.limit("on a hosted runner the login item job waits for a Finder consent window nobody answers, which is the state the app's probe saw when a boot out left its daemon running");
+        stop_round(p, "use", "the window's picture through facade::use_picture, then a boot out", |program| scooch::facade::use_picture(program, &first), Ending::Bootout)?;
+        stop_round(p, "on", "the window's Turn on through facade::turn_on, then a boot out", |program| scooch::facade::turn_on(program).map(drop), Ending::Bootout)?;
+        stop_round(p, "term", "facade::turn_on again, then SIGTERM to the job while its consent window is open", |program| scooch::facade::turn_on(program).map(drop), Ending::Term)?;
+        render_stop(p, &large)?;
         Ok(())
     }
 
