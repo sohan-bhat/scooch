@@ -821,7 +821,7 @@ export function Post({ phone }: { phone: boolean }) {
     motion.was = moving;
     quality.moving = moving;
     if (before && moving && quality.motionSharp && quality.chain === 'sharp' && now - quality.switchAt > 100 && delta * 1000 > quality.period * 1.5) quality.miss();
-    const want = fast && runtime.shown && quality.fastReady && moving && !quality.motionSharp ? 'fast' : 'sharp';
+    const want = fast && runtime.shown && quality.fastReady && moving && !quality.motionSharp && now >= live.pourUntil ? 'fast' : 'sharp';
     if (want !== quality.chain) {
       if (want === 'sharp') quality.blendAt = now;
       quality.switchAt = now;

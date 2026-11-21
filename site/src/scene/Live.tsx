@@ -401,7 +401,7 @@ export function Live({ onAction }: { onAction: (name: string) => void }) {
     live.sway.z += live.sway.vz * step;
 
     for (const [id, root] of Object.entries(things)) {
-      const target = live.hover === id && live.quiet ? 0.55 : 0;
+      const target = live.hover === id && live.quiet && !(id === 'glass' && now < live.pourUntil) ? 0.55 : 0;
       for (const level of rimOf(root)) {
         if (level.value === 0 && target === 0) continue;
         level.value += (target - level.value) * (1 - Math.exp(-step * 10));
