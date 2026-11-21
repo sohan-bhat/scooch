@@ -102,29 +102,59 @@ function Dialog {
     }
     return $found
 }
+function Dialog-Part([object]$Dialog, [string]$Id) {
+    $byId = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, $Id)
+    return @($Dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byId))
+}
+function Dialog-Open([object]$Dialog) {
+    $open = Dialog-Part $Dialog '1' | Select-Object -First 1
+    $invoke = $null
+    if ($open -and $open.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) { $invoke.Invoke(); return $true }
+    return $false
+}
+function Dialog-Item([object]$Dialog, [string]$File) {
+    $leaf = [IO.Path]::GetFileName($File)
+    $base = [IO.Path]::GetFileNameWithoutExtension($File)
+    $byType = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)
+    return @($Dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byType)) | Where-Object { $_.Current.Name -eq $leaf -or $_.Current.Name -eq $base } | Select-Object -First 1
+}
 function Pick-File([string]$File) {
     $pressed = Press 'Pick a file' 0
     $dialog = $null
     for ($step = 0; $step -lt 30 -and -not $dialog; $step++) { Start-Sleep -Milliseconds 500; $dialog = Dialog }
     if (-not $dialog) { return "$pressed, and no file window opened" }
     $title = $dialog.Current.Name
-    $byId = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, '1148')
-    $edit = @($dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byId)) | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit } | Select-Object -First 1
-    [Desk]::SetForegroundWindow([IntPtr]$dialog.Current.NativeWindowHandle) | Out-Null
-    Start-Sleep -Milliseconds 500
-    if ($edit) { try { $edit.SetFocus() } catch { } }
-    Start-Sleep -Milliseconds 300
-    [System.Windows.Forms.SendKeys]::SendWait('^a')
-    Start-Sleep -Milliseconds 200
-    [System.Windows.Forms.SendKeys]::SendWait(($File -replace '([+^%~(){}\[\]])', '{$1}'))
-    Start-Sleep -Milliseconds 800
-    $typed = ''
-    $value = $null
-    if ($edit -and $edit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value)) { $typed = $value.Current.Value }
-    [System.Windows.Forms.SendKeys]::SendWait('~')
-    $how = "typed keys reading '$typed' and Enter"
+    Start-Sleep -Seconds 1
+    $item = Dialog-Item $dialog $File
+    $how = 'its file list'
+    if (-not $item) {
+        $box = Dialog-Part $dialog '1148' | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit } | Select-Object -First 1
+        $value = $null
+        if ($box -and $box.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value)) {
+            $value.SetValue((Split-Path $File))
+            Dialog-Open $dialog | Out-Null
+            $how = 'the folder typed into its file name box, then its file list'
+            for ($step = 0; $step -lt 20 -and -not $item; $step++) { Start-Sleep -Milliseconds 500; $item = Dialog-Item $dialog $File }
+        }
+    }
+    $selection = $null
+    if ($item -and $item.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$selection)) {
+        $selection.Select()
+        Start-Sleep -Seconds 1
+        $box = Dialog-Part $dialog '1148' | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit } | Select-Object -First 1
+        $value = $null
+        $shows = ''
+        if ($box -and $box.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value)) { $shows = $value.Current.Value }
+        Dialog-Open $dialog | Out-Null
+        $how = "$how, the file name box reading '$shows', and its Open button"
+    } else {
+        [Desk]::SetForegroundWindow([IntPtr]$dialog.Current.NativeWindowHandle) | Out-Null
+        Start-Sleep -Milliseconds 500
+        [System.Windows.Forms.SendKeys]::SendWait(($File -replace '([+^%~(){}\[\]])', '{$1}') + '~')
+        $how = 'typed keys and Enter, since its file list showed no such file'
+    }
     $closed = Wait-For 15 { -not (Dialog) }
-    if ($closed -lt 0) { return "the file window '$title' stayed open after $File" }
+    if ($closed -lt 0) { return "the file window '$title' stayed open after $File through $how" }
     return "the file window '$title' took $File through $how and closed"
 }
 function Press-Switch([string]$Label) { Press $Label 0 | Out-Null; Start-Sleep -Seconds 1 }
