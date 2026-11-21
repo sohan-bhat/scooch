@@ -98,13 +98,22 @@ status_text() { "$daemon" status 2>&1 | tr '\n' '|'; }
 watching() { pgrep -f 'scooch watch' >/dev/null; }
 no_watch() { ! pgrep -f 'scooch watch' >/dev/null; }
 alive_on() { status_text | grep -q "^Scooch is on\.|" && watching; }
-window_count() { limited 20 osascript -e 'tell application "System Events" to count windows of (first process whose bundle identifier is "me.sohanbhat.scooch.window")' 2>/dev/null; }
+panel_shown() {
+  limited 15 osascript -l JavaScript -e '
+    ObjC.import("CoreGraphics");
+    const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0))) || [];
+    const owners = ["Scooch", "scooch-app"];
+    const panels = list.filter((w) => w.kCGWindowLayer === 0 && (/save panel|openandsavepanel/i.test(w.kCGWindowOwnerName || "") || (owners.includes(w.kCGWindowOwnerName) && (w.kCGWindowName || "") !== "Scooch")));
+    panels.map((w) => `${w.kCGWindowOwnerName} ${w.kCGWindowName || "untitled"}`).join(", ");' 2>/dev/null
+}
 pick_file() {
-  local file="$1" before opened after
-  before=$(window_count)
+  local file="$1" shown="" after step
   press 'Pick a file' >/dev/null
-  sleep 3
-  opened=$(window_count)
+  for step in $(seq 1 20); do
+    shown=$(panel_shown)
+    [ -n "$shown" ] && break
+    sleep 0.5
+  done
   limited 60 osascript - "$file" <<'APPLESCRIPT' >/dev/null 2>&1
 on run argv
   set wanted to item 1 of argv
@@ -123,12 +132,15 @@ on run argv
   end tell
 end run
 APPLESCRIPT
-  sleep 3
-  after=$(window_count)
-  if [ "${opened:-0}" -gt "${before:-0}" ] && [ "${after:-0}" = "${before:-0}" ]; then
-    echo "the file window opened with $opened windows, took $file and closed back to $after"
+  for step in $(seq 1 20); do
+    after=$(panel_shown)
+    [ -z "$after" ] && break
+    sleep 0.5
+  done
+  if [ -n "$shown" ] && [ -z "$after" ]; then
+    echo "the file window, $shown, took $file and closed"
   else
-    echo "the file window did not behave, windows $before then $opened then $after for $file"
+    echo "the file window did not show as expected, seen [$shown], after [$after], for $file"
   fi
 }
 press_switch() { press "$1" >/dev/null; sleep 1; }
@@ -185,7 +197,11 @@ same_desktop() { [ "$(wallpaper)" = "$shown_before" ] && [ "$(digest)" = "$befor
 expect "a picked file that is no picture leaves the desktop and the saved picture as they were" same_desktop
 
 line
-line "#### Clouds on a sky photo"
+line "#### Clouds on a sky photo, with the icon column full"
+desk="$HOME/Desktop"
+mkdir -p "$desk"
+for n in $(seq -w 1 40); do : >"$desk/probe-icon-$n.txt"; done
+sleep 6
 before=$(digest)
 line "- $(press 'probe sky')"
 wait_for 40 fresh_from "$pics/probe-sky.jpg" "$before" >/dev/null
@@ -242,10 +258,6 @@ done
 
 line
 line "#### Flip with the icon column full"
-desk="$HOME/Desktop"
-mkdir -p "$desk"
-for n in $(seq -w 1 40); do : >"$desk/probe-icon-$n.txt"; done
-sleep 6
 "$daemon" use "$pics/probe-flip.png" >"$out/flip-use.txt" 2>&1
 helps() { names "$pics/probe-flip.png" && ours && screens_say flip_helps true && status_text | grep -q "Run scooch flip"; }
 wait_for 60 helps >/dev/null

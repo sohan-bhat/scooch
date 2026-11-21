@@ -145,6 +145,7 @@ stand_in() {
   launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1
   close_prompts
   sleep 2
+  wait_for 15 sh -c '! pgrep -f "scooch watch" >/dev/null' >/dev/null || line "- a daemon still ran before the stand in, $(pgrep -fl 'scooch watch' | tr '\n' ' ')"
   rm -f "$data/watch.pid"
   SCOOCH_TRACE=1 "$daemon" watch >>"$out/watch.log" 2>&1 &
   line "- booted out the login item job and started $daemon watch from the probe as $!, which inherits the runner's Finder automation"
