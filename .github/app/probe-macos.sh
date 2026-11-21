@@ -150,6 +150,12 @@ stand_in() {
     pkill -KILL -f 'scooch watch' >/dev/null 2>&1
     wait_for 10 sh -c '! pgrep -f "scooch watch" >/dev/null' >/dev/null
   fi
+  holders=$(lsof -t "$data/watch.lock" 2>/dev/null | tr '\n' ' ')
+  if [ -n "$holders" ]; then
+    line "- the daemon's lock was still held by $(for pid in $holders; do ps -o comm= -p "$pid"; done | tr '\n' ' '), so the probe ends them"
+    kill -KILL $holders >/dev/null 2>&1
+    sleep 1
+  fi
   rm -f "$data/watch.pid"
   SCOOCH_TRACE=1 "$daemon" watch >>"$out/watch.log" 2>&1 &
   line "- booted out the login item job and started $daemon watch from the probe as $!, which inherits the runner's Finder automation"
