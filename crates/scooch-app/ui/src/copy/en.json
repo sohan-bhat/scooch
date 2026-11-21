@@ -108,6 +108,9 @@
   "failure": {
     "turn-on": "Scooch did not turn on. Try again.",
     "turn-off": "Scooch did not turn off. Try again.",
+    "held": "Another program had Scooch's settings open. Try again in a moment.",
+    "full": "The disk is full. Make room, then try again.",
+    "unwritable": "Scooch could not save its settings. Check that its folder can be written.",
     "set": "That setting did not change. Try again.",
     "use": "That picture did not open. Pick another one.",
     "move": "Scooch could not be copied to either Applications folder.",

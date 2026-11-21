@@ -29,10 +29,19 @@ const KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", 
 
 struct Kept(Mutex<Option<notify::RecommendedWatcher>>);
 
+const SAVES: [(&str, &str); 3] = [("so try again in a moment.", "held"), ("so check that the disk has room.", "full"), ("so check that its folder can be written.", "unwritable")];
+
+fn cause(error: &anyhow::Error) -> Option<&'static str> {
+    error.chain().find_map(|part| {
+        let text = part.to_string();
+        text.starts_with("Scooch could not").then(|| SAVES.iter().find(|(ending, _)| text.ends_with(ending)).map(|(_, code)| *code)).flatten()
+    })
+}
+
 fn said<T>(code: &'static str, result: anyhow::Result<T>) -> Result<T, String> {
     result.map_err(|error| {
         eprintln!("scooch-app {code} failed: {error:#}");
-        code.to_string()
+        cause(&error).unwrap_or(code).to_string()
     })
 }
 
@@ -325,5 +334,19 @@ mod tests {
     fn a_failure_reaches_the_window_as_its_code_only() {
         let failed: anyhow::Result<()> = Err(anyhow::anyhow!("Permission denied (os error 13)"));
         assert_eq!(said("move", failed), Err("move".to_string()));
+    }
+
+    #[test]
+    fn a_failed_save_reaches_the_window_as_its_cause() {
+        for (sentence, code) in [
+            ("Scooch could not replace C:\\Scooch\\state.json because another program had it open, so try again in a moment.", "held"),
+            ("Scooch could not write /data/state.json, so check that the disk has room.", "full"),
+            ("Scooch could not write /data/state.json, so check that its folder can be written.", "unwritable"),
+        ] {
+            let failed: anyhow::Result<()> = Err(anyhow::Error::new(std::io::Error::from_raw_os_error(5)).context(sentence).context("turning off"));
+            assert_eq!(said("turn-off", failed), Err(code.to_string()));
+        }
+        let other: anyhow::Result<()> = Err(anyhow::anyhow!("Scooch could not reach the X display, so check that DISPLAY is set."));
+        assert_eq!(said("turn-off", other), Err("turn-off".to_string()));
     }
 }
