@@ -16,9 +16,74 @@ fn woke_more(woke: (u64, u64), baseline: Option<(u64, u64)>, events: usize) -> b
     events > 0 || baseline.is_some_and(|(idle, interrupt)| woke.0 > idle + SPARE_WAKEUPS || woke.1 > interrupt + SPARE_WAKEUPS)
 }
 
+#[cfg(any(target_os = "macos", test))]
+const NORMAL_SKIPS: [&str; 6] = ["hidden", "no room", "too large", "helper cold", "nothing new", "helper budget"];
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq)]
+enum Try {
+    Glided,
+    Skipped(String),
+    Fault(String),
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn glide_try(log: &[String]) -> Try {
+    if log.iter().any(|line| line.contains(" shown and gliding") || line.contains(" glide glided ")) {
+        return Try::Glided;
+    }
+    let Some(rest) = log.iter().find_map(|line| line.split_once(" glide skipped, ").map(|(_, rest)| rest)) else { return Try::Glided };
+    let reason = rest.split(", ").next().unwrap_or(rest).trim().to_string();
+    if NORMAL_SKIPS.contains(&reason.as_str()) {
+        Try::Skipped(reason)
+    } else {
+        Try::Fault(reason)
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn none_glided(tries: &[Try]) -> Option<String> {
+    let reasons: Vec<&str> = tries.iter().filter_map(|tried| if let Try::Skipped(reason) = tried { Some(reason.as_str()) } else { None }).collect();
+    (!tries.is_empty() && reasons.len() == tries.len()).then(|| format!("no try glided, the daemon skipped all {} as {}", tries.len(), reasons.join(", ")))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::woke_more;
+    use super::{glide_try, none_glided, woke_more, Try};
+
+    fn log(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn a_skip_the_daemon_counts_as_normal_is_tried_again_and_any_other_fails() {
+        let hidden = log(&["1795266235.131 glide open after snapshot 2 on /out/a.jpg", "1795266237.229 glide skipped, hidden, macOS never reported the live layer as visible, so Scooch keeps the plain swap.", "1795266237.777 tick 2663 ms"]);
+        assert_eq!(glide_try(&hidden), Try::Skipped("hidden".into()));
+        assert_eq!(glide_try(&log(&["1 glide skipped, helper cold"])), Try::Skipped("helper cold".into()));
+        assert_eq!(glide_try(&log(&["1 glide skipped, old tables, the tables on screen come from another version"])), Try::Fault("old tables".into()));
+        assert_eq!(glide_try(&log(&["1 glide skipped, setting off"])), Try::Fault("setting off".into()));
+        assert_eq!(glide_try(&log(&["1 glide open 2", "2 glide glided 2 with 17 frames", "3 glide settled after 40 ms"])), Try::Glided);
+        let settle_budget = log(&[
+            "1795266265.157 glide open after snapshot 5 on /out/a-50.jpg",
+            "1795266265.270 glide open 5 shown and gliding after 29 ms, opened after the snapshot",
+            "1795266265.458 glide settle 5 on /out/a-51.jpg",
+            "1795266266.174 glide glided 5 with 15 frames, 3 slow, at scale 0.5, first frame 33 ms after the glide was sent",
+            "1795266267.553 glide skipped, settle budget, the helper did not settle within 2000 ms",
+            "1795266267.553 glide gave up the settle after 2019 ms",
+            "1795266267.553 glide closed 5 300 ms after its wallpaper was set",
+        ]);
+        assert_eq!(glide_try(&settle_budget), Try::Glided);
+        assert_eq!(glide_try(&settle_budget[1..2]), Try::Glided);
+        assert_eq!(glide_try(&settle_budget[3..5]), Try::Glided);
+    }
+
+    #[test]
+    fn the_check_fails_only_when_no_try_glided_and_names_every_reason() {
+        let three = [Try::Skipped("hidden".into()), Try::Skipped("no room".into()), Try::Skipped("hidden".into())];
+        assert_eq!(none_glided(&three).as_deref(), Some("no try glided, the daemon skipped all 3 as hidden, no room, hidden"));
+        assert_eq!(none_glided(&[Try::Skipped("hidden".into()), Try::Glided]), None);
+        assert_eq!(none_glided(&[]), None);
+    }
 
     #[test]
     fn one_wakeup_against_a_baseline_of_none_is_noise() {
@@ -4257,6 +4322,7 @@ mod probe {
         let mut unseen = Vec::new();
         let mut during = String::new();
         let mut held = None;
+        let mut tries = Vec::new();
         for attempt in 1..=3 {
             if attempt > 1 {
                 quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
@@ -4270,6 +4336,20 @@ mod probe {
             }
             let evidence = if attempt == 1 { "glide".to_string() } else { format!("glide-{attempt}") };
             let judged = judge_glide(p, &dragged, &screen, &format!("glide on, CGEvent drag, attempt {attempt}"), Some(&evidence));
+            let tried = crate::glide_try(&dragged.log);
+            tries.push(tried.clone());
+            match tried {
+                crate::Try::Skipped(reason) => {
+                    p.line(format!("  - attempt {attempt} did not glide, the daemon skipped it as {reason}, which it counts as normal, so it is not judged and the drag is tried again"));
+                    continue;
+                }
+                crate::Try::Fault(reason) => {
+                    p.line(format!("  - attempt {attempt} did not glide, the daemon skipped it as {reason}, which it does not count as normal"));
+                    verdict = Some(false);
+                    break;
+                }
+                crate::Try::Glided => {}
+            }
             if !judged.rest {
                 verdict = Some(false);
                 break;
@@ -4282,11 +4362,14 @@ mod probe {
             p.line(format!("  - captures between the old and the new picture not judged, {} captures a second, largest gap {:?} ms, two in-between captures are certain only with no gap over {} ms", judged.rate.map_or(0.0, f64::round), judged.gap.map(|gap| (gap * 1000.0).round()), (SEEN_GAP * 1000.0) as u32));
             unseen.push(judged.frames);
         }
-        let good = match verdict {
-            Some(good) => good,
-            None => {
+        let unglided = crate::none_glided(&tries);
+        let good = match (verdict, &unglided) {
+            (Some(good), _) => good,
+            (None, Some(_)) => true,
+            (None, None) => {
                 let drew = unseen.iter().all(|frames| frames.is_some_and(|frames| frames >= 3));
-                p.limit(format!("the frames between the old and the new picture could not be judged on this runner, since screen capture slowed below one every {} ms during each of three glides, while the helper drew {unseen:?} frames and every other glide check passed", (SEEN_GAP * 1000.0) as u32));
+                let which = if unseen.len() == 1 { "the one try that glided and was not judged".to_string() } else { format!("each of the {} tries that glided and were not judged", unseen.len()) };
+                p.limit(format!("the frames between the old and the new picture could not be judged on this runner, since screen capture slowed below one every {} ms during {which}, while the helper drew {unseen:?} frames and every other glide check passed", (SEEN_GAP * 1000.0) as u32));
                 drew
             }
         };
@@ -4295,6 +4378,9 @@ mod probe {
         let pids = helper_pids(p);
         let left = layer::every_window().into_iter().filter(|window| pids.contains(&(window.pid as i32))).count();
         p.line(format!("- helper processes {pids:?} with windows left {left}"));
+        if let Some(said) = unglided {
+            p.fail(said);
+        }
         if !good || left > 0 {
             p.fail("the glide did not move steadily under the icons and hand over cleanly");
         }
