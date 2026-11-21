@@ -401,7 +401,7 @@ mod probe {
             "9 Spaces" => 91_112,
             "9b Program moved" => 300_000,
             "9c Stop" => 300_000,
-            "9d Consent waiter" => 420_000,
+            "9d Consent waiter" => 480_000,
             "10 Cleanup" => 308,
             _ => 600_000,
         };
@@ -5136,7 +5136,14 @@ mod probe {
         let asked = wait_until(Duration::from_secs(15), || asking(p));
         let shown = wait_until(Duration::from_secs(10), || consent_windows() >= 1);
         let windows_first = consent_windows();
-        p.line(format!("- closed {closed:?} first, then scooch use turned on with exit {:?}, job A {first:?}, the saved problem asks for Allow after {asked:?}, a consent window after {shown:?}, consent windows {windows_first}", on.code));
+        let tick_a = first_tick(p, mark);
+        p.line(format!("- closed {closed:?} first, then scooch use turned on with exit {:?}, job A {first:?}, its first tick took {tick_a:?} ms, the saved problem asks for Allow after {asked:?}, a consent window after {shown:?}, consent windows {windows_first}", on.code));
+        if !tick_a.is_some_and(|took| took < 1000) {
+            p.fail(format!("job A's first tick with the permission undecided took {tick_a:?} ms, where it ends in under 1000 ms"));
+        }
+        if shown.is_none() {
+            p.fail("no consent window came for job A");
+        }
         let Some(a) = first else {
             p.fail("job A did not start");
             return Ok(());
@@ -5163,7 +5170,11 @@ mod probe {
             return Ok(());
         };
         let threads_b = sample_threads(p, b, "consent-b", "1");
-        p.line(format!("- job B {b} started from the same login item as a login would, consent windows {windows_second}, its threads {threads_b:?}, its consent lines {:?}", consent_lines(p, from)));
+        let tick_b = first_tick(p, from);
+        p.line(format!("- job B {b} started from the same login item as a login would, its first tick took {tick_b:?} ms, consent windows {windows_second}, its threads {threads_b:?}, its consent lines {:?}", consent_lines(p, from)));
+        if !tick_b.is_some_and(|took| took < 1000) {
+            p.fail(format!("job B's first tick with the permission undecided took {tick_b:?} ms, where it ends in under 1000 ms"));
+        }
         if !waits(&threads_b) {
             p.fail("job B keeps no waiter for the answer while the permission is undecided");
         }
@@ -5221,11 +5232,27 @@ mod probe {
         if checked > 0 || crate::woke_more(woke, p.quiet, 0) {
             p.fail("job B's listening waiter did work or woke more at rest than the daemon in check 6");
         }
+        let poked_from = daemon_log(p).lines().count();
+        let poke = p.scooch(&["use", &picture.to_string_lossy()], Duration::from_secs(60));
+        let back = wait_until(Duration::from_secs(10), || consent_windows() >= 1);
+        let threads_poked = sample_threads(p, b, "consent-b-poked", "1");
+        let asks = consent_lines(p, from).iter().filter(|line| line.contains(" asks whether")).count();
+        p.line(format!("- a poke through scooch use exit {:?}: a consent window again after {back:?}, job B's consent lines since {:?}, its threads {threads_poked:?}, asks in all {asks}", poke.code, consent_lines(p, poked_from)));
+        if back.is_none() || !threads_poked.iter().any(|thread| thread.starts_with("scooch-consent") && thread.contains("AEDeterminePermissionToAutomateTarget")) || asks != 2 {
+            p.fail(format!("a poke did not bring the question back once, window {back:?}, asks {asks}"));
+        }
+        let closed = close_consent(p);
+        std::thread::sleep(Duration::from_secs(2));
+        p.line(format!("- closed {closed:?} unanswered again, job B's consent lines since the poke {:?}", consent_lines(p, poked_from)));
         let _ = Command::new("/bin/launchctl").args(["bootout", &target()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
         let gone = wait_until(STOP_LIMIT, || !pid_lives(b));
         let closed = close_consent(p);
         p.line(format!("- job B booted out, gone after {gone:?}, closed {closed:?}"));
         Ok(())
+    }
+
+    fn first_tick(p: &Probe, from: usize) -> Option<u64> {
+        daemon_log(p).lines().skip(from).find_map(|line| line.split_once(" tick ").and_then(|(_, rest)| rest.split_once(" ms").and_then(|(took, _)| took.trim().parse().ok())))
     }
 
     fn quiet_buckets(pid: i32) -> Option<((u64, u64), Vec<u64>)> {
