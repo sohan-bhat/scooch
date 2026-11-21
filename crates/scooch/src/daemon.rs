@@ -1,5 +1,5 @@
 use crate::platform::{Desktop, DragHooks, Format, Screen, Snapshot};
-use crate::state::{display_of, file_safe, parse, same, write_atomic, Entry, Lock, State, Store, Tally};
+use crate::state::{display_of, file_safe, parse, same, write_atomic, Entry, Lock, Places, State, Store, Tally};
 use crate::glide::{Glider, Launch, Plan, Program, Warmup};
 use crate::{cache, poke, scene};
 use anyhow::{Context, Result};
@@ -84,6 +84,8 @@ pub struct Report {
     pub unsaved: bool,
     pub exit: bool,
     pub unload: bool,
+    #[cfg(any(target_os = "linux", test))]
+    pub origin: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -186,6 +188,10 @@ pub fn settle_screens(state: &mut State, desktop: &dyn Desktop, store: &Store, s
             if drop_gone && gone(&id, known, screens) {
                 state.screens.remove(&id);
                 sweep(desktop, store, state, &id, entry.output.as_slice());
+            } else if drop_gone && detached(desktop, &id, &entry) {
+                state.screens.remove(&id);
+                tally.back += 1;
+                sweep(desktop, store, state, &id, entry.output.as_slice());
             } else {
                 tally.pending += 1;
             }
@@ -221,6 +227,10 @@ pub fn settle_screens(state: &mut State, desktop: &dyn Desktop, store: &Store, s
             Settled { tally, standing: false }
         }
     }
+}
+
+pub fn detached(desktop: &dyn Desktop, id: &str, entry: &Entry) -> bool {
+    !entry.unrestorable && entry.original.is_file() && desktop.put_back_detached(id, &entry.original).unwrap_or(false)
 }
 
 pub fn untouched(store: &Store, id: &str, entry: &Entry) -> bool {
@@ -493,10 +503,7 @@ impl Daemon {
     }
 
     fn predicted(&self, worker: &Signal) -> bool {
-        let Some(snapshot) = self.desktop.predicted() else { return false };
-        if !parse(self.store.read().as_deref()).predict {
-            return false;
-        }
+        let Some(snapshot) = self.desktop.predicted(&|| parse(self.store.read().as_deref()).predict) else { return false };
         if trace() {
             eprintln!("{} predicted drop handed, icons {:016x}", stamp(), icon_print(&snapshot));
         }
@@ -810,6 +817,8 @@ impl Daemon {
         *self.ledger.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Ledger { expected: before.clone(), external: false };
         let mut state = parse(before.as_deref());
         let mut report = Report::default();
+        #[cfg(any(target_os = "linux", test))]
+        report.origin.clone_from(&state.origin);
         if !state.on && !state.restoring {
             report.exit = true;
             return report;
@@ -879,6 +888,14 @@ impl Daemon {
             state.picture = None;
             forget(self.desktop.as_ref(), &self.store, &mut state);
             report.unload = true;
+            #[cfg(target_os = "linux")]
+            if crate::commands::copy_goes(&state) {
+                let own = std::env::current_exe().ok().map(|exe| crate::state::canonical(&exe).unwrap_or(exe));
+                let proven: Vec<PathBuf> = own.into_iter().chain(crate::platform::login_program()).collect();
+                for line in crate::program::remove_copies(&crate::program::copies(&self.store), &proven, &crate::program::link_places()) {
+                    eprintln!("{} {line}", stamp());
+                }
+            }
         }
         if state == parse(now.as_deref()) {
             return report;
@@ -1013,6 +1030,9 @@ impl Daemon {
         let fingerprint = scene::fingerprint(&entry.source, &scene, options);
         let showing = current.as_deref().is_some_and(|path| same(path, entry.shown()));
         if entry.fingerprint.as_deref() == Some(fingerprint.as_str()) && entry.shown().is_file() {
+            if entry.places.is_none() {
+                entry.places = Some(Places { width: scene.width, height: scene.height, icons: scene.icons.clone() });
+            }
             if let Some(glider) = glider.as_deref_mut() {
                 glider.close_early_for(&screen.id);
             }
@@ -1032,6 +1052,7 @@ impl Daemon {
         if outcome != Outcome::Interrupted {
             entry.fingerprint = Some(fingerprint);
             entry.chosen = false;
+            entry.places = Some(Places { width: scene.width, height: scene.height, icons: scene.icons.clone() });
         }
         Ok(outcome)
     }
@@ -1433,6 +1454,7 @@ pub fn merge(mine: &State, before: &State, fresh: &State) -> State {
                     theirs.painted = ours.painted;
                 }
                 theirs.icons = ours.icons;
+                theirs.places.clone_from(&ours.places);
                 theirs.counter = theirs.counter.max(ours.counter);
             }
             None if before.screens.contains_key(id) => {}
@@ -1626,9 +1648,40 @@ pub fn release(desktop: &dyn Desktop, store: &Store, report: &Report, stop: &Sto
     }
 }
 
+pub fn off_here(daemon: &Daemon) {
+    let _lock = daemon.store.command_lock(crate::state::COMMAND_PATIENCE).ok();
+    match crate::commands::wind_down(daemon.desktop.as_ref(), &daemon.store) {
+        Ok(off) => eprintln!("{} program in the Trash, Scooch turned off with {off:?}", stamp()),
+        Err(error) => eprintln!("{} program in the Trash, but Scooch could not turn off, {error:#}", stamp()),
+    }
+    match daemon.desktop.leave_login() {
+        Ok(()) => eprintln!("{} program in the Trash, the login item removed", stamp()),
+        Err(error) => eprintln!("{} program in the Trash, but the login item could not be removed, {error:#}", stamp()),
+    }
+}
+
+pub fn park_left(store: &Store, login: bool) -> bool {
+    let mut state = parse(store.read().as_deref());
+    if !state.restoring || state.on || login || !store.state_file().exists() {
+        return false;
+    }
+    state.restoring = false;
+    store.save(&state).is_ok()
+}
+
+fn ended(store: &Store) {
+    if crate::platform::login_exists() || std::env::var_os("SCOOCH_HOME").is_some_and(|value| !value.is_empty()) {
+        return;
+    }
+    if park_left(store, false) {
+        eprintln!("{} Scooch ended before every screen was back and no login item will start it again, so the rest stay parked", stamp());
+    }
+}
+
 fn finish(store: &Store, stop: &Stop) -> ! {
     retire(store, stop);
     if stop.wait_idle(STOP_CAP) {
+        ended(store);
         let _ = store.mark(None);
     }
     std::process::exit(0)
@@ -1689,6 +1742,11 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     desktop.drag_starts(DragHooks { on_icon: Box::new(move |point| looker.over_icon(point)), start: Box::new(move |point| starter.drag_starting(point)) });
     let worker = signal.clone();
     let tracing = trace();
+    let trashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(target_os = "macos")]
+    crate::program::watch_self(trashed.clone(), signal.clone());
+    #[cfg(target_os = "linux")]
+    let origin = crate::program::linux::Watcher::start(trashed.clone(), signal.clone());
     std::thread::Builder::new().name("scooch-tick".into()).spawn(move || {
         let mut said: Option<String> = None;
         loop {
@@ -1698,8 +1756,15 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             if !stop.begin() {
                 return;
             }
+            if trashed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                off_here(&daemon);
+            }
             let started = Instant::now();
             let report = daemon.tick();
+            #[cfg(target_os = "linux")]
+            if let Some(origin) = &origin {
+                origin.arm(report.origin.as_deref());
+            }
             drop(busy);
             relieve();
             stop.end();
@@ -1727,6 +1792,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     })?;
     signal.wake();
     let result = desktop.run(Box::new(move || signal.wake()));
+    ended(&store);
     let _ = store.mark(None);
     result
 }
@@ -1734,7 +1800,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::platform::linux::parse::drops::{Guess, Press, Tracker, Verdict};
+    use crate::platform::linux::parse::drops::{hand, through, Guess, Hold, Press, Tracker, Verdict};
     use crate::platform::Wake;
     use crate::state::scratch;
     use scooch_core::Rect;
@@ -1775,13 +1841,18 @@ pub mod tests {
         pub bad_profile: Mutex<bool>,
         pub saves: Mutex<Vec<Instant>>,
         pub predicted: Mutex<Option<Snapshot>>,
+        pub leaves: AtomicUsize,
+        pub installs: AtomicUsize,
+        pub detached: Mutex<Vec<String>>,
+        pub offered: Mutex<Option<Hold>>,
+        pub hold: Mutex<Option<Hold>>,
         pub events: crate::glide::tests::Events,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), bad_profile: Mutex::new(false), saves: Mutex::new(Vec::new()), predicted: Mutex::new(None), events: Arc::new(Mutex::new(Vec::new())) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), bad_profile: Mutex::new(false), saves: Mutex::new(Vec::new()), predicted: Mutex::new(None), leaves: AtomicUsize::new(0), installs: AtomicUsize::new(0), detached: Mutex::new(Vec::new()), offered: Mutex::new(None), hold: Mutex::new(None), events: Arc::new(Mutex::new(Vec::new())) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -1829,7 +1900,7 @@ pub mod tests {
                 anyhow::bail!(reason);
             }
             let screens = self.screens()?;
-            let icons = self.icons.lock().unwrap().clone();
+            let icons = through(&mut self.hold.lock().unwrap(), self.icons.lock().unwrap().clone(), Instant::now());
             if let Some(later) = self.after_read.lock().unwrap().take() {
                 *self.icons.lock().unwrap() = later;
             }
@@ -1910,9 +1981,10 @@ pub mod tests {
         }
 
         fn autostart(&self, exe: Option<&Path>) -> Result<()> {
-            if exe.is_none() {
-                self.unloads.fetch_add(1, Ordering::SeqCst);
-            }
+            match exe {
+                None => self.unloads.fetch_add(1, Ordering::SeqCst),
+                Some(_) => self.installs.fetch_add(1, Ordering::SeqCst),
+            };
             Ok(())
         }
 
@@ -1944,8 +2016,22 @@ pub mod tests {
             *self.at_once.lock().unwrap()
         }
 
-        fn predicted(&self) -> Option<Snapshot> {
-            self.predicted.lock().unwrap().take()
+        fn leave_login(&self) -> Result<()> {
+            self.leaves.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn put_back_detached(&self, id: &str, picture: &Path) -> Result<bool> {
+            if !self.detached.lock().unwrap().iter().any(|listed| listed == id) {
+                return Ok(false);
+            }
+            self.shown.lock().unwrap().insert(id.to_string(), picture.to_path_buf());
+            Ok(true)
+        }
+
+        fn predicted(&self, shown: &dyn Fn() -> bool) -> Option<Snapshot> {
+            let offered = self.predicted.lock().unwrap().take().map(|snapshot| (snapshot, self.offered.lock().unwrap().take()));
+            hand(offered, &mut self.hold.lock().unwrap(), shown)
         }
 
         fn place_saved(&self) -> Option<Instant> {
@@ -2049,6 +2135,135 @@ pub mod tests {
         assert_eq!(fake.sets.load(Ordering::SeqCst), 1);
         assert_eq!(fake.decodes.load(Ordering::SeqCst), 1);
         assert_eq!(daemon.store.read(), saved);
+    }
+
+    fn compact(daemon: &Daemon) -> Vec<u8> {
+        let bytes = serde_json::to_vec(&daemon.store.load()).unwrap();
+        std::fs::write(daemon.store.state_file(), &bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn a_placed_screen_keeps_the_icons_of_that_tick_and_the_scene_size() {
+        let (daemon, fake, _) = rig("places", vec![screen("main", 0.0, 2.0)]);
+        fake.place(vec![subject()]);
+        let reads = fake.snapshots.load(Ordering::SeqCst);
+        let before = compact(&daemon);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 1);
+        assert_ne!(daemon.store.read(), Some(before));
+        let places = daemon.store.load().screens["main"].places.clone();
+        assert_eq!(places, Some(Places { width: 320, height: 200, icons: vec![Rect { x: 120.0, y: 60.0, w: 80.0, h: 80.0 }] }));
+        fake.place(vec![corner()]);
+        daemon.tick();
+        assert_eq!(daemon.store.load().screens["main"].places.clone().map(|places| places.icons), Some(vec![Rect { x: 0.0, y: 0.0, w: 40.0, h: 40.0 }]));
+    }
+
+    #[test]
+    fn a_tick_that_changes_nothing_writes_nothing_and_reads_the_desktop_once() {
+        let (daemon, fake, _) = rig("places-idle", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let placed = daemon.store.load().screens["main"].places.clone();
+        assert!(placed.is_some());
+        fake.place(vec![Rect { x: 60.2, ..subject() }]);
+        let reads = fake.snapshots.load(Ordering::SeqCst);
+        let before = compact(&daemon);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 1);
+        assert_eq!(daemon.store.read(), Some(before));
+        assert_eq!(daemon.store.load().screens["main"].places, placed);
+    }
+
+    #[test]
+    fn an_old_state_file_without_places_loads_and_the_next_placement_adds_them() {
+        let (daemon, fake, _) = rig("places-old", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let mut old: serde_json::Value = serde_json::from_slice(&daemon.store.read().unwrap()).unwrap();
+        old["screens"]["main"].as_object_mut().unwrap().remove("places");
+        std::fs::write(daemon.store.state_file(), serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+        let loaded = daemon.store.load();
+        let entry = &loaded.screens["main"];
+        assert_eq!((entry.places.clone(), entry.counter, entry.icons), (None, 1, 1));
+        assert!(!daemon.store.aside_file().exists());
+        fake.place(vec![corner()]);
+        daemon.tick();
+        let text = String::from_utf8(daemon.store.read().unwrap()).unwrap();
+        assert!(text.contains("\"places\""), "{text}");
+        let mut newer: serde_json::Value = serde_json::from_str(&text).unwrap();
+        newer["screens"]["main"]["later"] = serde_json::json!({ "from": "a newer Scooch" });
+        let read: State = serde_json::from_value(newer).unwrap();
+        assert_eq!(read.screens["main"].places.clone().map(|places| places.icons), Some(vec![corner()]));
+    }
+
+    #[test]
+    fn an_entry_without_places_gets_them_on_the_first_unchanged_tick_and_saves_once() {
+        let (daemon, fake, _) = rig("places-upgrade", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        daemon.tick();
+        let mut old: serde_json::Value = serde_json::from_slice(&daemon.store.read().unwrap()).unwrap();
+        old["screens"]["main"].as_object_mut().unwrap().remove("places");
+        let older = serde_json::to_vec(&old).unwrap();
+        std::fs::write(daemon.store.state_file(), &older).unwrap();
+        let reads = fake.snapshots.load(Ordering::SeqCst);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 1);
+        assert_ne!(daemon.store.read(), Some(older));
+        assert_eq!(daemon.store.load().screens["main"].places.clone().map(|places| (places.width, places.height, places.icons)), Some((160, 100, vec![subject()])));
+        fake.place(vec![Rect { x: 60.2, ..subject() }]);
+        let before = compact(&daemon);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 2);
+        assert_eq!(daemon.store.read(), Some(before));
+    }
+
+    #[test]
+    fn an_idle_pool_thread_of_the_blocking_crate_ends() {
+        struct Gone(std::sync::mpsc::Sender<()>);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        thread_local! {
+            static GONE: std::cell::RefCell<Option<Gone>> = const { std::cell::RefCell::new(None) };
+        }
+        let (sender, ended) = std::sync::mpsc::channel();
+        blocking::unblock(move || GONE.with(|gone| *gone.borrow_mut() = Some(Gone(sender)))).detach();
+        assert!(ended.recv_timeout(Duration::from_secs(5)).is_ok(), "a pool thread of the blocking crate stayed after its work, so it would wake twice a second at rest");
+    }
+
+    #[test]
+    fn the_tick_reads_origin_from_the_state_it_loads_with_no_new_read_or_save() {
+        let (daemon, fake, _) = rig("origin-read", vec![screen("main", 0.0, 1.0)]);
+        let mut state = daemon.store.load();
+        state.origin = Some(PathBuf::from("/home/ada/Applications/Scooch.AppImage"));
+        daemon.store.save(&state).unwrap();
+        fake.place(vec![subject()]);
+        let reads = fake.snapshots.load(Ordering::SeqCst);
+        let report = daemon.tick();
+        assert_eq!(outcome(&report), Outcome::Rendered);
+        assert_eq!(report.origin, state.origin);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 1);
+        let before = compact(&daemon);
+        let report = daemon.tick();
+        assert_eq!(outcome(&report), Outcome::Unchanged);
+        assert_eq!(report.origin, state.origin);
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), reads + 2);
+        assert_eq!(daemon.store.read(), Some(before));
+        assert_eq!(daemon.store.load().origin, state.origin);
+    }
+
+    #[test]
+    fn two_screens_each_keep_their_own_icons() {
+        let (daemon, fake, _) = rig("places-two", vec![screen("main", 0.0, 1.0), screen("side", 160.0, 1.0)]);
+        fake.place(vec![subject(), Rect { x: 230.0, y: 10.0, w: 30.0, h: 30.0 }]);
+        daemon.tick();
+        let state = daemon.store.load();
+        let of = |id: &str| state.screens[id].places.clone().map(|places| (places.width, places.height, places.icons));
+        assert_eq!(of("main"), Some((160, 100, vec![subject()])));
+        assert_eq!(of("side"), Some((160, 100, vec![Rect { x: 70.0, y: 10.0, w: 30.0, h: 30.0 }])));
     }
 
     #[test]
@@ -3112,6 +3327,25 @@ pub mod tests {
     }
 
     #[test]
+    fn the_trash_removes_the_login_item_at_once_even_while_a_screen_is_pending_and_an_orderly_end_parks_the_rest() {
+        let (daemon, fake, original) = rig("trash-pending", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        fake.connect(Vec::new());
+        off_here(&daemon);
+        assert_eq!(fake.leaves.load(Ordering::SeqCst), 1, "the login item stayed while a screen was pending");
+        assert_eq!(fake.installs.load(Ordering::SeqCst), 0);
+        let state = daemon.store.load();
+        assert!(state.restoring && !state.on && state.screens.contains_key("main"));
+        assert!(!park_left(&daemon.store, true), "a restorer with its login item keeps restoring");
+        assert!(daemon.store.load().restoring);
+        assert!(park_left(&daemon.store, false));
+        let state = daemon.store.load();
+        assert!(!state.restoring && !state.on && state.screens["main"].original == original, "the record of the pending screen was not kept parked");
+        assert!(!park_left(&daemon.store, false));
+    }
+
+    #[test]
     fn a_restore_after_scenery_brings_back_the_users_own_picture() {
         let (daemon, fake, original) = scenery_rig("scenery-off", true);
         fake.place(vec![subject(), calm()]);
@@ -3599,7 +3833,7 @@ pub mod tests {
         let (daemon, fake, script, _) = marked_rig("glide-beside");
         fake.place(vec![subject()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
-        remember_start(&daemon, 1_000, 5);
+        remember_start(&daemon, 60_000, 5);
         script.lock().unwrap().shown_after_asked = Some(Duration::from_millis(100));
         fake.events.lock().unwrap().clear();
         fake.place(vec![moved_subject()]);
@@ -4572,12 +4806,45 @@ pub mod tests {
         state.predict = false;
         daemon.store.save(&state).unwrap();
         *fake.predicted.lock().unwrap() = Some(Snapshot { screens: fake.screens.lock().unwrap().clone(), icons: vec![moved_subject()] });
+        *fake.offered.lock().unwrap() = Some(Hold::new(&[subject()], vec![moved_subject()], Instant::now() + Duration::from_secs(5)));
         let signal = Signal::default();
         signal.wake();
         let started = Instant::now();
         daemon.gather(&signal);
         assert!(started.elapsed() >= Duration::from_millis(200), "the prediction was taken with predict off, {:?}", started.elapsed());
         assert!(daemon.handed.lock().unwrap().is_none());
+        assert!(fake.hold.lock().unwrap().is_none(), "a guess the person switched off still held the reads");
+    }
+
+    #[test]
+    fn a_held_guess_outlasts_a_read_from_before_the_save_and_a_save_that_disagrees_is_drawn_at_once() {
+        let (daemon, fake, _) = rig("predict-hold", vec![screen("main", 0.0, 1.0)]);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let first = fake.showing("main");
+        *fake.predicted.lock().unwrap() = Some(Snapshot { screens: fake.screens.lock().unwrap().clone(), icons: vec![moved_subject()] });
+        *fake.offered.lock().unwrap() = Some(Hold::new(&[subject()], vec![moved_subject()], Instant::now() + Duration::from_secs(5)));
+        let signal = Signal::default();
+        signal.wake();
+        daemon.gather(&signal);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let guessed = fake.showing("main");
+        assert_ne!(guessed, first);
+        let sets = fake.sets.load(Ordering::SeqCst);
+        signal.wake();
+        daemon.gather(&signal);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged, "a read from before the save drew the old places back");
+        assert_eq!((fake.sets.load(Ordering::SeqCst), fake.showing("main")), (sets, guessed.clone()));
+        fake.place(vec![corner()]);
+        signal.wake();
+        daemon.gather(&signal);
+        assert_ne!(outcome(&daemon.tick()), Outcome::Unchanged, "the save that disagrees with the guess was not drawn");
+        assert_ne!(fake.showing("main"), guessed);
+        assert!(fake.hold.lock().unwrap().is_none());
+        fake.place(vec![subject()]);
+        signal.wake();
+        daemon.gather(&signal);
+        assert_ne!(outcome(&daemon.tick()), Outcome::Unchanged, "the hold outlived the save");
     }
 
     fn map_rig(name: &str) -> (Daemon, Arc<Fake>, PathBuf) {
@@ -4810,6 +5077,30 @@ pub mod tests {
                 assert_eq!(events.iter().filter(|event| *event == "spawn").count(), 2, "a fresh helper warms after one dies in use {events:?}");
             }
         }
+    }
+
+    fn landing_words(daemon: &Daemon) -> (bool, bool) {
+        let said = daemon.glider.lock().unwrap().said.clone();
+        (said.iter().any(|line| line.starts_with("settled after ")), said.iter().any(|line| line.starts_with("gave up the settle after ")))
+    }
+
+    #[test]
+    fn a_settle_the_helper_reports_writes_the_settled_words() {
+        let (daemon, fake, _, _) = glide_rig("glide-settle-words", true);
+        assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
+        assert!(events(&fake).iter().any(|event| event == "settled 1"), "{:?}", events(&fake));
+        assert_eq!(landing_words(&daemon), (true, false), "{:?}", daemon.glider.lock().unwrap().said);
+    }
+
+    #[test]
+    fn a_settle_given_up_writes_its_own_words_and_not_the_settled_words() {
+        let (daemon, fake, script, _) = glide_rig("glide-settle-given-up", true);
+        script.lock().unwrap().settle_never = true;
+        assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.starts_with("skipped, settle budget")), "{said:?}");
+        assert!(events(&fake).iter().any(|event| event.starts_with("close")), "{:?}", events(&fake));
+        assert_eq!(landing_words(&daemon), (false, true), "{said:?}");
     }
 
     #[test]

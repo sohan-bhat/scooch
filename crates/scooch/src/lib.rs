@@ -1,6 +1,7 @@
 mod cache;
 mod commands;
 mod daemon;
+pub mod facade;
 mod glide;
 #[doc(hidden)]
 pub mod live;
@@ -8,6 +9,8 @@ pub mod live;
 pub mod platform;
 #[doc(hidden)]
 pub mod poke;
+#[cfg(unix)]
+mod program;
 mod scene;
 mod state;
 
@@ -28,7 +31,10 @@ enum Command {
     #[command(about = "Switch the picture on every screen")]
     Use { image: Option<PathBuf> },
     #[command(about = "Stop, remove the login item and put your wallpaper back")]
-    Off,
+    Off {
+        #[arg(long = "final", hide = true)]
+        last: bool,
+    },
     #[command(about = "Show whether Scooch is on and what it shows")]
     Status,
     #[command(about = "Render one picture to a file without touching your wallpaper")]
@@ -75,7 +81,8 @@ fn dispatch() -> Result<()> {
     match Cli::parse().command {
         None => commands::start(),
         Some(Command::Use { image }) => commands::switch(image),
-        Some(Command::Off) => commands::off(),
+        Some(Command::Off { last: false }) => commands::off(),
+        Some(Command::Off { last: true }) => commands::off_final(),
         Some(Command::Status) => commands::status(),
         Some(Command::Render { image, icons, out, json, saliency, fill }) => commands::render(image, icons, out, json, saliency, fill),
         Some(Command::Flip) => commands::flip(),

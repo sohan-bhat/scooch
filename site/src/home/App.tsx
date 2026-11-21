@@ -9,6 +9,15 @@ import { Stills } from './Stills';
 import { Story } from './Story';
 import { introduce, storyMode, useReveal, useSolidNav, useStory } from './useStory';
 
+function armMusic() {
+  void import('@/lib/audio').then((audio) => audio.arm());
+}
+
+function afterLoad() {
+  if (document.readyState === 'complete') armMusic();
+  else window.addEventListener('load', armMusic, { once: true });
+}
+
 export function App() {
   const beats = useRef<HTMLElement[]>([]);
   const section = useRef<HTMLElement>(null);
@@ -26,12 +35,14 @@ export function App() {
     if (!next.live) {
       document.documentElement.classList.add('stills-mode');
       release(false);
+      if (next.still < 0) afterLoad();
     }
     setMode(next);
     const fallback = () => {
       runtime.abandoned = true;
       runtime.resume?.();
       setMode((current) => ({ ...current, live: false }));
+      afterLoad();
     };
     window.addEventListener('scooch:stills', fallback);
     return () => window.removeEventListener('scooch:stills', fallback);
@@ -41,7 +52,10 @@ export function App() {
   useReveal();
   useSolidNav(header, storyEnd);
 
-  const onReady = useCallback(() => introduce(refs, mode.still), [refs, mode.still]);
+  const onReady = useCallback(() => {
+    introduce(refs, mode.still);
+    if (mode.still < 0) armMusic();
+  }, [refs, mode.still]);
 
   return (
     <>

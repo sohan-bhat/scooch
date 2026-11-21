@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/scooch", "binaries/scoochw"],
+    "resources": { "windows/hooks.ps1": "hooks.ps1" },
+    "windows": {
+      "signCommand": "pwsh -NoProfile -File windows/sign.ps1 %1",
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/hooks.nsh"
+      }
+    }
+  }
+}

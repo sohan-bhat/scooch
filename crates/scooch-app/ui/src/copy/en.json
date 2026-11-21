@@ -1,0 +1,130 @@
+{
+  "name": "Scooch",
+  "desk": "Your desktop",
+  "status": {
+    "on": {
+      "plain": "Scooch is on.",
+      "none": "Scooch is on and the desktop has no icons.",
+      "one": "Scooch is on for 1 icon.",
+      "many": "Scooch is on for {n} icons.",
+      "spread": "Scooch is on for {n} icons on {screens} screens."
+    },
+    "off": "Scooch is off.",
+    "starting": "Scooch is starting.",
+    "stopping": "Scooch is putting your wallpaper back.",
+    "pending": {
+      "one": "Scooch is off. 1 more desktop switches back when it shows.",
+      "many": "Scooch is off. {n} more desktops switch back when they show."
+    }
+  },
+  "pill": {
+    "on": "Turn on",
+    "off": "Turn off",
+    "starting": "Turning on",
+    "stopping": "Turning off"
+  },
+  "hint": {
+    "flip": {
+      "line": "Icons still cover part of the picture.",
+      "fix": "Let it flip"
+    }
+  },
+  "problem": {
+    "automation": {
+      "line": "Finder access is off for Scooch.",
+      "fix": "Open settings"
+    },
+    "asking": {
+      "line": "Choose Allow in the Finder access window."
+    },
+    "finder": {
+      "line": "Finder is closed, so your icons are hidden.",
+      "fix": "Open Finder"
+    },
+    "move": {
+      "line": "Scooch is not in Applications yet.",
+      "fix": "Move to Applications"
+    },
+    "wallpaper": {
+      "slideshow": "Your wallpaper is a slideshow.",
+      "video": "Your wallpaper is a video.",
+      "color": "Your wallpaper is a plain color.",
+      "moving": "Your wallpaper is the moving macOS one.",
+      "unreadable": "Your wallpaper file is unreadable.",
+      "made": "This desktop still shows an old Scooch picture.",
+      "other": "Your wallpaper is not a single picture.",
+      "fix": "Pick a picture"
+    },
+    "gnome": {
+      "line": "Desktop icons are off in GNOME.",
+      "fix": "Turn them on",
+      "missing": "Install the Desktop Icons NG extension to show icons in GNOME.",
+      "blocked": "Extensions are off in GNOME. Turn them on in the Extensions app.",
+      "broken": "Desktop Icons NG did not start. Update it, then log out and back in.",
+      "unknown": "Desktop icons are off in GNOME."
+    },
+    "unknown": {
+      "line": "{desktop} is not supported yet.",
+      "fix": "Ask for {desktop}"
+    },
+    "admin": {
+      "line": "Scooch is open as administrator.",
+      "fix": "Open normally"
+    },
+    "startup": {
+      "line": "Scooch is off in Startup apps.",
+      "fix": "Open Startup apps"
+    },
+    "stopped": {
+      "line": "Scooch stopped running.",
+      "fix": "Start again"
+    },
+    "screen": {
+      "line": "No screen is showing right now."
+    },
+    "other": {
+      "line": "Something went wrong with the last picture.",
+      "fix": "Try again"
+    }
+  },
+  "switch": {
+    "glide": {
+      "label": "Slide",
+      "tip": "The picture slides into place."
+    },
+    "scenery": {
+      "label": "Clouds",
+      "tip": "Clouds and islands around your icons."
+    },
+    "flip": {
+      "label": "Flip",
+      "tip": "The picture may flip to clear your icons."
+    },
+    "predict": {
+      "label": "Quick drop",
+      "tip": "The picture moves sooner after you drop an icon."
+    }
+  },
+  "failure": {
+    "turn-on": "Scooch did not turn on. Try again.",
+    "turn-off": "Scooch did not turn off. Try again.",
+    "set": "That setting did not change. Try again.",
+    "use": "That picture did not open. Pick another one.",
+    "move": "Scooch could not be copied to either Applications folder.",
+    "admin": "Scooch did not open again. Close it and open it from the Start menu.",
+    "gnome-icons": "Desktop icons did not turn on. Log out and back in, then try again.",
+    "open": "That window did not open. Try again.",
+    "start": "Scooch did not start again. Try again.",
+    "view": "Scooch could not read its state. Try again.",
+    "pictures": "Your pictures did not load. Try again.",
+    "other": "Something went wrong. Try again."
+  },
+  "pictures": {
+    "label": "Pictures",
+    "pick": "Pick a file",
+    "drop": "Drop to use this picture."
+  },
+  "dmg": {
+    "first": "In System Settings, press Privacy and Security, then Open Anyway."
+  }
+}

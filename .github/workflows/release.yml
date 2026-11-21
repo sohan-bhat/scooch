@@ -3,18 +3,25 @@ name: release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   version:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - env:
           TAG: ${{ github.ref_name }}
         run: |
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "No tag, so there is no version to compare."
+            exit 0
+          fi
           want="${TAG#v}"
           have=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           if [ "$want" != "$have" ]; then
@@ -26,10 +33,14 @@ jobs:
     needs: version
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          persist-credentials: false
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - run: cargo build --release -p scooch --bin scooch --target aarch64-apple-darwin
       - run: cargo build --release -p scooch --bin scooch --target x86_64-apple-darwin
       - run: |
@@ -37,7 +48,7 @@ jobs:
           lipo -create -output out/scooch target/aarch64-apple-darwin/release/scooch target/x86_64-apple-darwin/release/scooch
           codesign --force --sign - --identifier me.sohanbhat.scooch out/scooch
           tar -czf scooch-macos.tar.gz -C out scooch
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: macos
           path: scooch-macos.tar.gz
@@ -53,14 +64,18 @@ jobs:
     needs: version
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          targets: ${{ matrix.arch }}-unknown-linux-musl
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.arch }}-unknown-linux-musl
       - run: cargo build --release -p scooch --bin scooch --target ${{ matrix.arch }}-unknown-linux-musl
       - run: tar -czf scooch-linux-${{ matrix.arch }}.tar.gz -C target/${{ matrix.arch }}-unknown-linux-musl/release scooch
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: linux-${{ matrix.arch }}
           path: scooch-linux-${{ matrix.arch }}.tar.gz
@@ -74,42 +89,81 @@ jobs:
     env:
       RUSTFLAGS: -C target-feature=+crt-static
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          targets: ${{ matrix.arch }}-pc-windows-msvc
+          persist-credentials: false
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.arch }}-pc-windows-msvc
       - run: cargo build --release -p scooch --bins --target ${{ matrix.arch }}-pc-windows-msvc
       - shell: pwsh
         run: |
           $from = "target/${{ matrix.arch }}-pc-windows-msvc/release"
           Compress-Archive -Path "$from/scooch.exe", "$from/scoochw.exe" -DestinationPath "scooch-windows-${{ matrix.arch }}.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-${{ matrix.arch }}
           path: scooch-windows-${{ matrix.arch }}.zip
 
-  publish:
-    needs: [macos, linux, windows]
+  guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          path: dist
+          persist-credentials: false
+      - name: Signing names stay in their jobs
+        run: bash .github/app/guard.sh
+
+  app:
+    needs: [version, guard]
+    uses: ./.github/workflows/app.yml
+    secrets: inherit
+
+  publish:
+    needs: [macos, linux, windows, app, guard]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: macos
+          path: ${{ runner.temp }}/dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: linux-*
+          path: ${{ runner.temp }}/dist
           merge-multiple: true
-      - working-directory: dist
-        run: sha256sum scooch-* > SHA256SUMS
-      - env:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: windows-*
+          path: ${{ runner.temp }}/dist
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/dist
+      - name: Sums and files
+        run: bash .github/app/release-sums.sh "$RUNNER_TEMP/dist"
+      - name: Preview
+        if: github.event_name != 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-preview
+          path: ${{ runner.temp }}/dist
+      - name: Release
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: |
-          notes="docs/releases/$TAG.md"
-          if [ -f "$notes" ]; then
-            gh release create "$TAG" dist/* --title "Scooch ${TAG#v}" --notes-file "$notes"
-          else
-            gh release create "$TAG" dist/* --title "Scooch ${TAG#v}" --generate-notes
-          fi
+        run: bash .github/app/release-publish.sh "$RUNNER_TEMP/dist"
 
   install-check:
     needs: publish
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     uses: ./.github/workflows/install-check.yml

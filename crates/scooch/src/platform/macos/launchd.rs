@@ -121,6 +121,34 @@ pub fn install(exe: &Path, data: &Path) -> Result<()> {
     load(&mut System, &domain(), &target(), &path)
 }
 
+pub fn repoint(exe: &Path) -> Result<()> {
+    let path = plist_path()?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let home = std::env::var_os("SCOOCH_HOME").filter(|value| !value.is_empty()).map(PathBuf::from);
+    crate::state::write_atomic(&path, plist(exe, &crate::state::folder(), home.as_deref(), crate::daemon::trace()).as_bytes())
+}
+
+pub fn program_in(plist: &str) -> Option<PathBuf> {
+    let after = &plist[plist.find("<key>ProgramArguments</key>")?..];
+    let start = after.find("<string>")? + "<string>".len();
+    let length = after[start..].find("</string>")?;
+    Some(PathBuf::from(after[start..start + length].replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")))
+}
+
+pub fn program() -> Option<PathBuf> {
+    program_in(&std::fs::read_to_string(plist_path().ok()?).ok()?)
+}
+
+pub fn forget() -> Result<()> {
+    let path = plist_path()?;
+    match std::fs::remove_file(&path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error).with_context(|| format!("Scooch could not remove {}, so delete it by hand.", path.display())),
+        _ => Ok(()),
+    }
+}
+
 pub fn remove() -> Result<()> {
     let path = plist_path()?;
     if path.exists() {
@@ -215,6 +243,13 @@ mod tests {
         let mut control = script(&[true], &[]);
         assert!(!unload(&mut control, "gui/501/x"));
         assert!(control.paused >= Duration::from_secs(3) && control.paused < Duration::from_millis(3200));
+    }
+
+    #[test]
+    fn the_login_item_names_its_program() {
+        let text = plist(Path::new("/Applications/A & B <x>.app/Contents/MacOS/scooch"), Path::new("/tmp/data"), None, false);
+        assert_eq!(program_in(&text), Some(PathBuf::from("/Applications/A & B <x>.app/Contents/MacOS/scooch")));
+        assert_eq!(program_in("<plist></plist>"), None);
     }
 
     #[test]

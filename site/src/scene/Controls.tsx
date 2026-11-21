@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import content from '@/content.json';
+import { tune } from '@/lib/audio';
 import { actions } from './Live';
 import { play } from './sound';
 import { live } from './touch';
@@ -9,7 +10,7 @@ import { live } from './touch';
 const words = content.story.desk;
 
 function read() {
-  return { lamp: live.lampTarget > 0.5, power: live.power, tape: live.tape };
+  return { lamp: live.lampTarget > 0.5, power: live.power, tape: tune.wanted, empty: live.juice <= 0 };
 }
 
 export default function Controls() {
@@ -30,12 +31,13 @@ export default function Controls() {
   };
 
   const list = [
+    { key: 'demo', label: words.demo, run: () => void import('./demo').then((demo) => demo.openDemo()) },
     { key: 'lamp', label: state.lamp ? words.lampOff : words.lampOn, run: press('lamp', 'lamp') },
     { key: 'channel', label: words.channel, run: press('channel', 'channel'), off: !state.power },
     { key: 'power', label: state.power ? words.tvOff : words.tvOn, run: press('power', 'power') },
     { key: 'tape', label: state.tape ? words.stop : words.play, run: press('tape', 'cassette') },
     { key: 'ring', label: words.ring, run: press('ring', 'clock') },
-    { key: 'sip', label: words.sip, run: press('sip', 'glass') },
+    { key: 'sip', label: state.empty ? words.fill : words.sip, run: press('sip', 'glass') },
     { key: 'staple', label: words.staple, run: press('staple', 'stapler') },
   ];
 

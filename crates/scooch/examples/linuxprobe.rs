@@ -15,7 +15,7 @@ mod probe {
     use scooch::platform::linux::parse::geometry::{intersect, Insets};
     use scooch::platform::linux::parse::{caja, ding, gio, gvariant, kde as kde_rules, keyfile, nemo, record, wakes, xfce as xfce_rules};
     use scooch::platform::linux::settings::{self, Gsettings, Plasma, Xfconf};
-    use scooch::platform::linux::{bus, cinnamon, decode, gnome, gvfs, kde, mate, screens, tool, xfce, Linux};
+    use scooch::platform::linux::{bus, cinnamon, decode, drops, gnome, gvfs, kde, mate, screens, tool, xfce, Linux};
     use scooch::platform::{Desktop, Screen};
     use scooch_core::{Rect, RgbImage};
     use std::collections::{BTreeMap, VecDeque};
@@ -28,7 +28,7 @@ mod probe {
     use std::time::{Duration, Instant};
     use x11rb::connection::Connection as _;
     use x11rb::wrapper::ConnectionExt as _;
-    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, KeyButMask, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT};
+    use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask, ImageFormat, KeyButMask, PropMode, WindowClass, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT};
     use x11rb::protocol::xtest::ConnectionExt as _;
     use zbus::zvariant;
 
@@ -175,6 +175,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         probe.section("6 End to end", end_to_end);
         probe.section("7 Two monitors", monitors);
         probe.section("7b Desktop after the drop", after_drop);
+        probe.section("7c The AppImage thrown away", thrown_away);
+        probe.section("7d The final off", final_off_check);
         probe.section("8 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -962,6 +964,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         Ok(true)
     }
 
+    const KDE_DROP_BAR: f64 = 500.0;
     const OFFSETS: [u64; 16] = [0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600, 2000];
     const STEADY: Duration = Duration::from_millis(400);
     const TRUTH: Duration = Duration::from_millis(2500);
@@ -998,6 +1001,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         lattice: Option<Lattice>,
         steady: bool,
         scale: f32,
+        plasma5: bool,
+        pid: u32,
+    }
+
+    impl Bench<'_> {
+        fn predicts(&self) -> bool {
+            self.lattice.is_some() || self.plasma5
+        }
     }
 
     struct Plan {
@@ -1063,7 +1074,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let scale = factor(p);
         let frame = physical(&screen.frame, scale);
         let at = |x: f32, y: f32| ((frame.x + frame.w * x) as i16, (frame.y + frame.h * y) as i16);
-        let bench = Bench { linux: &linux, log: p.out.join("drop.log"), stamps, live, lattice, steady, scale };
+        let plasma5 = kde && drops::applies(p.kind, p.session);
+        if plasma5 {
+            p.line("- the Plasma 5 prediction lands each single drag by the folder view rule, and the probe checks that rule against the places Plasma saves 2.5 s after the drop");
+        }
+        let bench = Bench { linux: &linux, log: p.out.join("drop.log"), stamps, live, lattice, steady, scale, plasma5, pid: process };
         let back = if steady { ", back to back for the first 400 ms on this desktop" } else { "" };
         p.line(format!("- ten drags of the probe icon, each to whichever of two spots lies farther from it, then five drags of the same three icons from the leftmost column, selected by three control clicks after a click on empty desktop, each by XTest, with reads at 0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600 and 2000 ms after the drop{back}, against the places read 2.5 s after the drop, each read printed as began+took:moved places it shows"));
         let mut tally = Tally::default();
@@ -1084,6 +1099,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         if bench.lattice.is_some() {
             if let Some(point) = tracked {
                 specials(p, &bench, point, &at);
+            }
+        }
+        if bench.predicts() {
+            tracked = key_cases(p, &bench, tracked, &at);
+        }
+        if plasma5 {
+            if let Some(point) = tracked {
+                plasma_specials(p, &bench, point, &at);
             }
         }
         let mut group: Rects = Vec::new();
@@ -1118,6 +1141,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let log_mark = log_lines(&bench.log).len();
         let stamp_mark = bench.stamps.lock().map(|list| list.len()).unwrap_or(0);
         let live_before = bench.live.as_ref().map(Live::read);
+        let boards = if bench.plasma5 && !plan.group { plasma_boards(bench.linux) } else { None };
         let sent = drag(plan.from, plan.to).is_ok();
         let dropped = Instant::now();
         let dropped_wall = wall();
@@ -1162,7 +1186,22 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         ));
         let shown: Vec<String> = reads.iter().map(|taken| format!("{}+{}:{}", taken.began.as_millis(), taken.took.as_millis(), changed.iter().filter(|rect| taken.seen.contains(rect)).count())).collect();
         p.line(format!("    - reads {}", shown.join(" ")));
-        if bench.lattice.is_some() {
+        if let Some(boards) = boards {
+            let start = logical(drag_start(plan.from, plan.to, drag_distance()), bench.scale);
+            let said = match plasma_landing(&boards, logical(plan.from, bench.scale), start, logical(plan.to, bench.scale)) {
+                Ok((_, to, rect)) => {
+                    let mut expected: Rects = plan.before.iter().filter(|rect| !plan.moving.contains(rect)).copied().collect();
+                    expected.push(rounded(&rect));
+                    expected.sort_unstable();
+                    let right = expected == last;
+                    tally.predicted[slot] += usize::from(right);
+                    format!("lands it in cell {to}, equal to the final places {right}")
+                }
+                Err(why) => format!("gives no landing since {why}"),
+            };
+            p.line(format!("    - the Plasma 5 landing rule from the press {said}"));
+        }
+        if bench.predicts() {
             let (guessed, verdict) = guessed(&wakes, lines.get(log_mark..).unwrap_or_default());
             tally.guessed[slot] += usize::from(guessed);
             if guessed && slot == 0 {
@@ -1301,6 +1340,332 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         untouched(p, "drag ended with Escape", escape, false);
     }
 
+    fn plasma_boards(linux: &Linux) -> Option<Vec<kde::Board>> {
+        let shell = kde::Kde { desktop: linux.desktop.clone(), config: kde::config_folder(), session: linux.session };
+        let found = linux.all_screens().ok()?;
+        let state = kde::state().ok()?;
+        let screens: Vec<Screen> = found.into_iter().map(|found| found.screen).collect();
+        Some(shell.boards(&state, &screens, &kde::mapping()))
+    }
+
+    fn plasma_board(boards: &[kde::Board], press: (f32, f32)) -> Result<(&kde::Board, i64), &'static str> {
+        let board = boards.iter().find(|board| board.grid.cell_at(press).is_some()).ok_or("the press was off Plasma's icons")?;
+        match board.grid.spot(press) {
+            kde_rules::Spot::Icon(from) => Ok((board, from)),
+            _ => Err("the press was not on an icon"),
+        }
+    }
+
+    fn plasma_landing(boards: &[kde::Board], press: (f32, f32), start: (f32, f32), release: (f32, f32)) -> Result<(i64, i64, Rect), &'static str> {
+        let (board, from) = plasma_board(boards, press)?;
+        if let Some(why) = board.why_not {
+            return Err(why);
+        }
+        let to = board.grid.landing(from, start, release)?;
+        Ok((from, to, board.grid.icon(to)))
+    }
+
+    fn drag_distance() -> f32 {
+        kde_rules::drag_distance(&kde::groups("kdeglobals"))
+    }
+
+    fn drag_start(from: (i16, i16), to: (i16, i16), distance: f32) -> (i16, i16) {
+        (1..=20i32)
+            .map(|step| ((from.0 as i32 + (to.0 as i32 - from.0 as i32) * step / 20) as i16, (from.1 as i32 + (to.1 as i32 - from.1 as i32) * step / 20) as i16))
+            .find(|point| f32::from((point.0 - from.0).abs() + (point.1 - from.1).abs()) >= distance)
+            .unwrap_or(to)
+    }
+
+    fn logical(point: (i16, i16), scale: f32) -> (f32, f32) {
+        (f32::from(point.0) / scale, f32::from(point.1) / scale)
+    }
+
+    fn set_times(lines: &[String], dropped: f64) -> Vec<f64> {
+        lines.iter().filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let stamp = words.next()?.parse::<f64>().ok()?;
+            (words.next() == Some("set")).then_some((stamp - dropped) * 1000.0)
+        }).collect()
+    }
+
+    fn drops_switches(pid: u32) -> Option<u64> {
+        threads_of(pid).iter().find(|thread| thread.name == "scooch-drops").map(|thread| thread.voluntary + thread.involuntary)
+    }
+
+    fn intern(conn: &x11rb::rust_connection::RustConnection, name: &[u8]) -> Result<u32> {
+        Ok(conn.intern_atom(false, name)?.reply()?.atom)
+    }
+
+    fn active_window(conn: &x11rb::rust_connection::RustConnection, root: u32) -> Option<u32> {
+        let atom = intern(conn, b"_NET_ACTIVE_WINDOW").ok()?;
+        conn.get_property(false, root, atom, AtomEnum::WINDOW, 0, 1).ok()?.reply().ok()?.value32()?.next()
+    }
+
+    fn desktop_active() -> Result<bool> {
+        let (conn, number) = x11rb::connect(None)?;
+        let root = conn.setup().roots.get(number).context("no root")?.root;
+        let Some(window) = active_window(&conn, root) else { return Ok(false) };
+        let (kind, desktop) = (intern(&conn, b"_NET_WM_WINDOW_TYPE")?, intern(&conn, b"_NET_WM_WINDOW_TYPE_DESKTOP")?);
+        let types = conn.get_property(false, window, kind, AtomEnum::ATOM, 0, 16)?.reply()?;
+        Ok(types.value32().is_some_and(|mut values| values.any(|value| value == desktop)))
+    }
+
+    fn typed_elsewhere(pid: u32) -> Result<(bool, Option<u64>, Option<u64>)> {
+        let (conn, number) = x11rb::connect(None)?;
+        let screen = conn.setup().roots.get(number).context("no root")?.clone();
+        let window = conn.generate_id()?;
+        conn.create_window(x11rb::COPY_DEPTH_FROM_PARENT, window, screen.root, 240, 200, 480, 240, 0, WindowClass::INPUT_OUTPUT, 0, &CreateWindowAux::new().background_pixel(screen.white_pixel).event_mask(EventMask::KEY_PRESS))?;
+        conn.change_property8(PropMode::REPLACE, window, AtomEnum::WM_NAME, AtomEnum::STRING, b"scooch probe typing")?;
+        conn.map_window(window)?;
+        conn.flush()?;
+        std::thread::sleep(Duration::from_millis(300));
+        let message = ClientMessageEvent::new(32, window, intern(&conn, b"_NET_ACTIVE_WINDOW")?, [2, 0, 0, 0, 0]);
+        conn.send_event(false, screen.root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, message)?;
+        conn.flush()?;
+        let active = wait_until(Duration::from_secs(3), || active_window(&conn, screen.root) == Some(window)).is_some();
+        std::thread::sleep(Duration::from_millis(600));
+        let code = key_code(&conn, 0x61).context("no key for the letter a")?;
+        conn.xtest_fake_input(KEY_PRESS_EVENT, code, 0, screen.root, 0, 0, 0)?;
+        conn.xtest_fake_input(KEY_RELEASE_EVENT, code, 0, screen.root, 0, 0, 0)?;
+        conn.sync()?;
+        std::thread::sleep(Duration::from_millis(400));
+        let before = drops_switches(pid);
+        for _ in 0..50 {
+            conn.xtest_fake_input(KEY_PRESS_EVENT, code, 0, screen.root, 0, 0, 0)?;
+            conn.flush()?;
+            std::thread::sleep(Duration::from_millis(15));
+            conn.xtest_fake_input(KEY_RELEASE_EVENT, code, 0, screen.root, 0, 0, 0)?;
+            conn.flush()?;
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        conn.sync()?;
+        std::thread::sleep(Duration::from_millis(400));
+        let after = drops_switches(pid);
+        conn.destroy_window(window)?;
+        conn.flush()?;
+        std::thread::sleep(Duration::from_millis(300));
+        Ok((active, before, after))
+    }
+
+    fn tap_shift() -> Result<()> {
+        let (conn, number) = x11rb::connect(None)?;
+        let root = conn.setup().roots.get(number).context("no root")?.root;
+        let code = key_code(&conn, 0xffe1).context("no Shift key")?;
+        conn.xtest_fake_input(KEY_PRESS_EVENT, code, 0, root, 0, 0, 0)?;
+        conn.flush()?;
+        std::thread::sleep(Duration::from_millis(60));
+        conn.xtest_fake_input(KEY_RELEASE_EVENT, code, 0, root, 0, 0, 0)?;
+        conn.sync()?;
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(())
+    }
+
+    fn key_lines(lines: &[String]) -> Vec<String> {
+        lines.iter().filter(|line| line.contains(" drop key") || line.contains(" drop thread woke")).cloned().collect()
+    }
+
+    fn key_cases(p: &mut Probe, bench: &Bench, tracked: Option<(f32, f32)>, at: &dyn Fn(f32, f32) -> (i16, i16)) -> Option<(f32, f32)> {
+        let mark = log_lines(&bench.log).len();
+        match typed_elsewhere(bench.pid) {
+            Ok((active, before, after)) => {
+                let switched = before.zip(after).map(|(before, after)| after.saturating_sub(before));
+                p.line(format!("  - 50 keys typed into a window of the probe's own, which the window manager made the active window {active}, after one key that makes the X server's test keyboard the one in use, the scooch-drops thread switched {switched:?} times while they went in"));
+                match switched {
+                    None => p.fail("the scooch-drops thread could not be read while keys went to another window"),
+                    Some(0) => {}
+                    Some(count) => p.fail(format!("the scooch-drops thread woke {count} times while 50 keys went to another window, where it must not wake at all")),
+                }
+                if !active {
+                    p.soft("keys typed into another window", "the window manager did not make the probe's window the active window");
+                }
+            }
+            Err(error) => p.fail(format!("keys could not be typed into another window, {error:#}")),
+        }
+        let lines = log_lines(&bench.log);
+        p.line(format!("  - drop.log lines about keys while the keys went elsewhere {:?}", key_lines(lines.get(mark..).unwrap_or_default())));
+        let _ = clicks(&[at(0.92, 0.92)]);
+        let on_desktop = desktop_active().unwrap_or(false);
+        let before = places(bench.linux);
+        let icon = tracked.and_then(|point| nearest(&before, point))?;
+        let from = grab(&icon, bench.scale);
+        let to = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
+        let mark = log_lines(&bench.log).len();
+        let typed = special(p, bench, "a drag after Shift went down with the desktop active", || {
+            tap_shift()?;
+            drag(from, to)?;
+            Ok(format!("Shift pressed and let go with the desktop the active window {on_desktop}, then the probe icon from {},{} to {},{}", from.0, from.1, to.0, to.1))
+        });
+        let lines = log_lines(&bench.log);
+        let fresh = lines.get(mark..).unwrap_or_default();
+        p.line(format!("  - drop.log lines about keys around that drag {:?}", key_lines(fresh)));
+        let why = unguessed(fresh);
+        if typed.0 {
+            p.fail("the daemon predicted a drag after a key went down on the active desktop, where the selection may hold more than one icon");
+        } else if on_desktop && !why.contains("the selection may hold more than one icon") {
+            p.fail(format!("a key on the active desktop did not make the selection unknown to the daemon{why}"));
+        }
+        let after = places(bench.linux);
+        after.iter().find(|rect| !before.contains(rect)).map(center).or(tracked)
+    }
+
+    fn walked(grid: &kde_rules::Grid, from: i64, start: i64) -> Option<i64> {
+        (start..start + 64).find(|index| *index == from || !grid.taken.contains(index)).filter(|index| *index != from)
+    }
+
+    fn by_center(area: &Rect, points: impl Iterator<Item = (f32, f32)>) -> Vec<(f32, f32)> {
+        let middle = (area.x + area.w / 2.0, area.y + area.h / 2.0);
+        let mut points: Vec<(f32, f32)> = points.collect();
+        points.sort_by(|a, b| (a.0 - middle.0).hypot(a.1 - middle.1).total_cmp(&(b.0 - middle.0).hypot(b.1 - middle.1)));
+        points
+    }
+
+    fn lattice_points(area: &Rect) -> impl Iterator<Item = (f32, f32)> + '_ {
+        let (columns, rows) = (((area.w - 48.0) / 8.0) as i32, ((area.h - 48.0) / 8.0) as i32);
+        (0..rows.max(0)).flat_map(move |row| (0..columns.max(0)).map(move |column| (area.x + 24.0 + 8.0 * column as f32, area.y + 24.0 + 8.0 * row as f32)))
+    }
+
+    fn taken_drop(boards: &[kde::Board], press: (f32, f32), scale: f32) -> Option<((f32, f32), i64, i64)> {
+        let (board, from) = plasma_board(boards, press).ok()?;
+        let grid = &board.grid;
+        let distance = drag_distance();
+        by_center(&grid.area, lattice_points(&grid.area)).into_iter().find_map(|point| {
+            let start = logical(drag_start(physical_point(press, scale), physical_point(point, scale), distance), scale);
+            let landing = grid.target(from, start, point).ok()?;
+            let pointer = grid.cell_at(point)?;
+            let usable = grid.landing(from, start, point) == Err("the landing cell is taken") && pointer != from && !grid.taken.contains(&pointer);
+            usable.then(|| walked(grid, from, landing).map(|walk| (point, landing, walk))).flatten()
+        })
+    }
+
+    type Hook = ((f32, f32), (f32, f32), i64, i64);
+
+    fn hook_plan(boards: &[kde::Board], press: (f32, f32)) -> Option<Hook> {
+        let (board, from) = plasma_board(boards, press).ok()?;
+        let grid = &board.grid;
+        let (_, tall) = grid.size();
+        let jump = (press.0, press.1 - tall as f32);
+        grid.cell_at(jump)?;
+        by_center(&grid.area, lattice_points(&grid.area)).into_iter().find_map(|point| {
+            let hooked = grid.landing(from, jump, point).ok()?;
+            let straight = grid.target(from, press, point).ok()?;
+            (straight != hooked).then_some((jump, point, hooked, straight))
+        })
+    }
+
+    fn hook_drag(from: (i16, i16), jump: (i16, i16), to: (i16, i16)) -> Result<()> {
+        let (conn, number) = x11rb::connect(None)?;
+        let root = conn.setup().roots.get(number).context("no root")?.root;
+        let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
+        conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, from.0, from.1, 0)?;
+        conn.flush()?;
+        pause(200);
+        conn.xtest_fake_input(BUTTON_PRESS_EVENT, 1, 0, root, 0, 0, 0)?;
+        conn.flush()?;
+        pause(200);
+        conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, jump.0, jump.1, 0)?;
+        conn.flush()?;
+        pause(150);
+        for step in 1..=20i32 {
+            let x = jump.0 as i32 + (to.0 as i32 - jump.0 as i32) * step / 20;
+            let y = jump.1 as i32 + (to.1 as i32 - jump.1 as i32) * step / 20;
+            conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, x as i16, y as i16, 0)?;
+            conn.flush()?;
+            pause(30);
+        }
+        pause(200);
+        conn.xtest_fake_input(BUTTON_RELEASE_EVENT, 1, 0, root, 0, 0, 0)?;
+        conn.flush()?;
+        conn.sync()?;
+        Ok(())
+    }
+
+    fn physical_point(point: (f32, f32), scale: f32) -> (i16, i16) {
+        ((point.0 * scale) as i16, (point.1 * scale) as i16)
+    }
+
+    fn plasma_specials(p: &mut Probe, bench: &Bench, point: (f32, f32), at: &dyn Fn(f32, f32) -> (i16, i16)) {
+        let scale = bench.scale;
+        let Some(icon) = nearest(&places(bench.linux), point) else { return };
+        let from = grab(&icon, scale);
+        let press = (f32::from(from.0) / scale, f32::from(from.1) / scale);
+        let Some(boards) = plasma_boards(bench.linux) else {
+            p.fail("Plasma's grid could not be read for the drop on a taken cell");
+            return;
+        };
+        let Some((spot, landing, walk)) = taken_drop(&boards, press, scale) else {
+            p.fail("no release point lands the probe icon on a taken cell with a free cell under the pointer");
+            return;
+        };
+        let onto = physical_point(spot, scale);
+        let before = places(bench.linux);
+        let mark = log_lines(&bench.log).len();
+        let released = std::cell::Cell::new(wall());
+        let taken = special(p, bench, "a drop whose landing cell is taken, which gives no guess and follows the save", || {
+            drag(from, onto)?;
+            released.set(wall());
+            Ok(format!("the probe icon from {},{} to {},{}, where Plasma's rule lands it on the taken cell {landing} and walks it on to cell {walk}", from.0, from.1, onto.0, onto.1))
+        });
+        let fresh = log_lines(&bench.log);
+        let sets = set_times(fresh.get(mark..).unwrap_or_default(), released.get());
+        let why = unguessed(fresh.get(mark..).unwrap_or_default());
+        if taken.0 {
+            p.fail("the daemon predicted a drop whose landing cell is taken, which it must never do");
+        } else if !why.contains("the landing cell is taken") {
+            p.fail(format!("the drop on a taken cell was not refused for its taken cell{why}"));
+        } else if taken.2 {
+            p.fail("the drop on a taken cell moved no icon, so it could not show the save being followed");
+        } else if !sets.first().is_some_and(|first| *first >= 1500.0) {
+            p.fail(format!("the drop on a taken cell set the wallpaper at {sets:?} ms after the drop, where it must follow Plasma's save at about 2 s"));
+        }
+        let now = places(bench.linux);
+        let Some(icon) = now.iter().find(|rect| !before.contains(rect)).copied().or_else(|| nearest(&now, point)) else { return };
+        let from = grab(&icon, scale);
+        let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
+        special(p, bench, "a plain drag so the daemon learns the selection again", || {
+            drag(from, free)?;
+            Ok(format!("the probe icon from {},{} to {},{}", from.0, from.1, free.0, free.1))
+        });
+        let now = places(bench.linux);
+        let Some(icon) = nearest(&now, (f32::from(free.0) / scale, f32::from(free.1) / scale)) else { return };
+        let from = grab(&icon, scale);
+        let press = (f32::from(from.0) / scale, f32::from(from.1) / scale);
+        let plan = plasma_boards(bench.linux).and_then(|boards| hook_plan(&boards, press).map(|plan| (boards, plan)));
+        let Some((boards, (jump, release, hooked, straight))) = plan else {
+            p.fail("no release point gives the hook drag a landing apart from a straight drag");
+            return;
+        };
+        let Ok((board, _)) = plasma_board(&boards, press) else { return };
+        let (hooked_rect, straight_rect) = (rounded(&board.grid.icon(hooked)), rounded(&board.grid.icon(straight)));
+        let (jump_at, release_at) = (physical_point(jump, scale), physical_point(release, scale));
+        let mark = log_lines(&bench.log).len();
+        let released = std::cell::Cell::new(wall());
+        let hook = special(p, bench, "a hook drag whose first motion leaves the icon's row, which the prediction follows", || {
+            hook_drag(from, jump_at, release_at)?;
+            released.set(wall());
+            Ok(format!("the probe icon pressed at {},{}, first moved to {},{} in the row above, then let go at {},{}, where Plasma, which takes the drag from that first motion, lands it in cell {hooked} and a drag taken from the press would land in cell {straight}", from.0, from.1, jump_at.0, jump_at.1, release_at.0, release_at.1))
+        });
+        let fresh = log_lines(&bench.log);
+        let fresh = fresh.get(mark..).unwrap_or_default();
+        let sets = set_times(fresh, released.get());
+        let (agreed, began) = (fresh.iter().any(|line| line.contains("predicted drop agreed")), fresh.iter().filter(|line| line.contains(" drop drag began at ")).cloned().collect::<Vec<_>>());
+        let now = places(bench.linux);
+        let (landed, astray) = (now.contains(&hooked_rect), now.contains(&straight_rect));
+        p.line(format!("    - drag starts seen {began:?}, wallpaper sets at {sets:?} ms after the drop, the net agreed {agreed}, the icon in the hooked cell {landed} and in the straight cell {astray}"));
+        if !hook.0 || !agreed || !landed || sets.len() != 1 || !sets.first().is_some_and(|first| *first < KDE_DROP_BAR) {
+            p.fail(format!("the hook drag was not predicted where Plasma put it, guessed {}, agreed {agreed}, in the hooked cell {landed}, sets {sets:?} ms", hook.0));
+        }
+        let _ = clicks(&[at(0.92, 0.92)]);
+        let now = places(bench.linux);
+        let Some(icon) = nearest(&now, center(&hooked_rect)) else { return };
+        let from = grab(&icon, scale);
+        let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
+        let escape = special(p, bench, "drag ended with Escape", || {
+            drag_ending(from, free, true)?;
+            Ok(format!("the probe icon from {},{} toward {},{}, Escape before the release", from.0, from.1, free.0, free.1))
+        });
+        untouched(p, "drag ended with Escape", escape, false);
+    }
+
     fn steady_lines(p: &mut Probe, tally: &mut Tally, plan: &Plan, reads: &[Taken<Rects>], last: &[[i64; 4]], slot: usize) {
         let partial: Vec<&Taken<Rects>> = reads.iter().filter(|taken| taken.seen.as_slice() != last && taken.seen != plan.before).collect();
         tally.partly[slot] += usize::from(!partial.is_empty());
@@ -1344,15 +1709,15 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         if let Some(why) = quick_limit(p) {
             set_limit(p, &format!("section 7b on {why}"), &tally.sets, 600.0);
         }
-        if bench.lattice.is_some() {
-            let limit = if bench.scale > 1.0 { 900.0 } else { 700.0 };
-            set_limit(p, "the predicted single drags of section 7b on XFCE", &tally.guessed_sets, limit);
+        if bench.predicts() {
+            let (name, limit) = if bench.plasma5 { ("Plasma 5", KDE_DROP_BAR) } else { ("XFCE", if bench.scale > 1.0 { 900.0 } else { 700.0 }) };
+            set_limit(p, &format!("the predicted single drags of section 7b on {name}"), &tally.guessed_sets, limit);
             let (guessed, held) = (tally.guessed[0] + tally.guessed[1], tally.held[0] + tally.held[1]);
             if held < guessed {
-                p.fail(format!("{} of {guessed} guesses of a move on XFCE did not agree with the file", guessed - held));
+                p.fail(format!("{} of {guessed} guesses of a move on {name} did not agree with the file", guessed - held));
             }
             if tally.guessed[0] < 6 {
-                p.fail(format!("the daemon predicted only {} of 10 single drags on XFCE, where at least 6 must be predicted", tally.guessed[0]));
+                p.fail(format!("the daemon predicted only {} of 10 single drags on {name}, where at least 6 must be predicted", tally.guessed[0]));
             }
         }
         if bench.steady {
@@ -1369,6 +1734,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 shown_ms(median(&costs)),
                 shown_ms(tally.cost.iter().max().map(|cost| *cost as f64))
             ));
+        }
+        if bench.plasma5 {
+            p.line(format!("- the daemon predicted {} of 10 single drags and {} of 5 group drags, and its net found {} and {} of those guesses agreed", tally.guessed[0], tally.guessed[1], tally.held[0], tally.held[1]));
+            p.line(format!("- the Plasma 5 landing rule from the press equalled the final places in {} of 10 single drags", tally.predicted[0]));
         }
         if bench.lattice.is_some() {
             p.line(format!("- the daemon predicted {} of 10 single drags and {} of 5 group drags, and its net found {} and {} of those guesses agreed", tally.guessed[0], tally.guessed[1], tally.held[0], tally.held[1]));
@@ -2003,6 +2372,51 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
     }
 
+    struct Thread {
+        name: String,
+        id: String,
+        voluntary: u64,
+        involuntary: u64,
+        cpu: u64,
+    }
+
+    fn threads_of(process: u32) -> Vec<Thread> {
+        let Ok(tasks) = fs::read_dir(format!("/proc/{process}/task")) else { return Vec::new() };
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+        let mut found: Vec<Thread> = tasks
+            .flatten()
+            .filter_map(|task| {
+                let folder = task.path();
+                let name = fs::read_to_string(folder.join("comm")).ok()?.trim().to_string();
+                let status = fs::read_to_string(folder.join("status")).ok()?;
+                let field = |key: &str| status.lines().find_map(|line| line.strip_prefix(key)).and_then(|rest| rest.trim().parse::<u64>().ok());
+                let stat = fs::read_to_string(folder.join("stat")).ok()?;
+                let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+                let cpu = (fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?) * 1000 / ticks;
+                Some(Thread { name, id: task.file_name().to_string_lossy().into_owned(), voluntary: field("voluntary_ctxt_switches:")?, involuntary: field("nonvoluntary_ctxt_switches:")?, cpu })
+            })
+            .collect();
+        found.sort_by_key(|thread| thread.id.parse::<u64>().unwrap_or(0));
+        found
+    }
+
+    const REST_BAR: u64 = 2;
+
+    fn thread_rows(before: &[Thread], after: &[Thread]) -> (Vec<String>, Vec<(String, u64)>) {
+        let mut rows = Vec::new();
+        let mut woke = Vec::new();
+        for now in after {
+            let (voluntary, involuntary, cpu, began) = match before.iter().find(|was| was.id == now.id) {
+                Some(was) => (now.voluntary.saturating_sub(was.voluntary), now.involuntary.saturating_sub(was.involuntary), now.cpu.saturating_sub(was.cpu), ""),
+                None => (now.voluntary, now.involuntary, now.cpu, "began during the minute, "),
+            };
+            rows.push(format!("`{}` {}: {began}voluntary {voluntary}, involuntary {involuntary}, CPU {cpu} ms", now.name, now.id));
+            woke.push((format!("{} {}", now.name, now.id), voluntary + involuntary));
+        }
+        rows.extend(before.iter().filter(|was| !after.iter().any(|now| now.id == was.id)).map(|was| format!("`{}` {}: ended during the minute", was.name, was.id)));
+        (rows, woke)
+    }
+
     fn proc_numbers(process: u32) -> Option<(u64, u64, u64)> {
         let stat = fs::read_to_string(format!("/proc/{process}/stat")).ok()?;
         let rest = stat.rsplit_once(')')?.1;
@@ -2053,6 +2467,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         std::thread::sleep(Duration::from_secs(2));
         let mut times = Vec::new();
         let mut sets = Vec::new();
+        let mut each: Vec<Option<f64>> = Vec::new();
+        let plasma5 = p.kind == Some(Kind::Kde) && drops::applies(p.kind, p.session);
         let frame = primary_frame(p).unwrap_or(screen.frame);
         let log = p.out.join("watch.log");
         for round in 1..=5 {
@@ -2071,6 +2487,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let detail = tried.unwrap_or_else(|error| format!("failed {error:#}"));
             let changed = wait_until(Duration::from_secs(10), || linux.wallpaper(&screen).ok().flatten() != before);
             let latency = changed.map(|_| moved.elapsed().as_millis());
+            std::thread::sleep(if plasma5 { Duration::from_millis(2600) } else { Duration::from_millis(1800) });
             let moved_icons = icons(&linux) != rects_before;
             let place = seen.map_or("not found, so the picture's own spot".to_string(), |(x, y)| format!("{x:.0},{y:.0}"));
             p.line(format!("- move {round} onto the subject seen at {place}, {detail}, icons moved by the adapter's reading {moved_icons}, new wallpaper after {latency:?} ms"));
@@ -2082,10 +2499,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 p.fail(format!("move {round} onto the subject brought no new wallpaper within 10 s, {detail}"));
             }
             times.extend(latency);
-            std::thread::sleep(Duration::from_millis(1800));
             let lines = log_lines(&log);
             let (wakes, set) = daemon_after(lines.get(mark..).unwrap_or_default(), dropped);
             sets.extend(set);
+            each.push(set);
             let woke = if wakes.is_empty() { "none".to_string() } else { wakes.join(", ") };
             p.line(format!("  - wakes after the drop {woke}, the daemon set the wallpaper at {} ms", shown_ms(set)));
         }
@@ -2095,12 +2512,34 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         if let Some(why) = quick_limit(p) {
             set_limit(p, &format!("section 6 on {why}"), &sets, 600.0);
         }
+        if p.kind == Some(Kind::Kde) && p.session == Session::X11 {
+            let later: Vec<f64> = each.iter().skip(1).flatten().copied().collect();
+            p.line(format!("- named apart, move 1 set the wallpaper at {} ms, since the daemon starts with no knowledge of the selection, and moves 2 to 5 at a median {} ms in {} of 4", shown_ms(each.first().copied().flatten()), shown_ms(median(&later)), later.len()));
+            set_limit(p, "moves 2 to 5 of section 6 on KDE", &later, KDE_DROP_BAR);
+        }
         heard_saves(p);
         switch_check(p, &linux, &screen, (&program, process))?;
+        let resting = Instant::now();
+        let rested = wait_until(Duration::from_secs(45), || !threads_of(process).iter().any(|thread| thread.name == "scooch-reap")).map(|_| resting.elapsed().as_millis());
         std::thread::sleep(Duration::from_secs(3));
         let before = proc_numbers(process);
+        let threads_before = threads_of(process);
         std::thread::sleep(Duration::from_secs(60));
         let after = proc_numbers(process);
+        let threads_after = threads_of(process);
+        p.line(format!("- every thread of the daemon over a quiet minute begun 3 s after its render sessions were let go, {rested:?} ms after the last check, as name, id, voluntary and involuntary switches and CPU ms"));
+        let (rows, woke) = thread_rows(&threads_before, &threads_after);
+        for row in rows {
+            p.line(format!("  - {row}"));
+        }
+        let busiest = woke.iter().map(|(_, count)| *count).max().unwrap_or(0);
+        let over: Vec<String> = woke.iter().filter(|(_, count)| *count > REST_BAR).map(|(name, count)| format!("{name} {count}")).collect();
+        p.line(format!("- the busiest thread switched {busiest} times in the quiet minute, the bar is {REST_BAR} for every thread"));
+        if threads_after.is_empty() {
+            p.fail("the daemon's threads could not be read for the quiet minute");
+        } else if !over.is_empty() {
+            p.fail(format!("daemon threads woke at rest {over:?}"));
+        }
         p.line(format!("- CPU ms, resident KB and threads before {before:?} and after {after:?} a quiet minute"));
         if let (Some(before), Some(after)) = (before, after) {
             p.line(format!("- CPU used while idle {} ms", after.0.saturating_sub(before.0)));
@@ -2371,6 +2810,431 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         if left {
             p.fail("scooch off left its record file behind");
         }
+        Ok(())
+    }
+
+    struct Thrown {
+        child: Child,
+        copy: PathBuf,
+        bin: PathBuf,
+        stand_in: PathBuf,
+        moved: PathBuf,
+        entry: PathBuf,
+        login: Vec<u8>,
+        log: PathBuf,
+        places: String,
+        real: PathBuf,
+        before: Option<PathBuf>,
+    }
+
+    fn logged_since(log: &Path, mark: usize, started: Instant, limit: Duration, wanted: &str) -> Option<u128> {
+        wait_until(limit, || log_lines(log).iter().skip(mark).any(|line| line.contains(wanted))).map(|_| started.elapsed().as_millis())
+    }
+
+    fn program_said(log: &Path, mark: usize) -> Vec<String> {
+        log_lines(log).into_iter().skip(mark).filter(|line| line.contains(" program ") && !line.contains(" program event ")).collect()
+    }
+
+    fn saved_origin(real: &Path) -> Option<String> {
+        let state: serde_json::Value = serde_json::from_slice(&fs::read(real.join("state.json")).ok()?).ok()?;
+        state["origin"].as_str().map(str::to_string)
+    }
+
+    fn start_thrown(copy: &Path, log: &Path, places: &str) -> Result<Child> {
+        let file = fs::OpenOptions::new().create(true).append(true).open(log)?;
+        Ok(Command::new(copy).arg("watch").env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").env("SCOOCH_LINK_PLACES", places).stdin(Stdio::null()).stdout(Stdio::null()).stderr(file).spawn()?)
+    }
+
+    fn stop_thrown(child: &mut Child) {
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+        if wait_until(Duration::from_secs(10), || matches!(child.try_wait(), Ok(Some(_)))).is_none() {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+    }
+
+    fn still_running(child: &mut Child) -> bool {
+        matches!(child.try_wait(), Ok(None))
+    }
+
+    fn task_switches(process: u32) -> Vec<(String, u64)> {
+        let Ok(tasks) = fs::read_dir(format!("/proc/{process}/task")) else { return Vec::new() };
+        tasks
+            .flatten()
+            .filter_map(|task| {
+                let name = fs::read_to_string(task.path().join("comm")).ok()?.trim().to_string();
+                let status = fs::read_to_string(task.path().join("status")).ok()?;
+                let field = |key: &str| status.lines().find_map(|line| line.strip_prefix(key)).and_then(|rest| rest.trim().parse::<u64>().ok());
+                Some((format!("{name} {}", task.file_name().to_string_lossy()), field("voluntary_ctxt_switches:")? + field("nonvoluntary_ctxt_switches:")?))
+            })
+            .collect()
+    }
+
+    fn freedesktop_trash(home: &Path, file: &Path) -> Result<()> {
+        let trash = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|path| path.is_absolute()).unwrap_or_else(|| home.join(".local/share")).join("Trash");
+        fs::create_dir_all(trash.join("files"))?;
+        fs::create_dir_all(trash.join("info"))?;
+        let name = file.file_name().context("the stand in has no file name")?;
+        fs::write(trash.join("info").join(format!("{}.trashinfo", name.to_string_lossy())), format!("[Trash Info]\nPath={}\nDeletionDate=2026-11-20T00:00:00\n", file.display()))?;
+        fs::rename(file, trash.join("files").join(name))?;
+        Ok(())
+    }
+
+    fn thrown_report(p: &mut Probe, name: &str, result: Result<()>) {
+        if let Err(error) = result {
+            p.fail(format!("the {name} case stopped on an error of the probe's own, {error:#}"));
+        }
+    }
+
+    fn thrown_quiet(p: &mut Probe, run: &mut Thrown) -> Result<()> {
+        let started = Instant::now();
+        let rest = logged_since(&run.log, 0, started, Duration::from_secs(45), " sessions let go of ");
+        std::thread::sleep(Duration::from_secs(3));
+        let mark = log_lines(&run.log).len();
+        let pid = run.child.id();
+        let first = task_switches(pid);
+        std::thread::sleep(Duration::from_secs(60));
+        let last = task_switches(pid);
+        let lines: Vec<String> = log_lines(&run.log).into_iter().skip(mark).collect();
+        let events = lines.iter().filter(|line| line.contains(" program event ")).count();
+        let delta = |name: &str, count: u64| first.iter().find(|(seen, _)| seen == name).map(|(_, earlier)| count.saturating_sub(*earlier));
+        let woke: Vec<String> = last.iter().filter_map(|(name, count)| delta(name, *count).filter(|change| *change > 0).map(|change| format!("{name} +{change}"))).collect();
+        let watch = last.iter().find(|(name, _)| name.starts_with("scooch-program ")).and_then(|(name, count)| delta(name, *count));
+        p.line(format!("- a quiet 60 s with the AppImage watched, begun 3 s after the daemon let its render sessions go {rest:?} ms in: inotify events {events}, the watch thread scooch-program switched {watch:?} times, threads that woke {woke:?}, other log lines {lines:?}"));
+        if events > 0 || watch != Some(0) {
+            p.fail("the watch of the AppImage woke at rest");
+        }
+        Ok(())
+    }
+
+    fn thrown_rename(p: &mut Probe, run: &mut Thrown, linux: &Linux, screen: &Screen) -> Result<()> {
+        let showing = linux.wallpaper(screen).ok().flatten();
+        let mark = log_lines(&run.log).len();
+        let started = Instant::now();
+        fs::rename(&run.stand_in, &run.moved)?;
+        let decided = logged_since(&run.log, mark, started, Duration::from_secs(25), " program moved from ");
+        let moved = run.moved.to_string_lossy().into_owned();
+        let followed = wait_until(Duration::from_secs(2), || saved_origin(&run.real).as_deref() == Some(moved.as_str())).is_some();
+        let said = program_said(&run.log, mark);
+        let mark = log_lines(&run.log).len();
+        let started = Instant::now();
+        fs::rename(&run.moved, &run.stand_in)?;
+        let back = logged_since(&run.log, mark, started, Duration::from_secs(25), " program moved from ");
+        let origin = run.stand_in.to_string_lossy().into_owned();
+        let followed_back = wait_until(Duration::from_secs(2), || saved_origin(&run.real).as_deref() == Some(origin.as_str())).is_some();
+        let login = fs::read(&run.entry).ok().as_deref() == Some(run.login.as_slice());
+        let alive = still_running(&mut run.child);
+        let now = linux.wallpaper(screen).ok().flatten();
+        p.line(format!(
+            "- renamed to {}: decided after {decided:?} ms, origin followed {followed}, then back: decided after {back:?} ms, origin followed back {followed_back}, login item untouched {login}, daemon alive {alive}, wallpaper before {showing:?} and after {now:?}, log {said:?} then {:?}",
+            run.moved.display(),
+            program_said(&run.log, mark)
+        ));
+        if decided.is_none() || !followed || back.is_none() || !followed_back || !login || !alive {
+            p.fail("a rename of the AppImage did not take origin with it, or changed something else");
+        }
+        Ok(())
+    }
+
+    fn thrown_nothing(p: &mut Probe, run: &mut Thrown, what: &str, wanted: &str, act: impl FnOnce(&Path) -> std::io::Result<()>) -> Result<()> {
+        let mark = log_lines(&run.log).len();
+        let started = Instant::now();
+        act(&run.stand_in)?;
+        let judged = logged_since(&run.log, mark, started, Duration::from_secs(10), wanted);
+        std::thread::sleep(Duration::from_secs(2));
+        let said = program_said(&run.log, mark);
+        let acted = said.iter().any(|line| line.contains("moved to the Trash") || line.contains("moved from"));
+        let login = fs::read(&run.entry).ok().as_deref() == Some(run.login.as_slice());
+        let alive = still_running(&mut run.child);
+        let origin = run.stand_in.to_string_lossy().into_owned();
+        let kept = saved_origin(&run.real).as_deref() == Some(origin.as_str());
+        p.line(format!("- {what}: judged nothing after {judged:?} ms, acted anyway {acted}, login item untouched {login}, daemon alive {alive}, origin unchanged {kept}, log {said:?}"));
+        if judged.is_none() || acted || !login || !alive || !kept {
+            p.fail(format!("{what} changed Scooch"));
+        }
+        Ok(())
+    }
+
+    fn thrown_off(p: &mut Probe, run: &mut Thrown) -> Result<()> {
+        let started = Instant::now();
+        let out = Command::new(&run.copy).arg("off").env_remove("SCOOCH_HOME").env("SCOOCH_LINK_PLACES", &run.places).stdin(Stdio::null()).output()?;
+        let error = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let exited = wait_until(Duration::from_secs(10), || !still_running(&mut run.child)).map(|_| started.elapsed().as_millis());
+        let copy_gone = !run.copy.exists();
+        let link_gone = fs::symlink_metadata(run.bin.join("scooch")).is_err();
+        let others = fs::read_link(run.bin.join("foreign")).is_ok_and(|points| points == Path::new("/usr/bin/env")) && fs::read(run.bin.join("scooch-old")).is_ok_and(|bytes| bytes == b"a program of its own");
+        let entry_gone = !run.entry.exists();
+        let origin = saved_origin(&run.real);
+        p.line(format!(
+            "- scooch off run from the copy with origin {origin:?} and nothing pending, exit {:?}, said {:?} {error:?}: the daemon exited after {exited:?} ms, the copy removed {copy_gone}, the link at the copy removed {link_gone}, a foreign link and a regular file untouched {others}, the login item removed {entry_gone}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).trim()
+        ));
+        if !out.status.success() || exited.is_none() || !copy_gone || !link_gone || !others || !entry_gone {
+            p.fail("an off with nothing pending did not take away the AppImage copy and its link, or touched a file it must leave alone");
+        }
+        Ok(())
+    }
+
+    fn thrown_restart(p: &mut Probe, run: &mut Thrown) -> Result<()> {
+        if !run.stand_in.exists() {
+            fs::write(&run.stand_in, b"a stand in for the AppImage")?;
+        }
+        if !run.copy.exists() {
+            fs::copy(scooch_program()?, &run.copy)?;
+            let link = run.bin.join("scooch");
+            if fs::symlink_metadata(&link).is_err() {
+                std::os::unix::fs::symlink(&run.copy, &link)?;
+            }
+        }
+        if fs::read(&run.entry).ok().as_deref() != Some(run.login.as_slice()) {
+            fs::write(&run.entry, &run.login)?;
+        }
+        let mut state: serde_json::Value = serde_json::from_slice(&fs::read(run.real.join("state.json"))?)?;
+        if state["on"] != serde_json::Value::Bool(true) {
+            state["on"] = serde_json::Value::Bool(true);
+            fs::write(run.real.join("state.json"), serde_json::to_vec(&state)?)?;
+        }
+        stop_thrown(&mut run.child);
+        let mark = log_lines(&run.log).len();
+        let started = Instant::now();
+        run.child = start_thrown(&run.copy, &run.log, &run.places)?;
+        let armed = logged_since(&run.log, mark, started, Duration::from_secs(60), " program watched at ");
+        p.line(format!("- the stand in made again and the daemon started again, watch armed after {armed:?} ms"));
+        armed.map(drop).context("the restarted daemon made no watch on the AppImage")
+    }
+
+    fn thrown_trash(p: &mut Probe, run: &mut Thrown, linux: &Linux, screen: &Screen) -> Result<()> {
+        let home = dirs::home_dir().context("no home folder")?;
+        let mark = log_lines(&run.log).len();
+        let started = Instant::now();
+        let gio = Command::new("gio").arg("trash").arg(&run.stand_in).output();
+        let used = match &gio {
+            Ok(out) if out.status.success() => "gio trash".to_string(),
+            other => {
+                freedesktop_trash(&home, &run.stand_in)?;
+                format!("a Freedesktop move made by the probe, since gio trash gave {:?}", other.as_ref().map(|out| out.status.code()).map_err(|error| error.to_string()))
+            }
+        };
+        let decided = logged_since(&run.log, mark, started, Duration::from_secs(25), " program moved to the Trash at ");
+        let turned = logged_since(&run.log, mark, started, Duration::from_secs(25), " program in the Trash, Scooch turned off");
+        let exited = wait_until(Duration::from_secs(30), || !still_running(&mut run.child)).map(|_| started.elapsed().as_millis());
+        let gone = wait_until(Duration::from_secs(10), || !run.entry.exists()).map(|_| started.elapsed().as_millis());
+        let copy_gone = !run.copy.exists();
+        let link_gone = fs::symlink_metadata(run.bin.join("scooch")).is_err();
+        let others = fs::read_link(run.bin.join("foreign")).is_ok_and(|points| points == Path::new("/usr/bin/env")) && fs::read(run.bin.join("scooch-old")).is_ok_and(|bytes| bytes == b"a program of its own");
+        let after = linux.wallpaper(screen).ok().flatten();
+        let restored = after == run.before;
+        p.line(format!(
+            "- moved to the Trash through {used}: decided after {decided:?} ms, turned off after {turned:?} ms, the daemon exited after {exited:?} ms, the login item was gone after {gone:?} ms, the copy removed {copy_gone}, the link at the copy removed {link_gone}, a foreign link and a regular file untouched {others}, wallpaper now {after:?}, the person's own {:?}, back {restored}, log {:?}",
+            run.before,
+            program_said(&run.log, mark)
+        ));
+        if decided.is_none() || turned.is_none() || exited.is_none() || gone.is_none() || !copy_gone || !link_gone || !others || !restored {
+            p.fail("the AppImage in the Trash did not turn Scooch off, put the wallpaper back and take away the copy and its link");
+        }
+        Ok(())
+    }
+
+    fn thrown_away(p: &mut Probe) -> Result<()> {
+        let single = std::env::var("SCOOCH_MONITORS").map_or(true, |value| value == "1");
+        if p.kind != Some(Kind::Gnome) || !single {
+            p.line("- this check runs on the single screen GNOME job, which carries gio".to_string());
+            return Ok(());
+        }
+        if let Some(mut child) = p.daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let linux = p.linux()?;
+        let screen = linux.screens()?.first().cloned().context("no screen")?;
+        let home = dirs::home_dir().context("no home folder")?;
+        let real = dirs::data_local_dir().context("no data folder")?.join("scooch");
+        let scratch = std::env::temp_dir().join(format!("scooch-thrown-{}", std::process::id()));
+        let (local, bin) = (scratch.join("local"), scratch.join("bin"));
+        fs::create_dir_all(&local)?;
+        fs::create_dir_all(&bin)?;
+        p.made.push(scratch.clone());
+        let copy = local.join("scooch");
+        fs::copy(scooch_program()?, &copy)?;
+        std::os::unix::fs::symlink(&copy, bin.join("scooch"))?;
+        std::os::unix::fs::symlink("/usr/bin/env", bin.join("foreign"))?;
+        fs::write(bin.join("scooch-old"), b"a program of its own")?;
+        let apps = home.join("Applications");
+        let moved_folder = home.join("Applications-moved");
+        fs::create_dir_all(&apps)?;
+        fs::create_dir_all(&moved_folder)?;
+        p.made.push(moved_folder.clone());
+        let stand_in = apps.join("Scooch-probe.AppImage");
+        fs::write(&stand_in, b"a stand in for the AppImage")?;
+        p.made.push(stand_in.clone());
+        fs::create_dir_all(&real)?;
+        p.made.push(real.clone());
+        fs::write(real.join("state.json"), br#"{"version":1,"on":true}"#)?;
+        std::env::remove_var("SCOOCH_HOME");
+        let set = scooch::facade::set_origin(Some(stand_in.as_path()));
+        std::env::set_var("SCOOCH_HOME", &p.home);
+        p.line(format!("- the stand in AppImage {} recorded through facade::set_origin {:?}, saved origin {:?}", stand_in.display(), set.map_err(|error| format!("{error:#}")), saved_origin(&real)));
+        let entry = scooch::platform::linux::autostart::path()?;
+        if let Some(folder) = entry.parent() {
+            fs::create_dir_all(folder)?;
+        }
+        fs::write(&entry, scooch::platform::linux::parse::entry::text(&copy, &entry))?;
+        let login = fs::read(&entry)?;
+        let before = linux.wallpaper(&screen).ok().flatten();
+        let log = p.out.join("program-watch.log");
+        let places = format!("{}:{}", local.display(), bin.display());
+        let started = Instant::now();
+        let child = start_thrown(&copy, &log, &places)?;
+        let mut run = Thrown { child, copy, bin, stand_in, moved: moved_folder.join("Scooch-probe.AppImage"), entry, login, log, places, real, before };
+        let armed = logged_since(&run.log, 0, started, Duration::from_secs(60), " program watched at ");
+        let ready = wait_until(Duration::from_secs(60), || rendered(&run.real)).map(|_| started.elapsed().as_millis());
+        let showing = linux.wallpaper(&screen).ok().flatten();
+        p.line(format!("- the daemon run from the copy {} with the real data folder, a login item at {} and link places {}, rendered after {ready:?} ms, watch armed after {armed:?} ms, wallpaper before {:?}, now {showing:?}", run.copy.display(), run.entry.display(), run.places, run.before));
+        if armed.is_none() {
+            p.fail("the daemon made no watch on the recorded AppImage");
+        } else {
+            let result = thrown_quiet(p, &mut run);
+            thrown_report(p, "quiet minute", result);
+            let result = thrown_rename(p, &mut run, &linux, &screen);
+            thrown_report(p, "rename", result);
+            let result = thrown_nothing(p, &mut run, "a replace in place, the file written over", "changed in place, so nothing changes", |path| fs::write(path, b"a newer stand in for the AppImage"));
+            thrown_report(p, "replace in place", result);
+            let result = thrown_nothing(p, &mut run, "a delete", "was deleted, so nothing changes", |path| fs::remove_file(path));
+            thrown_report(p, "delete", result);
+            let result = thrown_restart(p, &mut run);
+            thrown_report(p, "restart", result);
+            let result = thrown_off(p, &mut run);
+            thrown_report(p, "off", result);
+            let result = thrown_restart(p, &mut run);
+            thrown_report(p, "restart after the off", result);
+            let result = thrown_trash(p, &mut run, &linux, &screen);
+            thrown_report(p, "Trash", result);
+        }
+        if still_running(&mut run.child) {
+            stop_thrown(&mut run.child);
+        }
+        let _ = fs::remove_file(&run.entry);
+        p.line(format!("- the stand in stays in the runner's Trash, the daemon's log is in the artifact as {}", run.log.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+        Ok(())
+    }
+
+    fn real_scooch(program: &Path, arguments: &[&str]) -> Result<std::process::Output> {
+        Ok(Command::new(program).args(arguments).env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").stdin(Stdio::null()).output()?)
+    }
+
+    fn real_state(real: &Path) -> serde_json::Value {
+        fs::read(real.join("state.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn real_daemon(real: &Path) -> Option<u32> {
+        let pid: u32 = fs::read_to_string(real.join("watch.pid")).ok()?.trim().parse().ok()?;
+        (unsafe { libc::kill(pid as libc::pid_t, 0) } == 0).then_some(pid)
+    }
+
+    fn said(out: &std::process::Output) -> String {
+        String::from_utf8_lossy(&out.stdout).trim().replace('\n', " / ")
+    }
+
+    fn launched_by_gio(entry: &Path) -> String {
+        match Command::new("gio").arg("launch").arg(entry).env_remove("SCOOCH_HOME").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status() {
+            Ok(status) => format!("gio launch exit {:?}", status.code()),
+            Err(error) => format!("gio launch could not run, {error}"),
+        }
+    }
+
+    fn final_off_check(p: &mut Probe) -> Result<()> {
+        let single = std::env::var("SCOOCH_MONITORS").map_or(true, |value| value == "1");
+        if p.kind != Some(Kind::Gnome) || !single {
+            p.line("- this check runs on the single screen GNOME job, which carries gio".to_string());
+            return Ok(());
+        }
+        let linux = p.linux()?;
+        let screen = linux.screens()?.first().cloned().context("no screen")?;
+        let program = scooch_program()?;
+        let real = dirs::data_local_dir().context("no data folder")?.join("scooch");
+        let picture = p.pictures.first().cloned().context("no probe picture")?;
+        let entry = scooch::platform::linux::autostart::path()?;
+        if let Some(folder) = entry.parent() {
+            fs::create_dir_all(folder)?;
+        }
+        let _ = fs::remove_dir_all(&real);
+        fs::create_dir_all(real.join("out"))?;
+        if !p.made.contains(&real) {
+            p.made.push(real.clone());
+        }
+        let set = linux.set_wallpaper(&screen, &picture).map_err(|error| format!("{error:#}"));
+        let parked_out = real.join("out").join("probe-absent-1.jpg");
+        fs::copy(&picture, &parked_out)?;
+        let record = serde_json::json!({"version": 1, "on": true, "screens": {"probe-absent": {"source": picture, "original": picture, "output": parked_out}}});
+        fs::write(real.join("state.json"), serde_json::to_vec(&record)?)?;
+        p.line(format!("- the real data folder {} holds a record for a screen probe-absent that no desktop shows, its own picture {} and its output {}, the wallpaper set to that picture {set:?}", real.display(), picture.display(), parked_out.display()));
+        let before = linux.wallpaper(&screen).ok().flatten();
+        let on = real_scooch(&program, &[])?;
+        let id = screen.id.clone();
+        let drawn = wait_until(Duration::from_secs(60), || !real_state(&real)["screens"][id.as_str()]["fingerprint"].is_null());
+        let daemon = real_daemon(&real);
+        p.line(format!("- scooch turned on exit {:?}, said {:?}, the screen drawn after {:?} ms, daemon {daemon:?}, login item {}", on.status.code(), said(&on), drawn.map(|time| time.as_millis()), entry.exists()));
+        let started = Instant::now();
+        let off = real_scooch(&program, &["off", "--final"])?;
+        let took = started.elapsed().as_millis();
+        let state = real_state(&real);
+        let left = daemon.filter(|pid| unsafe { libc::kill(*pid as libc::pid_t, 0) } == 0);
+        let kept = state["screens"]["probe-absent"]["original"].as_str() == picture.to_str();
+        let parked = state["on"] != serde_json::Value::Bool(true) && state["restoring"] != serde_json::Value::Bool(true) && kept && state["screens"].get(id.as_str()).is_none();
+        let back = linux.wallpaper(&screen).ok().flatten();
+        p.line(format!(
+            "- scooch off --final exit {:?} after {took} ms, said {:?}: daemon left {left:?}, login item left {}, record of probe-absent kept with its own picture {kept}, state parked {parked}, its output still there {}, the shown screen back on the wallpaper it had before Scooch {}, {back:?}",
+            off.status.code(),
+            said(&off),
+            entry.exists(),
+            parked_out.exists(),
+            back == before
+        ));
+        if off.status.code() != Some(0) || left.is_some() || entry.exists() || !parked || !parked_out.exists() || back != before || !said(&off).contains("could not reach") {
+            p.fail("the final off left a daemon or a login item, or did not keep the record of the screen it could not reach");
+        }
+        let status = real_scooch(&program, &["status"])?;
+        p.line(format!("- scooch status on the parked state said {:?}", said(&status)));
+        if !said(&status).contains("still shows a picture Scooch made") {
+            p.fail("status on a parked state did not count the screen that still shows Scooch's picture");
+        }
+        let again = real_scooch(&program, &[])?;
+        let drawn = wait_until(Duration::from_secs(60), || !real_state(&real)["screens"][id.as_str()]["fingerprint"].is_null());
+        let state = real_state(&real);
+        let woke = state["on"] == serde_json::Value::Bool(true) && state["screens"]["probe-absent"]["original"].as_str() == picture.to_str();
+        p.line(format!("- scooch turned on again exit {:?}, said {:?}, the shown screen drawn after {:?} ms, on with the parked record of probe-absent and its own picture still kept {woke}, daemon {:?}", again.status.code(), said(&again), drawn.map(|time| time.as_millis()), real_daemon(&real)));
+        if !woke {
+            p.fail("turning on after a final off lost the record of the screen it could not reach");
+        }
+        let entry_named = fs::read_to_string(&entry).unwrap_or_default();
+        p.line(format!("- the login item the daemon wrote {:?}", entry_named.lines().find(|line| line.starts_with("Exec="))));
+        let ended = real_scooch(&program, &["off", "--final"])?;
+        p.line(format!("- scooch off --final again exit {:?}, said {:?}", ended.status.code(), said(&ended)));
+        let missing = real.join("gone").join("scooch");
+        fs::write(&entry, scooch::platform::linux::parse::entry::text(&missing, &entry))?;
+        let how = launched_by_gio(&entry);
+        let removed = wait_until(Duration::from_secs(10), || !entry.exists()).map(|time| time.as_millis());
+        p.line(format!("- a login item naming {} which is not there, started the way GNOME starts it, {how}: the entry removed itself after {removed:?} ms", missing.display()));
+        if removed.is_none() {
+            p.fail("a login item whose program is gone did not remove itself");
+        }
+        let mut on_again = real_state(&real);
+        on_again["on"] = serde_json::Value::Bool(true);
+        fs::write(real.join("state.json"), serde_json::to_vec(&on_again)?)?;
+        fs::write(&entry, scooch::platform::linux::parse::entry::text(&program, &entry))?;
+        let how = launched_by_gio(&entry);
+        let found = wait_until(Duration::from_secs(20), || real_daemon(&real).is_some()).and_then(|_| real_daemon(&real));
+        let exe = found.and_then(|pid| fs::read_link(format!("/proc/{pid}/exe")).ok());
+        let line = found.and_then(|pid| fs::read(format!("/proc/{pid}/cmdline")).ok()).map(|bytes| bytes.split(|byte| *byte == 0).map(|part| String::from_utf8_lossy(part).into_owned()).filter(|part| !part.is_empty()).collect::<Vec<_>>());
+        p.line(format!("- a login item naming the program, started the same way, {how}: daemon {found:?}, its program {exe:?}, its command line {line:?}, the entry still there {}", entry.exists()));
+        if exe.as_deref() != Some(program.as_path()) || !line.as_deref().is_some_and(|parts| parts.last().map(String::as_str) == Some("watch")) {
+            p.fail("the login item did not start the program itself as scooch watch");
+        }
+        let cleared = real_scooch(&program, &["off", "--final"])?;
+        let _ = fs::write(real.join("state.json"), br#"{"version":1,"on":false}"#);
+        let _ = fs::remove_file(&entry);
+        p.line(format!("- cleared with scooch off --final exit {:?}, daemon left {:?}", cleared.status.code(), real_daemon(&real)));
         Ok(())
     }
 

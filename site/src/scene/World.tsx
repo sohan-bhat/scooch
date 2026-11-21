@@ -199,10 +199,14 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       screens.crt.uniforms.uExtent.value.set(television.origin.width, television.origin.height);
       found.television.mesh.material = screens.crt.material;
       hooks.frame = screens.main;
+      hooks.gl = gl;
+      hooks.manifest = manifest;
       hooks.icons = screens.crt.uniforms.uIcons.value;
       hooks.origin = screens.crt.uniforms.uOrigin.value;
       hooks.extent = screens.crt.uniforms.uExtent.value;
       hooks.place = () => story.place;
+      hooks.laptop = found.laptop.mesh;
+      hooks.screen = { lcd: screens.lcd.uniforms, crt: screens.crt.uniforms };
       found.television.mesh.castShadow = false;
       setBuilt({
         laptop: glassOf(found.laptop.mesh, found.laptop.frame, laptop.screen),
@@ -624,7 +628,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     };
   }, [built, gl, camera, scene, screens, wall, blindsMatrix]);
 
-  const heldPart = useCallback(() => {
+  const heldPart = useCallback((size: { width: number; height: number }) => {
     if (!built) return undefined;
     const tv = built.television;
     const buffer = quality.liveSize(gl, scratch.buffer);
@@ -641,8 +645,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       minY = Math.min(minY, scratch.corner.y);
       maxY = Math.max(maxY, scratch.corner.y);
     }
-    const size = screens.main.live.image as { width: number; height: number };
-    const fit = Math.min(1, Math.max(((maxX - minX) / 2) * buffer.x / size.width, ((maxY - minY) / 2) * buffer.y / size.height) * 1.25);
+    const fit = Math.min(1, hooks.fit ? hooks.fit(buffer, size) : Math.max(((maxX - minX) / 2) * buffer.x / size.width, ((maxY - minY) / 2) * buffer.y / size.height) * 1.25);
     if (fit >= 1) return undefined;
     return { width: Math.max(64, Math.ceil(size.width * fit)), height: Math.max(48, Math.ceil(size.height * fit)) };
   }, [built, gl, camera, scratch, screens]);
@@ -668,6 +671,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     const lookX = pointer.x * motion + live.look.x;
     const lookY = pointer.y * motion + live.look.y;
     rig.apply(camera as PerspectiveCamera, story.camera, time, lookX, lookY, Math.min(delta, 0.1), size.width, size.height, idle, runtime.frozen !== null);
+    hooks.view(camera as PerspectiveCamera);
     runtime.settled = rig.settled(lookX, lookY);
 
     const away = 1 - story.inside;
@@ -722,8 +726,13 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
     floor.uniforms.uDrift.value.copy(wall.uniforms.uDrift.value);
     crt.uTime.value = screenTime;
     const frameSize = screens.main.live.image as { width: number; height: number };
-    const part = inside?.group.visible ? undefined : heldPart();
-    const holding = hooks.drawHeld(gl, Math.min(delta, 0.05), part);
+    const heldFrame = hooks.frame ?? screens.main;
+    const heldSize = heldFrame.live.image as { width: number; height: number };
+    const part = inside?.group.visible ? undefined : heldPart(heldSize);
+    const held = hooks.drawHeld(gl, Math.min(delta, 0.05), part);
+    const holding = held && heldFrame === screens.main;
+    hooks.scale[0] = held && part && !native.full ? part.width / heldSize.width : 1;
+    hooks.scale[1] = held && part && !native.full ? part.height / heldSize.height : 1;
     const moving = quality.chain === 'fast' && quality.fastScale < 1 ? scratch.part.set(Math.max(1, Math.round(frameSize.width * quality.fastScale)), Math.max(1, Math.round(frameSize.height * quality.fastScale))) : null;
     const movingPart = moving ? { width: moving.x, height: moving.y } : undefined;
     if (!holding && native.phase === 'live') screens.main.render(gl, story.place, movingPart);
@@ -782,6 +791,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
 
     scratch.focus.copy(built.laptop.center).lerp(built.television.center, story.focus);
     quality.focus(scratch.focus, camera.position, 1, scratch.focus, scratch.focus, story.dof);
+    hooks.after();
   });
 
   return (

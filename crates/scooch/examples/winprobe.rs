@@ -39,7 +39,7 @@ mod probe {
     use ::windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First, Thread32Next, PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32};
     use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use ::windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
-    use ::windows::Win32::System::Registry::{RegCloseKey, RegDeleteKeyValueW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_BINARY, REG_DWORD, RRF_RT_REG_DWORD};
+    use ::windows::Win32::System::Registry::{RegCloseKey, RegDeleteKeyValueW, RegGetValueW, RegOpenKeyExW, RegSetKeyValueW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_BINARY, REG_DWORD, REG_SZ, RRF_RT_REG_DWORD};
     use ::windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount, GetProcessTimes, OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, PROCESS_VM_READ};
     use scooch::live::{Command as LiveCommand, Helper, Hints, Reply};
     use scooch::platform::windows::layer::{self, Method};
@@ -92,6 +92,19 @@ mod probe {
 
     fn epoch() -> f64 {
         SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |since| since.as_secs_f64())
+    }
+
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmFlush() -> i32;
+    }
+
+    fn composed() {
+        for _ in 0..2 {
+            if unsafe { DwmFlush() } < 0 {
+                break;
+            }
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -232,6 +245,7 @@ mod probe {
         probe.section("6c Explorer after the drop", explorer_after_drop);
         probe.section("9 Live layer", live);
         probe.section("8 Display scaling", scaling);
+        probe.section("6d The final off", final_off_check);
         probe.section("7 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -3493,6 +3507,7 @@ mod probe {
     struct Watched {
         dropped: f64,
         shots: Vec<(f64, RgbImage)>,
+        layered: Vec<(f64, usize)>,
         log: Vec<String>,
         old: Option<PathBuf>,
         kept: Option<PathBuf>,
@@ -3525,12 +3540,22 @@ mod probe {
         let dropped = DROPPED.lock().ok().and_then(|mut dropped| dropped.take()).unwrap_or_else(epoch);
         let started = Instant::now();
         let mut shots = Vec::new();
+        let mut layered = Vec::new();
+        let mut up_before = 0usize;
         let mut done: Option<Instant> = None;
         let mut count = 0usize;
         while started.elapsed() < Duration::from_secs(12) {
             if capture_screen {
+                let mut up = layer::ours_left();
+                if up == 0 && up_before > 0 {
+                    composed();
+                    up = layer::ours_left();
+                }
+                up_before = up;
+                let began = epoch();
                 if let Ok(shot) = capture(area) {
                     shots.push((epoch(), shot));
+                    layered.push((began, up));
                 }
             } else {
                 pump(Duration::from_millis(30));
@@ -3547,7 +3572,7 @@ mod probe {
         let log: Vec<String> = log_lines(log).into_iter().skip(start).filter(|line| line.contains(" glide ") || line.contains(" tick ") || line.contains(" wake ") || line.contains(" set ")).collect();
         let set = log.iter().rev().find_map(|line| line.split_once(' ').and_then(|(_, rest)| rest.strip_prefix("set ")).map(|path| PathBuf::from(path.trim())));
         let new = set.or_else(|| desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten()));
-        Watched { dropped, shots, log, old, kept, new, sent }
+        Watched { dropped, shots, layered, log, old, kept, new, sent }
     }
 
     fn logged(watched: &Watched, word: &str) -> Option<f64> {
@@ -3557,6 +3582,10 @@ mod probe {
     fn logged_from(watched: &Watched, word: &str, from: f64) -> Option<f64> {
         let word = word.trim_start();
         watched.log.iter().filter(|line| line.split_once(' ').is_some_and(|(_, rest)| rest.starts_with(word))).filter_map(|line| stamp_of(line)).find(|stamp| *stamp >= from)
+    }
+
+    fn lands(line: &str) -> bool {
+        line.contains(" glide settled") || line.contains(" glide gave up the settle")
     }
 
     fn gliding(line: &str) -> bool {
@@ -3625,12 +3654,15 @@ mod probe {
         let glided = named("glided");
         let closed = named("closed");
         let settled = settle.or(open).and_then(|from| logged_from(watched, "glide settled", from));
+        let given_up = settle.or(open).and_then(|from| logged_from(watched, "glide gave up the settle", from));
+        let budget = settle.or(open).and_then(|from| logged_from(watched, "glide skipped, settle budget", from));
+        let landed = settled.or(given_up);
         let ready = logged(watched, " glide ready");
         let set = logged(watched, " set ");
         let tick = watched.log.iter().filter(|line| line.contains(" tick ")).find(|line| set.is_none_or(|set| stamp_of(line).is_some_and(|stamp| stamp >= set))).cloned();
         let wake = logged(watched, " wake ");
         let fitted: Vec<Option<(f32, f32)>> = watched.shots.iter().map(|(_, shot)| (!frames.is_empty()).then(|| best_frame(shot, &frames, &keep))).collect();
-        let window: Vec<f32> = watched.shots.iter().enumerate().filter(|(_, (at, _))| open.is_some_and(|open| *at >= open) && settled.is_none_or(|settled| *at <= settled)).filter_map(|(index, _)| fitted[index].map(|(s, _)| s)).collect();
+        let window: Vec<f32> = watched.shots.iter().enumerate().filter(|(_, (at, _))| open.is_some_and(|open| *at >= open) && landed.is_none_or(|landed| *at <= landed)).filter_map(|(index, _)| fitted[index].map(|(s, _)| s)).collect();
         let steady = window.windows(2).all(|pair| pair[1] >= pair[0] - 0.1);
         let distinct = {
             let mut seen: Vec<i32> = window.iter().map(|s| (s * 20.0).round() as i32).collect();
@@ -3649,9 +3681,10 @@ mod probe {
             hidden = hidden.max(covered(shot, before, &expected, &mask).0);
         }
         let wide = outside(width, height, &avoid, 1);
-        let after: Vec<(usize, (f32, u8, u8))> = settled.map_or_else(Vec::new, |settled| {
-            watched.shots.iter().enumerate().filter(|(_, (at, _))| *at > settled && closed.is_none_or(|closed| *at <= closed + 1.0)).map(|(index, (_, shot))| (index, difference(shot, &new, &wide))).collect()
-        });
+        let bare = |index: usize| closed.zip(watched.layered.get(index)).is_some_and(|(closed, (began, up))| *began >= closed && *up == 0);
+        let counted = |index: usize, at: f64| closed.is_none_or(|closed| at <= closed + 1.0) && (settled.is_some_and(|settled| at > settled) || bare(index));
+        let after: Vec<(usize, (f32, u8, u8))> = watched.shots.iter().enumerate().filter(|(index, (at, _))| counted(*index, *at)).map(|(index, (_, shot))| (index, difference(shot, &new, &wide))).collect();
+        let gone = closed.and_then(|closed| watched.layered.iter().find(|(began, up)| *began >= closed && *up == 0).map(|(began, _)| *began));
         let hand_over: Option<(f32, u8, u8)> = (!after.is_empty()).then(|| after.iter().fold((0.0f32, 0u8, 0u8), |w, (_, d)| (w.0.max(d.0), w.1.max(d.1), w.2.max(d.2))));
         let worst_after = after.iter().max_by_key(|(_, d)| d.1).map(|(index, d)| (*index, *d));
         let since = |time: Option<f64>| time.map(|time| ((time - watched.dropped) * 1000.0).round());
@@ -3660,8 +3693,8 @@ mod probe {
             (None, true) => "ready earlier".to_string(),
             (None, false) => "ready missing".to_string(),
         };
-        let order: Vec<String> = std::iter::once(ready_text).chain([("open and glide", open), ("settle after the set", settle), ("glided", glided), ("settled", settled), ("closed", closed)].into_iter().map(|(name, at)| format!("{name} {:?}", since(at)))).collect();
-        let in_order = match (open, settle, settled, closed) {
+        let order: Vec<String> = std::iter::once(ready_text).chain([("open and glide", open), ("settle after the set", settle), ("glided", glided), ("settled", settled), ("gave up the settle", given_up), ("closed", closed)].into_iter().map(|(name, at)| format!("{name} {:?}", since(at)))).collect();
+        let in_order = match (open, settle, landed, closed) {
             (Some(open), Some(settle), Some(settled), Some(closed)) => open <= settle && settled >= settle && closed >= settled && closed + 0.02 >= settle + HOLD as f64 / 1000.0,
             _ => false,
         };
@@ -3689,6 +3722,14 @@ mod probe {
         ));
         p.line(format!("  - {} captures fitted to {} CPU frames during the glide, {distinct} distinct s, steady {steady}: {:?}", window.len(), frames.len(), window.iter().map(|s| (s * 100.0).round() / 100.0).collect::<Vec<_>>()));
         p.line(format!("  - icon pixels covered {hidden} of {}, {} captures from settled to a second after close, worst against the new still {hand_over:?}, old picture after the new {returned}", total(&mask), after.len()));
+        let gone_ms = closed.zip(gone).map(|(closed, gone)| ((gone - closed) * 1000.0).round());
+        if given_up.is_some() {
+            let given_ms = watched.log.iter().find_map(|line| line.split(" glide gave up the settle after ").nth(1)).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<u64>().ok());
+            let stayed = glided.zip(gone).map(|(glided, gone)| ((gone - glided) * 1000.0).round());
+            p.line(format!("  - the daemon gave up the settle after {given_ms:?} ms with its skip line logged {}, the glide's last frame stayed on screen {stayed:?} ms until the layer was gone, the first capture with no layer window left began {gone_ms:?} ms after the close was sent, the hand over judged on the {} captures that began with no layer window left", budget.is_some(), after.len()));
+        } else {
+            p.line(format!("  - the first capture with no layer window left began {gone_ms:?} ms after the close was sent"));
+        }
         if let Some((index, d)) = worst_after.filter(|(_, d)| d.1 > 2) {
             let at = watched.shots[index].0;
             let marks = [("after the drop", Some(((at - watched.dropped) * 1000.0) as i128)), ("after settled", settled.map(|settled| ((at - settled) * 1000.0) as i128)), ("after close", closed.map(|closed| ((at - closed) * 1000.0) as i128))];
@@ -3716,7 +3757,7 @@ mod probe {
         p.line(format!("  - the daemon's file is {} bytes, the system's decode against ours {:?}, Themes copies since the drop {copies:?}", file_bytes.len(), system.map_err(|error| error.to_string())));
         p.line(format!("  - daemon log {:?}", watched.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         if let Some(name) = strip_name {
-            let picked: Vec<(f64, RgbImage)> = watched.shots.iter().filter(|(at, _)| open.is_none_or(|open| *at >= open - 0.05) && settled.is_none_or(|settled| *at <= settled + 0.1)).map(|(at, shot)| (*at, shot.clone())).collect();
+            let picked: Vec<(f64, RgbImage)> = watched.shots.iter().filter(|(at, _)| open.is_none_or(|open| *at >= open - 0.05) && landed.is_none_or(|landed| *at <= landed + 0.1)).map(|(at, shot)| (*at, shot.clone())).collect();
             let timed: Vec<(u128, RgbImage)> = picked.into_iter().map(|(at, shot)| (((at - watched.dropped) * 1000.0).max(0.0) as u128, shot)).collect();
             if let (Some(first), Some(last)) = (timed.first().map(|(at, _)| *at), timed.last().map(|(at, _)| *at)) {
                 if let Some(image) = strip(&timed, first, last) {
@@ -3725,7 +3766,8 @@ mod probe {
                 }
             }
         }
-        returned == 0 && steady && distinct >= 3 && hidden * 100 <= total(&mask).max(1) && hand_over.is_some_and(|d| d.1 <= 2) && in_order
+        let landing = settled.is_some() || (given_up.is_some() && budget.is_some());
+        returned == 0 && steady && distinct >= 3 && hidden * 100 <= total(&mask).max(1) && hand_over.is_some_and(|d| d.1 <= 2) && in_order && landing
     }
 
     fn icons_except(screen: &Screen, moving: &str) -> Vec<Rect> {
@@ -4094,7 +4136,7 @@ mod probe {
             quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
             tries += 1;
             let again = watch_change(&log, &screen, || drag_icon(name, folder, target), false);
-            glided_again = again.log.iter().any(|line| line.contains(" glide settled"));
+            glided_again = again.log.iter().any(|line| lands(line));
             let reasons: Vec<String> = again.log.iter().filter(|line| line.contains("glide skipped")).map(|line| line.chars().take(200).collect()).collect();
             p.line(format!("- drag {tries} after the kill glides {glided_again}, skip reasons {reasons:?}, log {:?}", again.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
             decisions(p, &again);
@@ -4170,7 +4212,7 @@ mod probe {
         let rest_target = if last_target.x == centre.x && last_target.y == centre.y { aside } else { centre };
         let rested = watch_change(&log, &screen, || drag_icon(name, folder, rest_target), false);
         let stamp = |word: &str| rested.log.iter().find(|line| line.contains(word)).and_then(|line| stamp_of(line));
-        let rest_glided = rested.log.iter().any(|line| line.contains(" glide settled"));
+        let rest_glided = rested.log.iter().any(|line| lands(line));
         let rest_skips: Vec<String> = rested.log.iter().filter(|line| line.contains("glide skipped")).map(|line| line.chars().take(200).collect()).collect();
         let cold = stamp(" glide early launch").or_else(|| stamp(" glide helper launched")).zip(stamp(" glide ready")).map(|(started, ready)| ((ready - started) * 1000.0).round());
         let shown = stamp(" glide open after snapshot").zip(rested.log.iter().find(|line| gliding(line)).and_then(|line| stamp_of(line))).map(|(asked, shown)| ((shown - asked) * 1000.0).round());
@@ -4409,6 +4451,66 @@ mod probe {
         for line in quiet.iter().take(20) {
             p.line(format!("  - `{line}`"));
         }
+        Ok(())
+    }
+
+    fn real_state(real: &Path) -> serde_json::Value {
+        fs::read(real.join("state.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn final_off_check(p: &mut Probe) -> Result<()> {
+        if let Some(mut child) = p.daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let desktop = platform::current()?;
+        let screen = desktop.screens()?.first().context("no screen")?.clone();
+        let twin = twin()?;
+        let cli = twin.with_file_name("scooch.exe");
+        let real = dirs::data_local_dir().context("no data folder")?.join("Scooch");
+        let _ = fs::remove_dir_all(&real);
+        fs::create_dir_all(real.join("out"))?;
+        p.made.push(real.clone());
+        let picture = p.home.join("probe-final.jpg");
+        fs::write(&picture, jpeg(&subject_picture(screen.frame.w as u32, screen.frame.h as u32))?)?;
+        desktop.set_wallpaper(&screen, &picture)?;
+        let absent = r"\\?\DISPLAY#PROBE0000#5&1a2b3c4d&0&UID4357#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
+        let parked_out = real.join("out").join("probe-absent-1.png");
+        fs::copy(&picture, &parked_out)?;
+        let record = serde_json::json!({"version": 1, "on": true, "screens": {absent: {"source": picture, "original": picture, "output": parked_out}}});
+        fs::write(real.join("state.json"), serde_json::to_vec(&record)?)?;
+        p.line(format!("- the real data folder {} holds a record for a monitor that is not attached, {absent}, with its own picture and its output", real.display()));
+        let command: Vec<u16> = layout::command_line(&twin).encode_utf16().chain(Some(0)).collect();
+        let written = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, startup::RUN, startup::VALUE, REG_SZ.0, Some(command.as_ptr() as *const c_void), (command.len() * 2) as u32) };
+        let log = fs::File::create(p.out.join("final-off.log"))?;
+        let launched = Command::new(&twin).arg("watch").env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn().map(|child| child.id());
+        std::env::remove_var("SCOOCH_HOME");
+        let installed = (written, launched.map_err(|error| error.to_string()));
+        let id = screen.id.clone();
+        let drawn = wait_until(Duration::from_secs(60), || !real_state(&real)["screens"][id.as_str()]["fingerprint"].is_null());
+        let entry = startup::entry();
+        let daemons = running("scoochw.exe");
+        p.line(format!("- turned on through the login item {installed:?}, Run entry {entry:?}, scoochw processes {daemons:?}, the screen drawn after {:?} ms", drawn.map(|time| time.as_millis())));
+        let started = Instant::now();
+        let off = Command::new(&cli).args(["off", "--final"]).env_remove("SCOOCH_HOME").stdin(Stdio::null()).output();
+        let took = started.elapsed().as_millis();
+        let gone = wait_until(Duration::from_secs(10), || running("scoochw.exe").is_empty()).is_some();
+        let entry = startup::entry();
+        let state = real_state(&real);
+        let kept = state["screens"][absent]["original"].as_str().map(PathBuf::from).as_deref() == Some(picture.as_path());
+        let parked = state["on"] != serde_json::Value::Bool(true) && state["restoring"] != serde_json::Value::Bool(true) && kept && state["screens"].get(id.as_str()).is_none();
+        let back = desktop.wallpaper(&screen).ok().flatten();
+        let said = off.as_ref().map(|out| String::from_utf8_lossy(&out.stdout).trim().replace("\r\n", " / ")).unwrap_or_default();
+        p.line(format!(
+            "- scoochw off --final through scooch.exe exit {:?} after {took} ms, said {said:?}: no scoochw process left {gone}, Run entry left {entry:?}, the record of the detached monitor kept with its own picture {kept}, state parked {parked}, its output still there {}, the attached screen shows {back:?}",
+            off.as_ref().map(|out| out.status.code()).map_err(|error| error.to_string()),
+            parked_out.exists()
+        ));
+        std::env::set_var("SCOOCH_HOME", &p.home);
+        if !off.as_ref().is_ok_and(|out| out.status.success()) || !gone || entry.is_some() || !parked || !parked_out.exists() {
+            p.failed.push("the final off left a scoochw process or the Run entry, or did not keep the record of the monitor it could not reach".into());
+        }
+        let _ = startup::remove();
         Ok(())
     }
 

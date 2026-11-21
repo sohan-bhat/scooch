@@ -297,13 +297,14 @@ function Extras({ phone, onExtras, onConsole }: { phone: boolean; onExtras: () =
     placed.name = 'extras';
     placed.visible = false;
     for (const model of Object.values(loaded)) prepare(model.scene);
-    for (const placement of placements) {
-      const source = loaded[placement.model as Extra];
+    for (const spot of placements) {
+      const source = loaded[spot.model as Extra];
       if (!source) continue;
-      const object = placement.node ? source.scene.getObjectByName(placement.node) : source.scene;
+      const object = spot.node ? source.scene.getObjectByName(spot.node) : source.scene;
       if (!object) continue;
+      const placement = phone && typeof spot.phone === 'object' ? { ...spot, ...spot.phone } : spot;
       const holder = placeOnDesk(object, placement, placement.floor ? 0 : LAPTOP.position[1]);
-      holder.userData.phone = placement.phone !== false;
+      holder.userData.phone = spot.phone !== false;
       holder.userData.floor = !!placement.floor;
       placed.add(holder);
     }
@@ -474,6 +475,7 @@ export function Desk({ onScreens, onExtras, onConsole, phone }: { onScreens: (sc
     if (pivot) pivot.rotation.x = LAPTOP.lid;
     makeLive(lamp.scene, 'lamp');
     makeLive(television.scene, 'tv');
+    makeLive(laptop.scene, 'laptop');
     obstacles.push(lamp.scene, television.scene, laptop.scene);
   }, [desk, laptop, lamp, television]);
 

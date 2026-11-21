@@ -1,4 +1,5 @@
-import { Color, Mesh, type Material, type MeshStandardMaterial, type Object3D, type Vector2, type Vector4, type WebGLRenderer } from 'three';
+import { Color, Mesh, type Material, type MeshStandardMaterial, type Object3D, type PerspectiveCamera, type Vector2, type Vector4, type WebGLRenderer } from 'three';
+import type { DemoManifest } from '@/story/demo';
 import type { Frame } from './screen/scenery';
 
 export const things: Record<string, Object3D | undefined> = {};
@@ -15,6 +16,14 @@ export const hooks = {
   origin: null as Vector2 | null,
   extent: null as Vector2 | null,
   place: () => 0,
+  laptop: null as Mesh | null,
+  screen: null as null | Record<'lcd' | 'crt', Record<string, { value: unknown }>>,
+  view: (_camera: PerspectiveCamera) => {},
+  after: () => {},
+  fit: null as null | ((buffer: Vector2, size: { width: number; height: number }) => number),
+  gl: null as WebGLRenderer | null,
+  manifest: null as DemoManifest | null,
+  scale: [1, 1] as [number, number],
 };
 
 export const live = {
@@ -32,12 +41,12 @@ export const live = {
   power: true,
   channel: -1,
   noiseAt: -1e9,
-  tape: false,
-  tapeAt: 0,
   ringUntil: 0,
   stapleAt: -1e9,
-  sipAt: -1e9,
+  pourUntil: 0,
+  crisp: false,
   juice: 4,
+  slosh: 0,
   glass: { x: 0, z: 0, ready: false },
   look: { x: 0, y: 0, tx: 0, ty: 0 },
   sway: { x: 0, z: 0, vx: 0, vz: 0 },
@@ -58,7 +67,8 @@ export function animating(now: number) {
     now - live.noiseAt < 380 ||
     now - live.onAt < 1100 ||
     now - live.offAt < 700 ||
-    now - live.sipAt < 1600 ||
+    now < live.pourUntil ||
+    live.slosh > 0.002 ||
     now - live.stapleAt < 500 ||
     now < live.fadeUntil
   );
@@ -130,7 +140,6 @@ export function release(now: number) {
     live.power = true;
     live.onAt = now;
   }
-  live.tape = false;
   live.ringUntil = 0;
   live.look.tx = 0;
   live.look.ty = 0;

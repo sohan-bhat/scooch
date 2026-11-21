@@ -17,6 +17,8 @@ pub const STOP_PATIENCE: Duration = daemon::STOP_CAP.saturating_add(Duration::fr
 pub const UNREADABLE_OFF: &str = "Scooch is off. It could not read its record of your wallpapers, so pick them again in your system settings.";
 pub const STOP_FAILED: &str = "Scooch could not stop its background program, so run scooch off again in a moment.";
 pub const NO_RESTORER: &str = "Nothing is running to switch them back, so run scooch off again to give up on them or scooch to turn Scooch back on.";
+pub const BUSY: &str = "Another Scooch command was busy, so the record of your wallpapers was left as it was.";
+pub const UNPROVEN: &str = "A program that may be Scooch is still running and could not be proven to be Scooch, so it was left alone.";
 const PICTURE_KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", "tiff", "bmp", "avif"];
 pub const FLIP_HINT: &str = "Icons still cover part of the picture. Run scooch flip to let Scooch flip it.";
 pub const FLIP_ON: &str = "Scooch may now flip your picture when that clears your icons.";
@@ -27,8 +29,8 @@ pub const SCENERY_LINE: &str = "Scenery  on";
 pub const GLIDE_ON: &str = "Scooch now slides your picture into place when icons move.";
 pub const GLIDE_OFF: &str = "Scooch now swaps your picture without sliding it.";
 pub const GLIDE_NONE: &str = "Scooch swaps the picture here, since sliding it works only on macOS and Windows.";
-pub const PREDICT_ON: &str = "Scooch now moves your picture the moment you drop an icon on Xfce.";
-pub const PREDICT_OFF: &str = "Scooch now waits for Xfce to save where your icons sit.";
+pub const PREDICT_ON: &str = "Scooch now moves your picture the moment you drop an icon on Xfce and Plasma 5.";
+pub const PREDICT_OFF: &str = "Scooch now waits for your desktop to save where your icons sit.";
 pub const GUIDE: &str = "Your wallpaper is not a picture file, so pick a picture for Scooch to move.";
 pub const MADE: &str = "This desktop still shows a picture Scooch made, so pick a picture for Scooch to move.";
 pub const NO_SCREEN: &str = "No screen was found, so connect one and try again.";
@@ -132,6 +134,9 @@ pub fn describe(state: &State, running: bool, connected: Option<&[String]>) -> V
     }
     if !state.on {
         let mut lines = vec!["Scooch is off. Run scooch to turn it on.".to_string()];
+        if parked(state) {
+            lines.push(counted(Count::Parked, state.screens.len()));
+        }
         lines.extend(tally_lines(&state.tally));
         return lines;
     }
@@ -308,6 +313,154 @@ pub enum Off {
     Pending(Tally),
 }
 
+pub fn off_final() -> Result<()> {
+    let program = std::env::current_exe().map(|exe| state::canonical(&exe).unwrap_or(exe)).unwrap_or_default();
+    print(&final_off(&Store::open(), &program, STOP_PATIENCE).lines);
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Final {
+    pub tally: Tally,
+    pub parked: usize,
+    pub left_running: Option<u32>,
+    pub lines: Vec<String>,
+}
+
+#[allow(dead_code)]
+pub fn reclaim(store: &Store, program: &Path) -> Option<Final> {
+    if !parked(&store.load()) {
+        return None;
+    }
+    let desktop = platform::current().ok();
+    reclaim_with(store, program, desktop.as_deref(), STOP_PATIENCE, platform::remove_login)
+}
+
+fn reclaim_with(store: &Store, program: &Path, desktop: Option<&dyn Desktop>, patience: Duration, remove_login: impl FnOnce() -> Result<()>) -> Option<Final> {
+    let _lock = store.command_lock(state::COMMAND_PATIENCE).ok()?;
+    if !parked(&store.load()) {
+        return None;
+    }
+    let named = platform::login_program();
+    let running = store.watcher().and_then(poke::program_of);
+    let mut own: Vec<PathBuf> = vec![program.to_path_buf()];
+    own.extend(named.clone());
+    let mut done = Final { left_running: end_daemon(store, &own, patience), ..Final::default() };
+    let mut notes = Vec::new();
+    let mut unreadable = false;
+    match park(desktop, store) {
+        Ok(Some(tally)) => (done.tally, done.parked) = (tally, tally.abandoned),
+        Ok(None) => {
+            unreadable = true;
+            notes.extend(aside(store));
+            notes.push(UNREADABLE_OFF.into());
+        }
+        Err(error) => notes.push(error.to_string()),
+    }
+    if let Err(error) = remove_login() {
+        notes.push(error.to_string());
+    }
+    if done.left_running.is_some() {
+        notes.push(UNPROVEN.into());
+    }
+    done.lines = if unreadable { notes } else { std::iter::once(closing(&done.tally)).chain(notes).collect() };
+    #[cfg(target_os = "linux")]
+    if copy_goes(&store.load()) {
+        let proven: Vec<PathBuf> = running.into_iter().chain(named).collect();
+        crate::program::remove_copies(&crate::program::copies(store), &proven, &crate::program::link_places());
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = running;
+    Some(done)
+}
+
+pub fn final_off(store: &Store, program: &Path, patience: Duration) -> Final {
+    let named = platform::login_program();
+    let running = store.watcher().and_then(poke::program_of);
+    let mut own: Vec<PathBuf> = vec![program.to_path_buf()];
+    own.extend(named.clone());
+    let desktop = platform::current().ok();
+    let done = finish_off(store, desktop.as_deref(), &own, patience, platform::remove_login);
+    #[cfg(target_os = "linux")]
+    if copy_goes(&store.load()) {
+        let proven: Vec<PathBuf> = running.into_iter().chain(named).collect();
+        crate::program::remove_copies(&crate::program::copies(store), &proven, &crate::program::link_places());
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = running;
+    done
+}
+
+pub fn finish_off(store: &Store, desktop: Option<&dyn Desktop>, own: &[PathBuf], patience: Duration, remove_login: impl FnOnce() -> Result<()>) -> Final {
+    let lock = store.command_lock(state::COMMAND_PATIENCE);
+    let mut done = Final { left_running: end_daemon(store, own, patience), ..Final::default() };
+    let mut notes = Vec::new();
+    let mut unreadable = false;
+    match lock {
+        Ok(_) => match park(desktop, store) {
+            Ok(Some(tally)) => (done.tally, done.parked) = (tally, tally.abandoned),
+            Ok(None) => {
+                unreadable = true;
+                notes.extend(aside(store));
+                notes.push(UNREADABLE_OFF.into());
+            }
+            Err(error) => notes.push(error.to_string()),
+        },
+        Err(_) => notes.push(BUSY.into()),
+    }
+    if let Err(error) = remove_login() {
+        notes.push(error.to_string());
+    }
+    if done.left_running.is_some() {
+        notes.push(UNPROVEN.into());
+    }
+    done.lines = if unreadable { notes } else { std::iter::once(closing(&done.tally)).chain(notes).collect() };
+    done
+}
+
+pub fn end_daemon(store: &Store, own: &[PathBuf], patience: Duration) -> Option<u32> {
+    let process = store.watcher()?;
+    poke::stop(process);
+    if wait_gone(|| poke::alive(process), patience, POLL, std::thread::sleep) {
+        return None;
+    }
+    if poke::proven(process, own) && poke::kill(process) && wait_gone(|| poke::alive(process), patience, POLL, std::thread::sleep) {
+        return None;
+    }
+    Some(process)
+}
+
+pub fn park(desktop: Option<&dyn Desktop>, store: &Store) -> Result<Option<Tally>> {
+    let mut state = store.load();
+    if state.screens.is_empty() && store.aside_file().is_file() {
+        state.on = false;
+        state.restoring = false;
+        store.save(&state)?;
+        return Ok(None);
+    }
+    let mut tally = Tally::default();
+    if let Some(desktop) = desktop {
+        if let Ok(screens) = desktop.screens() {
+            let known = desktop.known().ok().flatten();
+            tally = daemon::settle_screens(&mut state, desktop, store, &screens, known.as_deref(), true).tally;
+            daemon::forget(desktop, store, &mut state);
+        }
+    }
+    let _ = std::fs::remove_dir_all(store.cache());
+    state.on = false;
+    state.restoring = false;
+    state.problem = None;
+    (tally.pending, tally.abandoned) = (0, state.screens.len());
+    if state.screens.is_empty() {
+        state.picture = None;
+    }
+    state.tally = tally;
+    if store.state_file().exists() {
+        store.save(&state)?;
+    }
+    Ok(Some(tally))
+}
+
 pub fn wind_down(desktop: &dyn Desktop, store: &Store) -> Result<Off> {
     let screens = desktop.screens()?;
     let known = desktop.known().ok().flatten();
@@ -342,6 +495,11 @@ pub fn wind_down(desktop: &dyn Desktop, store: &Store) -> Result<Off> {
         state.picture = None;
         state.tally = tally;
         daemon::forget(desktop, store, &mut state);
+        #[cfg(target_os = "linux")]
+        if copy_goes(&state) {
+            let proven: Vec<PathBuf> = platform::login_program().into_iter().collect();
+            crate::program::remove_copies(&crate::program::copies(store), &proven, &crate::program::link_places());
+        }
         Off::Done(tally)
     };
     if store.state_file().exists() {
@@ -350,8 +508,17 @@ pub fn wind_down(desktop: &dyn Desktop, store: &Store) -> Result<Off> {
     Ok(off)
 }
 
+#[cfg(any(target_os = "linux", test))]
+pub fn copy_goes(state: &State) -> bool {
+    state.origin.is_some() && !state.on && !state.restoring && state.screens.is_empty()
+}
+
+pub fn parked(state: &State) -> bool {
+    !state.on && !state.restoring && !state.screens.is_empty()
+}
+
 pub fn wake_up(state: &mut State) -> bool {
-    if !state.restoring {
+    if !state.restoring && !parked(state) {
         return false;
     }
     state.restoring = false;
@@ -369,6 +536,7 @@ pub enum Count {
     Stuck,
     Pending,
     Unreached,
+    Parked,
 }
 
 pub fn counted(kind: Count, count: usize) -> String {
@@ -377,6 +545,7 @@ pub fn counted(kind: Count, count: usize) -> String {
         Count::Stuck => ("1 desktop still shows Scooch's picture because nothing was left to put back, so pick a wallpaper there.", "{n} desktops still show Scooch's picture because nothing was left to put back, so pick a wallpaper there."),
         Count::Pending => ("1 more switches back the next time that desktop or screen shows.", "{n} more switch back the next time those desktops or screens show."),
         Count::Unreached => ("1 desktop or screen it could not reach still shows Scooch's picture, so pick a wallpaper there.", "{n} desktops or screens it could not reach still show Scooch's picture, so pick a wallpaper there."),
+        Count::Parked => ("1 desktop or screen still shows a picture Scooch made.", "{n} desktops or screens still show a picture Scooch made."),
     };
     if count == 1 {
         one.to_string()
@@ -419,7 +588,7 @@ fn tally_lines(tally: &Tally) -> Vec<String> {
     lines
 }
 
-fn stop(store: &Store) -> Result<()> {
+pub(crate) fn stop(store: &Store) -> Result<()> {
     let Some(process) = store.watcher() else { return Ok(()) };
     poke::stop(process);
     if !wait_gone(|| poke::alive(process), STOP_PATIENCE, POLL, std::thread::sleep) {
@@ -1156,6 +1325,173 @@ mod tests {
         assert_eq!(chosen.picture, Some(left));
     }
 
+    fn finished(fake: &crate::daemon::tests::Fake, store: &Store) -> (Final, usize) {
+        let removed = std::cell::Cell::new(0);
+        let done = finish_off(store, Some(fake), &[], Duration::from_millis(200), || {
+            removed.set(removed.get() + 1);
+            Ok(())
+        });
+        (done, removed.get())
+    }
+
+    #[test]
+    fn a_final_off_parks_an_unreached_screen_starts_nothing_and_removes_the_login_item() {
+        let (fake, store, left, right) = pair("final");
+        let mut state = store.load();
+        for id in ["L", "R"] {
+            state.screens.get_mut(id).unwrap().output = Some(store.output(id, 1, "jpg"));
+        }
+        store.save(&state).unwrap();
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        let (done, removed) = finished(&fake, &store);
+        assert_eq!((done.tally, done.parked, removed), (tally(1, 0, 0, 0, 1), 1, 1));
+        assert_eq!(done.lines, vec!["Scooch is off. Your wallpaper is back. 1 desktop or screen it could not reach still shows Scooch's picture, so pick a wallpaper there."]);
+        assert_eq!(fake.installs.load(std::sync::atomic::Ordering::SeqCst), 0, "a final off started Scooch again");
+        assert!(store.watcher().is_none());
+        assert_eq!(fake.showing("L"), left);
+        let state = store.load();
+        assert!(parked(&state) && !state.on && !state.restoring);
+        assert_eq!((state.screens["R"].original.clone(), state.screens["R"].output.clone()), (right, Some(store.output("R", 1, "jpg"))));
+        assert!(store.output("R", 1, "jpg").exists() && !store.cache().exists());
+        assert_eq!(describe(&state, false, None), vec!["Scooch is off. Run scooch to turn it on.", "1 desktop or screen still shows a picture Scooch made."]);
+    }
+
+    #[test]
+    fn reclaim_decides_on_the_state_it_reads_under_the_lock() {
+        let (fake, store, _, _) = pair("reclaim-lock");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        finished(&fake, &store);
+        assert!(parked(&store.load()));
+        let held = store.command_lock(state::COMMAND_PATIENCE).unwrap();
+        let removed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (shared, root, counted) = (fake.clone(), store.root.clone(), removed.clone());
+        let reclaiming = std::thread::spawn(move || {
+            let desktop: &dyn Desktop = shared.as_ref();
+            reclaim_with(&Store::at(&root), Path::new("/nowhere"), Some(desktop), Duration::from_millis(200), || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .is_some()
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let mut turned_on = store.load();
+        turned_on.on = true;
+        store.save(&turned_on).unwrap();
+        drop(held);
+        let acted = reclaiming.join().unwrap();
+        assert!(!acted, "reclaim undid a turn on that took the lock first");
+        assert_eq!(removed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(store.load().on);
+    }
+
+    #[test]
+    fn a_final_off_on_a_parked_state_puts_back_what_came_back_and_keeps_the_rest() {
+        let (fake, store, _, right) = pair("final-again");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        finished(&fake, &store);
+        let (again, removed) = finished(&fake, &store);
+        assert_eq!((again.parked, removed), (1, 1));
+        assert!(parked(&store.load()));
+        assert!(reclaim(&Store::at(store.root.join("none")), Path::new("/nowhere")).is_none(), "nothing parked must cost nothing");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0), crate::daemon::tests::screen("R", 160.0, 1.0)]);
+        let (back, _) = finished(&fake, &store);
+        assert_eq!((back.tally.back, back.parked), (1, 0));
+        assert_eq!(fake.showing("R"), right);
+        let state = store.load();
+        assert!(!parked(&state) && state.screens.is_empty() && !store.output("R", 1, "jpg").exists());
+        assert_eq!(describe(&state, false, None), vec!["Scooch is off. Run scooch to turn it on."]);
+    }
+
+    #[test]
+    fn a_parked_record_survives_into_a_later_turn_on_and_a_plain_off_on_it_starts_the_restorer() {
+        let (fake, store, _, right) = pair("final-on");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        finished(&fake, &store);
+        let mut state = store.load();
+        assert_eq!(turn_on(&mut state, fake.as_ref(), &store, false).unwrap(), FirstRun::Go);
+        assert!(state.on && !state.restoring);
+        assert_eq!(state.screens["R"].original, right);
+        let (fake, store, _, _) = pair("final-plain");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        finished(&fake, &store);
+        assert_eq!(off_of(&fake, &store), Off::Pending(tally(0, 0, 0, 1, 0)));
+        assert!(store.load().restoring);
+    }
+
+    #[test]
+    fn the_copy_goes_only_when_an_off_ends_with_nothing_pending_and_an_origin_is_set() {
+        let (fake, store, _, _) = pair("copy-goes");
+        let mut state = store.load();
+        state.origin = Some(PathBuf::from("/home/ada/Applications/Scooch.AppImage"));
+        store.save(&state).unwrap();
+        assert!(!copy_goes(&store.load()), "Scooch is on");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        finished(&fake, &store);
+        assert!(!copy_goes(&store.load()), "a screen is parked");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0), crate::daemon::tests::screen("R", 160.0, 1.0)]);
+        finished(&fake, &store);
+        assert!(copy_goes(&store.load()));
+        let mut restoring = store.load();
+        restoring.restoring = true;
+        assert!(!copy_goes(&restoring), "a restore is still pending");
+        let mut plain = store.load();
+        plain.origin = None;
+        assert!(!copy_goes(&plain), "no AppImage was recorded");
+    }
+
+    #[test]
+    fn a_detached_screen_counts_as_back_only_when_its_own_picture_reads_back() {
+        let (fake, store, _, right) = pair("detached");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        fake.detached.lock().unwrap().push("R".into());
+        assert_eq!(off_of(&fake, &store), Off::Done(tally(2, 0, 0, 0, 0)));
+        assert_eq!(fake.showing("R"), right);
+        let (fake, store, _, _) = pair("detached-refused");
+        fake.connect(vec![crate::daemon::tests::screen("L", 0.0, 1.0)]);
+        let (done, _) = finished(&fake, &store);
+        assert_eq!(done.parked, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn a_stranger_that_ignores_stop() {
+        if std::env::var_os("SCOOCH_STRANGER").is_none() {
+            return;
+        }
+        unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) };
+        std::thread::sleep(Duration::from_secs(20));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_the_pid_file_names_is_ended_by_force_only_when_proven_to_be_scooch() {
+        let folder = crate::state::scratch("foreign");
+        let stranger = folder.join("scooch-stranger");
+        std::fs::copy(std::env::current_exe().unwrap(), &stranger).unwrap();
+        let mut child = std::process::Command::new(&stranger)
+            .args(["--ignored", "--exact", "commands::tests::a_stranger_that_ignores_stop", "--test-threads=1"])
+            .env("SCOOCH_STRANGER", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let store = Store::at(folder.join("data"));
+        std::fs::create_dir_all(&store.root).unwrap();
+        std::fs::write(store.pid_file(), child.id().to_string()).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(poke::alive(child.id()), "the stranger must look like a Scooch process by name");
+        let own = vec![std::env::current_exe().unwrap()];
+        assert_eq!(end_daemon(&store, &own, Duration::from_millis(300)), Some(child.id()));
+        assert!(child.try_wait().unwrap().is_none(), "a process not proven to be Scooch was ended");
+        assert!(poke::proven(child.id(), std::slice::from_ref(&stranger)) && !poke::proven(child.id(), &own));
+        assert_eq!(end_daemon(&store, &[stranger], Duration::from_millis(3000)), None, "a process that ended and waits to be reaped still counted as running");
+        assert!(!poke::alive(child.id()));
+        assert!(child.wait().is_ok());
+        assert!(UNPROVEN.ends_with('.') && !UNPROVEN.contains([';', '(', ')']));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     #[test]
     fn a_space_that_no_longer_exists_is_forgotten() {
         let (fake, store, _, chosen) = desk("gonespace");
@@ -1634,7 +1970,7 @@ mod tests {
     fn an_unreadable_record_is_mentioned_once_then_left_behind() {
         let (fake, store, _, _) = pair("asideonce");
         std::fs::write(store.state_file(), b"{ broken").unwrap();
-        let lines = turn_off(fake.as_ref(), &store, Duration::ZERO).unwrap();
+        let lines = turn_off(fake.as_ref(), &store, Duration::from_secs(2)).unwrap();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("state.unreadable.json") && lines[1] == UNREADABLE_OFF);
         assert!(!store.aside_file().exists());
@@ -1642,7 +1978,7 @@ mod tests {
         assert_eq!(renamed.len(), 1);
         assert_eq!(std::fs::read(store.root.join(&renamed[0])).unwrap(), b"{ broken");
         assert_eq!(aside(&store), None);
-        assert_eq!(turn_off(fake.as_ref(), &store, Duration::ZERO).unwrap(), vec![closing(&Tally { strays: 2, ..Tally::default() })]);
+        assert_eq!(turn_off(fake.as_ref(), &store, Duration::from_secs(2)).unwrap(), vec![closing(&Tally { strays: 2, ..Tally::default() })]);
         assert!(store.output("L", 1, "jpg").exists() && store.output("R", 1, "jpg").exists());
     }
 

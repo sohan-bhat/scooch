@@ -17,20 +17,24 @@ pub fn installed() -> bool {
     path().is_ok_and(|path| path.is_file())
 }
 
+pub fn program() -> Option<PathBuf> {
+    entry::program(&std::fs::read_to_string(path().ok()?).ok()?)
+}
+
 pub fn install(exe: &Path) -> Result<()> {
     if !custom_home() {
         let file = path()?;
         if let Some(folder) = file.parent() {
             std::fs::create_dir_all(folder).with_context(|| format!("Scooch could not make {}, so check the folder.", folder.display()))?;
         }
-        crate::state::write_atomic(&file, entry::text(exe).as_bytes())?;
+        crate::state::write_atomic(&file, entry::text(exe, &file).as_bytes())?;
     }
     start(exe)
 }
 
 pub fn start(exe: &Path) -> Result<()> {
     let mut command = Command::new(exe);
-    command.arg("watch").current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    super::children::clean(&mut command).arg("watch").current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     unsafe {
         command.pre_exec(|| {
             libc::setsid();

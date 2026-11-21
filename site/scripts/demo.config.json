@@ -205,18 +205,21 @@
   "pictures": [
     {
       "id": "canoe",
+      "analysis": true,
       "photo": "../assets/photos/lone-canoe.jpg",
       "layout": "left",
       "problem": false
     },
     {
       "id": "moon",
+      "analysis": true,
       "photo": "../assets/photos/moon-sky.jpg",
       "layout": "right",
       "problem": false
     },
     {
       "id": "city",
+      "analysis": true,
       "photo": "../assets/photos/city-night.jpg",
       "layout": "start",
       "problem": false

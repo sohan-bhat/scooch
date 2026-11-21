@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use scooch_core::{Options, Placement, Scenery};
+use scooch_core::{Options, Placement, Rect, Scenery};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -41,6 +41,8 @@ pub struct State {
     pub scales: BTreeMap<String, f32>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub starts: BTreeMap<String, Start>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub origin: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -97,7 +99,7 @@ impl Tally {
 
 impl Default for State {
     fn default() -> Self {
-        Self { version: VERSION, on: false, options: Options::default(), glide: true, predict: true, screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new(), scales: BTreeMap::new(), starts: BTreeMap::new() }
+        Self { version: VERSION, on: false, options: Options::default(), glide: true, predict: true, screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new(), scales: BTreeMap::new(), starts: BTreeMap::new(), origin: None }
     }
 }
 
@@ -133,6 +135,15 @@ pub struct Entry {
     pub belongs: Option<Belongs>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub drawn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub places: Option<Places>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Places {
+    pub width: u32,
+    pub height: u32,
+    pub icons: Vec<Rect>,
 }
 
 fn lenient<'de, D: Deserializer<'de>, T: serde::de::DeserializeOwned>(deserializer: D) -> std::result::Result<Option<T>, D::Error> {
@@ -777,5 +788,19 @@ mod tests {
         assert_eq!(entry.shown(), Path::new("/p/a.jpg"));
         entry.output = Some("/d/out/x-1.jpg".into());
         assert_eq!(entry.shown(), Path::new("/d/out/x-1.jpg"));
+    }
+
+    #[test]
+    fn origin_is_optional_both_ways() {
+        let old = parse(Some(br#"{"version":1,"on":true}"#));
+        assert_eq!(old.origin, None);
+        let saved = State { origin: Some("/home/ada/Apps/Scooch.AppImage".into()), ..State::default() };
+        let bytes = serde_json::to_vec(&saved).unwrap();
+        assert!(String::from_utf8(bytes.clone()).unwrap().contains(r#""origin":"/home/ada/Apps/Scooch.AppImage""#));
+        assert_eq!(parse(Some(&bytes)).origin, saved.origin);
+        assert!(!String::from_utf8(serde_json::to_vec(&State::default()).unwrap()).unwrap().contains("origin"));
+        let odd = parse(Some(br#"{"version":1,"on":true,"origin":7,"later":"field"}"#));
+        assert!(odd.on);
+        assert_eq!(odd.origin, None);
     }
 }

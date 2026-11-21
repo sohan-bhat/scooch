@@ -148,7 +148,7 @@ function objects(layout) {
   return { width, height, icons: rects(layout).map(([x, y, w, h]) => ({ x, y, w, h })) };
 }
 
-async function scenery(id, source, layouts) {
+async function scenery(id, source, layouts, analysed = id === 'main') {
   const folder = join(work, `scenery-${id}`);
   const target = join(out, 'scenery', id);
   await mkdir(folder, { recursive: true });
@@ -175,11 +175,12 @@ async function scenery(id, source, layouts) {
   const sharpInfo = await sharp(source).rotate().resize({ width: longest * 2, height: longest * 2, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 78, mozjpeg: true }).toFile(sharpFile);
   if (sharpInfo.width > info.width * 1.2) bundle.sharp = { file: 'canvas-2x.jpg', width: sharpInfo.width, height: sharpInfo.height };
   else await rm(sharpFile, { force: true });
-  if (bundle.analysis && id === 'main') {
+  if (bundle.analysis && analysed) {
     const file = `${bundle.analysis.file}.gz`;
     await writeFile(join(target, file), gzipSync(await readFile(join(folder, bundle.analysis.file)), { level: 9 }));
     bundle.analysis.file = file;
-  } else delete bundle.analysis;
+  }
+  if (id !== 'main') delete bundle.analysis;
   for (const state of bundle.states) {
     const tables = state.tables;
     for (const key of ['map', 'look', 'pad', 'paints', 'ramps']) await writeFile(join(target, tables[key].file), await readFile(join(folder, tables[key].file)));
@@ -251,7 +252,7 @@ async function pictureAt(entry) {
       ),
     ),
     icons: Object.fromEntries(config.icons.map((icon, index) => [icon.id, rects(config.layouts[entry.layout])[index].map((value, at) => round(value / (at % 2 === 0 ? width : height)))])),
-    scenery: await scenery(entry.id, source, [config.layouts[entry.layout]]),
+    scenery: await scenery(entry.id, source, [config.layouts[entry.layout]], entry.analysis === true),
   };
 }
 
