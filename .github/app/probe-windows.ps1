@@ -42,6 +42,17 @@ public static class Desk {
         return new int[] { corner.X, corner.Y, corner.X + box.Right, corner.Y + box.Bottom };
     }
     [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
+    public static void Click(int x, int y) {
+        SetCursorPos(x, y);
+        System.Threading.Thread.Sleep(150);
+        mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
+        System.Threading.Thread.Sleep(80);
+        mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+    }
+    [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")]
     public static extern bool PrintWindow(IntPtr window, IntPtr hdc, uint flags);
@@ -409,6 +420,8 @@ $again = Wait-For 30 { State-On }
 Line "- on again after $again s"
 Expect "Turn on turned Scooch on again" ($again -ge 0)
 Start-Sleep -Seconds 5
+
+. (Join-Path $PSScriptRoot 'presses-windows.ps1')
 
 $window = Find-Window
 if ($window) {
