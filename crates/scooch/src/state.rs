@@ -460,13 +460,17 @@ pub fn held(error: &std::io::Error) -> bool {
     cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32 | 33))
 }
 
-pub fn patiently<T>(mut attempt: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+pub fn patiently<T>(attempt: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    retried(attempt, held, HELD_PAUSE)
+}
+
+fn retried<T>(mut attempt: impl FnMut() -> std::io::Result<T>, busy: impl Fn(&std::io::Error) -> bool, pause: Duration) -> std::io::Result<T> {
     let mut tries = 1;
     loop {
         match attempt() {
-            Err(error) if held(&error) && tries < HELD_TRIES => {
+            Err(error) if busy(&error) && tries < HELD_TRIES => {
                 tries += 1;
-                std::thread::sleep(HELD_PAUSE);
+                std::thread::sleep(pause);
             }
             done => return done,
         }
@@ -502,6 +506,42 @@ pub fn scratch(name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_file_is_tried_again_up_to_ten_times_and_nothing_else_is() {
+        let busy = |error: &std::io::Error| error.kind() == std::io::ErrorKind::ResourceBusy;
+        let mut calls = 0;
+        let late = retried(
+            || {
+                calls += 1;
+                if calls < 4 { Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy)) } else { Ok(calls) }
+            },
+            busy,
+            Duration::ZERO,
+        );
+        assert_eq!(late.unwrap(), 4);
+        let mut tries = 0;
+        let never = retried(
+            || {
+                tries += 1;
+                Err::<(), _>(std::io::Error::from(std::io::ErrorKind::ResourceBusy))
+            },
+            busy,
+            Duration::ZERO,
+        );
+        assert!(never.is_err() && tries == HELD_TRIES, "{tries}");
+        let mut once = 0;
+        let other = retried(
+            || {
+                once += 1;
+                Err::<(), _>(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            },
+            busy,
+            Duration::ZERO,
+        );
+        assert!(other.is_err() && once == 1, "{once}");
+        assert!(HELD_PAUSE * (HELD_TRIES - 1) <= Duration::from_millis(500));
+    }
 
     #[test]
     fn a_failed_write_names_its_cause() {
