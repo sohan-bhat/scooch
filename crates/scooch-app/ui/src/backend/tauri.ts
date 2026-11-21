@@ -8,6 +8,7 @@ type Facade = Omit<View, 'phase' | 'monitors'> & { on: boolean; running: boolean
 const KINDS = /\.(jpe?g|png|heic|heif|webp|tiff?|bmp|avif)$/i;
 const listeners = new Set<() => void>();
 let busy: Phase | null = null;
+let failure: string | null = null;
 
 const shown = (path: string, thumb = false) => `${convertFileSrc(path, 'scooch')}${thumb ? '?thumb' : ''}`;
 
@@ -28,28 +29,34 @@ function shaped(raw: Facade): View {
     counted: raw.counted,
     reduceMotion: raw.reduceMotion,
     textScale: raw.textScale,
+    failure,
   };
+}
+
+function sentence(error: unknown) {
+  const text = typeof error === 'string' ? error : error instanceof Error ? error.message : String(error);
+  return text.trim() || null;
+}
+
+async function attempt(work: () => Promise<unknown>) {
+  try {
+    await work();
+    failure = null;
+  } catch (error) {
+    failure = sentence(error);
+  }
 }
 
 async function during(phase: Phase, work: () => Promise<unknown>) {
   busy = phase;
   tell();
-  try {
-    await work();
-  } catch (error) {
-    console.error(error);
-  } finally {
-    busy = null;
-    tell();
-  }
+  await attempt(work);
+  busy = null;
+  tell();
 }
 
 async function quietly(work: () => Promise<unknown>) {
-  try {
-    await work();
-  } catch (error) {
-    console.error(error);
-  }
+  await attempt(work);
   tell();
 }
 
@@ -66,7 +73,7 @@ export const tauri: Backend = {
   set: (name: SwitchName, on: boolean) => quietly(() => invoke('set', { switch: name, on })),
   use: (path: string) => quietly(() => invoke('use_picture', { path })),
   pick: () => invoke<string | null>('pick'),
-  fix: (problem: Problem) => (problem.kind === 'stopped' || problem.kind === 'other' ? during('starting', () => invoke('fix', { problem })) : quietly(() => invoke('fix', { problem }))),
+  fix: (problem: Problem) => (problem.kind === 'stopped' || problem.kind === 'other' ? during('starting', () => invoke('fix')) : quietly(() => invoke('fix'))),
   firstOpen: () => invoke<boolean>('first_open'),
   subscribe(listener) {
     listeners.add(listener);

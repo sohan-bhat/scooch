@@ -79,6 +79,7 @@ export function Desk({ monitors, system, empty }: { monitors: Monitor[]; system:
           return (
             <div
               key={monitor.id}
+              data-screen
               className="absolute overflow-hidden rounded-[8px] bg-room-3 shadow-[0_0_0_1px_rgb(243_236_220/0.12),0_28px_56px_-28px_rgb(0_0_0/0.95),0_10px_22px_-14px_rgb(0_0_0/0.7)]"
               style={{ left, top, width, height }}
             >
@@ -91,12 +92,13 @@ export function Desk({ monitors, system, empty }: { monitors: Monitor[]; system:
               {showBar && (
                 <div
                   aria-hidden
+                  data-depiction
                   className={system === 'macos' ? 'absolute inset-x-0 bg-paper/25 backdrop-blur-sm' : 'absolute inset-x-0 bg-ink/70'}
                   style={{ [bar.edge]: 0, height: barHeight }}
                 />
               )}
               {places && places.width > 0 && places.height > 0 && (
-                <div aria-hidden className="absolute inset-0">
+                <div aria-hidden data-depiction className="absolute inset-0">
                   {places.icons.map((icon, iconIndex) => (
                     <IconMark key={iconIndex} rect={icon} sx={width / places.width} sy={height / places.height} />
                   ))}

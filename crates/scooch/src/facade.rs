@@ -45,13 +45,23 @@ pub enum Problem {
     Finder,
     Move,
     Wallpaper { what: Wallpaper },
-    Gnome,
+    Gnome { icons: Icons },
     Unknown { desktop: String },
     Admin,
     Startup,
     Stopped,
     Screen,
     Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Icons {
+    Missing,
+    Off,
+    Blocked,
+    Broken,
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -85,6 +95,7 @@ pub struct View {
     pub current: Option<PathBuf>,
     pub counted: Option<Counted>,
     pub reduce_motion: bool,
+    pub live: bool,
     pub text_scale: f32,
 }
 
@@ -237,6 +248,48 @@ fn gnome_without_icons() -> bool {
     false
 }
 
+pub fn icons_from(info: Option<&std::collections::HashMap<String, f64>>, user_extensions_off: bool) -> Icons {
+    let Some(info) = info else { return Icons::Unknown };
+    if info.is_empty() {
+        return Icons::Missing;
+    }
+    if user_extensions_off {
+        return Icons::Blocked;
+    }
+    match info.get("state").copied() {
+        Some(state) if state == 3.0 || state == 4.0 => Icons::Broken,
+        _ => Icons::Off,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ding_info() -> Option<std::collections::HashMap<String, f64>> {
+    let info: std::collections::HashMap<String, zbus::zvariant::OwnedValue> = platform::linux::bus::call(EXTENSIONS, EXTENSIONS_PATH, EXTENSIONS, "GetExtensionInfo", &(DING,)).ok()?;
+    let mut numbers = std::collections::HashMap::new();
+    for (key, value) in info {
+        numbers.insert(key, value.downcast_ref::<f64>().unwrap_or(f64::NAN));
+    }
+    Some(numbers)
+}
+
+#[cfg(target_os = "linux")]
+fn ding_icons() -> Icons {
+    let off = platform::linux::settings::gsetting("org.gnome.shell", "disable-user-extensions").is_some_and(|value| value.trim() == "true");
+    icons_from(ding_info().as_ref(), off)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ding_icons() -> Icons {
+    Icons::Unknown
+}
+
+#[cfg(target_os = "linux")]
+const EXTENSIONS: &str = "org.gnome.Shell.Extensions";
+#[cfg(target_os = "linux")]
+const EXTENSIONS_PATH: &str = "/org/gnome/Shell/Extensions";
+#[cfg(target_os = "linux")]
+const DING: &str = "ding@rastersoft.com";
+
 #[cfg(windows)]
 fn admin() -> bool {
     platform::windows::startup::refused()
@@ -259,9 +312,7 @@ fn startup_off() -> bool {
 
 #[cfg(target_os = "linux")]
 fn predicts() -> bool {
-    use platform::linux::parse::desktop::{pick, session, Kind, Session};
-    let current = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    pick(&current) == Some(Kind::Xfce) && session(std::env::var("WAYLAND_DISPLAY").ok().as_deref()) == Session::X11
+    crate::platform::linux::drops::predicts()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -308,7 +359,7 @@ fn problem_of(view: &View, layout: Option<&Layout>, desktop: &dyn Desktop, store
         return Some(Problem::Stopped);
     }
     if gnome_without_icons() {
-        return Some(Problem::Gnome);
+        return Some(Problem::Gnome { icons: ding_icons() });
     }
     if !view.on {
         let arranged = layout.all.iter().filter(|screen| layout.arranged.contains(&screen.id));
@@ -351,6 +402,7 @@ pub fn view() -> View {
         current: None,
         counted: None,
         reduce_motion,
+        live,
         text_scale: text_scale(),
     };
     let Some(desktop) = desktop else {
@@ -571,50 +623,128 @@ pub fn set_origin(origin: Option<&Path>) -> Result<bool> {
 }
 
 pub fn login_points_at(program: &Path) -> Option<bool> {
+    let named = platform::login_program()?;
     let wanted = state::canonical(program).unwrap_or_else(|_| program.to_path_buf());
-    let text = login_text()?;
-    let plain = wanted.to_string_lossy().to_lowercase();
-    let twin = wanted.with_file_name(if cfg!(windows) { "scoochw.exe" } else { "scooch" }).to_string_lossy().to_lowercase();
-    let text = text.to_lowercase();
-    Some(text.contains(&plain) || text.contains(&twin))
+    let twin = wanted.with_file_name(if cfg!(windows) { "scoochw.exe" } else { "scooch" });
+    let found = state::canonical(&named).unwrap_or(named);
+    Some(same_path(&found, &wanted) || same_path(&found, &twin))
 }
 
-#[cfg(target_os = "macos")]
-fn login_text() -> Option<String> {
-    std::fs::read_to_string(platform::macos::launchd::plist_path().ok()?).ok()
+fn same_path(a: &Path, b: &Path) -> bool {
+    if cfg!(target_os = "linux") {
+        a == b
+    } else {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    }
 }
 
-#[cfg(windows)]
-fn login_text() -> Option<String> {
-    platform::windows::startup::entry()
+pub fn reclaim(program: &Path) -> bool {
+    commands::reclaim(&Store::open(), program).is_some()
 }
 
-#[cfg(target_os = "linux")]
-fn login_text() -> Option<String> {
-    std::fs::read_to_string(platform::linux::autostart::path().ok()?).ok()
+pub fn is_on() -> bool {
+    Store::open().load().on
 }
 
 pub fn repair(program: &Path) -> Result<bool> {
     let store = Store::open();
+    repair_with(&store, || login_points_at(program), |older| {
+        let desktop = platform::current()?;
+        commands::stop(&store)?;
+        if older {
+            store.mark(None)?;
+        }
+        desktop.autostart(Some(&state::canonical(program).unwrap_or_else(|_| program.to_path_buf())))
+    })
+}
+
+fn repair_with(store: &Store, points: impl FnOnce() -> Option<bool>, act: impl FnOnce(bool) -> Result<()>) -> Result<bool> {
+    let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
     let state = store.load();
-    if !state.on || login_points_at(program) != Some(false) {
+    if !state.on {
         return Ok(false);
     }
-    let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
-    let desktop = platform::current()?;
-    desktop.autostart(Some(&state::canonical(program).unwrap_or_else(|_| program.to_path_buf())))?;
+    let elsewhere = points() == Some(false);
+    let older = commands::outdated(&state, store.watcher().is_some(), PROGRAM);
+    if !elsewhere && !older {
+        return Ok(false);
+    }
+    act(older)?;
     Ok(true)
 }
 
 #[cfg(target_os = "linux")]
+pub fn child_env(changes: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>) {
+    platform::linux::child_env(changes);
+}
+
+#[cfg(target_os = "linux")]
 pub fn show_gnome_icons() -> Result<()> {
-    let _: bool = platform::linux::bus::call("org.gnome.Shell.Extensions", "/org/gnome/Shell/Extensions", "org.gnome.Shell.Extensions", "EnableExtension", &("ding@rastersoft.com",))?;
+    use std::time::{Duration, Instant};
+    if ding_icons() != Icons::Off {
+        bail!("gnome-icons");
+    }
+    let _: bool = platform::linux::bus::call(EXTENSIONS, EXTENSIONS_PATH, EXTENSIONS, "EnableExtension", &(DING,))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while ding_info().and_then(|info| info.get("state").copied()) != Some(1.0) {
+        if Instant::now() >= deadline {
+            bail!("gnome-icons");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    while !platform::linux::gnome::running().unwrap_or(false) {
+        if Instant::now() >= deadline + Duration::from_secs(5) {
+            bail!("gnome-icons");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repair_decides_on_the_state_it_reads_under_the_lock() {
+        let root = std::env::temp_dir().join(format!("scooch-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Store::at(&root);
+        let mut saved = store.load();
+        saved.on = true;
+        store.save(&saved).unwrap();
+        let held = store.command_lock(state::COMMAND_PATIENCE).unwrap();
+        let acted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = acted.clone();
+        let folder = root.clone();
+        let repairing = std::thread::spawn(move || repair_with(&Store::at(&folder), || Some(false), |_| {
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut off = store.load();
+        off.on = false;
+        store.save(&off).unwrap();
+        drop(held);
+        let repaired = repairing.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!repaired);
+        assert!(!acted.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn gnome_icons_tell_missing_off_blocked_broken_and_unknown_apart() {
+        use std::collections::HashMap;
+        let with = |state: f64| HashMap::from([("state".to_string(), state)]);
+        assert_eq!(icons_from(None, false), Icons::Unknown);
+        assert_eq!(icons_from(Some(&HashMap::new()), false), Icons::Missing);
+        assert_eq!(icons_from(Some(&with(2.0)), false), Icons::Off);
+        assert_eq!(icons_from(Some(&with(6.0)), false), Icons::Off);
+        assert_eq!(icons_from(Some(&with(2.0)), true), Icons::Blocked);
+        assert_eq!(icons_from(Some(&with(3.0)), false), Icons::Broken);
+        assert_eq!(icons_from(Some(&with(4.0)), false), Icons::Broken);
+        assert_eq!(serde_json::to_string(&Problem::Gnome { icons: Icons::Blocked }).unwrap(), r#"{"kind":"gnome","icons":"blocked"}"#);
+    }
 
     #[test]
     fn places_show_only_while_on_and_only_when_saved() {

@@ -2,7 +2,7 @@ name: app
 
 on:
   push:
-    branches: [app]
+    branches: [main, app]
     paths:
       - "crates/**"
       - "Cargo.toml"
@@ -11,41 +11,40 @@ on:
       - "site/src/components/ui/**"
       - "site/scripts/make-brand.mjs"
       - ".github/workflows/app.yml"
-      - ".github/actions/app-build/**"
+      - ".github/actions/**"
       - ".github/app/**"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: app-${{ github.ref }}
+  group: app-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-  APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-  APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-  APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-  APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-  APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
-  WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-  WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-  TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
-
 jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Signing names stay in their jobs
+        run: bash .github/app/guard.sh
+
   build-macos:
     runs-on: macos-15
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/app-build
         with:
           name: macos
           target: universal-apple-darwin
-          bundles: app,dmg
+          updater-pubkey: ${{ vars.TAURI_UPDATER_PUBKEY }}
 
   build-windows:
     strategy:
@@ -61,13 +60,15 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/app-build
         with:
           name: ${{ matrix.name }}
           target: ${{ matrix.target }}
-          bundles: nsis
           clippy: ${{ matrix.clippy }}
+          updater-pubkey: ${{ vars.TAURI_UPDATER_PUBKEY }}
 
   build-linux:
     strategy:
@@ -77,24 +78,175 @@ jobs:
           - name: linux-x64
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            musl: x86_64-unknown-linux-musl
           - name: linux-arm64
             runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            musl: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/app-build
         with:
           name: ${{ matrix.name }}
           target: ${{ matrix.target }}
-          musl: ${{ matrix.musl }}
-          bundles: deb,rpm,appimage
+          updater-pubkey: ${{ vars.TAURI_UPDATER_PUBKEY }}
+
+  bundle-macos:
+    needs: [guard, build-macos]
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: compiled-macos
+          path: ${{ runner.temp }}/compiled
+      - name: Bundle and sign
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash .github/app/bundle-macos.sh "$RUNNER_TEMP/compiled"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: app-macos
+          path: dist
+          if-no-files-found: error
+
+  bundle-windows:
+    needs: [guard, build-windows]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            target: x86_64-pc-windows-msvc
+          - name: windows-arm64
+            target: aarch64-pc-windows-msvc
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: compiled-${{ matrix.name }}
+          path: ${{ runner.temp }}/compiled
+      - name: Bundle and sign
+        shell: bash
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: bash .github/app/bundle-windows.sh "$RUNNER_TEMP/compiled" ${{ matrix.target }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: app-${{ matrix.name }}
+          path: dist
+          if-no-files-found: error
+
+  bundle-linux:
+    needs: [guard, build-linux]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: compiled-${{ matrix.name }}
+          path: ${{ runner.temp }}/compiled
+      - name: Bundle
+        run: bash .github/app/bundle-linux.sh "$RUNNER_TEMP/compiled" ${{ matrix.target }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: app-${{ matrix.name }}
+          path: dist
+          if-no-files-found: error
+
+  updater-sign:
+    needs: [guard, bundle-macos, bundle-windows, bundle-linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: app-*
+          path: ${{ runner.temp }}/bundles
+      - name: Sign the update files
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash .github/app/updater-sign.sh "$RUNNER_TEMP/bundles"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: update-signatures
+          path: signatures
+          if-no-files-found: ignore
+
+  files:
+    needs: [guard, bundle-macos, bundle-windows, bundle-linux, updater-sign]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: app-*
+          path: built
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: update-signatures
+          path: built
+      - name: Release names
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          bash .github/app/release-files.sh built release "$version"
+          {
+            echo "## Release files"
+            echo
+            echo "| file | bytes |"
+            echo "|---|---|"
+            for file in release/*; do
+              echo "| $(basename "$file") | $(wc -c < "$file" | tr -d ' ') |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Release names in both modes from stand in files
+        run: bash .github/app/release-files-check.sh | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-files
+          path: release
+          if-no-files-found: error
 
   probe-macos:
-    needs: build-macos
+    needs: bundle-macos
+    if: ${{ github.workflow == 'app' }}
     strategy:
       fail-fast: false
       matrix:
@@ -102,8 +254,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: app-macos
           path: built
@@ -112,7 +266,7 @@ jobs:
         run: bash .github/app/probe-macos.sh built appprobe
       - name: Upload
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: appprobe-${{ matrix.runner }}
           path: appprobe
@@ -122,24 +276,39 @@ jobs:
         run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
 
   probe-windows:
-    needs: build-windows
-    runs-on: windows-2025
+    needs: [build-windows, bundle-windows]
+    if: ${{ github.workflow == 'app' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            runner: windows-2025
+          - name: windows-arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          name: app-windows-x64
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: app-${{ matrix.name }}
           path: built
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: compiled-${{ matrix.name }}
+          path: programs
       - name: Probe
         timeout-minutes: 20
         shell: pwsh
-        run: ./.github/app/probe-windows.ps1 -Built built -Out appprobe
+        run: ./.github/app/probe-windows.ps1 -Built built -Out appprobe -Programs programs
       - name: Upload
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: appprobe-windows
+          name: appprobe-${{ matrix.name }}
           path: appprobe
           if-no-files-found: warn
       - name: Summary
@@ -148,12 +317,63 @@ jobs:
         run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
 
   probe-linux:
-    needs: build-linux
-    runs-on: ubuntu-24.04
+    needs: bundle-linux
+    if: ${{ github.workflow == 'app' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-24.04
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: app-${{ matrix.name }}
+          path: built
+      - name: Probe
+        timeout-minutes: 20
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11 libglib2.0-bin file gnome-themes-extra python3-pyatspi at-spi2-core dconf-gsettings-backend dconf-service rpm
+          sudo apt-get install -y ./built/*.deb
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          XAUTHORITY="$RUNNER_TEMP/x-cookie/display.auth"
+          mkdir -p "$RUNNER_TEMP/x-cookie" "$RUNNER_TEMP/x-server"
+          xauth -q -f "$XAUTHORITY" add :99 . "$(mcookie)"
+          printf '#!/bin/sh\nexec /usr/bin/Xvfb "$@" -auth "%s"\n' "$XAUTHORITY" >"$RUNNER_TEMP/x-server/Xvfb"
+          chmod +x "$RUNNER_TEMP/x-server/Xvfb"
+          export XAUTHORITY
+          PATH="$RUNNER_TEMP/x-server:$PATH" dbus-run-session -- bash .github/linux/xfce.sh .github/app/probe-linux.sh appprobe
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: appprobe-${{ matrix.name }}
+          path: appprobe
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+  probe-gnome:
+    needs: bundle-linux
+    if: ${{ github.workflow == 'app' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: app-linux-x64
           path: built
@@ -161,17 +381,75 @@ jobs:
         timeout-minutes: 20
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11
+          sudo apt-get install -y gnome-shell gvfs gvfs-daemons dconf-service libglib2.0-bin gnome-shell-extension-prefs fonts-cantarell adwaita-icon-theme dconf-cli xdg-user-dirs
           sudo apt-get install -y ./built/*.deb
+          sudo apt-get remove -y gnome-shell-extension-desktop-icons-ng || true
           XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
           export XDG_RUNTIME_DIR
-          dbus-run-session -- bash .github/linux/xfce.sh .github/app/probe-linux.sh appprobe
+          failed=0
+          PASS=missing dbus-run-session -- bash .github/linux/gnome.sh .github/app/probe-gnome.sh appprobe || failed=1
+          sudo apt-get install -y gnome-shell-extension-desktop-icons-ng
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          PASS=off dbus-run-session -- bash .github/linux/gnome.sh .github/app/probe-gnome.sh appprobe || failed=1
+          exit "$failed"
       - name: Upload
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: appprobe-linux
+          name: appprobe-gnome
+          path: appprobe
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+  rpm-fedora:
+    needs: bundle-linux
+    if: ${{ github.workflow == 'app' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-24.04
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: fedora:latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: app-${{ matrix.name }}
+          path: built
+      - name: Install, answer and remove
+        run: |
+          mkdir -p appprobe
+          report=appprobe/report.md
+          rpm=$(ls built/*.rpm | head -1)
+          name=$(rpm -qp --qf '%{NAME}' "$rpm")
+          echo "## rpm on $(. /etc/os-release && echo "$PRETTY_NAME")" > "$report"
+          echo >> "$report"
+          echo "- file $(basename "$rpm"), package $name" >> "$report"
+          dnf install -y "$rpm" > appprobe/install.log 2>&1
+          echo "- dnf install exit $?, pulled $(grep -c '^ ' appprobe/install.log) lines of packages" >> "$report"
+          echo "- scooch --version answers $(scooch --version 2>&1)" >> "$report"
+          missing=$(ldd /usr/bin/scooch-app | grep 'not found' || true)
+          echo "- ldd on scooch-app misses ${missing:-nothing}" >> "$report"
+          dnf remove -y "$name" > appprobe/remove.log 2>&1
+          removed=$?
+          echo "- dnf remove exit $removed, files left $(rpm -q "$name" >/dev/null 2>&1 && echo yes || echo no)" >> "$report"
+          cat "$report"
+          scooch_left=$(command -v scooch || true)
+          if [ -n "$missing" ] || [ "$removed" != 0 ] || [ -n "$scooch_left" ]; then exit 1; fi
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: appprobe-rpm-${{ matrix.name }}
           path: appprobe
           if-no-files-found: warn
       - name: Summary

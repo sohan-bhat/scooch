@@ -1,5 +1,5 @@
 name: Build the Scooch app
-description: Builds the scooch programs, checks the window and shell, and makes the installers for one target.
+description: Builds the scooch programs and the window program for one target and uploads them, with no installer and no signature.
 
 inputs:
   name:
@@ -8,17 +8,14 @@ inputs:
   target:
     description: Rust target the app is built for
     required: true
-  bundles:
-    description: Tauri bundles to make
-    required: true
-  musl:
-    description: Static Linux target for the scooch program
-    required: false
-    default: ""
   clippy:
     description: Whether to run clippy on the shell
     required: false
     default: "true"
+  updater-pubkey:
+    description: Public key of the updater, empty for a build without the updater
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -33,19 +30,23 @@ runs:
           exit 1
         fi
 
-    - uses: dtolnay/rust-toolchain@stable
-      with:
-        components: clippy
-        targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || inputs.musl != '' && inputs.musl || inputs.target }}
+    - name: Rust
+      shell: bash
+      env:
+        TARGETS: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin x86_64-apple-darwin' || inputs.target }}
+      run: |
+        rustup toolchain install stable --profile minimal --component clippy --no-self-update
+        rustup default stable
+        rustup target add $TARGETS
 
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       with:
         key: ${{ inputs.name }}
         workspaces: |
           . -> target
           crates/scooch-app -> target
 
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
         node-version: 22
         cache: npm
@@ -56,7 +57,7 @@ runs:
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf musl-tools file
+        sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf file
 
     - name: Scooch program for macOS
       if: runner.os == 'macOS'
@@ -85,9 +86,9 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       run: |
-        cargo build --release -p scooch --bin scooch --target ${{ inputs.musl }}
+        cargo build --release -p scooch --bin scooch --target ${{ inputs.target }}
         mkdir -p crates/scooch-app/binaries
-        cp "target/${{ inputs.musl }}/release/scooch" "crates/scooch-app/binaries/scooch-${{ inputs.target }}"
+        cp "target/${{ inputs.target }}/release/scooch" "crates/scooch-app/binaries/scooch-${{ inputs.target }}"
 
     - name: Window packages
       shell: bash
@@ -110,41 +111,45 @@ runs:
     - name: Updater switch
       id: updater
       shell: bash
+      env:
+        TAURI_UPDATER_PUBKEY: ${{ inputs.updater-pubkey }}
       run: |
-        if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -n "${TAURI_UPDATER_PUBKEY:-}" ]; then
-          printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s","endpoints":["https://github.com/sohan-bhat/scooch/releases/latest/download/latest.json"]}}}' "$TAURI_UPDATER_PUBKEY" > crates/scooch-app/updater.conf.json
+        if [ -n "${TAURI_UPDATER_PUBKEY:-}" ]; then
+          printf '{"plugins":{"updater":{"pubkey":"%s","endpoints":["https://github.com/sohan-bhat/scooch/releases/latest/download/latest.json"]}}}' "$TAURI_UPDATER_PUBKEY" > crates/scooch-app/updater.conf.json
           echo "args=--features updater --config updater.conf.json" >> "$GITHUB_OUTPUT"
         else
           echo "args=" >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Installers
+    - name: Compile
       shell: bash
       working-directory: crates/scooch-app
-      run: |
-        for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
-          if [ -z "${!name:-}" ]; then unset "$name"; fi
-        done
-        node ui/node_modules/@tauri-apps/cli/tauri.js build --ci --target ${{ inputs.target }} --bundles ${{ inputs.bundles }} ${{ steps.updater.outputs.args }}
+      run: node ui/node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle --target ${{ inputs.target }} ${{ steps.updater.outputs.args }}
 
-    - name: Collect
+    - name: Compiled programs
       shell: bash
       run: |
-        mkdir -p dist
-        bundle="crates/scooch-app/target/${{ inputs.target }}/release/bundle"
-        find "$bundle" -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.sig' -o -name '*.tar.gz' \) -exec cp {} dist/ \;
-        {
-          echo "## ${{ inputs.name }}"
-          echo
-          echo "| file | bytes |"
-          echo "|---|---|"
-          for file in dist/*; do
-            echo "| $(basename "$file") | $(wc -c < "$file" | tr -d ' ') |"
-          done
-        } | tee -a "$GITHUB_STEP_SUMMARY"
+        mkdir -p compiled
+        release="crates/scooch-app/target/${{ inputs.target }}/release"
+        case "$RUNNER_OS" in
+          macOS)
+            cp "$release/scooch-app" compiled/scooch-app
+            cp crates/scooch-app/binaries/scooch-universal-apple-darwin compiled/scooch
+            ;;
+          Windows)
+            cp "$release/scooch-app.exe" compiled/scooch-app.exe
+            cp "crates/scooch-app/binaries/scooch-${{ inputs.target }}.exe" compiled/scooch.exe
+            cp "crates/scooch-app/binaries/scoochw-${{ inputs.target }}.exe" compiled/scoochw.exe
+            ;;
+          Linux)
+            cp "$release/scooch-app" compiled/scooch-app
+            cp "crates/scooch-app/binaries/scooch-${{ inputs.target }}" compiled/scooch
+            ;;
+        esac
+        ls -l compiled
 
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: app-${{ inputs.name }}
-        path: dist
+        name: compiled-${{ inputs.name }}
+        path: compiled
         if-no-files-found: error
