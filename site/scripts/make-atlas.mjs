@@ -7,6 +7,7 @@ import sharp from 'sharp';
 
 const site = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(join(site, 'package.json'));
+const scale = Number(process.argv[process.argv.indexOf('--scale') + 1] ?? 1) || 1;
 const config = JSON.parse(await readFile(join(site, 'scripts', 'demo.config.json'), 'utf8'));
 const tokens = await readFile(join(site, 'src', 'styles', 'tokens.css'), 'utf8');
 const color = (name) => tokens.match(new RegExp(`--color-${name}:\\s*(#[0-9a-f]{6})`, 'i'))[1];
@@ -40,9 +41,10 @@ const browser = await chromium.launch({ channel: 'chrome', headless: true });
 const page = await browser.newPage();
 await page.setContent(`<style>@font-face{font-family:Label;src:url(data:font/woff2;base64,${font.toString('base64')}) format("woff2");font-weight:400 700;}</style><p style="font-family:Label">x</p>`);
 const data = await page.evaluate(
-  async ({ icons, cursor, palette }) => {
-    await document.fonts.load('600 30px Label');
-    const cell = 256;
+  async ({ icons, cursor, palette, scale }) => {
+    const u = (value) => value * scale;
+    await document.fonts.load(`600 ${u(30)}px Label`);
+    const cell = u(256);
     const canvas = document.createElement('canvas');
     canvas.width = cell * 4;
     canvas.height = cell * 4;
@@ -54,67 +56,69 @@ const data = await page.evaluate(
     shade.fillStyle = '#000000';
     shade.fillRect(0, 0, shadeCanvas.width, shadeCanvas.height);
     const image = async (source, fill) => {
-      const sized = source.replace('<svg ', '<svg width="512" height="512" ').replace(/currentColor/g, fill);
+      const sized = source.replace('<svg ', `<svg width="${u(512)}" height="${u(512)}" `).replace(/currentColor/g, fill);
       const element = new Image();
       element.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(sized)}`;
       await element.decode();
       return element;
     };
     const place = (index, row) => [(index % 4) * cell, (row + Math.floor(index / 4)) * cell];
-    const glyph = 142;
+    const glyph = u(142);
     for (const [index, icon] of icons.entries()) {
       const [left, top] = place(index, 0);
       const body = await image(icon.fill, icon.folder ? palette.pad : palette.paper);
       context.save();
       context.shadowColor = 'rgba(10, 8, 6, 0.65)';
-      context.shadowBlur = 10;
-      context.shadowOffsetY = 3;
-      context.drawImage(body, left + (cell - glyph) / 2, top + 14, glyph, glyph);
+      context.shadowBlur = u(10);
+      context.shadowOffsetY = u(3);
+      context.drawImage(body, left + (cell - glyph) / 2, top + u(14), glyph, glyph);
       context.shadowColor = 'transparent';
-      context.font = '600 30px Label';
+      context.font = `600 ${u(30)}px Label`;
       context.textAlign = 'center';
       context.textBaseline = 'alphabetic';
       context.fillStyle = palette.paper;
-      context.fillText(icon.label, left + cell / 2, top + 206, cell - 16);
+      context.fillText(icon.label, left + cell / 2, top + u(206), cell - u(16));
       context.restore();
-      shade.font = '600 30px Label';
+      shade.font = `600 ${u(30)}px Label`;
       shade.textAlign = 'center';
       shade.textBaseline = 'alphabetic';
-      shade.filter = 'blur(3px)';
+      shade.filter = `blur(${u(3)}px)`;
       shade.lineJoin = 'round';
-      shade.lineWidth = 4;
+      shade.lineWidth = u(4);
       shade.strokeStyle = '#ffffff';
       shade.fillStyle = '#ffffff';
-      shade.strokeText(icon.label, left + cell / 2, top + 207, cell - 16);
-      shade.fillText(icon.label, left + cell / 2, top + 207, cell - 16);
+      shade.strokeText(icon.label, left + cell / 2, top + u(207), cell - u(16));
+      shade.fillText(icon.label, left + cell / 2, top + u(207), cell - u(16));
       shade.filter = 'none';
       const [lineLeft, lineTop] = place(index, 2);
       const line = await image(icon.line, palette.pad);
-      context.drawImage(line, lineLeft + (cell - glyph) / 2, lineTop + 14, glyph, glyph);
-      context.font = '500 30px Label';
+      context.drawImage(line, lineLeft + (cell - glyph) / 2, lineTop + u(14), glyph, glyph);
+      context.font = `500 ${u(30)}px Label`;
       context.textAlign = 'center';
       context.fillStyle = palette.pad;
-      context.fillText(icon.label, lineLeft + cell / 2, lineTop + 206, cell - 16);
+      context.fillText(icon.label, lineLeft + cell / 2, lineTop + u(206), cell - u(16));
     }
     const [left, top] = place(icons.length, 0);
-    const size = 132;
+    const size = u(132);
     const outline = await image(cursor, palette.ink);
     const body = await image(cursor, palette.paper);
     context.save();
     context.shadowColor = 'rgba(10, 8, 6, 0.5)';
-    context.shadowBlur = 8;
-    context.shadowOffsetY = 4;
+    context.shadowBlur = u(8);
+    context.shadowOffsetY = u(4);
     context.drawImage(outline, left, top, size, size);
     context.restore();
     context.drawImage(body, left + size * 0.06, top + size * 0.06, size * 0.88, size * 0.88);
     return [canvas.toDataURL('image/png'), shadeCanvas.toDataURL('image/png')];
   },
-  { icons, cursor, palette: { pad: color('pad'), paper: color('paper'), ink: color('ink') } },
+  { icons, cursor, palette: { pad: color('pad'), paper: color('paper'), ink: color('ink') }, scale },
 );
 await browser.close();
 const [atlas, shade] = data.map((url) => Buffer.from(url.split(',')[1], 'base64'));
-const out = join(site, 'public', 'demo', 'atlas.png');
+const out = join(site, 'public', 'demo', scale === 1 ? 'atlas.png' : `atlas-${scale}x.png`);
 await writeFile(out, await sharp(atlas).png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer());
-const shadeOut = join(site, 'public', 'demo', 'shade.png');
-await writeFile(shadeOut, await sharp(shade).extractChannel(0).png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer());
-console.log('wrote', out, shadeOut);
+if (scale === 1) {
+  const shadeOut = join(site, 'public', 'demo', 'shade.png');
+  await writeFile(shadeOut, await sharp(shade).extractChannel(0).png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer());
+  console.log('wrote', out, shadeOut);
+} else console.log('wrote', out);

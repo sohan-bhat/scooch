@@ -62,7 +62,7 @@ export function Install() {
             const other = item.downloads.filter((download) => download.arch !== main.arch);
             const otherArch = other[0]?.arch as Arch | undefined;
             return (
-              <TabsContent key={item.id} value={item.id} className="flex flex-col items-start gap-5 data-[state=active]:animate-[tip-in_240ms_var(--ease-out)]">
+              <TabsContent key={item.id} value={item.id} tabIndex={-1} className="flex flex-col items-start gap-5 data-[state=active]:animate-[tip-in_240ms_var(--ease-out)]">
                 <Button asChild size="lg">
                   <a href={`${install.release}${main.file}`} download onClick={click}>
                     <DownloadSimple weight="bold" aria-hidden />
