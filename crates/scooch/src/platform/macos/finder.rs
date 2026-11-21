@@ -351,9 +351,12 @@ pub fn consent_aside(check: Check, answered: Answered, asking: &'static Asking, 
         });
         let mut seen = asking.nudges();
         let mut now = match asked {
-            Some(answer @ (Access::Allowed | Access::Denied)) => answer,
+            Some(Access::Allowed) => Access::Allowed,
             _ => objc2::rc::autoreleasepool(|_| check(false)),
         };
+        if let Some(answer) = asked {
+            said(&format!("the ask came back as {answer:?} and a check without asking says {now:?}"));
+        }
         let mut listening: Option<Box<dyn FnOnce()>> = None;
         while now == Access::WouldAsk {
             if listening.is_none() {
@@ -627,11 +630,16 @@ mod tests {
         state: Mutex<Access>,
         asks: std::sync::atomic::AtomicUsize,
         joins: bool,
+        closed: Option<Access>,
     }
 
     impl Tcc {
         fn new(state: Access, joins: bool) -> Arc<Self> {
-            Arc::new(Self { state: Mutex::new(state), asks: std::sync::atomic::AtomicUsize::new(0), joins })
+            Arc::new(Self { state: Mutex::new(state), asks: std::sync::atomic::AtomicUsize::new(0), joins, closed: None })
+        }
+
+        fn closed_unanswered(returns: Access) -> Arc<Self> {
+            Arc::new(Self { state: Mutex::new(Access::WouldAsk), asks: std::sync::atomic::AtomicUsize::new(0), joins: false, closed: Some(returns) })
         }
 
         fn check(self: &Arc<Self>) -> Check {
@@ -639,6 +647,9 @@ mod tests {
             Arc::new(move |ask| {
                 if ask {
                     tcc.asks.fetch_add(1, Ordering::SeqCst);
+                    if let Some(returns) = tcc.closed {
+                        return returns;
+                    }
                     while tcc.joins && *tcc.state.lock().unwrap() == Access::WouldAsk {
                         std::thread::sleep(Duration::from_millis(5));
                     }
@@ -673,6 +684,20 @@ mod tests {
         heard.fire();
         assert!(until(|| woke.load(Ordering::SeqCst)), "Allow in the earlier window did not wake the daemon");
         assert!(settle(asking) && heard.counts() == (1, 1) && tcc.asks() == 1, "{:?} asks {}", heard.counts(), tcc.asks());
+    }
+
+    #[test]
+    fn a_window_closed_without_a_choice_leaves_a_waiter_whatever_the_ask_returned() {
+        for returned in [Access::Denied, Access::WouldAsk, Access::Unknown(-128)] {
+            let (tcc, heard, asking) = (Tcc::closed_unanswered(returned), Arc::new(Heard::default()), fresh());
+            let (woke, answered) = woke_into();
+            assert_eq!(consent_aside(tcc.check(), answered, asking, heard.listen(), Duration::from_millis(100)), Consent::AskLater);
+            assert!(until(|| heard.counts() == (1, 0)), "{returned:?} {:?}", heard.counts());
+            assert!(asking.waiting() && tcc.asks() == 1 && !woke.load(Ordering::SeqCst), "{returned:?}");
+            tcc.answer(Access::Allowed);
+            heard.fire();
+            assert!(until(|| woke.load(Ordering::SeqCst)) && settle(asking) && heard.counts() == (1, 1) && tcc.asks() == 1, "{returned:?}");
+        }
     }
 
     #[test]
@@ -790,7 +815,13 @@ mod tests {
             let asking = fresh();
             let woke = Arc::new(AtomicBool::new(false));
             let told = woke.clone();
-            let check: Check = Arc::new(move |ask| if ask { asked } else { first });
+            let chose = Arc::new(AtomicBool::new(false));
+            let check: Check = Arc::new(move |ask| {
+                if ask {
+                    chose.store(true, Ordering::SeqCst);
+                }
+                if chose.load(Ordering::SeqCst) { asked } else { first }
+            });
             assert_eq!(consent_aside(check, Arc::new(move || told.store(true, Ordering::SeqCst)), asking, deaf(), Duration::from_secs(5)), wanted, "{first:?} then {asked:?}");
             assert!(settle(asking), "{first:?} then {asked:?} left the flag up");
             assert!(!wakes || until(|| woke.load(Ordering::SeqCst)), "{first:?} then {asked:?} did not wake the daemon");
