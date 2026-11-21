@@ -222,6 +222,8 @@ press_pill alt+F4
 wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
 line
 
+. "$PWD/.github/app/presses-linux.sh"
+
 before=$(pgrep -x scooch | head -1)
 sed -i 's/"daemon": "[^"]*"/"daemon": "0.0.0"/' "$data/state.json"
 line "- the saved state now says $(grep -o '"daemon": "[^"]*"' "$data/state.json"), as after an upgrade in place, daemon $before"
