@@ -38,7 +38,7 @@ type Slot = { id: string; frame: Frame | null; icons: Vector4[]; base: Vector4[]
 const slots = new Map<string, Slot>();
 const view = { frame: null as Frame | null, main: null as Frame | null };
 
-const saved = { frame: null as Texture | null, icons: [] as Vector4[], scale: null as Vector2 | null, grid: null as Vector2 | null, atlas: null as Texture | null };
+const saved = { frame: null as Texture | null, icons: [] as Vector4[], scale: null as Vector2 | null, grid: null as Vector2 | null, atlas: null as Texture | null, opener: null as HTMLElement | null };
 const sharper = { atlas: null as Texture | null, loading: false };
 const fade = { mix: 0, at: 0, target: 0, span: BLEND };
 const work = {} as { target: Vector3; center: Vector3; normal: Vector3; up: Vector3; point: Vector3; ray: Vector3; quaternion: Quaternion; matrix: Matrix4; answers: number; timer: number; nudged: number };
@@ -368,6 +368,8 @@ function close() {
   demo.closing = performance.now();
   live.fadeUntil = Math.max(live.fadeUntil, demo.closing + GLIDE + 150);
   document.documentElement.classList.remove('demo-open');
+  if (saved.opener?.isConnected) saved.opener.focus({ preventScroll: true });
+  saved.opener = null;
   const screen = lcd();
   if (screen && saved.frame) {
     screen.uFrom.value = saved.frame;
@@ -445,6 +447,8 @@ export function openDemo() {
     (screen.uGrid.value as Vector2).set(1e5, 1e5);
     view.main = hooks.frame;
     demo.picture = OWN;
+    const active = document.activeElement;
+    saved.opener = active instanceof HTMLElement && active !== document.body && !active.closest('.demo-layer') ? active : null;
     fade.mix = 0;
   }
   const now = performance.now();
