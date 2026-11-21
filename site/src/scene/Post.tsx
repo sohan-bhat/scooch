@@ -3,7 +3,7 @@ import { useFrame, useThree } from '@react-three/fiber';
 import { BlendFunction, CopyPass, ToneMappingMode } from 'postprocessing';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConstantAlphaFactor, CustomBlending, HalfFloatType, NoBlending, OneMinusConstantAlphaFactor, SRGBColorSpace, Vector2, WebGLRenderTarget, type Texture } from 'three';
-import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass } from 'postprocessing';
+import type { DepthOfFieldEffect, EffectComposer as EffectComposerType, NoiseEffect, Pass, SMAAEffect } from 'postprocessing';
 import { holdQuiet, quiet, quietFast } from '@/lib/idle';
 import { release as releaseLoader } from '@/lib/load';
 import { changed, clockSweeping, runtime, story, wallClock } from '@/story/state';
@@ -80,10 +80,32 @@ function patchTargets(pass: object) {
   }
 }
 
+const crispable = new WeakSet<SMAAEffect>();
+
+function crispen(effect: SMAAEffect) {
+  if (crispable.has(effect)) return;
+  crispable.add(effect);
+  const update = effect.update.bind(effect);
+  const inner = effect as unknown as { clearPass: { overrideClearAlpha: number; render: (gl: unknown, target: WebGLRenderTarget) => void }; renderTargetWeights: WebGLRenderTarget };
+  effect.update = (renderer, input, delta) => {
+    if (!live.crisp) {
+      update(renderer, input, delta);
+      return;
+    }
+    const alpha = inner.clearPass.overrideClearAlpha;
+    inner.clearPass.overrideClearAlpha = 0;
+    inner.clearPass.render(renderer, inner.renderTargetWeights);
+    inner.clearPass.overrideClearAlpha = alpha;
+  };
+}
+
 function Effects({ full }: { full: boolean }) {
   const dof = useCallback((effect: DepthOfFieldEffect | null) => quality.attachDof(effect), []);
   const ao = useCallback((pass: Toggle | null) => {
     if (pass) patchTargets(pass);
+  }, []);
+  const smaa = useCallback((effect: SMAAEffect | null) => {
+    if (effect) crispen(effect);
   }, []);
   const noise = useCallback((effect: NoiseEffect | null) => {
     if (effect) effect.blendMode.opacity.value = quality.grainOpacity();
@@ -94,7 +116,7 @@ function Effects({ full }: { full: boolean }) {
       {full && quality.dof && <DepthOfField ref={dof} focusDistance={1} focusRange={0.2} bokehScale={0} resolutionScale={0.5} />}
       <Bloom mipmapBlur levels={full ? 5 : 4} luminanceThreshold={1.3} luminanceSmoothing={0.35} intensity={0.6} radius={0.7} />
       <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
-      <SMAA />
+      <SMAA ref={smaa} />
       {runtime.still >= 0 && <Vignette offset={0.3} darkness={0.62} />}
       <Noise ref={noise} premultiply blendFunction={BlendFunction.SOFT_LIGHT} opacity={quality.grainOpacity()} />
     </>
@@ -465,7 +487,7 @@ export function Post({ phone }: { phone: boolean }) {
     target.scissorTest = true;
     const previous = gl.getRenderTarget();
     const clear = gl.autoClear;
-    const [jx, jy] = JITTER[still.pass] ?? [0, 0];
+    const [jx, jy] = live.crisp ? [0, 0] : (JITTER[still.pass] ?? [0, 0]);
     const projection = camera.projectionMatrix.elements;
     const x = projection[8];
     const y0 = projection[9];

@@ -39,6 +39,7 @@ export const live = {
   ringUntil: 0,
   stapleAt: -1e9,
   pourUntil: 0,
+  crisp: false,
   juice: 4,
   slosh: 0,
   glass: { x: 0, z: 0, ready: false },
