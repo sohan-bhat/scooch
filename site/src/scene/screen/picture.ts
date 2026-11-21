@@ -23,6 +23,7 @@ uniform float uGhost[ICON_SLOTS];
 uniform float uOutline;
 uniform vec3 uCursor;
 uniform vec2 uCursorSize;
+uniform float uSharp;
 `;
 
 export const pictureBody = `
@@ -72,7 +73,7 @@ vec4 atlasCell(float index, float row, vec2 q, vec2 dx, vec2 dy, vec2 scale) {
   vec2 at = (cell + clamp(q, 0.002, 0.998)) / GRID;
   vec2 size = vec2(textureSize(uAtlas, 0));
   float footprint = max(length(dx * scale * size), length(dy * scale * size));
-  float lod = clamp(log2(max(footprint, 1e-4)), 0.0, 10.0);
+  float lod = footprint < 2.2 * uSharp ? 0.0 : clamp(log2(max(footprint, 1e-4)), 0.0, 10.0);
   return clamp(textureLod(uAtlas, at, lod), 0.0, 1.0);
 }
 
@@ -139,6 +140,7 @@ export type PictureUniforms = {
   uOutline: { value: number };
   uCursor: { value: Vector3 };
   uCursorSize: { value: Vector2 };
+  uSharp: { value: number };
 };
 
 export function pictureUniforms(): PictureUniforms {
@@ -157,5 +159,6 @@ export function pictureUniforms(): PictureUniforms {
     uOutline: { value: 0 },
     uCursor: { value: new Vector3(0.5, 0.5, 0) },
     uCursorSize: { value: new Vector2(0.06, 0.08) },
+    uSharp: { value: 0 },
   };
 }

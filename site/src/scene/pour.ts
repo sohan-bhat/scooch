@@ -1,4 +1,4 @@
-import { Box3, BufferAttribute, BufferGeometry, Group, InstancedMesh, Matrix4, Mesh, Quaternion, SphereGeometry, Vector3, type Camera, type MeshStandardMaterial, type Object3D } from 'three';
+import { Box3, BufferAttribute, BufferGeometry, Group, InstancedMesh, Matrix4, Mesh, Quaternion, SphereGeometry, Vector3, type Camera, type MeshStandardMaterial, type Object3D, type Scene } from 'three';
 import { DESK_TOP } from './layout';
 import { play } from './sound';
 import { glass, radiusAt, tumblerMaterial } from './Tumbler';
@@ -1067,7 +1067,7 @@ export function pourFrame(now: number, step: number, gl: { compileAsync: (scene:
   rippleFrame(step);
 }
 
-export function warmStream(gl: { compileAsync: (scene: Object3D, camera: Camera) => Promise<unknown> }, camera: Camera, group: Object3D) {
+export function warmStream(gl: { compileAsync: (scene: Object3D, camera: Camera, target?: Scene | null) => Promise<unknown> }, camera: Camera, group: Object3D, scene: Scene) {
   const mesh = state.stream;
   const beads = state.beadMesh;
   if (!mesh || !beads) return;
@@ -1076,7 +1076,7 @@ export function warmStream(gl: { compileAsync: (scene: Object3D, camera: Camera)
   beads.setMatrixAt(0, ring.m);
   beads.instanceMatrix.needsUpdate = true;
   beads.count = 1;
-  void gl.compileAsync(group, camera).catch(() => undefined).finally(() => {
+  void gl.compileAsync(group, camera, scene).catch(() => undefined).finally(() => {
     if (!pool.count) {
       mesh.visible = false;
       beads.count = 0;

@@ -19,6 +19,10 @@ path = "src/bin/scoochw.rs"
 name = "macprobe"
 test = true
 
+[[example]]
+name = "linuxprobe"
+test = true
+
 [dependencies]
 scooch-core = { path = "../scooch-core" }
 anyhow = "1"
