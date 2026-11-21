@@ -68,7 +68,7 @@ cost = 4.0  * saliency hidden under icons, as a share of all saliency
 
 **Never worse.** The result never hides more of the subject than the home frame. With no icons, or icons that cover nothing important, the output equals the home frame, which is a normal fill wallpaper whenever the centered crop already shows the subject.
 
-**Stability.** The previous placement is kept unless the new one is clearly better, so a small nudge of one icon does not move the picture.
+**Stability.** The previous placement is kept unless the new one is clearly better, so a small nudge of one icon does not move the picture. The daemon keeps a placement only under the flip, scenery, strength and zoom settings it was solved with, which each screen entry records as `placed`, so a changed setting always gets a fresh solve. An entry saved before that record existed takes the settings of its next unchanged tick.
 
 A `Placement` is separable. `fx` and `fy` are tables of 257 values. `fx[k]` is the source x, from 0 to 1, shown at output x `k / 256`. Mirror and crop are folded into the tables. Both tables are monotone and smooth.
 
@@ -111,7 +111,7 @@ Once a release has shipped tables, any change in what a table holds must raise t
 
 ### What the engine cannot do
 
-A subject that touches the screen edge under the icons cannot slide clear on a screen with the same shape as the picture, because there is no picture beyond that edge to fill in. Flipping the picture clears it. Flipping is off by default, since a flipped photo of a known place or person looks wrong. `scooch flip` turns it on, and the status line says when it would help.
+A subject that touches the screen edge under the icons cannot slide clear on a screen with the same shape as the picture, because there is no picture beyond that edge to fill in. Flipping the picture clears it. Flipping is off by default, since a flipped photo of a known place or person looks wrong. `scooch flip` turns it on, and the status line says when it would help. It says so only when the solve with flipping allowed, and everything else as it is, ends flipped and hides less than half of what the picture on screen hides, which is exactly the picture turning flipping on then shows.
 
 ### What scenery cannot do
 
