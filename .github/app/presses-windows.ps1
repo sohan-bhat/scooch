@@ -71,11 +71,18 @@ function Click-Control([string]$Label) {
     Start-Sleep -Milliseconds 400
     $found = Control $Label
     if (-not $found) { return "no control named $Label" }
-    $legacy = $null
-    if ($found.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacy)) {
-        $legacy.DoDefaultAction()
-        return "pressed $Label through its default action"
+    $selection = $null
+    if ($found.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$selection)) {
+        try { $selection.Select() } catch { }
+        Start-Sleep -Milliseconds 2500
+        if (Chosen $Label) { return "selected $Label through UI Automation" }
     }
+    try { $found.SetFocus() } catch { }
+    Start-Sleep -Milliseconds 300
+    [System.Windows.Forms.SendKeys]::SendWait(' ')
+    Start-Sleep -Milliseconds 2500
+    if (Chosen $Label) { return "pressed $Label with the space key" }
+    $found = Control $Label
     $rect = $found.Current.BoundingRectangle
     if ($rect.Width -le 0) { return "$Label has no place on the screen" }
     [Desk]::Click([int]($rect.X + $rect.Width / 2), [int]($rect.Y + $rect.Height / 2))
@@ -102,34 +109,20 @@ function Pick-File([string]$File) {
     if (-not $dialog) { return "$pressed, and no file window opened" }
     $title = $dialog.Current.Name
     $byId = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, '1148')
-    $edits = @($dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byId))
-    $typed = $false
-    foreach ($edit in $edits) {
-        $value = $null
-        if ($edit.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit -and $edit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value)) {
-            $value.SetValue($File)
-            $typed = $true
-            break
-        }
-    }
-    $how = 'the file name box'
-    if (-not $typed) {
-        [Desk]::SetForegroundWindow([IntPtr]$dialog.Current.NativeWindowHandle) | Out-Null
-        Start-Sleep -Milliseconds 500
-        [System.Windows.Forms.SendKeys]::SendWait($File)
-        $how = 'typed keys'
-    }
+    $edit = @($dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byId)) | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit } | Select-Object -First 1
+    [Desk]::SetForegroundWindow([IntPtr]$dialog.Current.NativeWindowHandle) | Out-Null
     Start-Sleep -Milliseconds 500
-    $byOpen = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, '1')
-    $open = $dialog.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $byOpen)
-    $invoke = $null
-    if ($open -and $open.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
-        $invoke.Invoke()
-        $how = "$how and its Open button"
-    } else {
-        [System.Windows.Forms.SendKeys]::SendWait('~')
-        $how = "$how and Enter"
-    }
+    if ($edit) { try { $edit.SetFocus() } catch { } }
+    Start-Sleep -Milliseconds 300
+    [System.Windows.Forms.SendKeys]::SendWait('^a')
+    Start-Sleep -Milliseconds 200
+    [System.Windows.Forms.SendKeys]::SendWait(($File -replace '([+^%~(){}\[\]])', '{$1}'))
+    Start-Sleep -Milliseconds 800
+    $typed = ''
+    $value = $null
+    if ($edit -and $edit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value)) { $typed = $value.Current.Value }
+    [System.Windows.Forms.SendKeys]::SendWait('~')
+    $how = "typed keys reading '$typed' and Enter"
     $closed = Wait-For 15 { -not (Dialog) }
     if ($closed -lt 0) { return "the file window '$title' stayed open after $File" }
     return "the file window '$title' took $File through $how and closed"
@@ -184,7 +177,7 @@ Start-Sleep -Seconds 4
 $page = Page-Text
 $sentence = $page.Contains($unreadable) -or [bool](Control $unreadable)
 Line "- the page text reads $(($page -replace '\s+', ' ').Trim())"
-Line "- the window shows the sentence for an unreadable picture $sentence, the copy file says '$unreadable', the wallpaper is $([Desk]::Wallpaper())"
+Line "- the window shows the sentence for an unreadable picture $sentence, the copy file says '$unreadable', the saved state names $((Sources) -join ' '), the wallpaper is $([Desk]::Wallpaper())"
 Expect "the file window also took a file that is no picture" ($picked -like '*took*and closed')
 Expect "a picked file that is no picture shows the window's sentence for it" $sentence
 Expect "a picked file that is no picture leaves the desktop and the saved picture as they were" (([Desk]::Wallpaper() -ieq $shownBefore) -and ((Digest) -eq $before) -and (Names $pick))
