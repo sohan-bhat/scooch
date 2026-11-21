@@ -178,7 +178,17 @@ function Press([string]$Label, [int]$Tabs) {
     return "pressed $Label with $Tabs Tabs and Enter, since UI Automation found no button named $Label"
 }
 
-function State-On { (Test-Path "$data\state.json") -and ((Get-Content -Raw "$data\state.json") -match '"on": true') }
+function Read-Shared([string]$Path) {
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]'ReadWrite, Delete')
+        try { return (New-Object System.IO.StreamReader($stream)).ReadToEnd() } finally { $stream.Dispose() }
+    } catch { return '' }
+}
+function Shared-Sum([string]$Path) {
+    $text = Read-Shared $Path
+    return [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::HashData([System.Text.Encoding]::UTF8.GetBytes($text)))
+}
+function State-On { (Test-Path "$data\state.json") -and ((Read-Shared "$data\state.json") -match '"on": true') }
 function Run-Value { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Scooch -ErrorAction SilentlyContinue).Scooch }
 function Daemons { @(Get-Process -Name scoochw -ErrorAction SilentlyContinue).Count }
 
@@ -299,7 +309,7 @@ Start-Sleep -Seconds 3
 $on = Wait-For 40 { State-On }
 Line "- first open turned Scooch on after $on s"
 Expect "first open turned Scooch on" ($on -ge 0)
-$drawn = Wait-For 40 { (Test-Path "$data\state.json") -and ((Get-Content -Raw "$data\state.json") -match '"fingerprint": "') }
+$drawn = Wait-For 40 { (Test-Path "$data\state.json") -and ((Read-Shared "$data\state.json") -match '"fingerprint": "') }
 Line "- Scooch drew the desktop after $drawn s"
 Expect "Scooch drew the desktop" ($drawn -ge 0)
 Start-Sleep -Seconds 3
@@ -404,10 +414,10 @@ if ($null -eq $textBefore) { Remove-ItemProperty -Path $access -Name TextScaleFa
 Start-Sleep -Seconds 2
 Line ''
 Line '### Switches, off and removal'
-$glideBefore = (Get-Content -Raw "$data\state.json") -match '"glide": true'
+$glideBefore = (Read-Shared "$data\state.json") -match '"glide": true'
 Line "- $(Press 'Slide' 1)"
 Start-Sleep -Seconds 2
-$glideAfter = (Get-Content -Raw "$data\state.json") -match '"glide": true'
+$glideAfter = (Read-Shared "$data\state.json") -match '"glide": true'
 Line "- Slide was on $glideBefore and after one press is on $glideAfter"
 Expect "one press of Slide flipped it" ($glideBefore -ne $glideAfter)
 Shot 'slide'
@@ -450,15 +460,15 @@ Start-Sleep -Seconds 2
 $parked = Join-Path $data 'out\probe-absent-1.jpg'
 New-Item -ItemType Directory -Force (Split-Path $parked) | Out-Null
 Copy-Item $photo $parked -Force
-$saved = Get-Content -Raw "$data\state.json" | ConvertFrom-Json
+$saved = Read-Shared "$data\state.json" | ConvertFrom-Json
 $saved.on = $true
 $saved.screens | Add-Member -NotePropertyName 'probe-absent' -NotePropertyValue ([pscustomobject]@{ source = $photo; original = $photo; output = $parked }) -Force
 $saved | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 "$data\state.json"
 Start-Process -FilePath (Join-Path $folder 'scoochw.exe') -WindowStyle Hidden
 Wait-For 30 { (Daemons) -ge 1 } | Out-Null
 Start-Sleep -Seconds 3
-Line "- the saved state holds a record for a screen probe-absent that no desktop shows $((Get-Content -Raw "$data\state.json") -match 'probe-absent'), Scooch on again, daemons $(Daemons), login entry $(Run-Value)"
-Expect "the saved state holds a record for a screen nobody shows before the removal" ((Get-Content -Raw "$data\state.json") -match 'probe-absent')
+Line "- the saved state holds a record for a screen probe-absent that no desktop shows $((Read-Shared "$data\state.json") -match 'probe-absent'), Scooch on again, daemons $(Daemons), login entry $(Run-Value)"
+Expect "the saved state holds a record for a screen nobody shows before the removal" ((Read-Shared "$data\state.json") -match 'probe-absent')
 function Uninstall-Entry { @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DisplayName -eq 'Scooch' }).Count }
 Line "- uninstall entries for Scooch before removal $(Uninstall-Entry)"
 $uninstaller = Join-Path $folder 'uninstall.exe'

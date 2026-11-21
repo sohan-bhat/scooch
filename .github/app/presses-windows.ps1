@@ -20,7 +20,7 @@ $unreadable = (Get-Content -Raw 'crates/scooch-app/ui/src/copy/en.json' | Conver
 $scooch = Join-Path $folder 'scooch.exe'
 $app = Get-ChildItem $folder -Filter 'scooch-app.exe' | Select-Object -First 1
 
-function Saved { Get-Content -Raw "$data\state.json" | ConvertFrom-Json }
+function Saved { Read-Shared "$data\state.json" | ConvertFrom-Json }
 function Plain([string]$Path) { if (-not $Path) { return '' }; return $Path -replace '^\\\\\?\\', '' }
 function Sources { @((Saved).screens.PSObject.Properties.Value | ForEach-Object { Plain $_.source } | Sort-Object -Unique) }
 function Names([string]$Path) { $found = @(Sources); return ($found.Count -eq 1) -and ($found[0] -ieq $Path) }
@@ -283,7 +283,7 @@ Wait-For 30 { -not (State-On) } | Out-Null
 Wait-For 30 { (Daemons) -eq 0 } | Out-Null
 Start-Sleep -Seconds 3
 $shownOff = [Desk]::Wallpaper()
-$stateSum = (Get-FileHash -Algorithm MD5 -Path "$data\state.json").Hash
+$stateSum = (Shared-Sum "$data\state.json")
 Line "- off, wallpaper $shownOff, login entry '$(Run-Value)', daemons $(Daemons)"
 Line "- $(Click-Control 'probe canoe')"
 Start-Sleep -Seconds 5
@@ -292,7 +292,7 @@ Expect "a picture pressed while off is marked as chosen" (Chosen 'probe canoe')
 Expect "pressed while off the desktop keeps its wallpaper" ([Desk]::Wallpaper() -ieq $shownOff)
 Expect "pressed while off no login entry is written" (-not (Run-Value))
 Expect "pressed while off no daemon runs" ((Daemons) -eq 0)
-Expect "pressed while off Scooch's saved state is untouched" ((Get-FileHash -Algorithm MD5 -Path "$data\state.json").Hash -eq $stateSum)
+Expect "pressed while off Scooch's saved state is untouched" ((Shared-Sum "$data\state.json") -eq $stateSum)
 $window = Find-Window
 if ($window) { $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close() }
 Wait-For 15 { @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count -eq 0 } | Out-Null
