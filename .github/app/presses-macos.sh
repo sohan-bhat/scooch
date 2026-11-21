@@ -330,7 +330,7 @@ wait_for 30 state_on >/dev/null
 wait_for 30 test -f "$plist" >/dev/null
 wait_for 30 launchctl print "gui/$(id -u)/$label" >/dev/null
 sleep 3
-stand_in
+stand_in "Turn on with a selection, through use_picture"
 wait_for 40 fresh_from "$pics/probe-canoe.jpg" "$before" >/dev/null
 sleep 3
 line "- after Turn on the saved state names $(sources), the wallpaper is $(wallpaper), login item $([ -f "$plist" ] && echo present || echo gone)"
