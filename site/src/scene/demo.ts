@@ -149,6 +149,25 @@ function after() {
   }
 }
 
+function fit(buffer: Vector2, size: { width: number; height: number }) {
+  const camera = demo.camera;
+  const frame = screenFrame();
+  const mesh = hooks.laptop;
+  if (!camera || !frame || !mesh) return 1;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const [u, v] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+    work.point.set(frame.origin.x + u * frame.extent.x, frame.origin.y + v * frame.extent.y, frame.front).applyMatrix4(mesh.matrixWorld).project(camera);
+    minX = Math.min(minX, work.point.x);
+    maxX = Math.max(maxX, work.point.x);
+    minY = Math.min(minY, work.point.y);
+    maxY = Math.max(maxY, work.point.y);
+  }
+  return Math.max(((maxX - minX) / 2) * buffer.x / size.width, ((maxY - minY) / 2) * buffer.y / size.height);
+}
+
 function rects(index: number, x: number, y: number) {
   const icons = hooks.icons ?? [];
   const out = new Float32Array(icons.length * 4);
@@ -189,6 +208,7 @@ function finish() {
   live.crisp = false;
   hooks.view = () => {};
   hooks.after = () => {};
+  hooks.fit = null;
   emit();
 }
 
@@ -227,6 +247,7 @@ export function openDemo() {
   live.lastScroll = -1e9;
   hooks.view = view;
   hooks.after = after;
+  hooks.fit = fit;
   document.documentElement.classList.add('demo-open');
   window.addEventListener('scroll', onScroll, { passive: true });
   window.addEventListener('keydown', onKey);

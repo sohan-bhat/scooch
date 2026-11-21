@@ -19,6 +19,7 @@ export const hooks = {
   screen: null as null | Record<'lcd' | 'crt', Record<string, { value: unknown }>>,
   view: (_camera: PerspectiveCamera) => {},
   after: () => {},
+  fit: null as null | ((buffer: Vector2, size: { width: number; height: number }) => number),
 };
 
 export const live = {

@@ -644,7 +644,7 @@ export function World({ manifest, onReady }: { manifest: DemoManifest; onReady: 
       maxY = Math.max(maxY, scratch.corner.y);
     }
     const size = screens.main.live.image as { width: number; height: number };
-    const fit = Math.min(1, Math.max(((maxX - minX) / 2) * buffer.x / size.width, ((maxY - minY) / 2) * buffer.y / size.height) * 1.25);
+    const fit = Math.min(1, hooks.fit ? hooks.fit(buffer, size) : Math.max(((maxX - minX) / 2) * buffer.x / size.width, ((maxY - minY) / 2) * buffer.y / size.height) * 1.25);
     if (fit >= 1) return undefined;
     return { width: Math.max(64, Math.ceil(size.width * fit)), height: Math.max(48, Math.ceil(size.height * fit)) };
   }, [built, gl, camera, scratch, screens]);
