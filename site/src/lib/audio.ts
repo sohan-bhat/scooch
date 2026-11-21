@@ -17,6 +17,9 @@ const files: Record<string, string> = {
   down: 'sounds/down.m4a',
   stream: 'sounds/stream.m4a',
   drips: 'sounds/drips.m4a',
+  pick: 'sounds/pick.m4a',
+  drop: 'sounds/drop.m4a',
+  slide: 'sounds/slide.m4a',
 };
 
 const MUSIC = 'sounds/lobby.m4a';
