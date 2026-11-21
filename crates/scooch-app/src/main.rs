@@ -148,7 +148,7 @@ async fn first_open<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
         return Ok(false);
     }
     let _ = std::fs::create_dir_all(data_folder(&app));
-    let _ = std::fs::write(&marker, facade::PROGRAM);
+    let _ = pictures::save(&marker, facade::PROGRAM.as_bytes());
     Ok(true)
 }
 
