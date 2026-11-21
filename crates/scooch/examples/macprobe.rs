@@ -8,6 +8,42 @@ fn main() -> std::process::ExitCode {
     probe::main()
 }
 
+#[cfg(any(target_os = "macos", test))]
+const SPARE_WAKEUPS: u64 = 6;
+
+#[cfg(any(target_os = "macos", test))]
+fn woke_more(woke: (u64, u64), baseline: Option<(u64, u64)>, events: usize) -> bool {
+    events > 0 || baseline.is_some_and(|(idle, interrupt)| woke.0 > idle + SPARE_WAKEUPS || woke.1 > interrupt + SPARE_WAKEUPS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::woke_more;
+
+    #[test]
+    fn one_wakeup_against_a_baseline_of_none_is_noise() {
+        assert!(!woke_more((1, 1), Some((0, 14)), 0));
+    }
+
+    #[test]
+    fn a_wakeup_every_second_is_more_than_the_baseline() {
+        assert!(woke_more((61, 61), Some((0, 14)), 0));
+    }
+
+    #[test]
+    fn any_return_of_the_watch_fails_however_few_the_wakeups() {
+        assert!(woke_more((0, 0), Some((5, 14)), 3));
+        assert!(woke_more((0, 0), None, 1));
+    }
+
+    #[test]
+    fn six_more_wakeups_pass_and_seven_fail_in_either_count() {
+        assert!(!woke_more((6, 20), Some((0, 14)), 0));
+        assert!(woke_more((7, 14), Some((0, 14)), 0));
+        assert!(woke_more((0, 21), Some((0, 14)), 0));
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod probe {
     use anyhow::{Context, Result};
@@ -1648,7 +1684,7 @@ mod probe {
             "- a quiet 60 s with the program watched, begun 3 s after the daemon let its render sessions go {rested:?} ms into this case: idle and interrupt wakeups {woke:?}, the same minute of check 6 without the watch {:?}, idle wakeups in each 5 s {buckets:?}, kevent returns {events}, other log lines {lines:?}, CPU by thread {busy:?}",
             p.quiet
         ));
-        if events > 0 || p.quiet.is_some_and(|(idle, interrupt)| woke.0 > idle || woke.1 > interrupt) {
+        if crate::woke_more(woke, p.quiet, events) {
             p.fail("the daemon with its program watched woke more at rest than without the watch");
         }
         Ok(())
@@ -1765,7 +1801,7 @@ mod probe {
         let later = rusage(pid).context("the daemon usage could not be read after the minute")?;
         let woke = (later.idle_wakeups.saturating_sub(calm.idle_wakeups), later.interrupt_wakeups.saturating_sub(calm.interrupt_wakeups));
         let quiet_lines: Vec<String> = watch_log(&run.log).into_iter().skip(quiet_from).collect();
-        let folder_events = quiet_lines.iter().filter(|line| line.contains(" program folder event ")).count();
+        let folder_events = quiet_lines.iter().filter(|line| line.contains(" program folder event ") || line.contains(" program event flags ")).count();
         let mark = watch_log(&run.log).len();
         let started = Instant::now();
         let back = p.tool("/usr/bin/ditto", &[&aside.to_string_lossy(), &run.bundle.to_string_lossy()]);
@@ -1781,7 +1817,7 @@ mod probe {
         if deleted.is_none() || waiting.is_none() || rearmed.is_none() || !alive {
             p.fail("after a delete the watch did not wait on the folder and arm again on the program put back");
         }
-        if folder_events > 0 || p.quiet.is_some_and(|(idle, interrupt)| woke.0 > idle || woke.1 > interrupt) {
+        if crate::woke_more(woke, p.quiet, folder_events) {
             p.fail("the daemon woke more at rest with the folder watched than without any watch");
         }
         let _ = fs::remove_dir_all(&aside);

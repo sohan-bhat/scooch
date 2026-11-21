@@ -8,6 +8,9 @@ on:
       - ".github/linux/**"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   probe:
     strategy:
@@ -101,6 +104,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 

@@ -1,18 +1,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appimage;
 #[cfg(target_os = "linux")]
 mod children;
 mod pictures;
 mod place;
+#[cfg(unix)]
+mod takeover;
 #[cfg(feature = "updater")]
 mod update;
 mod watch;
 
-use scooch::facade::{self, Problem, Started, Switch, View};
+use scooch::facade::{self, Icons, Problem, Started, Switch, View};
 use scooch::facade::Tally;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Runtime, WebviewWindow};
+use tauri::window::Color;
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Runtime, Theme, WebviewWindow, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_window_state::StateFlags;
@@ -25,10 +29,10 @@ const KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", 
 
 struct Kept(Mutex<Option<notify::RecommendedWatcher>>);
 
-fn said<T>(result: anyhow::Result<T>) -> Result<T, String> {
+fn said<T>(code: &'static str, result: anyhow::Result<T>) -> Result<T, String> {
     result.map_err(|error| {
-        eprintln!("{error}");
-        error.to_string()
+        eprintln!("scooch-app {code} failed: {error:#}");
+        code.to_string()
     })
 }
 
@@ -38,46 +42,64 @@ fn adopted<T>(result: anyhow::Result<T>) -> anyhow::Result<T> {
     result
 }
 
-async fn off_main<T: Send + 'static>(work: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
-    said(tauri::async_runtime::spawn_blocking(work).await.map_err(|error| anyhow::anyhow!(error.to_string())).and_then(|done| done))
+fn taken_over(program: &std::path::Path) {
+    #[cfg(unix)]
+    for done in takeover::take_over(program, cfg!(target_os = "macos") || std::env::var_os("APPIMAGE").is_some()) {
+        eprintln!("scooch-app {done}");
+    }
+    #[cfg(not(unix))]
+    let _ = program;
+}
+
+fn ready() -> anyhow::Result<PathBuf> {
+    let program = place::ready()?;
+    taken_over(&program);
+    Ok(program)
+}
+
+async fn off_main<T: Send + 'static>(code: &'static str, work: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
+    #[cfg(target_os = "linux")]
+    appimage::seal();
+    said(code, tauri::async_runtime::spawn_blocking(work).await.map_err(|error| anyhow::anyhow!(error.to_string())).and_then(|done| done))
 }
 
 fn data_folder<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("scooch-app"))
 }
 
+fn current() -> View {
+    let mut view = facade::view();
+    if place::misplaced() {
+        view.problem = Some(Problem::Move);
+    }
+    view
+}
+
 #[tauri::command]
 async fn view() -> Result<View, String> {
-    off_main(|| {
-        let mut view = facade::view();
-        if place::misplaced() {
-            view.problem = Some(Problem::Move);
-        }
-        Ok(view)
-    })
-    .await
+    off_main("view", || Ok(current())).await
 }
 
 #[tauri::command]
 async fn turn_on() -> Result<Started, String> {
-    off_main(|| adopted(facade::turn_on(&place::program()?))).await
+    off_main("turn-on", || adopted(facade::turn_on(&ready()?))).await
 }
 
 #[tauri::command]
 async fn turn_off() -> Result<Tally, String> {
-    off_main(|| adopted(facade::turn_off(&place::program()?))).await
+    off_main("turn-off", || adopted(facade::turn_off(&place::program()?))).await
 }
 
 #[tauri::command]
 async fn set(switch: Switch, on: bool) -> Result<(), String> {
-    off_main(move || facade::set(switch, on)).await
+    off_main("set", move || facade::set(switch, on)).await
 }
 
 #[tauri::command]
 async fn use_picture<R: Runtime>(app: AppHandle<R>, path: PathBuf) -> Result<(), String> {
     let folder = data_folder(&app);
-    off_main(move || {
-        adopted(facade::use_picture(&place::program()?, &path))?;
+    off_main("use", move || {
+        adopted(facade::use_picture(&ready()?, &path))?;
         pictures::remember(&folder, &path);
         Ok(())
     })
@@ -87,7 +109,7 @@ async fn use_picture<R: Runtime>(app: AppHandle<R>, path: PathBuf) -> Result<(),
 #[tauri::command]
 async fn pictures<R: Runtime>(app: AppHandle<R>) -> Result<Vec<String>, String> {
     let folder = data_folder(&app);
-    off_main(move || Ok(pictures::listed(&folder))).await
+    off_main("pictures", move || Ok(pictures::listed(&folder))).await
 }
 
 #[tauri::command]
@@ -107,27 +129,53 @@ async fn first_open<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
     Ok(true)
 }
 
+#[cfg(target_os = "linux")]
+fn open_link<R: Runtime>(_: &AppHandle<R>, url: String) -> anyhow::Result<()> {
+    let mut last = None;
+    for program in [&["xdg-open"][..], &["gio", "open"][..]] {
+        let mut command = std::process::Command::new(program[0]);
+        command.args(&program[1..]).arg(&url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        match appimage::apply(&mut command).spawn() {
+            Ok(mut child) => {
+                std::thread::spawn(move || child.wait());
+                return Ok(());
+            }
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(last.map(anyhow::Error::from).unwrap_or_else(|| anyhow::anyhow!("no opener")))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_link<R: Runtime>(app: &AppHandle<R>, url: String) -> anyhow::Result<()> {
+    app.opener().open_url(url, None::<&str>).map_err(anyhow::Error::from)
+}
+
 #[tauri::command]
-async fn fix<R: Runtime>(app: AppHandle<R>, problem: Problem) -> Result<(), String> {
+async fn fix<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let Some(problem) = off_main("view", || Ok(current().problem)).await? else { return Ok(()) };
     let opener = app.opener();
     match problem {
-        Problem::Automation => said(opener.open_url(AUTOMATION, None::<&str>).map_err(anyhow::Error::from)),
-        Problem::Finder => said(opener.open_path(FINDER, None::<&str>).map_err(anyhow::Error::from)),
-        Problem::Startup => said(opener.open_url(STARTUP, None::<&str>).map_err(anyhow::Error::from)),
-        Problem::Unknown { desktop } => said(opener.open_url(format!("{ISSUES}{}", desktop.replace(' ', "%20")), None::<&str>).map_err(anyhow::Error::from)),
+        Problem::Automation => said("open", opener.open_url(AUTOMATION, None::<&str>).map_err(anyhow::Error::from)),
+        Problem::Finder => said("open", opener.open_path(FINDER, None::<&str>).map_err(anyhow::Error::from)),
+        Problem::Startup => said("open", opener.open_url(STARTUP, None::<&str>).map_err(anyhow::Error::from)),
+        Problem::Unknown { desktop } => said("open", open_link(&app, format!("{ISSUES}{}", percent_encoding::utf8_percent_encode(&desktop, percent_encoding::NON_ALPHANUMERIC)))),
         Problem::Move => {
-            off_main(place::move_to_applications).await?;
+            let target = off_main("move", place::move_to_applications).await?;
+            tauri_plugin_single_instance::destroy(&app);
+            said("move", place::open_app(&target))?;
             app.exit(0);
             Ok(())
         }
         Problem::Admin => {
-            off_main(place::open_normally).await?;
+            tauri_plugin_single_instance::destroy(&app);
+            off_main("admin", place::open_normally).await?;
             app.exit(0);
             Ok(())
         }
-        Problem::Gnome => off_main(gnome_icons).await,
-        Problem::Stopped | Problem::Other => off_main(|| adopted(facade::turn_on(&place::program()?)).map(drop)).await,
-        Problem::Asking | Problem::Screen | Problem::Wallpaper { .. } => Ok(()),
+        Problem::Gnome { icons: Icons::Off } => off_main("gnome-icons", gnome_icons).await,
+        Problem::Stopped | Problem::Other => off_main("start", || adopted(facade::turn_on(&ready()?)).map(drop)).await,
+        Problem::Asking | Problem::Screen | Problem::Wallpaper { .. } | Problem::Gnome { .. } => Ok(()),
     }
 }
 
@@ -139,6 +187,11 @@ fn gnome_icons() -> anyhow::Result<()> {
 #[cfg(not(target_os = "linux"))]
 fn gnome_icons() -> anyhow::Result<()> {
     Ok(())
+}
+
+fn paint<R: Runtime>(window: &WebviewWindow<R>, theme: Theme) {
+    let color = if theme == Theme::Light { Color(239, 231, 214, 255) } else { Color(20, 17, 14, 255) };
+    let _ = window.set_background_color(Some(color));
 }
 
 fn place_on_pointer<R: Runtime>(window: &WebviewWindow<R>) {
@@ -157,7 +210,16 @@ fn place_on_pointer<R: Runtime>(window: &WebviewWindow<R>) {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    facade::child_env(appimage::changes());
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _arguments, _folder| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(StateFlags::SIZE | StateFlags::MAXIMIZED).build());
@@ -166,6 +228,13 @@ fn main() {
     builder
         .register_asynchronous_uri_scheme_protocol(pictures::SCHEME, |_context, request, responder| {
             std::thread::spawn(move || responder.respond(pictures::answer(&request)));
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::ThemeChanged(theme) = event {
+                if let Some(webview) = window.app_handle().get_webview_window(window.label()) {
+                    paint(&webview, *theme);
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![view, turn_on, turn_off, set, use_picture, pictures, pick, first_open, fix])
         .setup(|app| {
@@ -179,20 +248,36 @@ fn main() {
             .ok();
             app.manage(Kept(Mutex::new(watcher)));
             if let Some(window) = app.get_webview_window("main") {
+                if let Ok(theme) = window.theme() {
+                    paint(&window, theme);
+                }
                 place_on_pointer(&window);
                 let _ = window.show();
                 let _ = window.set_focus();
             }
-            if !place::misplaced() {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || {
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                #[cfg(target_os = "linux")]
+                appimage::seal();
+                let _ = facade::set_origin(std::env::var_os("APPIMAGE").map(PathBuf::from).as_deref());
+                if !place::misplaced() {
                     if let Ok(program) = place::program() {
-                        if adopted(facade::repair(&program)).unwrap_or(false) {
+                        if facade::reclaim(&program) {
                             let _ = handle.emit("changed", ());
                         }
                     }
-                });
-            }
+                }
+                if !place::misplaced() && facade::is_on() {
+                    if let Ok(program) = place::ready() {
+                        if adopted(facade::repair(&program)).unwrap_or(false) {
+                            let _ = handle.emit("changed", ());
+                        }
+                        taken_over(&program);
+                    }
+                }
+                let view = facade::view();
+                eprintln!("scooch-app live {} reduce motion {} problem {}", view.live, view.reduce_motion, serde_json::to_string(&view.problem).unwrap_or_default());
+            });
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -206,4 +291,15 @@ fn main() {
                 update::install(app);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failure_reaches_the_window_as_its_code_only() {
+        let failed: anyhow::Result<()> = Err(anyhow::anyhow!("Permission denied (os error 13)"));
+        assert_eq!(said("move", failed), Err("move".to_string()));
+    }
 }

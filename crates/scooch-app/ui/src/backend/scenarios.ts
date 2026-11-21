@@ -90,6 +90,7 @@ type Scenario = {
   blank?: boolean;
   hideIcons?: boolean;
   none?: boolean;
+  failure?: string;
 };
 
 export const scenarios: Record<string, Scenario> = {
@@ -114,8 +115,14 @@ export const scenarios: Record<string, Scenario> = {
   'win-video': { desk: windows, problem: { kind: 'wallpaper', what: 'video' }, blank: true },
   'win-admin': { desk: windows, problem: { kind: 'admin' } },
   'win-startup': { desk: windows, problem: { kind: 'startup' } },
+  'win-text-150': { desk: windows, textScale: 1.5 },
+  'win-text-200': { desk: windows, textScale: 2 },
+  'win-text-200-problem': { desk: windows, textScale: 2, problem: { kind: 'startup' } },
   'gnome-two': { desk: gnome },
-  'gnome-icons': { desk: gnome, problem: { kind: 'gnome' }, hideIcons: true },
+  'gnome-icons': { desk: gnome, problem: { kind: 'gnome', icons: 'off' }, hideIcons: true },
+  'gnome-missing': { desk: gnome, problem: { kind: 'gnome', icons: 'missing' }, hideIcons: true },
+  'gnome-blocked': { desk: gnome, problem: { kind: 'gnome', icons: 'blocked' }, hideIcons: true },
+  'mac-move-failed': { desk: mac, phase: 'off', problem: { kind: 'move' }, failure: 'move' },
   'gnome-color': { desk: gnome, problem: { kind: 'wallpaper', what: 'color' }, blank: true },
   'linux-unknown': { desk: gnome, phase: 'off', problem: { kind: 'unknown', desktop: 'Budgie' }, none: true },
   'xfce-on': { desk: xfce, xfce: true },
@@ -147,6 +154,7 @@ export function build(name: string): View {
     counted: phase === 'on' && !scenario.hideIcons && !scenario.blank && !scenario.none ? counted(monitors) : null,
     reduceMotion: scenario.reduced ?? false,
     textScale: scenario.textScale ?? 1,
+    failure: scenario.failure ?? null,
   };
 }
 

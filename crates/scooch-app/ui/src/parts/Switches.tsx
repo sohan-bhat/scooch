@@ -9,13 +9,13 @@ const ORDER: SwitchName[] = ['glide', 'scenery', 'flip', 'predict'];
 export function Switches({ values, onChange }: { values: Values; onChange: (name: SwitchName, on: boolean) => void }) {
   const shown = ORDER.filter((name) => values[name] !== undefined);
   return (
-    <div className="flex items-center gap-6 cramped:gap-4">
+    <div className="flex min-w-0 flex-wrap items-center gap-x-[24px] gap-y-[8px] cramped:gap-x-[16px]">
       {shown.map((name) => {
         const id = `switch-${name}`;
         return (
           <Tooltip key={name}>
             <TooltipTrigger asChild>
-              <div className="flex items-center gap-2.5">
+              <div className="flex items-center gap-[10px]">
                 <Label htmlFor={id} className="cramped:text-[0.875rem]">
                   {copy.switch[name].label}
                 </Label>
