@@ -112,12 +112,6 @@ function Dialog-Open([object]$Dialog) {
     if ($open -and $open.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) { $invoke.Invoke(); return $true }
     return $false
 }
-function Dialog-Item([object]$Dialog, [string]$File) {
-    $leaf = [IO.Path]::GetFileName($File)
-    $base = [IO.Path]::GetFileNameWithoutExtension($File)
-    $byType = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)
-    return @($Dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byType)) | Where-Object { $_.Current.Name -eq $leaf -or $_.Current.Name -eq $base } | Select-Object -First 1
-}
 function Pick-File([string]$File) {
     $pressed = Press 'Pick a file' 0
     $dialog = $null
@@ -125,34 +119,16 @@ function Pick-File([string]$File) {
     if (-not $dialog) { return "$pressed, and no file window opened" }
     $title = $dialog.Current.Name
     Start-Sleep -Seconds 1
-    $item = Dialog-Item $dialog $File
-    $how = 'its file list'
-    if (-not $item) {
-        $box = Dialog-Part $dialog '1148' | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit } | Select-Object -First 1
-        $value = $null
-        if ($box -and $box.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value)) {
-            $value.SetValue((Split-Path $File))
-            Dialog-Open $dialog | Out-Null
-            $how = 'the folder typed into its file name box, then its file list'
-            for ($step = 0; $step -lt 20 -and -not $item; $step++) { Start-Sleep -Milliseconds 500; $item = Dialog-Item $dialog $File }
-        }
-    }
-    $selection = $null
-    if ($item -and $item.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$selection)) {
-        $selection.Select()
-        Start-Sleep -Seconds 1
-        $box = Dialog-Part $dialog '1148' | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit } | Select-Object -First 1
-        $value = $null
-        $shows = ''
-        if ($box -and $box.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value)) { $shows = $value.Current.Value }
-        Dialog-Open $dialog | Out-Null
-        $how = "$how, the file name box reading '$shows', and its Open button"
-    } else {
-        [Desk]::SetForegroundWindow([IntPtr]$dialog.Current.NativeWindowHandle) | Out-Null
-        Start-Sleep -Milliseconds 500
-        [System.Windows.Forms.SendKeys]::SendWait(($File -replace '([+^%~(){}\[\]])', '{$1}') + '~')
-        $how = 'typed keys and Enter, since its file list showed no such file'
-    }
+    $box = Dialog-Part $dialog '1148' | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit } | Select-Object -First 1
+    if (-not $box) { return "the file window '$title' showed no file name box" }
+    $handle = [IntPtr]$box.Current.NativeWindowHandle
+    [Desk]::Type($handle, $File)
+    Start-Sleep -Milliseconds 800
+    $value = $null
+    $shows = ''
+    if ($box.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value)) { $shows = $value.Current.Value }
+    $how = "characters sent to its file name box, which then read '$shows',"
+    if (Dialog-Open $dialog) { $how = "$how and its Open button" } else { [Desk]::Enter($handle); $how = "$how and Enter" }
     $closed = Wait-For 15 { -not (Dialog) }
     if ($closed -lt 0) { return "the file window '$title' stayed open after $File through $how" }
     return "the file window '$title' took $File through $how and closed"

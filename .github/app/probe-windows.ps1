@@ -41,6 +41,19 @@ public static class Desk {
         if (!ClientToScreen(window, ref corner)) return null;
         return new int[] { corner.X, corner.Y, corner.X + box.Right, corner.Y + box.Bottom };
     }
+    [DllImport("user32.dll", EntryPoint = "SendMessageW")]
+    public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wide, IntPtr narrow);
+    public static void Type(IntPtr box, string text) {
+        SendMessage(box, 0x00B1, IntPtr.Zero, new IntPtr(-1));
+        SendMessage(box, 0x0102, new IntPtr(8), IntPtr.Zero);
+        foreach (char c in text) SendMessage(box, 0x0102, new IntPtr(c), IntPtr.Zero);
+    }
+    [DllImport("user32.dll")]
+    public static extern bool PostMessage(IntPtr window, uint message, IntPtr wide, IntPtr narrow);
+    public static void Enter(IntPtr box) {
+        PostMessage(box, 0x0100, new IntPtr(0x0D), IntPtr.Zero);
+        PostMessage(box, 0x0101, new IntPtr(0x0D), IntPtr.Zero);
+    }
     [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")]
