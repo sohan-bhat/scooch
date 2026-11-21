@@ -401,7 +401,7 @@ mod probe {
             "9 Spaces" => 91_112,
             "9b Program moved" => 300_000,
             "9c Stop" => 300_000,
-            "9d Consent waiter" => 240_000,
+            "9d Consent waiter" => 420_000,
             "10 Cleanup" => 308,
             _ => 600_000,
         };
@@ -5167,47 +5167,78 @@ mod probe {
         if !waits(&threads_b) {
             p.fail("job B keeps no waiter for the answer while the permission is undecided");
         }
-        let calm = rusage(b).context("job B's usage could not be read")?;
-        std::thread::sleep(Duration::from_secs(60));
-        let later = rusage(b).context("job B's usage could not be read after the minute")?;
-        let woke = (later.idle_wakeups.saturating_sub(calm.idle_wakeups), later.interrupt_wakeups.saturating_sub(calm.interrupt_wakeups));
-        let cpu = nanos((later.user + later.system).saturating_sub(calm.user + calm.system)) / 1_000_000;
-        p.line(format!("- a quiet 60 s of job B with the permission undecided and its waiter waiting: CPU {cpu} ms, idle and interrupt wakeups {woke:?}, the same minute of check 6 without any watch {:?}", p.quiet));
+        let Some((woke, buckets)) = quiet_buckets(b) else {
+            p.fail("job B's usage could not be read over its first minute");
+            return Ok(());
+        };
+        p.line(format!("- job B's first 60 s with the permission undecided, reported only since it holds the launch of the process: idle and interrupt wakeups {woke:?}, idle wakeups in each 5 s {buckets:?}"));
+        let Some((woke, buckets)) = quiet_buckets(b) else {
+            p.fail("job B's usage could not be read over its second minute");
+            return Ok(());
+        };
+        p.line(format!("- job B's second 60 s, once the launch is over, with its waiter waiting: idle and interrupt wakeups {woke:?}, idle wakeups in each 5 s {buckets:?}, the same minute of check 6 without any watch {:?}", p.quiet));
         if crate::woke_more(woke, p.quiet, 0) {
             p.fail("job B's waiter woke more at rest than the daemon in check 6");
         }
         let listening = consent_lines(p, from).iter().any(|line| line.contains("waits for the answer without asking again"));
         p.line(format!("  - job B's own ask {}", if listening { "came back without a decision, so its waiter waits without asking" } else { "still waits on the open window, so its waiter is that ask" }));
+        let closed = close_consent(p);
+        std::thread::sleep(Duration::from_secs(3));
+        let windows_closed = consent_windows();
+        let threads_after = sample_threads(p, b, "consent-b-after", "1");
+        let lines = consent_lines(p, from);
+        let asks = lines.iter().filter(|line| line.contains(" asks whether")).count();
+        let waits_now = lines.iter().any(|line| line.contains("waits for the answer without asking again"));
+        p.line(format!("- closed {closed:?} unanswered, consent windows now {windows_closed}, job B asked {asks} times in all, its consent lines {lines:?}, its threads {threads_after:?}"));
+        if !waits_now || !waits(&threads_after) {
+            p.fail("after the window closed unanswered job B kept no waiter that waits without asking");
+        }
         let nudged_from = daemon_log(p).lines().count();
         let opened = p.tool("/usr/bin/open", &["-a", "Calculator"]);
         std::thread::sleep(Duration::from_secs(3));
         let windows_nudged = consent_windows();
         let rechecks = consent_lines(p, nudged_from);
         let _ = p.tool("/usr/bin/killall", &["Calculator"]);
-        p.line(format!("- another app came to the front, open exit {:?}, job B's consent lines since {rechecks:?}, consent windows {windows_nudged} against {windows_second} before", opened.code));
-        if windows_nudged > windows_second {
-            p.fail("a check without asking brought up another consent window");
-        }
-        if listening && !rechecks.iter().any(|line| line.contains("checked again without asking")) {
+        let asks = consent_lines(p, from).iter().filter(|line| line.contains(" asks whether")).count();
+        p.line(format!("- another app came to the front, open exit {:?}, job B's consent lines since {rechecks:?}, consent windows {windows_nudged} against {windows_closed} before, asks in all {asks}", opened.code));
+        if !rechecks.iter().any(|line| line.contains("checked again without asking")) {
             p.fail("job B did not check again when another app came to the front");
         }
-        let closed = close_consent(p);
-        std::thread::sleep(Duration::from_secs(3));
-        let threads_after = sample_threads(p, b, "consent-b-after", "1");
-        let lines = consent_lines(p, from);
-        let asks = lines.iter().filter(|line| line.contains(" asks whether")).count();
-        p.line(format!("- closed {closed:?} unanswered, consent windows now {}, job B asked {asks} times in all, its threads {threads_after:?}", consent_windows()));
-        if asks > 1 {
-            p.fail(format!("job B asked the person {asks} times, where it may ask once"));
+        if windows_nudged > windows_closed {
+            p.fail("a check without asking brought up another consent window");
         }
-        if !waits(&threads_after) {
-            p.fail("after the window closed unanswered job B kept no waiter");
+        if asks != 1 {
+            p.fail(format!("job B asked the person {asks} times, where it asks once"));
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        let rest_from = daemon_log(p).lines().count();
+        let Some((woke, buckets)) = quiet_buckets(b) else {
+            p.fail("job B's usage could not be read over its listening minute");
+            return Ok(());
+        };
+        let checked = consent_lines(p, rest_from).iter().filter(|line| line.contains("checked again without asking")).count();
+        p.line(format!("- a quiet 60 s of job B while its waiter listens: idle and interrupt wakeups {woke:?}, idle wakeups in each 5 s {buckets:?}, checks without asking {checked}, the same minute of check 6 without any watch {:?}", p.quiet));
+        if checked > 0 || crate::woke_more(woke, p.quiet, 0) {
+            p.fail("job B's listening waiter did work or woke more at rest than the daemon in check 6");
         }
         let _ = Command::new("/bin/launchctl").args(["bootout", &target()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
         let gone = wait_until(STOP_LIMIT, || !pid_lives(b));
         let closed = close_consent(p);
         p.line(format!("- job B booted out, gone after {gone:?}, closed {closed:?}"));
         Ok(())
+    }
+
+    fn quiet_buckets(pid: i32) -> Option<((u64, u64), Vec<u64>)> {
+        let calm = rusage(pid)?;
+        let mut last = calm;
+        let mut buckets = Vec::new();
+        for _ in 0..12 {
+            std::thread::sleep(Duration::from_secs(5));
+            let now = rusage(pid)?;
+            buckets.push(now.idle_wakeups.saturating_sub(last.idle_wakeups));
+            last = now;
+        }
+        Some(((last.idle_wakeups.saturating_sub(calm.idle_wakeups), last.interrupt_wakeups.saturating_sub(calm.interrupt_wakeups)), buckets))
     }
 
     fn stop_check(p: &mut Probe) -> Result<()> {
