@@ -3,7 +3,7 @@ line "### Every control pressed once"
 pics="$HOME/probe-pictures"
 mkdir -p "$pics"
 cp "$PWD/assets/photos/lone-canoe.jpg" "$pics/probe-canoe.jpg"
-cp "$PWD/assets/photos/seagull-sky.jpg" "$pics/probe-sky.jpg"
+cp "$PWD/assets/photos/balloon-sky.jpg" "$pics/probe-sky.jpg"
 cp "$PWD/assets/photos/fox.jpg" "$pics/probe-pick.jpg"
 printf 'these are words and no picture\n' >"$pics/probe-notes.jpg"
 cp "$PWD/.github/app/flip-left.png" "$pics/probe-flip.png"
@@ -148,7 +148,11 @@ same_desktop() { [ "$(wallpaper)" = "$shown_before" ] && [ "$(digest)" = "$befor
 expect "a picked file that is no picture leaves the desktop and the saved picture as they were" same_desktop
 
 line
-line "#### Clouds on a sky photo"
+line "#### Clouds on a sky photo, with the icon column full"
+desk=$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")
+mkdir -p "$desk"
+for n in $(seq -w 1 40); do : >"$desk/probe-icon-$n.txt"; done
+sleep 6
 before=$(digest)
 line "- $(ctl 'probe sky' press)"
 wait_for 40 fresh_from "$pics/probe-sky.jpg" "$before" >/dev/null
@@ -205,10 +209,6 @@ done
 
 line
 line "#### Flip with the icon column full"
-desk=$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")
-mkdir -p "$desk"
-for n in $(seq -w 1 40); do : >"$desk/probe-icon-$n.txt"; done
-sleep 6
 clean /usr/bin/scooch use "$pics/probe-flip.png" >"$out/flip-use.txt" 2>&1
 helps() { names "$pics/probe-flip.png" && ours && screens_say flip_helps true && status_text | grep -q "Run scooch flip"; }
 wait_for 60 helps >/dev/null
