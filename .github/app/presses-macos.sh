@@ -263,6 +263,16 @@ helps() { names "$pics/probe-flip.png" && ours && screens_say flip_helps true &&
 wait_for 60 helps >/dev/null
 sleep 2
 before=$(digest)
+flipcase="$out/flip-case"
+mkdir -p "$flipcase"
+cp "$pics/probe-flip.png" "$flipcase/picture.png"
+log_from=$(wc -l <"$out/watch.log")
+cp "$data/state.json" "$flipcase/state-before.json"
+"$daemon" render "$pics/probe-flip.png" --out "$flipcase/render-now.jpg" --json "$flipcase/scene.json" >"$flipcase/render.txt" 2>&1
+system_profiler SPDisplaysDataType >"$flipcase/displays.txt" 2>&1
+limited 15 osascript -l JavaScript -e 'ObjC.import("AppKit"); const s = $.NSScreen.mainScreen; `frame ${s.frame.size.width}x${s.frame.size.height} scale ${s.backingScaleFactor}`' >"$flipcase/screen.txt" 2>&1
+echo "glide $(saved glide), predict $(saved predict), scenery $(saved options.scenery)" >"$flipcase/switches.txt"
+ps -axo pid,ppid,stat,comm,args | grep -i -E '[s]cooch' >"$flipcase/processes-before.txt"
 line "- with $(ls "$desk" | grep -c '^probe-icon-') files on the Desktop and the subject on the right, flip_helps $(python3 -c 'import json,sys; print([e.get("flip_helps", False) for e in json.load(open(sys.argv[1]))["screens"].values()])' "$data/state.json"), mirror $(saved options.mirror), scooch status says $(status_text)"
 expect "before Flip the saved state says flipping would help and scooch status shows the flip hint" helps
 press_switch Flip
@@ -270,6 +280,8 @@ mirrored() { [ "$(saved options.mirror)" = true ] && screens_say placement.mirro
 wait_for 60 mirrored >/dev/null
 sleep 2
 flipped_out=$(digest)
+cp "$data/state.json" "$flipcase/state-after-first-press.json"
+ps -axo pid,ppid,stat,comm,args | grep -i -E '[s]cooch' >"$flipcase/processes-after-first-press.txt"
 line "- after one press of Flip mirror is saved as $(saved options.mirror), the switch reads $(states Flip), the placement is mirrored $(python3 -c 'import json,sys; print([(e.get("placement") or {}).get("mirrored") for e in json.load(open(sys.argv[1]))["screens"].values()])' "$data/state.json"), scooch status says $(status_text)"
 expect "one press of Flip saves flip on" [ "$(saved options.mirror)" = true ]
 expect "the Flip switch reads on" chosen Flip
@@ -283,6 +295,9 @@ line "- after the second press mirror is saved as $(saved options.mirror), the s
 expect "the second press of Flip saves flip off" [ "$(saved options.mirror)" = false ]
 expect "the Flip switch reads off again" unchosen Flip
 expect "the daemon put the picture back unmirrored in a new output" unmirrored
+cp "$data/state.json" "$flipcase/state-after-second-press.json"
+sed -n "$((log_from + 1)),\$p" "$out/watch.log" >"$flipcase/watch.log"
+line "- the Flip case is kept in flip-case: $(ls "$flipcase" | tr '\n' ' '), $(cat "$flipcase/screen.txt"), $(cat "$flipcase/switches.txt"), daemon processes at the first press $(awk '{ print $4 }' "$flipcase/processes-after-first-press.txt" | sort | uniq -c | tr -s ' ' | tr '\n' ';'), ticks $(grep -o '"[^"]*@", [A-Za-z]*' "$flipcase/watch.log" | awk '{ print $2 }' | tr -d ')' | tr '\n' ' ')"
 rm -f "$desk"/probe-icon-*.txt
 sleep 3
 line "- the Desktop files of the Flip case are removed, $(ls "$desk" | grep -c '^probe-icon-') left"
