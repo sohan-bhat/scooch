@@ -1,4 +1,4 @@
-import { Matrix4, Quaternion, Raycaster, Vector2, Vector3, type PerspectiveCamera, type Texture, type Vector4 } from 'three';
+import type { Matrix4, PerspectiveCamera, Quaternion, Texture, Vector2, Vector3, Vector4 } from 'three';
 import { shot } from '@/lib/audio';
 import { ask, begin, dragged, held } from './drag';
 import { warm } from './engine';
@@ -23,20 +23,15 @@ export const demo = {
   camera: null as PerspectiveCamera | null,
 };
 
-const saved = { frame: null as Texture | null, icons: [] as Vector4[], scale: new Vector2(1, 1) };
-const work = {
-  target: new Vector3(),
-  center: new Vector3(),
-  normal: new Vector3(),
-  up: new Vector3(),
-  quaternion: new Quaternion(),
-  matrix: new Matrix4(),
-  point: new Vector3(),
-  ray: new Raycaster(),
-  ndc: new Vector2(),
-  answers: 0,
-  timer: 0,
-};
+const saved = { frame: null as Texture | null, icons: [] as Vector4[], scale: null as Vector2 | null };
+const work = {} as { target: Vector3; center: Vector3; normal: Vector3; up: Vector3; point: Vector3; ray: Vector3; quaternion: Quaternion; matrix: Matrix4; answers: number; timer: number };
+
+function ready() {
+  if (work.target || !hooks.laptop) return;
+  const mesh = hooks.laptop;
+  const vector = () => mesh.position.clone().set(0, 0, 0);
+  Object.assign(work, { target: vector(), center: vector(), normal: vector(), up: vector(), point: vector(), ray: vector(), quaternion: mesh.quaternion.clone(), matrix: mesh.matrix.clone(), answers: 0, timer: 0 });
+}
 const drag = { index: -1, dx: 0, dy: 0, x: 0, y: 0, moved: false, slid: false, pointer: -1 };
 
 function emit() {
@@ -60,6 +55,7 @@ function crt() {
 }
 
 function screenFrame() {
+  ready();
   const mesh = hooks.laptop;
   const uniforms = lcd();
   if (!mesh || !uniforms) return null;
@@ -174,7 +170,7 @@ function finish() {
     screen.uFrame.value = saved.frame;
     const icons = screen.uIcons.value as Vector4[];
     saved.icons.forEach((icon, i) => icons[i]?.copy(icon));
-    (screen.uFrameScale.value as Vector2).copy(saved.scale);
+    if (saved.scale) (screen.uFrameScale.value as Vector2).copy(saved.scale);
   }
   hooks.view = () => {};
   hooks.after = () => {};
@@ -196,7 +192,7 @@ export function openDemo() {
   if (!demo.closing) {
     saved.frame = screen.uFrame.value as Texture;
     saved.icons = (screen.uIcons.value as Vector4[]).map((icon) => icon.clone());
-    saved.scale.copy(screen.uFrameScale.value as Vector2);
+    saved.scale = (screen.uFrameScale.value as Vector2).clone();
   }
   const now = performance.now();
   demo.since = demo.closing ? now - GLIDE * (1 - Math.min((now - demo.closing) / GLIDE, 1)) : now;
@@ -248,12 +244,12 @@ export function screenBox(camera: PerspectiveCamera, width: number, height: numb
 function uvAt(clientX: number, clientY: number, camera: PerspectiveCamera, rect: DOMRect) {
   const mesh = hooks.laptop;
   const uniforms = lcd();
-  if (!mesh || !uniforms) return null;
-  work.ndc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
-  work.ray.setFromCamera(work.ndc, camera);
-  const hit = work.ray.intersectObject(mesh, false)[0];
-  if (!hit) return null;
-  const local = mesh.worldToLocal(work.point.copy(hit.point));
+  if (!mesh || !uniforms || !screenFrame()) return null;
+  work.ray.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1, 0.5).unproject(camera).sub(camera.position);
+  const facing = work.ray.dot(work.normal);
+  if (Math.abs(facing) < 1e-8) return null;
+  const t = work.point.copy(work.center).sub(camera.position).dot(work.normal) / facing;
+  const local = mesh.worldToLocal(work.point.copy(camera.position).addScaledVector(work.ray, t));
   const origin = uniforms.uOrigin.value as Vector2;
   const extent = uniforms.uExtent.value as Vector2;
   return [(local.x - origin.x) / extent.x, 1 - (local.y - origin.y) / extent.y];

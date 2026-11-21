@@ -29,6 +29,12 @@ export default defineConfig({
     target: 'es2022',
     chunkSizeWarningLimit: 1800,
     rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('/node_modules/three/build/')) return 'three.module';
+          return undefined;
+        },
+      },
       input: {
         main: resolve(root, 'index.html'),
         sources: resolve(root, 'sources/index.html'),
