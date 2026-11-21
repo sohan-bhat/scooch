@@ -7,6 +7,7 @@ report="$out/report.md"
 data="${XDG_DATA_HOME:-$HOME/.local/share}/scooch"
 autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/scooch.desktop"
 photo="$PWD/assets/photos/great-wave.jpg"
+readonly out report data autostart photo
 export WEBKIT_DISABLE_COMPOSITING_MODE=1
 export LIBGL_ALWAYS_SOFTWARE=1
 
@@ -36,6 +37,7 @@ no_runtime_name() { [ -s "$1" ] && ! grep -q -E "^($(echo $runtime_names | tr ' 
 session_backend() { [ -s "$1" ] && ! grep -q '^GDK_BACKEND ' "$1"; }
 
 allowed="HOME USER LOGNAME PATH LANG DISPLAY XAUTHORITY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE NO_AT_BRIDGE WEBKIT_DISABLE_COMPOSITING_MODE LIBGL_ALWAYS_SOFTWARE"
+readonly allowed
 clean() {
   local pass=() name
   for name in $allowed; do

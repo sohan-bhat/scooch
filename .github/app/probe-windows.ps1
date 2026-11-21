@@ -11,6 +11,7 @@ Set-Content -Path $report -Value ''
 $folder = Join-Path $env:LOCALAPPDATA 'Programs\Scooch'
 $data = Join-Path $env:LOCALAPPDATA 'Scooch'
 $photo = Join-Path (Resolve-Path 'assets/photos').Path 'golden-tree.jpg'
+foreach ($shared in 'report', 'folder', 'data', 'photo') { (Get-Variable -Name $shared).Options = 'ReadOnly' }
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing, System.Windows.Forms
 Add-Type @'
