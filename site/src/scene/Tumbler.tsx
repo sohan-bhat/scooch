@@ -23,7 +23,7 @@ const wrapped = ShaderChunk.lights_physical_pars_fragment.replace(
 );
 
 const edge =
-  '#ifdef STREAM\noutgoingLight += diffuseColor.rgb * vec3( 1.0, 0.62, 0.32 ) * 0.3 * vThin;\n#endif\nif ( uJuice < 0.5 ) {\nfloat edge = pow(1.0 - abs(dot(normal, normalize(vViewPosition))), 2.2);\ndiffuseColor.a = mix(0.05, 0.5, edge);\noutgoingLight = min(outgoingLight + vec3(0.62, 0.66, 0.68) * edge * 0.09, vec3(0.5));\n}\nif ( !juiceCap ) {\nfloat nv = abs( dot( normal, normalize( vViewPosition ) ) );\ndiffuseColor.a *= clamp( nv / max( fwidth( nv ) * 1.5, 1e-4 ), 0.0, 1.0 );\n}\n#include <opaque_fragment>';
+  '#ifdef STREAM\noutgoingLight += diffuseColor.rgb * vec3( 1.0, 0.62, 0.32 ) * 0.3 * vThin;\n#endif\nif ( uJuice < 0.5 ) {\nfloat edge = pow(1.0 - abs(dot(normal, normalize(vViewPosition))), 2.2);\ndiffuseColor.a = mix(0.05, 0.5, edge);\noutgoingLight = min(outgoingLight + vec3(0.62, 0.66, 0.68) * edge * 0.09, vec3(0.5));\n}\nif ( !juiceCap ) {\nfloat nv = abs( dot( normal, normalize( vViewPosition ) ) );\ndiffuseColor.a *= clamp( nv / max( fwidth( nv ) * 1.5, 1e-4 ), 0.0, 1.0 );\n}\nif ( uCut > 0.5 ) diffuseColor.a *= clamp( - juiceSd / max( fwidth( juiceSd ), 1e-6 ), 0.0, 1.0 );\n#include <opaque_fragment>';
 
 const lit = ShaderChunk.lights_fragment_begin
   .replaceAll('directLight.visible && receiveShadow', 'directLight.visible && receiveShadow && !juiceCap')
@@ -31,7 +31,7 @@ const lit = ShaderChunk.lights_fragment_begin
   .replace('normalize( vViewPosition );', 'normalize( - juiceView );');
 const surface = { uSurface: { value: new Vector4(0, 1, 0, 1e3) }, uRipple: { value: new Vector4() }, uAxis: { value: new Vector4(0, 0, 0.04, 0) } };
 const worldVarying = ['#include <project_vertex>', '#include <project_vertex>\nvJuiceWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;'] as const;
-const cut = 'if ( uCut > 0.5 && dot( vJuiceWorld, uSurface.xyz ) > uSurface.w ) discard;';
+const cut = 'float juiceSd = dot( vJuiceWorld, uSurface.xyz ) - uSurface.w;\nif ( uCut > 0.5 && juiceSd > 0.0 ) discard;';
 const top =
   '#include <normal_fragment_maps>\nvec3 juiceView = - vViewPosition;\nbool juiceCap = uCut > 0.5 && !gl_FrontFacing;\n#ifdef FLIP_SIDED\njuiceCap = uCut > 0.5;\n#endif\nif ( juiceCap ) {\nvec3 ray = vJuiceWorld - cameraPosition;\nvec3 cap = cameraPosition + ray * clamp( ( uSurface.w - dot( uSurface.xyz, cameraPosition ) ) / dot( uSurface.xyz, ray ), 0.0, 1.0 );\nvec2 out2 = cap.xz - uAxis.xy;\nfloat r = length( out2 ) + 1e-5;\nfloat f = clamp( r / uAxis.z, 0.0, 1.0 );\nvec2 q = cap.xz - uRipple.xy;\nfloat d = length( q ) + 1e-4;\nfloat w = uRipple.w * sin( d * 300.0 - uRipple.z ) * exp( -d * 45.0 );\nvec3 n = uSurface.xyz * ( 1.0 - 0.389 * f ) + vec3( out2.x, 0.0, out2.y ) / r * 0.791 * f + vec3( q.x, 0.0, q.y ) / d * ( w - uAxis.w * exp( -d * 55.0 ) );\nnormal = normalize( ( viewMatrix * vec4( n, 0.0 ) ).xyz );\njuiceView = ( viewMatrix * vec4( cap, 1.0 ) ).xyz;\n}';
 
