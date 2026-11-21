@@ -8,6 +8,7 @@ import { Desk } from '~/parts/Desk';
 import { Pictures } from '~/parts/Pictures';
 import { type Act, Status, said } from '~/parts/Status';
 import { Switches } from '~/parts/Switches';
+import { choose } from '~/parts/choice';
 
 const BLOCKING: Problem['kind'][] = ['unknown', 'move'];
 
@@ -66,8 +67,12 @@ export function App({ backend, first }: { backend: Backend; first: View }) {
   const label = view.phase === 'starting' ? copy.pill.starting : view.phase === 'stopping' ? copy.pill.stopping : on ? copy.pill.off : copy.pill.on;
   const cannotTurnOn = view.problem?.kind === 'admin' && !on;
   const toggle: Act | null = blocked || cannotTurnOn ? null : { label, busy, run: () => (on ? backend.turnOff() : backend.turnOn()) };
-  const pill = words.fix ?? toggle;
-  const quiet = words.fix ? toggle : null;
+  const again = (command: 'turn-on' | 'turn-off'): Act | null => {
+    if (command === 'turn-on' && cannotTurnOn) return null;
+    const named = view.phase === 'starting' ? copy.pill.starting : view.phase === 'stopping' ? copy.pill.stopping : command === 'turn-off' ? copy.pill.off : copy.pill.on;
+    return { label: named, busy, run: () => (command === 'turn-off' ? backend.turnOff() : backend.turnOn()) };
+  };
+  const { pill, quiet } = choose<Act>(view.failedWith, words.fix, toggle, again);
 
   return (
     <TooltipProvider delayDuration={500}>

@@ -11,6 +11,7 @@ data="$HOME/Library/Application Support/Scooch"
 plist="$HOME/Library/LaunchAgents/me.sohanbhat.scooch.plist"
 photo="$PWD/assets/photos/seagull-sky.jpg"
 label="me.sohanbhat.scooch"
+readonly built out report app data plist photo label
 
 line() { echo "$*" | tee -a "$report"; }
 . "$(dirname "$0")/expect.sh"
@@ -60,7 +61,7 @@ on run argv
     set everything to entire contents of window 1 of scoochApp
     repeat with element in everything
       try
-        if role of element is in {"AXButton", "AXCheckBox"} then
+        if role of element is in {"AXButton", "AXCheckBox", "AXRadioButton"} then
           set seen to ""
           try
             set seen to seen & (name of element as text)
@@ -82,6 +83,27 @@ on run argv
   return "no button " & wanted
 end run
 APPLESCRIPT
+}
+
+seen_texts() {
+  local folder
+  folder=$(mktemp -d)
+  cat >"$folder/read.swift" <<'SWIFT'
+import AppKit
+import Vision
+
+let url = URL(fileURLWithPath: CommandLine.arguments[1])
+guard let image = NSImage(contentsOf: url), let picture = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { exit(1) }
+let request = VNRecognizeTextRequest()
+request.recognitionLevel = .accurate
+request.usesLanguageCorrection = false
+try VNImageRequestHandler(cgImage: picture).perform([request])
+for found in request.results ?? [] {
+    if let best = found.topCandidates(1).first { print(best.string) }
+}
+SWIFT
+  limited 180 swift "$folder/read.swift" "$1" 2>/dev/null
+  rm -rf "$folder"
 }
 
 wait_for() {
@@ -120,10 +142,47 @@ close_prompts() {
   done
 }
 
+consent_windows() {
+  limited 15 osascript -l JavaScript -e '
+    ObjC.import("CoreGraphics");
+    const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0))) || [];
+    const asking = list.filter((w) => /UserNotificationCenter|universalAccessAuthWarn|CoreServicesUIAgent/.test(w.kCGWindowOwnerName || ""));
+    asking.map((w) => `${w.kCGWindowOwnerName} ${w.kCGWindowName || "untitled"} layer ${w.kCGWindowLayer}`).join(", ") || "none";' 2>&1
+}
+
 stand_in() {
-  launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1
+  local path="${1:-a turn on}" seen="$out/stand-in-$(date +%s)" from survivor status
+  mkdir -p "$seen"
+  from=$(wc -l <"$data/watch.log" 2>/dev/null || echo 0)
+  ps -axo pid,ppid,stat,lstart,comm,args | grep -i -E '[s]cooch' >"$seen/processes-before.txt"
+  launchctl print "gui/$(id -u)/$label" >"$seen/launchctl-before.txt" 2>&1
+  echo "turn on path: $path" >"$seen/path.txt"
+  echo "consent windows at the boot out: $(consent_windows)" >"$seen/consent.txt"
+  local item=no
+  [ -f "$plist" ] && item=yes
+  launchctl bootout "gui/$(id -u)/$label" >"$seen/bootout-stderr.txt" 2>&1
+  status=$?
+  { echo "exit $status"; echo "stderr:"; cat "$seen/bootout-stderr.txt"; } >"$seen/bootout.txt"
+  if [ "$item" = yes ]; then
+    expect "the stand-in booted out the login item's job, after $path" [ "$status" = 0 ]
+    [ "$status" = 0 ] || line "- the boot out of $label answered $(tr '\n' ' ' <"$seen/bootout-stderr.txt")"
+  fi
+  rm -f "$seen/bootout-stderr.txt"
   close_prompts
   sleep 2
+  if ! wait_for 15 sh -c '! pgrep -f "scooch watch" >/dev/null' >/dev/null; then
+    survivor=$(pgrep -f 'scooch watch' | head -1)
+    sample "$survivor" 3 -file "$seen/sample.txt" >/dev/null 2>&1
+    ps -axo pid,ppid,stat,lstart,comm,args | grep -i -E '[s]cooch' >"$seen/processes-after-15s.txt"
+    launchctl print "gui/$(id -u)/$label" >"$seen/launchctl-after-15s.txt" 2>&1
+    lsof "$data/watch.lock" >"$seen/lock-holders.txt" 2>&1
+    sleep 10
+    sample "$survivor" 3 -file "$seen/sample-2.txt" >/dev/null 2>&1
+    sed -n "$((from + 1)),\$p" "$data/watch.log" >"$seen/login-item-log.txt" 2>/dev/null
+    line "- a daemon still ran 15 s after the boot out, kept in $(basename "$seen"): turn on path $path, $(cat "$seen/consent.txt"), boot out $(head -1 "$seen/bootout.txt"), processes $(pgrep -fl 'scooch watch' | tr '\n' ' '), the lock held by $(lsof -t "$data/watch.lock" 2>/dev/null | while read -r pid; do echo "$pid $(ps -o comm= -p "$pid") parent $(ps -o ppid= -p "$pid" | tr -d ' ') $(ps -o comm= -p "$(ps -o ppid= -p "$pid" | tr -d ' ')")"; done | tr '\n' ';'), the login item's log in those seconds $(tr '\n' '|' <"$seen/login-item-log.txt" | cut -c1-600)"
+  else
+    rm -rf "$seen"
+  fi
   rm -f "$data/watch.pid"
   SCOOCH_TRACE=1 "$daemon" watch >>"$out/watch.log" 2>&1 &
   line "- booted out the login item job and started $daemon watch from the probe as $!, which inherits the runner's Finder automation"
@@ -271,7 +330,7 @@ else
   expect "a consent window came from the login item's daemon" false
 fi
 
-stand_in
+stand_in "the first open, through turn_on"
 if took=$(wait_for 40 rendered); then line "- Scooch drew the desktop after $took s"; else line "- no render within 40 s"; fi
 expect "Scooch drew the desktop" rendered
 sleep 3
@@ -312,10 +371,11 @@ expect "off removed the login item" no_plist
 line "- $(press 'Turn on')"
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 sleep 3
-stand_in
+stand_in "Turn on with no selection, through turn_on"
 expect "Turn on turned Scooch on again" state_on
 wait_for 40 rendered >/dev/null
 sleep 3
+. "$(dirname "$0")/presses-macos.sh"
 line "- wallpaper before the Trash $(wallpaper)"
 line "- daemon log $(grep 'program watched' "$out/watch.log" | tail -1)"
 line "- closing the window $(limited 30 osascript -e 'tell application "System Events" to tell (first process whose bundle identifier is "me.sohanbhat.scooch.window") to click (first button of window 1 whose subrole is "AXCloseButton")' 2>&1)"
@@ -381,26 +441,6 @@ end tell
 set AppleScript's text item delimiters to linefeed
 return texts as text
 APPLESCRIPT
-}
-seen_texts() {
-  local folder
-  folder=$(mktemp -d)
-  cat >"$folder/read.swift" <<'SWIFT'
-import AppKit
-import Vision
-
-let url = URL(fileURLWithPath: CommandLine.arguments[1])
-guard let image = NSImage(contentsOf: url), let picture = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { exit(1) }
-let request = VNRecognizeTextRequest()
-request.recognitionLevel = .accurate
-request.usesLanguageCorrection = false
-try VNImageRequestHandler(cgImage: picture).perform([request])
-for found in request.results ?? [] {
-    if let best = found.topCandidates(1).first { print(best.string) }
-}
-SWIFT
-  limited 180 swift "$folder/read.swift" "$1" 2>/dev/null
-  rm -rf "$folder"
 }
 press_move() {
   before=$(pgrep -f "MacOS/scooch-app" | head -1)
@@ -503,7 +543,7 @@ line "- after Turn on the link points at $(readlink "$HOME/.local/bin/scooch"), 
 expect "a link to a gone Scooch bundle was linked again to the helper in ~/Applications" [ "$(readlink "$HOME/.local/bin/scooch")" = "$HOME/Applications/Scooch.app/Contents/Helpers/Scooch.app/Contents/MacOS/scooch" ]
 expect "the login item points at the helper in ~/Applications" login_at "$HOME/Applications/Scooch.app/Contents/Helpers/Scooch.app/Contents/MacOS/scooch"
 daemon="$HOME/Applications/Scooch.app/Contents/Helpers/Scooch.app/Contents/MacOS/scooch"
-stand_in
+stand_in "Turn on from ~/Applications with no selection, through turn_on"
 wait_for 40 rendered >/dev/null
 sleep 5
 limited 30 osascript -e 'tell application "System Events" to tell (first process whose bundle identifier is "me.sohanbhat.scooch.window") to click (first button of window 1 whose subrole is "AXCloseButton")' >/dev/null 2>&1

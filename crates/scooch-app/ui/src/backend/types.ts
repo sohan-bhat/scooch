@@ -48,6 +48,7 @@ export type View = {
   reduceMotion: boolean;
   textScale: number;
   failure: string | null;
+  failedWith: 'turn-on' | 'turn-off' | 'fix' | 'other' | null;
 };
 
 export type Picture = { path: string; thumb: string };
