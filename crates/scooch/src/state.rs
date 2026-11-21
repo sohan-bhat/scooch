@@ -137,6 +137,8 @@ pub struct Entry {
     pub drawn: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub places: Option<Places>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub placed: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
