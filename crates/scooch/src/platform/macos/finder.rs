@@ -305,15 +305,37 @@ enum First {
     Refuse,
 }
 
-fn first_step(allowed: bool, check: impl FnOnce() -> Access) -> First {
-    if allowed {
-        return First::Send;
+fn first_step(answer: Option<Access>) -> First {
+    match answer {
+        Some(Access::Allowed) => First::Send,
+        Some(Access::WouldAsk) | None => First::Ask,
+        Some(Access::Denied) => First::Refuse,
+        Some(_) => First::Send,
     }
-    match check() {
-        Access::WouldAsk => First::Ask,
-        Access::Denied => First::Refuse,
-        _ => First::Send,
+}
+
+fn first_answer_with(check: Check, answered: Option<Answered>, asking: &'static Asking, listen: Listen, patience: Duration) -> Option<Access> {
+    match answered {
+        Some(answered) => consent_first(check, answered, asking, listen, patience),
+        None => Some(check(false)),
     }
+}
+
+fn first_answer() -> Option<Access> {
+    first_answer_with(Arc::new(access), ANSWERED.get().cloned(), &ASKING_HERE, Arc::new(listen_for_answers), PATIENCE)
+}
+
+pub const CHECK_PATIENCE: Duration = Duration::from_secs(1);
+
+pub fn access_within(check: impl FnOnce() -> Access + Send + 'static, limit: Duration) -> Option<Access> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("scooch-check".into())
+        .spawn(move || {
+            let _ = sender.send(objc2::rc::autoreleasepool(|_| check()));
+        })
+        .ok()?;
+    receiver.recv_timeout(limit).ok()
 }
 
 fn granted(property_code: u32, status: i32) -> Result<Option<Retained<NSAppleEventDescriptor>>> {
@@ -332,10 +354,13 @@ fn fetch(property_code: u32) -> Result<Option<Retained<NSAppleEventDescriptor>>>
         ASKING_HERE.nudge();
         bail!("{ASKING}");
     }
-    match first_step(ALLOWED.load(Ordering::SeqCst), || access(false)) {
-        First::Ask => return granted(property_code, WOULD_ASK),
-        First::Refuse => return failure(NOT_ALLOWED),
-        First::Send => {}
+    if !ALLOWED.load(Ordering::SeqCst) {
+        match first_step(first_answer()) {
+            First::Ask if ANSWERED.get().is_some() => bail!("{ASKING}"),
+            First::Ask => return granted(property_code, WOULD_ASK),
+            First::Refuse => return failure(NOT_ALLOWED),
+            First::Send => {}
+        }
     }
     match send(property_code) {
         Ok(reply) => {
@@ -363,8 +388,12 @@ fn consent() -> Consent {
 }
 
 pub fn consent_aside(check: Check, answered: Answered, asking: &'static Asking, listen: Listen, patience: Duration) -> Consent {
+    consent_first(check, answered, asking, listen, patience).map_or(Consent::AskLater, |first| consent_for(first, true))
+}
+
+pub fn consent_first(check: Check, answered: Answered, asking: &'static Asking, listen: Listen, patience: Duration) -> Option<Access> {
     if !start_asking(&asking.waiting) {
-        return Consent::AskLater;
+        return None;
     }
     let slot = Arc::new((Mutex::new((None::<Access>, false)), Condvar::new()));
     let told = slot.clone();
@@ -421,7 +450,7 @@ pub fn consent_aside(check: Check, answered: Answered, asking: &'static Asking, 
     });
     if spawned.is_err() {
         asking.waiting.store(false, Ordering::SeqCst);
-        return Consent::AskLater;
+        return None;
     }
     let deadline = Instant::now() + patience;
     let mut held = slot.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -432,13 +461,10 @@ pub fn consent_aside(check: Check, answered: Answered, asking: &'static Asking, 
         }
         held = slot.1.wait_timeout(held, left).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
     }
-    match held.0 {
-        Some(first) => consent_for(first, true),
-        None => {
-            held.1 = true;
-            Consent::AskLater
-        }
+    if held.0.is_none() {
+        held.1 = true;
     }
+    held.0
 }
 
 fn said(what: &str) {
@@ -770,23 +796,77 @@ mod tests {
     }
 
     #[test]
-    fn the_first_read_checks_without_asking_until_the_daemon_knows_it_is_allowed() {
-        let calls = std::cell::Cell::new(0);
-        let counted = |access: Access| {
-            let calls = &calls;
-            move || {
-                calls.set(calls.get() + 1);
-                access
+    fn the_first_read_takes_its_four_ways_from_the_consent_threads_answer() {
+        assert_eq!(first_step(Some(Access::Allowed)), First::Send);
+        assert_eq!(first_step(Some(Access::WouldAsk)), First::Ask);
+        assert_eq!(first_step(None), First::Ask);
+        assert_eq!(first_step(Some(Access::Denied)), First::Refuse);
+        assert_eq!(first_step(Some(Access::FinderOff)), First::Send);
+        assert_eq!(first_step(Some(Access::Unknown(-1712))), First::Send);
+    }
+
+    fn held_check(answer: Access, release: Arc<AtomicBool>, ran_on: Arc<Mutex<Option<String>>>) -> Check {
+        Arc::new(move |_| {
+            *ran_on.lock().unwrap() = std::thread::current().name().map(str::to_string);
+            let started = Instant::now();
+            while !release.load(Ordering::SeqCst) && started.elapsed() < Duration::from_millis(1500) {
+                std::thread::sleep(Duration::from_millis(5));
             }
-        };
-        assert_eq!(first_step(false, counted(Access::Allowed)), First::Send);
-        assert_eq!(first_step(false, counted(Access::WouldAsk)), First::Ask);
-        assert_eq!(first_step(false, counted(Access::Denied)), First::Refuse);
-        assert_eq!(first_step(false, counted(Access::FinderOff)), First::Send);
-        assert_eq!(first_step(false, counted(Access::Unknown(-1712))), First::Send);
-        assert_eq!(calls.get(), 5);
-        assert_eq!(first_step(true, counted(Access::WouldAsk)), First::Send);
-        assert_eq!(calls.get(), 5);
+            answer
+        })
+    }
+
+    #[test]
+    fn a_held_first_check_runs_on_the_consent_thread_and_the_read_ends_within_patience() {
+        let (release, ran_on, asking) = (Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(None)), fresh());
+        let (woke, answered) = woke_into();
+        let started = Instant::now();
+        let first = first_answer_with(held_check(Access::Allowed, release.clone(), ran_on.clone()), Some(answered), asking, deaf(), Duration::from_millis(100));
+        let took = started.elapsed();
+        assert_eq!(first, None);
+        assert!(took < Duration::from_millis(500), "the read waited {took:?}");
+        assert_eq!(ran_on.lock().unwrap().as_deref(), Some("scooch-consent"));
+        assert!(asking.waiting() && first_step(first) == First::Ask);
+        release.store(true, Ordering::SeqCst);
+        assert!(until(|| woke.load(Ordering::SeqCst)) && settle(asking), "Allow given to an earlier window did not wake the daemon");
+    }
+
+    #[test]
+    fn a_command_checks_on_its_own_thread_as_designed() {
+        let (release, ran_on) = (Arc::new(AtomicBool::new(true)), Arc::new(Mutex::new(None)));
+        let mine = std::thread::current().name().map(str::to_string);
+        assert_eq!(first_answer_with(held_check(Access::WouldAsk, release, ran_on.clone()), None, fresh(), deaf(), Duration::from_millis(100)), Some(Access::WouldAsk));
+        assert_eq!(*ran_on.lock().unwrap(), mine);
+    }
+
+    #[test]
+    fn a_held_first_check_that_later_says_would_ask_asks_once_and_one_that_says_denied_wakes_without_asking() {
+        let (tcc, heard, asking) = (Tcc::new(Access::WouldAsk, false), Arc::new(Heard::default()), fresh());
+        let (woke, answered) = woke_into();
+        tcc.checking_held.store(true, Ordering::SeqCst);
+        assert_eq!(first_answer_with(tcc.check(), Some(answered), asking, heard.listen(), Duration::from_millis(50)), None);
+        assert_eq!(tcc.asks(), 0);
+        tcc.checking_held.store(false, Ordering::SeqCst);
+        assert!(until(|| heard.counts().0 == 1) && tcc.asks() == 1);
+        let before = tcc.checks();
+        heard.fire();
+        assert!(until(|| tcc.checks() > before));
+        assert!(tcc.asks() == 1 && asking.waiting() && !woke.load(Ordering::SeqCst));
+        let (tcc, heard, asking) = (Tcc::new(Access::Denied, false), Arc::new(Heard::default()), fresh());
+        let (woke, answered) = woke_into();
+        tcc.checking_held.store(true, Ordering::SeqCst);
+        assert_eq!(first_answer_with(tcc.check(), Some(answered), asking, heard.listen(), Duration::from_millis(50)), None);
+        tcc.checking_held.store(false, Ordering::SeqCst);
+        assert!(until(|| woke.load(Ordering::SeqCst)) && settle(asking), "a late Don't Allow did not wake the daemon");
+        assert_eq!((tcc.asks(), heard.counts()), (0, (0, 0)));
+    }
+
+    #[test]
+    fn the_doctors_check_has_a_time_limit() {
+        let started = Instant::now();
+        assert_eq!(access_within(|| { std::thread::sleep(Duration::from_secs(3)); Access::Allowed }, Duration::from_millis(300)), None);
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert_eq!(access_within(|| Access::Denied, CHECK_PATIENCE), Some(Access::Denied));
     }
 
     #[test]
