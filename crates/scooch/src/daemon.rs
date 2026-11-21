@@ -1285,7 +1285,7 @@ impl Daemon {
         if let (Some(bundle), Some(output), Some(tables_key)) = (bundle, entry.output.clone(), tables_key) {
             let wanted = self.store.tables_for(&output, tables_key);
             let written = match &made {
-                Some(made) if *made != wanted => std::fs::rename(made, &wanted).map_err(anyhow::Error::from),
+                Some(made) if *made != wanted => crate::state::replace(made, &wanted).map_err(anyhow::Error::from),
                 Some(_) => Ok(()),
                 None => std::fs::create_dir_all(self.store.tables()).map_err(anyhow::Error::from).and_then(|_| crate::state::write_unsynced(&wanted, &bundle.tables_to_bytes())),
             };
