@@ -107,7 +107,9 @@ function Dialog-Part([object]$Dialog, [string]$Id) {
     return @($Dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byId))
 }
 function Dialog-Open([object]$Dialog) {
-    $open = Dialog-Part $Dialog '1' | Select-Object -First 1
+    $byId = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, '1')
+    $byType = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
+    $open = $Dialog.FindFirst([System.Windows.Automation.TreeScope]::Children, (New-Object System.Windows.Automation.AndCondition($byId, $byType)))
     $invoke = $null
     if ($open -and $open.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) { $invoke.Invoke(); return $true }
     return $false
