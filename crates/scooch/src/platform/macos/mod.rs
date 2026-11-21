@@ -174,11 +174,12 @@ impl Desktop for Mac {
     }
 
     fn check(&self) -> Vec<(String, Result<String>)> {
+        let access = finder::access_within(|| finder::access(false), finder::CHECK_PATIENCE);
         autoreleasepool(|_| {
             vec![
                 ("Finder".into(), check_finder()),
-                ("Automation".into(), check_access()),
-                ("Icons".into(), self.check_icons()),
+                ("Automation".into(), check_access(access)),
+                ("Icons".into(), self.check_icons(access)),
                 ("Wallpaper".into(), self.check_wallpaper()),
                 ("Login item".into(), check_login()),
             ]
@@ -252,8 +253,8 @@ impl Desktop for Mac {
 }
 
 impl Mac {
-    fn check_icons(&self) -> Result<String> {
-        if finder::access(false) != finder::Access::Allowed {
+    fn check_icons(&self, access: Option<finder::Access>) -> Result<String> {
+        if access != Some(finder::Access::Allowed) {
             return Err(anyhow!("not read until Automation is allowed"));
         }
         let view = finder::view();
@@ -301,13 +302,16 @@ fn check_finder() -> Result<String> {
     Ok("running".into())
 }
 
-fn check_access() -> Result<String> {
-    match finder::access(false) {
-        finder::Access::Allowed => Ok("allowed for this app".into()),
-        finder::Access::WouldAsk => Err(anyhow!("not asked yet, macOS asks the first time Scooch reads the desktop")),
-        finder::Access::Denied => Err(anyhow!("turned off, so turn on Finder for scooch in System Settings, Privacy and Security, Automation")),
-        finder::Access::FinderOff => Err(anyhow!("unknown while Finder is not running")),
-        finder::Access::Unknown(status) => Err(anyhow!("macOS answered with code {status}")),
+pub const ASKING_NOW: &str = "macOS is asking right now whether scooch may control Finder, so choose Allow in the window on screen";
+
+fn check_access(access: Option<finder::Access>) -> Result<String> {
+    match access {
+        Some(finder::Access::Allowed) => Ok("allowed for this app".into()),
+        Some(finder::Access::WouldAsk) => Err(anyhow!("not asked yet, macOS asks the first time Scooch reads the desktop")),
+        Some(finder::Access::Denied) => Err(anyhow!("turned off, so turn on Finder for scooch in System Settings, Privacy and Security, Automation")),
+        Some(finder::Access::FinderOff) => Err(anyhow!("unknown while Finder is not running")),
+        Some(finder::Access::Unknown(status)) => Err(anyhow!("macOS answered with code {status}")),
+        None => Err(anyhow!("{ASKING_NOW}")),
     }
 }
 
@@ -323,6 +327,14 @@ fn check_login() -> Result<String> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn a_held_permission_check_tells_the_person_to_choose_allow_in_the_window() {
+        let held = check_access(None).unwrap_err().to_string();
+        assert_eq!(held, ASKING_NOW);
+        assert!(!held.contains(['\u{2014}', '\u{2013}', ';', ':', '(', ')']), "{held}");
+        assert!(check_access(Some(finder::Access::Allowed)).is_ok());
+    }
 
     fn live() -> bool {
         std::env::var_os("SCOOCH_LIVE").is_some_and(|value| value == "1")

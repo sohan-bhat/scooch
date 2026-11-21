@@ -1739,7 +1739,11 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     let poked = signal.clone();
     let (stopper, stopping, stopped) = (stop.clone(), signal.clone(), store.clone());
     poke::listen(
-        move || poked.wake(),
+        move || {
+            #[cfg(target_os = "macos")]
+            crate::platform::macos::finder::poked();
+            poked.wake()
+        },
         move || {
             retire(&stopped, &stopper);
             stopping.wake();

@@ -16,9 +16,74 @@ fn woke_more(woke: (u64, u64), baseline: Option<(u64, u64)>, events: usize) -> b
     events > 0 || baseline.is_some_and(|(idle, interrupt)| woke.0 > idle + SPARE_WAKEUPS || woke.1 > interrupt + SPARE_WAKEUPS)
 }
 
+#[cfg(any(target_os = "macos", test))]
+const NORMAL_SKIPS: [&str; 6] = ["hidden", "no room", "too large", "helper cold", "nothing new", "helper budget"];
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq)]
+enum Try {
+    Glided,
+    Skipped(String),
+    Fault(String),
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn glide_try(log: &[String]) -> Try {
+    if log.iter().any(|line| line.contains(" shown and gliding") || line.contains(" glide glided ")) {
+        return Try::Glided;
+    }
+    let Some(rest) = log.iter().find_map(|line| line.split_once(" glide skipped, ").map(|(_, rest)| rest)) else { return Try::Glided };
+    let reason = rest.split(", ").next().unwrap_or(rest).trim().to_string();
+    if NORMAL_SKIPS.contains(&reason.as_str()) {
+        Try::Skipped(reason)
+    } else {
+        Try::Fault(reason)
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn none_glided(tries: &[Try]) -> Option<String> {
+    let reasons: Vec<&str> = tries.iter().filter_map(|tried| if let Try::Skipped(reason) = tried { Some(reason.as_str()) } else { None }).collect();
+    (!tries.is_empty() && reasons.len() == tries.len()).then(|| format!("no try glided, the daemon skipped all {} as {}", tries.len(), reasons.join(", ")))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::woke_more;
+    use super::{glide_try, none_glided, woke_more, Try};
+
+    fn log(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn a_skip_the_daemon_counts_as_normal_is_tried_again_and_any_other_fails() {
+        let hidden = log(&["1795266235.131 glide open after snapshot 2 on /out/a.jpg", "1795266237.229 glide skipped, hidden, macOS never reported the live layer as visible, so Scooch keeps the plain swap.", "1795266237.777 tick 2663 ms"]);
+        assert_eq!(glide_try(&hidden), Try::Skipped("hidden".into()));
+        assert_eq!(glide_try(&log(&["1 glide skipped, helper cold"])), Try::Skipped("helper cold".into()));
+        assert_eq!(glide_try(&log(&["1 glide skipped, old tables, the tables on screen come from another version"])), Try::Fault("old tables".into()));
+        assert_eq!(glide_try(&log(&["1 glide skipped, setting off"])), Try::Fault("setting off".into()));
+        assert_eq!(glide_try(&log(&["1 glide open 2", "2 glide glided 2 with 17 frames", "3 glide settled after 40 ms"])), Try::Glided);
+        let settle_budget = log(&[
+            "1795266265.157 glide open after snapshot 5 on /out/a-50.jpg",
+            "1795266265.270 glide open 5 shown and gliding after 29 ms, opened after the snapshot",
+            "1795266265.458 glide settle 5 on /out/a-51.jpg",
+            "1795266266.174 glide glided 5 with 15 frames, 3 slow, at scale 0.5, first frame 33 ms after the glide was sent",
+            "1795266267.553 glide skipped, settle budget, the helper did not settle within 2000 ms",
+            "1795266267.553 glide gave up the settle after 2019 ms",
+            "1795266267.553 glide closed 5 300 ms after its wallpaper was set",
+        ]);
+        assert_eq!(glide_try(&settle_budget), Try::Glided);
+        assert_eq!(glide_try(&settle_budget[1..2]), Try::Glided);
+        assert_eq!(glide_try(&settle_budget[3..5]), Try::Glided);
+    }
+
+    #[test]
+    fn the_check_fails_only_when_no_try_glided_and_names_every_reason() {
+        let three = [Try::Skipped("hidden".into()), Try::Skipped("no room".into()), Try::Skipped("hidden".into())];
+        assert_eq!(none_glided(&three).as_deref(), Some("no try glided, the daemon skipped all 3 as hidden, no room, hidden"));
+        assert_eq!(none_glided(&[Try::Skipped("hidden".into()), Try::Glided]), None);
+        assert_eq!(none_glided(&[]), None);
+    }
 
     #[test]
     fn one_wakeup_against_a_baseline_of_none_is_noise() {
@@ -336,6 +401,7 @@ mod probe {
             "9 Spaces" => 91_112,
             "9b Program moved" => 300_000,
             "9c Stop" => 300_000,
+            "9d Consent waiter" => 540_000,
             "10 Cleanup" => 308,
             _ => 600_000,
         };
@@ -531,6 +597,7 @@ mod probe {
         probe.section("9 Spaces", spaces_check);
         probe.section("9b Program moved", program_moved);
         probe.section("9c Stop", stop_check);
+        probe.section("9d Consent waiter", consent_waiter);
         probe.section("10 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -4255,6 +4322,7 @@ mod probe {
         let mut unseen = Vec::new();
         let mut during = String::new();
         let mut held = None;
+        let mut tries = Vec::new();
         for attempt in 1..=3 {
             if attempt > 1 {
                 quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
@@ -4268,6 +4336,20 @@ mod probe {
             }
             let evidence = if attempt == 1 { "glide".to_string() } else { format!("glide-{attempt}") };
             let judged = judge_glide(p, &dragged, &screen, &format!("glide on, CGEvent drag, attempt {attempt}"), Some(&evidence));
+            let tried = crate::glide_try(&dragged.log);
+            tries.push(tried.clone());
+            match tried {
+                crate::Try::Skipped(reason) => {
+                    p.line(format!("  - attempt {attempt} did not glide, the daemon skipped it as {reason}, which it counts as normal, so it is not judged and the drag is tried again"));
+                    continue;
+                }
+                crate::Try::Fault(reason) => {
+                    p.line(format!("  - attempt {attempt} did not glide, the daemon skipped it as {reason}, which it does not count as normal"));
+                    verdict = Some(false);
+                    break;
+                }
+                crate::Try::Glided => {}
+            }
             if !judged.rest {
                 verdict = Some(false);
                 break;
@@ -4280,11 +4362,14 @@ mod probe {
             p.line(format!("  - captures between the old and the new picture not judged, {} captures a second, largest gap {:?} ms, two in-between captures are certain only with no gap over {} ms", judged.rate.map_or(0.0, f64::round), judged.gap.map(|gap| (gap * 1000.0).round()), (SEEN_GAP * 1000.0) as u32));
             unseen.push(judged.frames);
         }
-        let good = match verdict {
-            Some(good) => good,
-            None => {
+        let unglided = crate::none_glided(&tries);
+        let good = match (verdict, &unglided) {
+            (Some(good), _) => good,
+            (None, Some(_)) => true,
+            (None, None) => {
                 let drew = unseen.iter().all(|frames| frames.is_some_and(|frames| frames >= 3));
-                p.limit(format!("the frames between the old and the new picture could not be judged on this runner, since screen capture slowed below one every {} ms during each of three glides, while the helper drew {unseen:?} frames and every other glide check passed", (SEEN_GAP * 1000.0) as u32));
+                let which = if unseen.len() == 1 { "the one try that glided and was not judged".to_string() } else { format!("each of the {} tries that glided and were not judged", unseen.len()) };
+                p.limit(format!("the frames between the old and the new picture could not be judged on this runner, since screen capture slowed below one every {} ms during {which}, while the helper drew {unseen:?} frames and every other glide check passed", (SEEN_GAP * 1000.0) as u32));
                 drew
             }
         };
@@ -4293,6 +4378,9 @@ mod probe {
         let pids = helper_pids(p);
         let left = layer::every_window().into_iter().filter(|window| pids.contains(&(window.pid as i32))).count();
         p.line(format!("- helper processes {pids:?} with windows left {left}"));
+        if let Some(said) = unglided {
+            p.fail(said);
+        }
         if !good || left > 0 {
             p.fail("the glide did not move steadily under the icons and hand over cleanly");
         }
@@ -5012,6 +5100,197 @@ mod probe {
             p.fail("a stop during a tick left a state or a wallpaper that does not read whole");
         }
         Ok(())
+    }
+
+    fn consent_windows() -> usize {
+        windows().iter().filter(|(owner, _, _)| owner == "UserNotificationCenter").count()
+    }
+
+    fn consent_lines(p: &Probe, from: usize) -> Vec<String> {
+        daemon_log(p).lines().skip(from).filter(|line| line.contains(" consent ")).map(str::to_string).collect()
+    }
+
+    fn waits(threads: &[String]) -> bool {
+        threads.iter().any(|thread| thread.starts_with("scooch-consent"))
+    }
+
+    fn consent_waiter(p: &mut Probe) -> Result<()> {
+        if !scooch_processes(p).is_empty() || launchd::loaded() || launchd::plist_path().is_ok_and(|path| path.exists()) {
+            let ran = p.scooch(&["off"], Duration::from_secs(60));
+            p.line(format!("- scooch off before these checks exit {:?}: {}", ran.code, ran.text()));
+            reap(p);
+        }
+        let closed = close_consent(p);
+        std::thread::sleep(Duration::from_secs(1));
+        p.limit("a runner cannot press Allow or Don't Allow, so the wake at Allow is proven by tests and this case shows the waiter, the windows and the asks");
+        let screen = main_screen(p)?;
+        let (width, height) = pixels(&screen);
+        let picture = picture_file(p, "consent.jpg", &subject_picture(width, height, (0.4, 0.5)))?;
+        let mark = daemon_log(p).lines().count();
+        let on = p.scooch(&["use", &picture.to_string_lossy()], Duration::from_secs(60));
+        let mut first = None;
+        wait_until(Duration::from_secs(10), || {
+            first = daemon_pid(p);
+            first.is_some()
+        });
+        let asked = wait_until(Duration::from_secs(15), || asking(p));
+        let shown = wait_until(Duration::from_secs(10), || consent_windows() >= 1);
+        let windows_first = consent_windows();
+        let tick_a = first_tick(p, mark);
+        p.line(format!("- closed {closed:?} first, then scooch use turned on with exit {:?}, job A {first:?}, its first tick took {tick_a:?} ms, the saved problem asks for Allow after {asked:?}, a consent window after {shown:?}, consent windows {windows_first}", on.code));
+        if !tick_a.is_some_and(|took| took < 1000) {
+            p.fail(format!("job A's first tick with the permission undecided took {tick_a:?} ms, where it ends in under 1000 ms"));
+        }
+        if shown.is_none() {
+            p.fail("no consent window came for job A");
+        }
+        let Some(a) = first else {
+            p.fail("job A did not start");
+            return Ok(());
+        };
+        let threads_a = sample_threads(p, a, "consent-a", "1");
+        p.line(format!("  - job A's threads {threads_a:?}, its consent lines {:?}", consent_lines(p, mark)));
+        let _ = Command::new("/bin/launchctl").args(["bootout", &target()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let ended = wait_until(STOP_LIMIT, || !pid_lives(a));
+        std::thread::sleep(Duration::from_secs(1));
+        let windows_left = consent_windows();
+        let stayed = windows_left > 0;
+        p.line(format!("- job A booted out, gone after {ended:?}, consent windows still on screen {windows_left}, so its window {}", if stayed { "stayed after its asker ended" } else { "went away with its asker" }));
+        let from = daemon_log(p).lines().count();
+        let plist = launchd::plist_path()?;
+        let booted = p.tool("/bin/launchctl", &["bootstrap", &format!("gui/{}", uid()), &plist.to_string_lossy()]);
+        let mut second = None;
+        wait_until(Duration::from_secs(10), || {
+            second = daemon_pid(p);
+            second.is_some()
+        });
+        std::thread::sleep(Duration::from_secs(4));
+        let windows_second = consent_windows();
+        let Some(b) = second else {
+            p.fail(format!("job B did not start from the same login item, bootstrap exit {:?} {}", booted.code, booted.text()));
+            return Ok(());
+        };
+        let threads_b = sample_threads(p, b, "consent-b", "1");
+        let tick_b = first_tick(p, from);
+        p.line(format!("- job B {b} started from the same login item as a login would, its first tick took {tick_b:?} ms, consent windows {windows_second}, its threads {threads_b:?}, its consent lines {:?}", consent_lines(p, from)));
+        if !tick_b.is_some_and(|took| took < 1000) {
+            p.fail(format!("job B's first tick with the permission undecided took {tick_b:?} ms, where it ends in under 1000 ms"));
+        }
+        if !waits(&threads_b) {
+            p.fail("job B keeps no waiter for the answer while the permission is undecided");
+        }
+        let elsewhere: Vec<&String> = threads_b.iter().filter(|thread| !thread.starts_with("scooch-consent") && thread.contains("AEDeterminePermissionToAutomateTarget")).collect();
+        if !elsewhere.is_empty() {
+            p.fail(format!("a thread of job B other than scooch-consent sits in a permission check, {elsewhere:?}"));
+        }
+        let early = consent_lines(p, from).iter().filter(|line| line.contains(" asks whether")).count();
+        p.line(format!("  - job B asked {early} times while job A's window {}", if stayed { "was still on screen, judged" } else { "was gone, reported only" }));
+        if stayed && early > 0 {
+            p.fail("job B asked while job A's consent window was still on screen");
+        }
+        let Some((woke, buckets)) = quiet_buckets(b) else {
+            p.fail("job B's usage could not be read over its first minute");
+            return Ok(());
+        };
+        p.line(format!("- job B's first 60 s with the permission undecided, reported only since it holds the launch of the process: idle and interrupt wakeups {woke:?}, idle wakeups in each 5 s {buckets:?}"));
+        let Some((woke, buckets)) = quiet_buckets(b) else {
+            p.fail("job B's usage could not be read over its second minute");
+            return Ok(());
+        };
+        p.line(format!("- job B's second 60 s, once the launch is over, with its waiter waiting: idle and interrupt wakeups {woke:?}, idle wakeups in each 5 s {buckets:?}, the same minute of check 6 without any watch {:?}", p.quiet));
+        if crate::woke_more(woke, p.quiet, 0) {
+            p.fail("job B's waiter woke more at rest than the daemon in check 6");
+        }
+        let listening = consent_lines(p, from).iter().any(|line| line.contains("waits for the answer without asking again"));
+        p.line(format!("  - job B's own ask {}", if listening { "came back without a decision, so its waiter waits without asking" } else { "still waits on the open window, so its waiter is that ask" }));
+        let mut closes = 0;
+        let mut waits_now = false;
+        while closes < 3 && !waits_now {
+            let closed = close_consent(p);
+            closes += 1;
+            std::thread::sleep(Duration::from_secs(3));
+            waits_now = consent_lines(p, from).iter().any(|line| line.contains("waits for the answer without asking again"));
+            p.line(format!("  - close {closes} of the consent window unanswered, quit {closed:?}, consent windows now {}, job B waits without asking {waits_now}", consent_windows()));
+        }
+        let windows_closed = consent_windows();
+        let threads_after = sample_threads(p, b, "consent-b-after", "1");
+        let lines = consent_lines(p, from);
+        let asks = lines.iter().filter(|line| line.contains(" asks whether")).count();
+        p.line(format!("- after {closes} closes job B listens {waits_now}, consent windows {windows_closed}, it asked {asks} times in all, its consent lines {lines:?}, its threads {threads_after:?}"));
+        if !waits_now || !waits(&threads_after) {
+            p.fail("after the window closed unanswered job B kept no waiter that waits without asking");
+        }
+        if asks != 1 {
+            p.fail(format!("job B asked the person {asks} times before it listened, where it asks once"));
+        }
+        let nudged_from = daemon_log(p).lines().count();
+        let opened = p.tool("/usr/bin/open", &["-a", "Calculator"]);
+        std::thread::sleep(Duration::from_secs(3));
+        let windows_nudged = consent_windows();
+        let rechecks = consent_lines(p, nudged_from);
+        let _ = p.tool("/usr/bin/killall", &["Calculator"]);
+        let asks = consent_lines(p, from).iter().filter(|line| line.contains(" asks whether")).count();
+        p.line(format!("- another app came to the front, open exit {:?}, job B's consent lines since {rechecks:?}, consent windows {windows_nudged} against {windows_closed} before, asks in all {asks}", opened.code));
+        if !rechecks.iter().any(|line| line.contains("checked again without asking")) {
+            p.fail("job B did not check again when another app came to the front");
+        }
+        if windows_nudged > windows_closed {
+            p.fail("a check without asking brought up another consent window");
+        }
+        if asks != 1 {
+            p.fail(format!("job B asked the person {asks} times, where it asks once"));
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        let rest_from = daemon_log(p).lines().count();
+        let Some((woke, buckets)) = quiet_buckets(b) else {
+            p.fail("job B's usage could not be read over its listening minute");
+            return Ok(());
+        };
+        let rested: Vec<String> = consent_lines(p, rest_from).into_iter().filter(|line| line.contains("checked again without asking")).collect();
+        p.line(format!("- a quiet 60 s of job B while its waiter listens: idle and interrupt wakeups {woke:?}, idle wakeups in each 5 s {buckets:?}, checks without asking {} {rested:?}, the same minute of check 6 without any watch {:?}", rested.len(), p.quiet));
+        if rested.len() > 3 {
+            p.fail(format!("job B's listening waiter checked {} times in a quiet minute, where only an event from macOS makes it check", rested.len()));
+        }
+        if crate::woke_more(woke, p.quiet, 0) {
+            p.fail("job B's listening waiter woke more at rest than the daemon in check 6");
+        }
+        let poked_from = daemon_log(p).lines().count();
+        let poke = p.scooch(&["use", &picture.to_string_lossy()], Duration::from_secs(60));
+        let back = wait_until(Duration::from_secs(10), || consent_windows() >= 1);
+        let threads_poked = sample_threads(p, b, "consent-b-poked", "1");
+        let asks = consent_lines(p, from).iter().filter(|line| line.contains(" asks whether")).count();
+        p.line(format!("- a poke through scooch use exit {:?}: a consent window again after {back:?}, job B's consent lines since {:?}, its threads {threads_poked:?}, asks in all {asks}", poke.code, consent_lines(p, poked_from)));
+        if back.is_none() || !threads_poked.iter().any(|thread| thread.starts_with("scooch-consent") && thread.contains("AEDeterminePermissionToAutomateTarget")) || asks != 2 {
+            p.fail(format!("a poke did not bring the question back once, window {back:?}, asks {asks}"));
+        }
+        let closed = close_consent(p);
+        std::thread::sleep(Duration::from_secs(2));
+        p.line(format!("- closed {closed:?} unanswered again, job B's consent lines since the poke {:?}", consent_lines(p, poked_from)));
+        let _ = Command::new("/bin/launchctl").args(["bootout", &target()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let gone = wait_until(STOP_LIMIT, || !pid_lives(b));
+        let closed = close_consent(p);
+        p.line(format!("- job B booted out, gone after {gone:?}, closed {closed:?}"));
+        if gone.is_none() {
+            p.fail(format!("job B still ran {} s after its boot out", STOP_LIMIT.as_secs()));
+        }
+        Ok(())
+    }
+
+    fn first_tick(p: &Probe, from: usize) -> Option<u64> {
+        daemon_log(p).lines().skip(from).find_map(|line| line.split_once(" tick ").and_then(|(_, rest)| rest.split_once(" ms").and_then(|(took, _)| took.trim().parse().ok())))
+    }
+
+    fn quiet_buckets(pid: i32) -> Option<((u64, u64), Vec<u64>)> {
+        let calm = rusage(pid)?;
+        let mut last = calm;
+        let mut buckets = Vec::new();
+        for _ in 0..12 {
+            std::thread::sleep(Duration::from_secs(5));
+            let now = rusage(pid)?;
+            buckets.push(now.idle_wakeups.saturating_sub(last.idle_wakeups));
+            last = now;
+        }
+        Some(((last.idle_wakeups.saturating_sub(calm.idle_wakeups), last.interrupt_wakeups.saturating_sub(calm.interrupt_wakeups)), buckets))
     }
 
     fn stop_check(p: &mut Probe) -> Result<()> {
