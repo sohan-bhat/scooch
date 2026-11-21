@@ -401,7 +401,7 @@ mod probe {
             "9 Spaces" => 91_112,
             "9b Program moved" => 300_000,
             "9c Stop" => 300_000,
-            "9d Consent waiter" => 480_000,
+            "9d Consent waiter" => 540_000,
             "10 Cleanup" => 308,
             _ => 600_000,
         };
@@ -5154,7 +5154,8 @@ mod probe {
         let ended = wait_until(STOP_LIMIT, || !pid_lives(a));
         std::thread::sleep(Duration::from_secs(1));
         let windows_left = consent_windows();
-        p.line(format!("- job A booted out, gone after {ended:?}, consent windows still on screen {windows_left}"));
+        let stayed = windows_left > 0;
+        p.line(format!("- job A booted out, gone after {ended:?}, consent windows still on screen {windows_left}, so its window {}", if stayed { "stayed after its asker ended" } else { "went away with its asker" }));
         let from = daemon_log(p).lines().count();
         let plist = launchd::plist_path()?;
         let booted = p.tool("/bin/launchctl", &["bootstrap", &format!("gui/{}", uid()), &plist.to_string_lossy()]);
@@ -5178,6 +5179,15 @@ mod probe {
         if !waits(&threads_b) {
             p.fail("job B keeps no waiter for the answer while the permission is undecided");
         }
+        let elsewhere: Vec<&String> = threads_b.iter().filter(|thread| !thread.starts_with("scooch-consent") && thread.contains("AEDeterminePermissionToAutomateTarget")).collect();
+        if !elsewhere.is_empty() {
+            p.fail(format!("a thread of job B other than scooch-consent sits in a permission check, {elsewhere:?}"));
+        }
+        let early = consent_lines(p, from).iter().filter(|line| line.contains(" asks whether")).count();
+        p.line(format!("  - job B asked {early} times while job A's window {}", if stayed { "was still on screen, judged" } else { "was gone, reported only" }));
+        if stayed && early > 0 {
+            p.fail("job B asked while job A's consent window was still on screen");
+        }
         let Some((woke, buckets)) = quiet_buckets(b) else {
             p.fail("job B's usage could not be read over its first minute");
             return Ok(());
@@ -5193,16 +5203,25 @@ mod probe {
         }
         let listening = consent_lines(p, from).iter().any(|line| line.contains("waits for the answer without asking again"));
         p.line(format!("  - job B's own ask {}", if listening { "came back without a decision, so its waiter waits without asking" } else { "still waits on the open window, so its waiter is that ask" }));
-        let closed = close_consent(p);
-        std::thread::sleep(Duration::from_secs(3));
+        let mut closes = 0;
+        let mut waits_now = false;
+        while closes < 3 && !waits_now {
+            let closed = close_consent(p);
+            closes += 1;
+            std::thread::sleep(Duration::from_secs(3));
+            waits_now = consent_lines(p, from).iter().any(|line| line.contains("waits for the answer without asking again"));
+            p.line(format!("  - close {closes} of the consent window unanswered, quit {closed:?}, consent windows now {}, job B waits without asking {waits_now}", consent_windows()));
+        }
         let windows_closed = consent_windows();
         let threads_after = sample_threads(p, b, "consent-b-after", "1");
         let lines = consent_lines(p, from);
         let asks = lines.iter().filter(|line| line.contains(" asks whether")).count();
-        let waits_now = lines.iter().any(|line| line.contains("waits for the answer without asking again"));
-        p.line(format!("- closed {closed:?} unanswered, consent windows now {windows_closed}, job B asked {asks} times in all, its consent lines {lines:?}, its threads {threads_after:?}"));
+        p.line(format!("- after {closes} closes job B listens {waits_now}, consent windows {windows_closed}, it asked {asks} times in all, its consent lines {lines:?}, its threads {threads_after:?}"));
         if !waits_now || !waits(&threads_after) {
             p.fail("after the window closed unanswered job B kept no waiter that waits without asking");
+        }
+        if asks != 1 {
+            p.fail(format!("job B asked the person {asks} times before it listened, where it asks once"));
         }
         let nudged_from = daemon_log(p).lines().count();
         let opened = p.tool("/usr/bin/open", &["-a", "Calculator"]);
@@ -5251,6 +5270,9 @@ mod probe {
         let gone = wait_until(STOP_LIMIT, || !pid_lives(b));
         let closed = close_consent(p);
         p.line(format!("- job B booted out, gone after {gone:?}, closed {closed:?}"));
+        if gone.is_none() {
+            p.fail(format!("job B still ran {} s after its boot out", STOP_LIMIT.as_secs()));
+        }
         Ok(())
     }
 
