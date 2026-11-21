@@ -89,9 +89,9 @@ float shadeCell(float index, vec2 q, vec2 dx, vec2 dy, vec2 scale) {
   return min(textureLod(uShade, at, lod).r * glow(footprint), 0.92);
 }
 
-vec3 icons(vec3 color, vec2 uv, vec2 dx, vec2 dy) {
+vec3 iconsAt(vec3 color, vec2 uv, vec2 dx, vec2 dy, vec4 rects[ICON_SLOTS]) {
   for (int i = 0; i < ICON_SLOTS; i++) {
-    vec4 rect = uIcons[i];
+    vec4 rect = rects[i];
     vec2 q = (uv - rect.xy) / rect.zw;
     float hit = step(0.0, q.x) * step(q.x, 1.0) * step(0.0, q.y) * step(q.y, 1.0);
     if (hit > 0.0) {
@@ -106,6 +106,10 @@ vec3 icons(vec3 color, vec2 uv, vec2 dx, vec2 dy) {
     }
   }
   return color;
+}
+
+vec3 icons(vec3 color, vec2 uv, vec2 dx, vec2 dy) {
+  return iconsAt(color, uv, dx, dy, uIcons);
 }
 
 vec3 cursor(vec3 color, vec2 uv, vec2 dx, vec2 dy) {

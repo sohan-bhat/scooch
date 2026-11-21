@@ -1,5 +1,5 @@
-import { Color, ShaderMaterial, Vector2, Vector3 } from 'three';
-import { pictureBody, pictureHead, pictureUniforms, type PictureUniforms } from './picture';
+import { Color, ShaderMaterial, Vector2, Vector3, Vector4, type Texture } from 'three';
+import { ICON_SLOTS, pictureBody, pictureHead, pictureUniforms, type PictureUniforms } from './picture';
 
 const vertex = `
 uniform vec2 uOrigin;
@@ -27,6 +27,10 @@ uniform vec3 uLamp;
 uniform vec3 uLampColor;
 uniform float uLampLevel;
 uniform vec3 uRim;
+uniform sampler2D uFrom;
+uniform vec2 uFromScale;
+uniform vec4 uFromIcons[ICON_SLOTS];
+uniform float uFromMix;
 
 varying vec2 vUv;
 varying vec3 vWorld;
@@ -41,6 +45,12 @@ void main() {
 
   vec3 color = picture(uv);
   color = icons(color, uv, dx, dy);
+  if (uFromMix > 0.001) {
+    vec2 at = clamp(uv, 0.0, 1.0);
+    vec3 from = texture(uFrom, vec2(at.x, 1.0 - at.y) * uFromScale).rgb;
+    from = iconsAt(from, uv, dx, dy, uFromIcons);
+    color = mix(color, from, uFromMix);
+  }
   color = cursor(color, uv, dx, dy);
 
   vec2 cell = uv * uGrid;
@@ -89,6 +99,10 @@ export type LcdUniforms = PictureUniforms & {
   uLampColor: { value: Color };
   uLampLevel: { value: number };
   uRim: { value: Color };
+  uFrom: { value: Texture | null };
+  uFromScale: { value: Vector2 };
+  uFromIcons: { value: Vector4[] };
+  uFromMix: { value: number };
 };
 
 export function createLcdMaterial() {
@@ -102,6 +116,10 @@ export function createLcdMaterial() {
     uLampColor: { value: new Color(1, 0.7, 0.4) },
     uLampLevel: { value: 1 },
     uRim: { value: new Color() },
+    uFrom: { value: null },
+    uFromScale: { value: new Vector2(1, 1) },
+    uFromIcons: { value: Array.from({ length: ICON_SLOTS }, () => new Vector4(-1, -1, 0.01, 0.01)) },
+    uFromMix: { value: 0 },
   };
   const material = new ShaderMaterial({ name: 'scooch-lcd', vertexShader: vertex, fragmentShader: fragment, uniforms });
   return { material, uniforms };

@@ -1,10 +1,14 @@
 import type { Matrix4, PerspectiveCamera, Quaternion, Texture, Vector2, Vector3, Vector4 } from 'three';
 import { shot } from '@/lib/audio';
+import { story } from '@/story/state';
 import { ask, begin, dragged, held } from './drag';
 import { warm } from './engine';
+import { quality } from './quality';
 import { hooks, live } from './touch';
 
 const GLIDE = 600;
+const BLEND = 420;
+const BLEND_REDUCED = 200;
 const FILL = { height: 0.78, width: 0.92 };
 const STEP = 1 / 40;
 const reduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -23,7 +27,8 @@ export const demo = {
   camera: null as PerspectiveCamera | null,
 };
 
-const saved = { frame: null as Texture | null, icons: [] as Vector4[], scale: null as Vector2 | null };
+const saved = { frame: null as Texture | null, icons: [] as Vector4[], scale: null as Vector2 | null, grid: null as Vector2 | null };
+const fade = { mix: 0, at: 0 };
 const work = {} as { target: Vector3; center: Vector3; normal: Vector3; up: Vector3; point: Vector3; ray: Vector3; quaternion: Quaternion; matrix: Matrix4; answers: number; timer: number };
 
 function ready() {
@@ -129,6 +134,12 @@ function after() {
   const source = tube.uIcons.value as Vector4[];
   for (let i = 0; i < icons.length && i < source.length; i++) icons[i].copy(source[i]);
   (screen.uFrameScale.value as Vector2).copy(tube.uFrameScale.value as Vector2);
+  const now = performance.now();
+  const step = (now - fade.at) / (reduced() ? BLEND_REDUCED : BLEND);
+  fade.at = now;
+  fade.mix = demo.open ? Math.max(fade.mix - step, 0) : Math.min(fade.mix + step, 1);
+  screen.uFromMix.value = fade.mix * fade.mix * (3 - 2 * fade.mix);
+  if (demo.camera) quality.focus(work.center, demo.camera.position, 1, work.center, work.point, story.dof * (1 - demo.amount));
   if (held.answers !== work.answers) {
     work.answers = held.answers;
     if (drag.moved && !drag.slid) {
@@ -171,7 +182,11 @@ function finish() {
     const icons = screen.uIcons.value as Vector4[];
     saved.icons.forEach((icon, i) => icons[i]?.copy(icon));
     if (saved.scale) (screen.uFrameScale.value as Vector2).copy(saved.scale);
+    if (saved.grid) (screen.uGrid.value as Vector2).copy(saved.grid);
+    screen.uFromMix.value = 0;
   }
+  fade.mix = 0;
+  live.crisp = false;
   hooks.view = () => {};
   hooks.after = () => {};
   emit();
@@ -193,8 +208,17 @@ export function openDemo() {
     saved.frame = screen.uFrame.value as Texture;
     saved.icons = (screen.uIcons.value as Vector4[]).map((icon) => icon.clone());
     saved.scale = (screen.uFrameScale.value as Vector2).clone();
+    saved.grid = (screen.uGrid.value as Vector2).clone();
+    screen.uFrom.value = saved.frame;
+    (screen.uFromScale.value as Vector2).copy(saved.scale);
+    const from = screen.uFromIcons.value as Vector4[];
+    saved.icons.forEach((icon, i) => from[i]?.copy(icon));
+    (screen.uGrid.value as Vector2).set(1e5, 1e5);
+    fade.mix = 1;
   }
   const now = performance.now();
+  fade.at = now;
+  live.crisp = true;
   demo.since = demo.closing ? now - GLIDE * (1 - Math.min((now - demo.closing) / GLIDE, 1)) : now;
   demo.closing = 0;
   demo.open = true;
