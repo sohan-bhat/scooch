@@ -229,31 +229,31 @@ expect "scooch status shows the scenery line again" eval 'status_text | grep -q 
 expect "the sky photo with clouds again is a new output unlike the one without" [ "$(digest)" != "$without_clouds" ]
 
 for switch in "Slide glide" "Quick drop predict"; do
-  label=${switch% *}
+  shown_switch=${switch% *}
   key=${switch##* }
   line
-  line "#### $label"
-  if states "$label" | grep -q -F "$label missing"; then
-    line "- $label is not shown on this system, so it is not pressed here"
+  line "#### $shown_switch"
+  if states "$shown_switch" | grep -q -F "$shown_switch missing"; then
+    line "- $shown_switch is not shown on this system, so it is not pressed here"
     continue
   fi
   was=$(saved "$key")
-  press_switch "$label"
+  press_switch "$shown_switch"
   flipped() { [ "$(saved "$key")" != "$was" ]; }
   wait_for 10 flipped >/dev/null
   sleep 2
-  line "- $label was saved as $was and after one press as $(saved "$key"), the switch reads $(states "$label"), scooch status says $(status_text)"
-  expect "one press of $label flips its saved value" flipped
-  if [ "$was" = true ]; then expect "the $label switch reads off" unchosen "$label"; else expect "the $label switch reads on" chosen "$label"; fi
-  expect "after $label scooch status still says on and the daemon is alive" alive_on
-  press_switch "$label"
+  line "- $shown_switch was saved as $was and after one press as $(saved "$key"), the switch reads $(states "$shown_switch"), scooch status says $(status_text)"
+  expect "one press of $shown_switch flips its saved value" flipped
+  if [ "$was" = true ]; then expect "the $shown_switch switch reads off" unchosen "$shown_switch"; else expect "the $shown_switch switch reads on" chosen "$shown_switch"; fi
+  expect "after $shown_switch scooch status still says on and the daemon is alive" alive_on
+  press_switch "$shown_switch"
   back() { [ "$(saved "$key")" = "$was" ]; }
   wait_for 10 back >/dev/null
   sleep 2
-  line "- after the second press $label is saved as $(saved "$key"), the switch reads $(states "$label"), scooch status says $(status_text)"
-  expect "the second press of $label brings its saved value back" back
-  if [ "$was" = true ]; then expect "the $label switch reads on again" chosen "$label"; else expect "the $label switch reads off again" unchosen "$label"; fi
-  expect "after the second press of $label scooch status still says on and the daemon is alive" alive_on
+  line "- after the second press $shown_switch is saved as $(saved "$key"), the switch reads $(states "$shown_switch"), scooch status says $(status_text)"
+  expect "the second press of $shown_switch brings its saved value back" back
+  if [ "$was" = true ]; then expect "the $shown_switch switch reads on again" chosen "$shown_switch"; else expect "the $shown_switch switch reads off again" unchosen "$shown_switch"; fi
+  expect "after the second press of $shown_switch scooch status still says on and the daemon is alive" alive_on
 done
 
 line

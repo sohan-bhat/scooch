@@ -220,29 +220,29 @@ Expect "scooch status shows the scenery line again" ((Status-Text) -like '*Scene
 Expect "the sky photo with clouds again is a new output unlike the one without" ((Digest) -ne $withoutClouds)
 
 foreach ($pair in @(@('Slide', 'glide'), @('Quick drop', 'predict'))) {
-    $label = $pair[0]
+    $shownSwitch = $pair[0]
     $key = $pair[1]
     Line ''
-    Line "#### $label"
-    if (-not (Control $label)) {
-        Line "- $label is not shown on this system, so it is not pressed here"
+    Line "#### $shownSwitch"
+    if (-not (Control $shownSwitch)) {
+        Line "- $shownSwitch is not shown on this system, so it is not pressed here"
         continue
     }
     $was = [bool](Saved).$key
-    Press-Switch $label
+    Press-Switch $shownSwitch
     Wait-For 10 { [bool](Saved).$key -ne $was } | Out-Null
     Start-Sleep -Seconds 2
-    Line "- $label was saved as $was and after one press as $([bool](Saved).$key), the switch reads $(States $label), scooch status says $(Status-Text)"
-    Expect "one press of $label flips its saved value" ([bool](Saved).$key -ne $was)
-    Expect "the $label switch reads $(if ($was) { 'off' } else { 'on' })" ((Chosen $label) -ne $was)
-    Expect "after $label scooch status still says on and the daemon is alive" (Alive-On)
-    Press-Switch $label
+    Line "- $shownSwitch was saved as $was and after one press as $([bool](Saved).$key), the switch reads $(States $shownSwitch), scooch status says $(Status-Text)"
+    Expect "one press of $shownSwitch flips its saved value" ([bool](Saved).$key -ne $was)
+    Expect "the $shownSwitch switch reads $(if ($was) { 'off' } else { 'on' })" ((Chosen $shownSwitch) -ne $was)
+    Expect "after $shownSwitch scooch status still says on and the daemon is alive" (Alive-On)
+    Press-Switch $shownSwitch
     Wait-For 10 { [bool](Saved).$key -eq $was } | Out-Null
     Start-Sleep -Seconds 2
-    Line "- after the second press $label is saved as $([bool](Saved).$key), the switch reads $(States $label), scooch status says $(Status-Text)"
-    Expect "the second press of $label brings its saved value back" ([bool](Saved).$key -eq $was)
-    Expect "the $label switch reads $(if ($was) { 'on' } else { 'off' }) again" ((Chosen $label) -eq $was)
-    Expect "after the second press of $label scooch status still says on and the daemon is alive" (Alive-On)
+    Line "- after the second press $shownSwitch is saved as $([bool](Saved).$key), the switch reads $(States $shownSwitch), scooch status says $(Status-Text)"
+    Expect "the second press of $shownSwitch brings its saved value back" ([bool](Saved).$key -eq $was)
+    Expect "the $shownSwitch switch reads $(if ($was) { 'on' } else { 'off' }) again" ((Chosen $shownSwitch) -eq $was)
+    Expect "after the second press of $shownSwitch scooch status still says on and the daemon is alive" (Alive-On)
 }
 
 Line ''
