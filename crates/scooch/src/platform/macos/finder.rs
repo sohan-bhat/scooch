@@ -386,6 +386,7 @@ pub fn consent_aside(check: Check, answered: Answered, asking: &'static Asking, 
             return;
         }
         let ask = || {
+            asking.again.store(false, Ordering::SeqCst);
             asking.open.store(true, Ordering::SeqCst);
             said("asks whether scooch may control Finder");
             let answer = objc2::rc::autoreleasepool(|_| check(true));
@@ -674,20 +675,34 @@ mod tests {
         joins: bool,
         closed: Mutex<Option<Access>>,
         held: AtomicBool,
+        checks: std::sync::atomic::AtomicUsize,
+        checking_held: AtomicBool,
     }
 
     impl Tcc {
         fn new(state: Access, joins: bool) -> Arc<Self> {
-            Arc::new(Self { state: Mutex::new(state), asks: std::sync::atomic::AtomicUsize::new(0), joins, closed: Mutex::new(None), held: AtomicBool::new(false) })
+            Arc::new(Self { state: Mutex::new(state), asks: std::sync::atomic::AtomicUsize::new(0), joins, closed: Mutex::new(None), held: AtomicBool::new(false), checks: std::sync::atomic::AtomicUsize::new(0), checking_held: AtomicBool::new(false) })
         }
 
         fn closed_unanswered(returns: Access) -> Arc<Self> {
-            Arc::new(Self { state: Mutex::new(Access::WouldAsk), asks: std::sync::atomic::AtomicUsize::new(0), joins: false, closed: Mutex::new(Some(returns)), held: AtomicBool::new(false) })
+            let tcc = Self::new(Access::WouldAsk, false);
+            tcc.close_with(Some(returns));
+            tcc
+        }
+
+        fn checks(&self) -> usize {
+            self.checks.load(Ordering::SeqCst)
         }
 
         fn check(self: &Arc<Self>) -> Check {
             let tcc = self.clone();
             Arc::new(move |ask| {
+                if !ask {
+                    tcc.checks.fetch_add(1, Ordering::SeqCst);
+                    while tcc.checking_held.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
                 if ask {
                     tcc.asks.fetch_add(1, Ordering::SeqCst);
                     while tcc.held.load(Ordering::SeqCst) {
@@ -800,6 +815,26 @@ mod tests {
         tcc.answer(Access::Allowed);
         heard.fire();
         assert!(until(|| woke.load(Ordering::SeqCst)) && settle(asking) && tcc.asks() == 2);
+    }
+
+    #[test]
+    fn a_poke_before_the_first_ask_is_used_up_by_that_ask() {
+        let (tcc, heard, asking) = (Tcc::closed_unanswered(Access::WouldAsk), Arc::new(Heard::default()), fresh());
+        let (_, answered) = woke_into();
+        tcc.checking_held.store(true, Ordering::SeqCst);
+        assert_eq!(consent_aside(tcc.check(), answered, asking, heard.listen(), Duration::from_millis(50)), Consent::AskLater);
+        assert!(until(|| tcc.checks() == 1) && asking.waiting() && tcc.asks() == 0);
+        asking.poke();
+        tcc.checking_held.store(false, Ordering::SeqCst);
+        assert!(until(|| heard.counts().0 == 1));
+        for _ in 0..2 {
+            let before = tcc.checks();
+            heard.fire();
+            assert!(until(|| tcc.checks() > before));
+        }
+        assert_eq!(tcc.asks(), 1, "a poke from before the first ask asked again with no person acting since");
+        asking.poke();
+        assert!(until(|| tcc.asks() == 2));
     }
 
     #[test]
