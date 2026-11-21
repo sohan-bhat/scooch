@@ -406,14 +406,14 @@ function choose(plant: Plant, from: Vector3, camera: Camera, blocks: Block[]) {
     const dir = new Vector3(Math.cos(angle), 0, Math.sin(angle));
     const gx = plant.x + dir.x * reach;
     const gz = plant.z + dir.z * reach;
-    const ax = plant.x + dir.x * (reach + 0.07);
-    const az = plant.z + dir.z * (reach + 0.07);
-    const pad = OUTER + 0.008;
+    const ax = plant.x + dir.x * (reach + 0.03);
+    const az = plant.z + dir.z * (reach + 0.03);
     if (gx < DESK.left || gx > DESK.right || gz < DESK.back || gz > DESK.front) continue;
-    if (blocks.some((block) => inside(block, gx, gz, pad) || inside(block, ax, az, pad))) continue;
+    if (blocks.some((block) => inside(block, gx, gz, OUTER + 0.008) || inside(block, ax, az, OUTER))) continue;
     const side = Math.abs(forward.x * dir.z - forward.z * dir.x);
-    const front = -(forward.x * dir.x + forward.z * dir.z);
-    const score = side * 1.4 + front * 0.5 - Math.hypot(gx - from.x, gz - from.z) * 0.6;
+    const behind = Math.max(0, forward.x * dir.x + forward.z * dir.z);
+    const toward = (dir.x * (from.x - plant.x) + dir.z * (from.z - plant.z)) / Math.max(Math.hypot(from.x - plant.x, from.z - plant.z), 1e-6);
+    const score = side * 1.4 - behind * 1.5 + toward * 0.8;
     if (!best || score > best.score) best = { dir, score };
   }
   return best?.dir ?? new Vector3(from.x - plant.x, 0, from.z - plant.z).normalize();
@@ -542,7 +542,7 @@ export function pressGlass(now: number) {
   const blocks = blocksExcept([p.root]);
   const dir = choose(p, holder.position, camera, blocks);
   const lip = new Vector3(p.x + dir.x * p.radius * 1.12, Math.max(p.rim + 0.105, DESK_TOP + LIFT + LIP.y), p.z + dir.z * p.radius * 1.12);
-  const pre: [number, number] = [p.x + dir.x * (p.radius * 1.12 + LIP.r + 0.07), p.z + dir.z * (p.radius * 1.12 + LIP.r + 0.07)];
+  const pre: [number, number] = [p.x + dir.x * (p.radius * 1.12 + LIP.r + 0.03), p.z + dir.z * (p.radius * 1.12 + LIP.r + 0.03)];
   const stop: [number, number] = [lip.x + dir.x * LIP.r, lip.z + dir.z * LIP.r];
   const plantBlock = blocksExcept(obstacles.filter((object) => object !== p.root));
   const path = rounded([...route([holder.position.x, holder.position.z], pre, [...blocks, ...plantBlock]), stop], blocks);
