@@ -111,10 +111,6 @@
     "action": "Install",
     "hint": "Press the laptop",
     "label": "Scooch in eleven steps",
-    "demo": {
-      "line": "Drag an icon.",
-      "back": "Back to the desk"
-    },
     "desk": {
       "label": "The desk",
       "demo": "Try Scooch",

@@ -1,11 +1,14 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
+import { ToggleGroup } from 'radix-ui';
 import { Button } from '@/components/ui/button';
 import content from '@/content.json';
-import { closeDemo, demo, drop, handles, move, nudge, pick, screenBox, subscribe } from './demo';
+import { asset } from '@/lib/base';
+import './demo.css';
+import words from './demo.json';
+import { PICTURES, choose, closeDemo, demo, drop, handles, move, nudge, pick, screenBox, subscribe, thumbOf } from './demo';
 import { hooks } from './touch';
 
-const words = content.story.demo;
 const names = ['Trip', 'Taxes', 'Notes', 'Resume', 'Shot', 'Recipes'];
 const ARROWS: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 
@@ -18,7 +21,7 @@ export default function DemoPanel() {
   const layer = useRef<HTMLDivElement>(null);
   const buttons = useRef<(HTMLButtonElement | null)[]>([]);
   const shown = demo.open || demo.closing > 0;
-  const count = hooks.icons?.length ?? 0;
+  const count = hooks.manifest?.icons.length ?? 0;
 
   useEffect(() => {
     if (!shown) return;
@@ -100,15 +103,41 @@ export default function DemoPanel() {
       ))}
       <div className="demo-bar page-gutter pointer-events-none absolute inset-x-0 bottom-[max(5svh,1.5rem)] flex flex-col items-center gap-4">
         {demo.used ? null : <p className="text-(length:--text-support) text-paper">{words.line}</p>}
-        <div className="pointer-events-auto flex items-center gap-6">
-          <Button asChild size="md">
-            <a href="#install" onClick={() => closeDemo()}>
-              {content.nav.install}
-            </a>
-          </Button>
-          <button type="button" className="link-quiet cursor-pointer text-[0.9375rem] font-medium" onClick={() => closeDemo()}>
-            {words.back}
-          </button>
+        <div className="pointer-events-auto flex flex-col items-center gap-4 sm:flex-row sm:gap-6">
+          <ToggleGroup.Root
+            type="single"
+            value={demo.picture}
+            onValueChange={(value) => {
+              if (value) choose(value);
+            }}
+            loop
+            aria-label={words.pictures}
+            className="flex items-center gap-2"
+          >
+            {PICTURES.map((id) => {
+              const thumb = thumbOf(id);
+              return (
+                <ToggleGroup.Item
+                  key={id}
+                  value={id}
+                  aria-label={words.names[id as keyof typeof words.names]}
+                  className="demo-pick"
+                >
+                  {thumb ? <img src={asset(thumb)} alt="" draggable={false} decoding="async" /> : null}
+                </ToggleGroup.Item>
+              );
+            })}
+          </ToggleGroup.Root>
+          <div className="flex items-center gap-6">
+            <Button asChild size="md">
+              <a href="#install" onClick={() => closeDemo()}>
+                {content.nav.install}
+              </a>
+            </Button>
+            <button type="button" className="link-quiet cursor-pointer text-[0.9375rem] font-medium" onClick={() => closeDemo()}>
+              {words.back}
+            </button>
+          </div>
         </div>
       </div>
     </div>,
