@@ -1072,6 +1072,9 @@ export function warmStream(gl: { compileAsync: (scene: Object3D, camera: Camera)
   const beads = state.beadMesh;
   if (!mesh || !beads) return;
   mesh.visible = true;
+  ring.m.makeScale(1e-7, 1e-7, 1e-7);
+  beads.setMatrixAt(0, ring.m);
+  beads.instanceMatrix.needsUpdate = true;
   beads.count = 1;
   void gl.compileAsync(group, camera).catch(() => undefined).finally(() => {
     if (!pool.count) {
