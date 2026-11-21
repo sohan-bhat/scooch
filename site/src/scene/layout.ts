@@ -16,7 +16,7 @@ export type Placement = {
   tilt?: number;
   roll?: number;
   scale?: number;
-  phone?: boolean;
+  phone?: boolean | { x: number; z: number; rotation: number; scale: number };
   floor?: boolean;
 };
 
@@ -30,7 +30,7 @@ export const placements: Placement[] = [
   { model: 'stationery', node: 'stationery_supplies_pencilcup', x: -0.5, z: -0.27, rotation: 0.4, phone: false },
   { model: 'stationery', node: 'stationery_supplies_pen_fancy', x: -0.14, z: 0.33, rotation: -1.3 },
   { model: 'clock', x: -0.4, z: -0.27, rotation: 0.5 },
-  { model: 'plant', x: -0.7, z: -0.3, rotation: 0.9, phone: false },
+  { model: 'plant', x: -0.7, z: -0.3, rotation: 0.9, phone: { x: 0.04, z: 0.41, rotation: 4.71, scale: 0.7 } },
   { model: 'cassette', x: -0.86, z: -0.08, rotation: 0.55, phone: false },
   { model: 'stapler', x: -0.56, z: 0.22, rotation: 0.62, phone: false },
   { model: 'glasses', x: 0.02, z: 0.3, rotation: 2.7, phone: false },
