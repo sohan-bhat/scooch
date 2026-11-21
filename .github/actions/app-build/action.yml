@@ -98,7 +98,9 @@ runs:
     - name: Window check
       shell: bash
       working-directory: crates/scooch-app/ui
-      run: npm run typecheck
+      run: |
+        npm run typecheck
+        node --experimental-strip-types --test tests/choice.test.ts
 
     - name: Shell clippy
       if: inputs.clippy == 'true'
@@ -107,6 +109,12 @@ runs:
       run: |
         npm --prefix ui run build
         cargo clippy --all-targets -- -D warnings
+
+    - name: Shell tests
+      if: inputs.clippy == 'true'
+      shell: bash
+      working-directory: crates/scooch-app
+      run: cargo test --locked
 
     - name: Updater switch
       id: updater

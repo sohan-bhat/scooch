@@ -29,10 +29,19 @@ const KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", 
 
 struct Kept(Mutex<Option<notify::RecommendedWatcher>>);
 
+const SAVES: [(&str, &str); 3] = [("so try again in a moment.", "held"), ("so check that the disk has room.", "full"), ("so check that its folder can be written.", "unwritable")];
+
+fn cause(error: &anyhow::Error) -> Option<&'static str> {
+    error.chain().find_map(|part| {
+        let text = part.to_string();
+        text.starts_with("Scooch could not").then(|| SAVES.iter().find(|(ending, _)| text.ends_with(ending)).map(|(_, code)| *code)).flatten()
+    })
+}
+
 fn said<T>(code: &'static str, result: anyhow::Result<T>) -> Result<T, String> {
     result.map_err(|error| {
         eprintln!("scooch-app {code} failed: {error:#}");
-        code.to_string()
+        cause(&error).unwrap_or(code).to_string()
     })
 }
 
@@ -67,22 +76,40 @@ fn data_folder<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("scooch-app"))
 }
 
-fn current() -> View {
+fn current(folder: &std::path::Path) -> View {
     let mut view = facade::view();
     if place::misplaced() {
         view.problem = Some(Problem::Move);
+    }
+    if view.on {
+        pictures::select(folder, None);
+    } else {
+        pictures::shown(&mut view, pictures::selected(folder).as_deref());
     }
     view
 }
 
 #[tauri::command]
-async fn view() -> Result<View, String> {
-    off_main("view", || Ok(current())).await
+async fn view<R: Runtime>(app: AppHandle<R>) -> Result<View, String> {
+    let folder = data_folder(&app);
+    off_main("view", move || Ok(current(&folder))).await
 }
 
 #[tauri::command]
-async fn turn_on() -> Result<Started, String> {
-    off_main("turn-on", || adopted(facade::turn_on(&ready()?))).await
+async fn turn_on<R: Runtime>(app: AppHandle<R>) -> Result<Started, String> {
+    let folder = data_folder(&app);
+    off_main("turn-on", move || {
+        let program = ready()?;
+        match pictures::selected(&folder).filter(|_| !facade::is_on()) {
+            Some(selection) => {
+                adopted(facade::use_picture(&program, &selection))?;
+                pictures::select(&folder, None);
+                Ok(Started::Go)
+            }
+            None => adopted(facade::turn_on(&program)),
+        }
+    })
+    .await
 }
 
 #[tauri::command]
@@ -99,7 +126,12 @@ async fn set(switch: Switch, on: bool) -> Result<(), String> {
 async fn use_picture<R: Runtime>(app: AppHandle<R>, path: PathBuf) -> Result<(), String> {
     let folder = data_folder(&app);
     off_main("use", move || {
-        adopted(facade::use_picture(&ready()?, &path))?;
+        if facade::is_on() {
+            adopted(facade::use_picture(&ready()?, &path))?;
+            pictures::select(&folder, None);
+        } else {
+            pictures::select(&folder, Some(&facade::select_picture(&path)?));
+        }
         pictures::remember(&folder, &path);
         Ok(())
     })
@@ -125,7 +157,7 @@ async fn first_open<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
         return Ok(false);
     }
     let _ = std::fs::create_dir_all(data_folder(&app));
-    let _ = std::fs::write(&marker, facade::PROGRAM);
+    let _ = pictures::save(&marker, facade::PROGRAM.as_bytes());
     Ok(true)
 }
 
@@ -153,7 +185,8 @@ fn open_link<R: Runtime>(app: &AppHandle<R>, url: String) -> anyhow::Result<()> 
 
 #[tauri::command]
 async fn fix<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    let Some(problem) = off_main("view", || Ok(current().problem)).await? else { return Ok(()) };
+    let folder = data_folder(&app);
+    let Some(problem) = off_main("view", move || Ok(current(&folder).problem)).await? else { return Ok(()) };
     let opener = app.opener();
     match problem {
         Problem::Automation => said("open", opener.open_url(AUTOMATION, None::<&str>).map_err(anyhow::Error::from)),
@@ -301,5 +334,19 @@ mod tests {
     fn a_failure_reaches_the_window_as_its_code_only() {
         let failed: anyhow::Result<()> = Err(anyhow::anyhow!("Permission denied (os error 13)"));
         assert_eq!(said("move", failed), Err("move".to_string()));
+    }
+
+    #[test]
+    fn a_failed_save_reaches_the_window_as_its_cause() {
+        for (sentence, code) in [
+            ("Scooch could not replace C:\\Scooch\\state.json because another program had it open, so try again in a moment.", "held"),
+            ("Scooch could not write /data/state.json, so check that the disk has room.", "full"),
+            ("Scooch could not write /data/state.json, so check that its folder can be written.", "unwritable"),
+        ] {
+            let failed: anyhow::Result<()> = Err(anyhow::Error::new(std::io::Error::from_raw_os_error(5)).context(sentence).context("turning off"));
+            assert_eq!(said("turn-off", failed), Err(code.to_string()));
+        }
+        let other: anyhow::Result<()> = Err(anyhow::anyhow!("Scooch could not reach the X display, so check that DISPLAY is set."));
+        assert_eq!(said("turn-off", other), Err("turn-off".to_string()));
     }
 }

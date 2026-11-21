@@ -169,6 +169,7 @@ mod tests {
         pairs.iter().map(|(name, value)| (OsString::from(name), OsString::from(value))).collect()
     }
 
+    #[cfg(unix)]
     #[test]
     fn only_the_appimage_parts_are_dropped() {
         let appdir = Path::new("/tmp/.mount_ScoochAb12");
@@ -178,6 +179,7 @@ mod tests {
         assert_eq!(scrubbed(OsStr::new("unix:path=/run/user/1000/bus"), appdir).as_deref(), Some(OsStr::new("unix:path=/run/user/1000/bus")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_rule_drops_every_mount_value_and_the_runtime_names() {
         let appdir = Path::new("/tmp/.mount_ScoochAb12");

@@ -137,6 +137,8 @@ pub struct Entry {
     pub drawn: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub places: Option<Places>,
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub placed: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -293,7 +295,7 @@ impl Store {
             self.keep(&bytes, UNREAD);
             return serde_json::to_vec_pretty(&saved).ok();
         }
-        if fs::rename(self.state_file(), self.aside_file()).is_err() {
+        if replace(&self.state_file(), &self.aside_file()).is_err() {
             let _ = write_atomic(&self.aside_file(), &bytes);
             let _ = fs::remove_file(self.state_file());
         }
@@ -306,7 +308,7 @@ impl Store {
 
     pub fn retire_aside(&self) {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|since| since.as_secs()).unwrap_or(0);
-        let _ = fs::rename(self.aside_file(), self.root.join(format!("state.unreadable-{stamp}.json")));
+        let _ = replace(&self.aside_file(), &self.root.join(format!("state.unreadable-{stamp}.json")));
     }
 
     pub fn aside_line(&self) -> Option<String> {
@@ -347,7 +349,7 @@ impl Store {
 
     pub fn lock(&self) -> Result<Option<Lock>> {
         fs::create_dir_all(&self.root)?;
-        let file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(self.lock_file())?;
+        let file = patiently(|| fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(self.lock_file()))?;
         if file.try_lock().is_err() {
             return Ok(None);
         }
@@ -359,7 +361,7 @@ impl Store {
 
     pub fn command_lock(&self, patience: Duration) -> Result<fs::File> {
         fs::create_dir_all(&self.root).with_context(|| format!("Scooch could not make its folder at {}.", self.root.display()))?;
-        let file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(self.root.join("command.lock"))?;
+        let file = patiently(|| fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(self.root.join("command.lock")))?;
         let started = Instant::now();
         loop {
             match file.try_lock() {
@@ -434,19 +436,60 @@ fn write_with(path: &Path, parts: &[&[u8]], sync: bool) -> Result<()> {
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let serial = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let partial = path.with_file_name(format!(".{name}.{}.{serial}.part", std::process::id()));
-    let written = fs::File::create(&partial)
-        .and_then(|mut file| {
-            parts.iter().try_for_each(|part| file.write_all(part))?;
-            if sync {
-                file.sync_all()?;
-            }
-            Ok(())
-        })
-        .and_then(|()| fs::rename(&partial, path));
+    let made = fs::File::create(&partial).and_then(|mut file| {
+        parts.iter().try_for_each(|part| file.write_all(part))?;
+        if sync {
+            file.sync_all()?;
+        }
+        Ok(())
+    });
+    let written = match made {
+        Ok(()) => replace(&partial, path).map_err(|error| unwritten(path, error, true)),
+        Err(error) => Err(unwritten(path, error, false)),
+    };
     if written.is_err() {
         let _ = fs::remove_file(&partial);
     }
-    written.with_context(|| format!("Scooch could not write {}, so check that the disk has room.", path.display()))
+    written
+}
+
+pub const HELD_TRIES: u32 = 10;
+pub const HELD_PAUSE: Duration = Duration::from_millis(50);
+
+pub fn held(error: &std::io::Error) -> bool {
+    cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+pub fn patiently<T>(attempt: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    retried(attempt, held, HELD_PAUSE)
+}
+
+fn retried<T>(mut attempt: impl FnMut() -> std::io::Result<T>, busy: impl Fn(&std::io::Error) -> bool, pause: Duration) -> std::io::Result<T> {
+    let mut tries = 1;
+    loop {
+        match attempt() {
+            Err(error) if busy(&error) && tries < HELD_TRIES => {
+                tries += 1;
+                std::thread::sleep(pause);
+            }
+            done => return done,
+        }
+    }
+}
+
+pub fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    patiently(|| fs::rename(from, to))
+}
+
+pub fn unwritten(path: &Path, error: std::io::Error, replacing: bool) -> anyhow::Error {
+    let sentence = if replacing && held(&error) {
+        format!("Scooch could not replace {} because another program had it open, so try again in a moment.", path.display())
+    } else if matches!(error.kind(), std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded) {
+        format!("Scooch could not write {}, so check that the disk has room.", path.display())
+    } else {
+        format!("Scooch could not write {}, so check that its folder can be written.", path.display())
+    };
+    anyhow::Error::new(error).context(sentence)
 }
 
 #[cfg(test)]
@@ -463,6 +506,82 @@ pub fn scratch(name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_file_is_tried_again_up_to_ten_times_and_nothing_else_is() {
+        let busy = |error: &std::io::Error| error.kind() == std::io::ErrorKind::ResourceBusy;
+        let mut calls = 0;
+        let late = retried(
+            || {
+                calls += 1;
+                if calls < 4 { Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy)) } else { Ok(calls) }
+            },
+            busy,
+            Duration::ZERO,
+        );
+        assert_eq!(late.unwrap(), 4);
+        let mut tries = 0;
+        let never = retried(
+            || {
+                tries += 1;
+                Err::<(), _>(std::io::Error::from(std::io::ErrorKind::ResourceBusy))
+            },
+            busy,
+            Duration::ZERO,
+        );
+        assert!(never.is_err() && tries == HELD_TRIES, "{tries}");
+        let mut once = 0;
+        let other = retried(
+            || {
+                once += 1;
+                Err::<(), _>(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            },
+            busy,
+            Duration::ZERO,
+        );
+        assert!(other.is_err() && once == 1, "{once}");
+        assert!(HELD_PAUSE * (HELD_TRIES - 1) <= Duration::from_millis(500));
+    }
+
+    #[test]
+    fn a_failed_write_names_its_cause() {
+        let path = Path::new("/d/state.json");
+        let said = |error: std::io::Error, replacing: bool| format!("{:#}", unwritten(path, error, replacing));
+        let full = said(std::io::Error::from(std::io::ErrorKind::StorageFull), true);
+        assert!(full.contains("so check that the disk has room"), "{full}");
+        let denied = said(std::io::Error::from(std::io::ErrorKind::PermissionDenied), true);
+        assert!(denied.contains("so check that its folder can be written"), "{denied}");
+        let held = said(std::io::Error::from_raw_os_error(32), true);
+        assert_eq!(held.contains("because another program had it open, so try again in a moment."), cfg!(windows), "{held}");
+        let creating = said(std::io::Error::from_raw_os_error(32), false);
+        assert!(!creating.contains("another program"), "{creating}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_save_outlasts_a_short_hold_and_names_a_long_one() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let store = Store::at(scratch("held"));
+        store.save(&State::default()).unwrap();
+        let hold = || fs::OpenOptions::new().read(true).share_mode(1 | 2).open(store.state_file()).unwrap();
+        let held = hold();
+        let letting = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        store.save(&State { on: true, ..State::default() }).unwrap();
+        letting.join().unwrap();
+        assert!(store.load().on);
+        let kept = hold();
+        let started = Instant::now();
+        let error = format!("{:#}", store.save(&State::default()).unwrap_err());
+        let waited = started.elapsed();
+        drop(kept);
+        assert!(error.contains("because another program had it open, so try again in a moment."), "{error}");
+        assert!(waited >= HELD_PAUSE * (HELD_TRIES - 1), "{waited:?}");
+        assert!(store.load().on);
+        assert!(fs::read_dir(&store.root).unwrap().flatten().all(|entry| !entry.file_name().to_string_lossy().ends_with(".part")));
+    }
 
     fn read_with(field: &str, odd: serde_json::Value) -> State {
         let mut state = State { on: true, ..State::default() };

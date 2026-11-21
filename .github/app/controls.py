@@ -26,7 +26,8 @@ def walk(node, found, depth=0):
 
 
 desktop = pyatspi.Registry.getDesktop(0)
-pressing = len(sys.argv) > 2 and sys.argv[2] == "press"
+mode = sys.argv[2] if len(sys.argv) > 2 else "whole"
+pressing = mode == "press"
 app = None
 for candidate in desktop:
     if candidate is not None and candidate.name in ("scooch-app", "Scooch"):
@@ -47,6 +48,47 @@ if pressing:
     names = [action.getName(index) for index in range(action.nActions)]
     pick = next((index for index, name in enumerate(names) if name in ("click", "press", "activate")), 0)
     print("- %s %s" % ("pressed" if action.nActions and action.doAction(pick) else "could not press", wanted[0]))
+    sys.exit(0)
+if mode == "states":
+    found = {}
+    walk(frame, found)
+    told = []
+    for name in wanted:
+        node = found.get(name)
+        if node is None:
+            told.append(name + " missing")
+            continue
+        states = node.getState()
+        on = states.contains(pyatspi.STATE_CHECKED) or states.contains(pyatspi.STATE_PRESSED)
+        told.append("%s %s" % (name, "on" if on else "off"))
+    print("- states " + "; ".join(told))
+    sys.exit(0)
+
+
+def text_of(node, depth=0):
+    if node is None or depth > 20:
+        return ""
+    try:
+        text = node.queryText().getText(0, -1)
+    except Exception:
+        text = ""
+    if text.strip():
+        return text.strip()
+    parts = []
+    for index in range(node.childCount):
+        try:
+            part = text_of(node.getChildAtIndex(index), depth + 1)
+        except Exception:
+            part = ""
+        if part:
+            parts.append(part)
+    return " ".join(parts) or (node.name or "").strip()
+
+
+if mode == "status":
+    found = {}
+    walk(frame, found)
+    print("- status " + text_of(found.get("status")))
     sys.exit(0)
 box = frame.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
 found = {}

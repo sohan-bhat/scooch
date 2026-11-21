@@ -68,7 +68,7 @@ cost = 4.0  * saliency hidden under icons, as a share of all saliency
 
 **Never worse.** The result never hides more of the subject than the home frame. With no icons, or icons that cover nothing important, the output equals the home frame, which is a normal fill wallpaper whenever the centered crop already shows the subject.
 
-**Stability.** The previous placement is kept unless the new one is clearly better, so a small nudge of one icon does not move the picture.
+**Stability.** The previous placement is kept unless the new one is clearly better, so a small nudge of one icon does not move the picture. The daemon keeps a placement only under the flip, scenery, strength and zoom settings it was solved with, which each screen entry records as `placed`, so a changed setting always gets a fresh solve. An entry saved before that record existed takes the settings of its next unchanged tick.
 
 A `Placement` is separable. `fx` and `fy` are tables of 257 values. `fx[k]` is the source x, from 0 to 1, shown at output x `k / 256`. Mirror and crop are folded into the tables. Both tables are monotone and smooth.
 
@@ -111,7 +111,7 @@ Once a release has shipped tables, any change in what a table holds must raise t
 
 ### What the engine cannot do
 
-A subject that touches the screen edge under the icons cannot slide clear on a screen with the same shape as the picture, because there is no picture beyond that edge to fill in. Flipping the picture clears it. Flipping is off by default, since a flipped photo of a known place or person looks wrong. `scooch flip` turns it on, and the status line says when it would help.
+A subject that touches the screen edge under the icons cannot slide clear on a screen with the same shape as the picture, because there is no picture beyond that edge to fill in. Flipping the picture clears it. Flipping is off by default, since a flipped photo of a known place or person looks wrong. `scooch flip` turns it on, and the status line says when it would help. It says so only when the solve with flipping allowed, and everything else as it is, ends flipped and hides less than half of what the picture on screen hides, which is exactly the picture turning flipping on then shows.
 
 ### What scenery cannot do
 
@@ -165,7 +165,7 @@ Windows builds two programs from the same code. `scooch.exe` is the console comm
 
 On macOS every picture is decoded with its color profile and matched into sRGB, and outputs carry the sRGB profile. Colors outside sRGB are clipped.
 
-Linux uses pure Rust libraries only, so one static program runs on every distribution. On KDE an icon move can take up to 10 seconds to arrive, because Plasma saves icon positions on a 10 second timer and sends no signal for a move. On GNOME, Cinnamon and MATE one picture covers every monitor, so Scooch arranges it for the main one.
+Linux uses pure Rust libraries only, so one static program runs on every distribution. On GNOME, Cinnamon and MATE one picture covers every monitor, so Scooch arranges it for the main one.
 
 ## Daemon
 
@@ -185,7 +185,7 @@ Plasma 5 under X11 keeps the new place of a dropped icon to itself for two secon
 
 Where scenery belongs is kept per screen in the cache as `<screen>.<key>.map`. A new session takes it, so the first move after the daemon freed its render data or started again does not work the map out again. The file carries the picture key, the source size, the scenery stamp, the map version and a checksum, and a map that does not fit is worked out again and replaces the file.
 
-State lives in the per-user data folder as `state.json`, with the source per screen, the last placement, and the wallpaper to restore. The file is written to a temporary name and renamed, so a crash never leaves half a file. A file that cannot be read is moved aside and never overwritten. One daemon runs at a time, held by a lock file.
+State lives in the per-user data folder as `state.json`, with the source per screen, the last placement, and the wallpaper to restore. The file is written to a temporary name and renamed, so a crash never leaves half a file. On Windows a rename or the opening of a lock that meets the file held by another program, such as a virus scanner that reads a file the moment it is written, is tried again ten times over half a second, and when it still fails the error says another program had the file open, apart from a full disk or a folder that cannot be written. Every file Scooch replaces goes this way. A file that cannot be read is moved aside and never overwritten. One daemon runs at a time, held by a lock file.
 
 **Icon places.** Each screen entry in `state.json` has `places`, the icons that the screen's last placement used. `width` and `height` give the screen's size in pixels, the size of the picture Scooch draws for it. `icons` lists one rectangle `{x, y, w, h}` per icon, in those pixels, measured from that screen's top left corner with y growing down. The field is written only by the save that follows a placement, so it shows the last tick that placed the screen, and a tick that moves nothing leaves it alone. It holds rectangles only, never names or paths. An entry saved by an older Scooch gets `places` from the first tick that reads its screen, and that tick saves once. Entries stay while a restore is pending, so a reader shows the places only while `on` is true.
 
@@ -227,7 +227,7 @@ Measured on macOS at rest, the daemon uses 0.01 s of CPU over two minutes, has n
 
 Measured on Windows 11, a dragged icon becomes a new wallpaper in 317 to 435 ms, and a quiet minute uses 0 ms of CPU with 6 MB of private memory. Windows re-encodes a JPEG wallpaper and keeps a PNG exactly, so outputs are PNG there. No event reports a change of icon size or a move made by another program, so those wait for the next drag or click on the desktop.
 
-Measured on Linux, a quiet minute uses 0 to 10 ms of CPU and about 20 MB resident. Scooch's own share of a move is 0.3 to 0.7 s. The rest of the 2 to 4 s from drop to new wallpaper is the desktop saving its positions.
+Measured by the Linux probe on every desktop at 963e36e, a quiet minute uses 0 ms of CPU with 18 to 39 MB resident. From the release of a dragged icon the daemon sets the new wallpaper at a median of 75 to 230 ms on GNOME, Cinnamon, MATE, Xfce and KDE Plasma 5.27 and 6.7 under X11, and at about 400 ms on Xfce at a scale of 2. Plasma 6.8 under Wayland gives the probe no way to drag an icon, so no move is timed there.
 
 On Linux crates/scooch asks for `blocking` `~1.6.2`, the thread pool zbus uses to open and close its connections, because from 1.7.0 an idle pool thread never ends and wakes every 500 ms, which breaks the promise that nothing runs at rest. The requirement may be lifted only once a newer `blocking` ends idle threads again, which the test `an_idle_pool_thread_of_the_blocking_crate_ends` checks and the judged quiet minute of the Linux probe confirms on every desktop.
 
