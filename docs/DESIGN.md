@@ -165,7 +165,7 @@ Windows builds two programs from the same code. `scooch.exe` is the console comm
 
 On macOS every picture is decoded with its color profile and matched into sRGB, and outputs carry the sRGB profile. Colors outside sRGB are clipped.
 
-Linux uses pure Rust libraries only, so one static program runs on every distribution. On KDE an icon move can take up to 10 seconds to arrive, because Plasma saves icon positions on a 10 second timer and sends no signal for a move. On GNOME, Cinnamon and MATE one picture covers every monitor, so Scooch arranges it for the main one.
+Linux uses pure Rust libraries only, so one static program runs on every distribution. On GNOME, Cinnamon and MATE one picture covers every monitor, so Scooch arranges it for the main one.
 
 ## Daemon
 
@@ -227,7 +227,7 @@ Measured on macOS at rest, the daemon uses 0.01 s of CPU over two minutes, has n
 
 Measured on Windows 11, a dragged icon becomes a new wallpaper in 317 to 435 ms, and a quiet minute uses 0 ms of CPU with 6 MB of private memory. Windows re-encodes a JPEG wallpaper and keeps a PNG exactly, so outputs are PNG there. No event reports a change of icon size or a move made by another program, so those wait for the next drag or click on the desktop.
 
-Measured on Linux, a quiet minute uses 0 to 10 ms of CPU and about 20 MB resident. Scooch's own share of a move is 0.3 to 0.7 s. The rest of the 2 to 4 s from drop to new wallpaper is the desktop saving its positions.
+Measured by the Linux probe on every desktop at 963e36e, a quiet minute uses 0 ms of CPU with 18 to 39 MB resident. From the release of a dragged icon the daemon sets the new wallpaper at a median of 75 to 230 ms on GNOME, Cinnamon, MATE, Xfce and KDE Plasma 5.27 and 6.7 under X11, and at about 400 ms on Xfce at a scale of 2. Plasma 6.8 under Wayland gives the probe no way to drag an icon, so no move is timed there.
 
 On Linux crates/scooch asks for `blocking` `~1.6.2`, the thread pool zbus uses to open and close its connections, because from 1.7.0 an idle pool thread never ends and wakes every 500 ms, which breaks the promise that nothing runs at rest. The requirement may be lifted only once a newer `blocking` ends idle threads again, which the test `an_idle_pool_thread_of_the_blocking_crate_ends` checks and the judged quiet minute of the Linux probe confirms on every desktop.
 
