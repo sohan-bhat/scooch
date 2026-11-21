@@ -15,6 +15,8 @@ const files: Record<string, string> = {
   creak: 'sounds/creak.m4a',
   lift: 'sounds/lift.m4a',
   down: 'sounds/down.m4a',
+  stream: 'sounds/stream.m4a',
+  drips: 'sounds/drips.m4a',
 };
 
 const MUSIC = 'sounds/lobby.m4a';

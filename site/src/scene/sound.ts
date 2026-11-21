@@ -2,7 +2,7 @@ import { preload, shot, tape, type Voice } from '@/lib/audio';
 import { onSound, sound } from '@/lib/sound';
 import { live } from './touch';
 
-const DESK = ['switch', 'knob', 'tack', 'bell', 'pour', 'static', 'creak', 'lift', 'down'];
+const DESK = ['switch', 'knob', 'tack', 'bell', 'pour', 'static', 'creak', 'lift', 'down', 'stream', 'drips'];
 let bell: Voice | null = null;
 
 onSound((on) => {
@@ -35,7 +35,9 @@ export function play(name: string) {
     void shot('knob', { gain: 0.7 });
     void shot('static', { gain: 0.12 });
   } else if (name === 'stapler') void shot('tack', { gain: 0.75, rate: 1.12 });
-  else if (name === 'glass' && live.juice === 4) void shot('pour', { gain: 0.5 });
+  else if (name === 'pour') void shot('pour', { gain: 0.5 });
+  else if (name === 'stream') void shot('stream', { gain: 0.4 });
+  else if (name === 'drips') void shot('drips', { gain: 0.3 });
   else if (name === 'creak') void shot('creak', { gain: 0.25 });
   else if (name === 'lift') void shot('lift', { gain: 0.18 });
   else if (name === 'down') void shot('down', { gain: 0.4 });
