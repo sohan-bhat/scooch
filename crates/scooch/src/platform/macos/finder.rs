@@ -39,17 +39,26 @@ static ALLOWED: AtomicBool = AtomicBool::new(false);
 pub struct Asking {
     waiting: AtomicBool,
     asked: AtomicBool,
+    open: AtomicBool,
+    again: AtomicBool,
     count: Mutex<u64>,
     nudged: Condvar,
 }
 
 impl Asking {
     pub const fn new() -> Self {
-        Self { waiting: AtomicBool::new(false), asked: AtomicBool::new(false), count: Mutex::new(0), nudged: Condvar::new() }
+        Self { waiting: AtomicBool::new(false), asked: AtomicBool::new(false), open: AtomicBool::new(false), again: AtomicBool::new(false), count: Mutex::new(0), nudged: Condvar::new() }
     }
 
     pub fn waiting(&self) -> bool {
         self.waiting.load(Ordering::SeqCst)
+    }
+
+    pub fn poke(&self) {
+        if self.waiting() && !self.open.load(Ordering::SeqCst) {
+            self.again.store(true, Ordering::SeqCst);
+            self.nudge();
+        }
     }
 
     pub fn nudge(&self) {
@@ -285,10 +294,48 @@ fn names() -> Result<Vec<String>> {
     Ok(list(reply.as_deref()).iter().map(|item| item.stringValue().map(|name| name.to_string()).unwrap_or_default()).collect())
 }
 
+pub fn poked() {
+    ASKING_HERE.poke();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum First {
+    Send,
+    Ask,
+    Refuse,
+}
+
+fn first_step(allowed: bool, check: impl FnOnce() -> Access) -> First {
+    if allowed {
+        return First::Send;
+    }
+    match check() {
+        Access::WouldAsk => First::Ask,
+        Access::Denied => First::Refuse,
+        _ => First::Send,
+    }
+}
+
+fn granted(property_code: u32, status: i32) -> Result<Option<Retained<NSAppleEventDescriptor>>> {
+    match consent() {
+        Consent::Granted => {
+            ALLOWED.store(true, Ordering::SeqCst);
+            send(property_code).or_else(failure)
+        }
+        Consent::AskLater => Err(anyhow!("{ASKING}")),
+        _ => failure(status),
+    }
+}
+
 fn fetch(property_code: u32) -> Result<Option<Retained<NSAppleEventDescriptor>>> {
     if ASKING_HERE.waiting() {
         ASKING_HERE.nudge();
         bail!("{ASKING}");
+    }
+    match first_step(ALLOWED.load(Ordering::SeqCst), || access(false)) {
+        First::Ask => return granted(property_code, WOULD_ASK),
+        First::Refuse => return failure(NOT_ALLOWED),
+        First::Send => {}
     }
     match send(property_code) {
         Ok(reply) => {
@@ -298,14 +345,7 @@ fn fetch(property_code: u32) -> Result<Option<Retained<NSAppleEventDescriptor>>>
         Err(TIMED_OUT) if ALLOWED.load(Ordering::SeqCst) => failure(TIMED_OUT),
         Err(status @ (WOULD_ASK | TIMED_OUT)) => {
             ALLOWED.store(false, Ordering::SeqCst);
-            match consent() {
-                Consent::Granted => {
-                    ALLOWED.store(true, Ordering::SeqCst);
-                    send(property_code).or_else(failure)
-                }
-                Consent::AskLater => Err(anyhow!("{ASKING}")),
-                _ => failure(status),
-            }
+            granted(property_code, status)
         }
         Err(status) => failure(status),
     }
@@ -345,18 +385,17 @@ pub fn consent_aside(check: Check, answered: Answered, asking: &'static Asking, 
             }
             return;
         }
-        let asked = (!asking.asked.swap(true, Ordering::SeqCst)).then(|| {
+        let ask = || {
+            asking.open.store(true, Ordering::SeqCst);
             said("asks whether scooch may control Finder");
-            objc2::rc::autoreleasepool(|_| check(true))
-        });
-        let mut seen = asking.nudges();
-        let mut now = match asked {
-            Some(Access::Allowed) => Access::Allowed,
-            _ => objc2::rc::autoreleasepool(|_| check(false)),
-        };
-        if let Some(answer) = asked {
+            let answer = objc2::rc::autoreleasepool(|_| check(true));
+            asking.open.store(false, Ordering::SeqCst);
+            let now = if answer == Access::Allowed { answer } else { objc2::rc::autoreleasepool(|_| check(false)) };
             said(&format!("the ask came back as {answer:?} and a check without asking says {now:?}"));
-        }
+            now
+        };
+        let mut seen = asking.nudges();
+        let mut now = if asking.asked.swap(true, Ordering::SeqCst) { objc2::rc::autoreleasepool(|_| check(false)) } else { ask() };
         let mut listening: Option<Box<dyn FnOnce()>> = None;
         while now == Access::WouldAsk {
             if listening.is_none() {
@@ -367,6 +406,9 @@ pub fn consent_aside(check: Check, answered: Answered, asking: &'static Asking, 
             seen = asking.nudges();
             now = objc2::rc::autoreleasepool(|_| check(false));
             said(&format!("checked again without asking, {now:?}"));
+            if now == Access::WouldAsk && asking.again.swap(false, Ordering::SeqCst) {
+                now = ask();
+            }
         }
         if let Some(stop) = listening {
             objc2::rc::autoreleasepool(|_| stop());
@@ -630,16 +672,17 @@ mod tests {
         state: Mutex<Access>,
         asks: std::sync::atomic::AtomicUsize,
         joins: bool,
-        closed: Option<Access>,
+        closed: Mutex<Option<Access>>,
+        held: AtomicBool,
     }
 
     impl Tcc {
         fn new(state: Access, joins: bool) -> Arc<Self> {
-            Arc::new(Self { state: Mutex::new(state), asks: std::sync::atomic::AtomicUsize::new(0), joins, closed: None })
+            Arc::new(Self { state: Mutex::new(state), asks: std::sync::atomic::AtomicUsize::new(0), joins, closed: Mutex::new(None), held: AtomicBool::new(false) })
         }
 
         fn closed_unanswered(returns: Access) -> Arc<Self> {
-            Arc::new(Self { state: Mutex::new(Access::WouldAsk), asks: std::sync::atomic::AtomicUsize::new(0), joins: false, closed: Some(returns) })
+            Arc::new(Self { state: Mutex::new(Access::WouldAsk), asks: std::sync::atomic::AtomicUsize::new(0), joins: false, closed: Mutex::new(Some(returns)), held: AtomicBool::new(false) })
         }
 
         fn check(self: &Arc<Self>) -> Check {
@@ -647,7 +690,10 @@ mod tests {
             Arc::new(move |ask| {
                 if ask {
                     tcc.asks.fetch_add(1, Ordering::SeqCst);
-                    if let Some(returns) = tcc.closed {
+                    while tcc.held.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    if let Some(returns) = *tcc.closed.lock().unwrap() {
                         return returns;
                     }
                     while tcc.joins && *tcc.state.lock().unwrap() == Access::WouldAsk {
@@ -656,6 +702,14 @@ mod tests {
                 }
                 *tcc.state.lock().unwrap()
             })
+        }
+
+        fn hold(&self, held: bool) {
+            self.held.store(held, Ordering::SeqCst);
+        }
+
+        fn close_with(&self, returns: Option<Access>) {
+            *self.closed.lock().unwrap() = returns;
         }
 
         fn answer(&self, access: Access) {
@@ -698,6 +752,81 @@ mod tests {
             heard.fire();
             assert!(until(|| woke.load(Ordering::SeqCst)) && settle(asking) && heard.counts() == (1, 1) && tcc.asks() == 1, "{returned:?}");
         }
+    }
+
+    #[test]
+    fn the_first_read_checks_without_asking_until_the_daemon_knows_it_is_allowed() {
+        let calls = std::cell::Cell::new(0);
+        let counted = |access: Access| {
+            let calls = &calls;
+            move || {
+                calls.set(calls.get() + 1);
+                access
+            }
+        };
+        assert_eq!(first_step(false, counted(Access::Allowed)), First::Send);
+        assert_eq!(first_step(false, counted(Access::WouldAsk)), First::Ask);
+        assert_eq!(first_step(false, counted(Access::Denied)), First::Refuse);
+        assert_eq!(first_step(false, counted(Access::FinderOff)), First::Send);
+        assert_eq!(first_step(false, counted(Access::Unknown(-1712))), First::Send);
+        assert_eq!(calls.get(), 5);
+        assert_eq!(first_step(true, counted(Access::WouldAsk)), First::Send);
+        assert_eq!(calls.get(), 5);
+    }
+
+    #[test]
+    fn nudges_never_ask_again_and_a_poke_asks_once_more_but_never_over_an_open_ask() {
+        let (tcc, heard, asking) = (Tcc::closed_unanswered(Access::WouldAsk), Arc::new(Heard::default()), fresh());
+        let (woke, answered) = woke_into();
+        assert_eq!(consent_aside(tcc.check(), answered, asking, heard.listen(), Duration::from_millis(100)), Consent::AskLater);
+        assert!(until(|| heard.counts().0 == 1));
+        for _ in 0..3 {
+            asking.nudge();
+            heard.fire();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(tcc.asks(), 1, "a nudge asked again");
+        tcc.hold(true);
+        asking.poke();
+        assert!(until(|| tcc.asks() == 2), "a poke did not ask once more");
+        asking.poke();
+        asking.poke();
+        tcc.hold(false);
+        std::thread::sleep(Duration::from_millis(150));
+        heard.fire();
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(tcc.asks() == 2 && asking.waiting(), "asks {} over an open ask", tcc.asks());
+        tcc.close_with(None);
+        tcc.answer(Access::Allowed);
+        heard.fire();
+        assert!(until(|| woke.load(Ordering::SeqCst)) && settle(asking) && tcc.asks() == 2);
+    }
+
+    #[test]
+    fn allow_in_the_window_a_poke_brought_back_wakes_the_daemon() {
+        let (tcc, heard, asking) = (Tcc::closed_unanswered(Access::Denied), Arc::new(Heard::default()), fresh());
+        let (woke, answered) = woke_into();
+        consent_aside(tcc.check(), answered, asking, heard.listen(), Duration::from_millis(100));
+        assert!(until(|| heard.counts().0 == 1) && asking.waiting());
+        tcc.hold(true);
+        tcc.close_with(None);
+        asking.poke();
+        assert!(until(|| tcc.asks() == 2));
+        tcc.answer(Access::Allowed);
+        tcc.hold(false);
+        assert!(until(|| woke.load(Ordering::SeqCst)) && settle(asking), "Allow in the second window did not wake the daemon");
+        assert_eq!((tcc.asks(), heard.counts()), (2, (1, 1)));
+    }
+
+    #[test]
+    fn a_persisted_dont_allow_never_reaches_a_poke() {
+        let (tcc, heard, asking) = (Tcc::new(Access::Denied, false), Arc::new(Heard::default()), fresh());
+        let (woke, answered) = woke_into();
+        assert_eq!(consent_aside(tcc.check(), answered, asking, heard.listen(), Duration::from_secs(5)), Consent::Refused);
+        assert!(settle(asking));
+        asking.poke();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!((tcc.asks(), heard.counts(), woke.load(Ordering::SeqCst)), (0, (0, 0), false));
     }
 
     #[test]
