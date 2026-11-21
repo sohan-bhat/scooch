@@ -142,19 +142,21 @@ close_prompts() {
 }
 
 stand_in() {
+  local seen="$out/stand-in-$(date +%s)" from
+  mkdir -p "$seen"
+  from=$(wc -l <"$data/watch.log" 2>/dev/null || echo 0)
+  ps -axo pid,ppid,stat,lstart,comm,args | grep -i -E '[s]cooch' >"$seen/processes-before.txt"
   launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1
   close_prompts
   sleep 2
   if ! wait_for 15 sh -c '! pgrep -f "scooch watch" >/dev/null' >/dev/null; then
-    line "- a daemon still ran 15 s after the boot out, $(pgrep -fl 'scooch watch' | tr '\n' ' '), so the probe ends it"
-    pkill -KILL -f 'scooch watch' >/dev/null 2>&1
-    wait_for 10 sh -c '! pgrep -f "scooch watch" >/dev/null' >/dev/null
-  fi
-  holders=$(lsof -t "$data/watch.lock" 2>/dev/null | tr '\n' ' ')
-  if [ -n "$holders" ]; then
-    line "- the daemon's lock was still held by $(for pid in $holders; do ps -o comm= -p "$pid"; done | tr '\n' ' '), so the probe ends them"
-    kill -KILL $holders >/dev/null 2>&1
-    sleep 1
+    ps -axo pid,ppid,stat,lstart,comm,args | grep -i -E '[s]cooch' >"$seen/processes-after-15s.txt"
+    lsof "$data/watch.lock" >"$seen/lock-holders.txt" 2>&1
+    sed -n "$((from + 1)),\$p" "$data/watch.log" >"$seen/login-item-log.txt" 2>/dev/null
+    line "- a daemon still ran 15 s after the boot out, kept in $(basename "$seen"): processes $(pgrep -fl 'scooch watch' | tr '\n' ' '), the lock held by $(lsof -t "$data/watch.lock" 2>/dev/null | while read -r pid; do echo "$pid $(ps -o comm= -p "$pid") parent $(ps -o ppid= -p "$pid" | tr -d ' ') $(ps -o comm= -p "$(ps -o ppid= -p "$pid" | tr -d ' ')")"; done | tr '\n' ';'), the login item's log in those seconds $(tr '\n' '|' <"$seen/login-item-log.txt" | cut -c1-600)"
+  else
+    rm -f "$seen/processes-before.txt"
+    rmdir "$seen" 2>/dev/null
   fi
   rm -f "$data/watch.pid"
   SCOOCH_TRACE=1 "$daemon" watch >>"$out/watch.log" 2>&1 &
