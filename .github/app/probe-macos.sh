@@ -11,6 +11,7 @@ data="$HOME/Library/Application Support/Scooch"
 plist="$HOME/Library/LaunchAgents/me.sohanbhat.scooch.plist"
 photo="$PWD/assets/photos/seagull-sky.jpg"
 label="me.sohanbhat.scooch"
+readonly built out report app data plist photo label
 
 line() { echo "$*" | tee -a "$report"; }
 . "$(dirname "$0")/expect.sh"
@@ -157,9 +158,15 @@ stand_in() {
   launchctl print "gui/$(id -u)/$label" >"$seen/launchctl-before.txt" 2>&1
   echo "turn on path: $path" >"$seen/path.txt"
   echo "consent windows at the boot out: $(consent_windows)" >"$seen/consent.txt"
+  local item=no
+  [ -f "$plist" ] && item=yes
   launchctl bootout "gui/$(id -u)/$label" >"$seen/bootout-stderr.txt" 2>&1
   status=$?
   { echo "exit $status"; echo "stderr:"; cat "$seen/bootout-stderr.txt"; } >"$seen/bootout.txt"
+  if [ "$item" = yes ]; then
+    expect "the stand-in booted out the login item's job, after $path" [ "$status" = 0 ]
+    [ "$status" = 0 ] || line "- the boot out of $label answered $(tr '\n' ' ' <"$seen/bootout-stderr.txt")"
+  fi
   rm -f "$seen/bootout-stderr.txt"
   close_prompts
   sleep 2
