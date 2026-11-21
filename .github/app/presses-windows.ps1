@@ -277,8 +277,36 @@ Start-Sleep -Seconds 3
 Line "- the Desktop files of the Flip case are removed, $(@(Get-ChildItem $desk -Filter 'probe-icon-*').Count) left"
 
 Line ''
-Line '#### A picture pressed while Scooch is off'
+Line '#### Turn off while another program holds the saved state'
+$offLine = (Get-Content -Raw 'crates/scooch-app/ui/src/copy/en.json' | ConvertFrom-Json).failure.'turn-off'
+function Window-Buttons {
+    $window = Find-Window
+    if (-not $window) { return @() }
+    $byType = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
+    return @($window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byType) | ForEach-Object { $_.Current.Name } | Where-Object { $_ -in 'Turn off', 'Turn on', 'Start again', 'Turning off', 'Turning on' })
+}
+$holder = [System.IO.File]::Open("$data\state.json", [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+$heldAt = Get-Date
+Line "- the probe holds state.json open for reading without delete sharing, as another program might"
 Line "- $(Press 'Turn off' 0)"
+$failed = Wait-For 20 { (Page-Text).Contains($offLine) }
+Start-Sleep -Seconds 1
+$afterFail = @(Window-Buttons)
+$stillOn = State-On
+$holder.Dispose()
+$heldFor = [int]((Get-Date) - $heldAt).TotalSeconds
+Line "- released after $heldFor s, the window said the off failed $($failed -ge 0), its buttons then read $($afterFail -join ', '), the saved state still on $stillOn"
+Expect "with state.json held, Turn off fails and the window says so" ($failed -ge 0)
+Expect "after the failed Turn off the pill is Turn off and no other button stands beside it" (($afterFail.Count -eq 1) -and ($afterFail[0] -eq 'Turn off'))
+Line "- $(Press 'Turn off' 0)"
+$off = Wait-For 30 { -not (State-On) }
+Start-Sleep -Seconds 2
+Line "- after the second press off after $off s, login entry '$(Run-Value)', buttons $((Window-Buttons) -join ', ')"
+Expect "the second press of Turn off ends the off" ($off -ge 0)
+Expect "after the second press no Run entry is left" (-not (Run-Value))
+
+Line ''
+Line '#### A picture pressed while Scooch is off'
 Wait-For 30 { -not (State-On) } | Out-Null
 Wait-For 30 { (Daemons) -eq 0 } | Out-Null
 Start-Sleep -Seconds 3
