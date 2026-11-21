@@ -527,13 +527,22 @@ pub fn set(switch: Switch, on: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn use_picture(program: &Path, path: &Path) -> Result<()> {
+fn readable(path: &Path) -> Result<(PathBuf, Box<dyn Desktop>)> {
     let image = state::canonical(path).map_err(|_| anyhow!("{} was not found.", path.display()))?;
     if !image.is_file() || !commands::is_picture(&image) {
         bail!("{} is not a picture file.", image.display());
     }
     let desktop = platform::current()?;
     desktop.decode(&image).map_err(|_| anyhow!("{} cannot be read as a picture.", image.display()))?;
+    Ok((image, desktop))
+}
+
+pub fn select_picture(path: &Path) -> Result<PathBuf> {
+    readable(path).map(|(image, _)| image)
+}
+
+pub fn use_picture(program: &Path, path: &Path) -> Result<()> {
+    let (image, desktop) = readable(path)?;
     let store = Store::open();
     let _lock = store.command_lock(state::COMMAND_PATIENCE)?;
     replace_outdated(&store)?;
@@ -704,6 +713,17 @@ pub fn show_gnome_icons() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selecting_a_file_that_is_no_picture_fails_before_it_reads_anything_of_scooch() {
+        let folder = std::env::temp_dir().join(format!("scooch-select-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let text = folder.join("notes.txt");
+        std::fs::write(&text, b"not a picture").unwrap();
+        assert!(select_picture(&text).unwrap_err().to_string().ends_with("is not a picture file."));
+        assert!(select_picture(&folder.join("gone.jpg")).unwrap_err().to_string().ends_with("was not found."));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
 
     #[test]
     fn repair_decides_on_the_state_it_reads_under_the_lock() {
