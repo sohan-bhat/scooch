@@ -336,6 +336,7 @@ mod probe {
             "9 Spaces" => 91_112,
             "9b Program moved" => 300_000,
             "9c Stop" => 300_000,
+            "9d Consent waiter" => 240_000,
             "10 Cleanup" => 308,
             _ => 600_000,
         };
@@ -531,6 +532,7 @@ mod probe {
         probe.section("9 Spaces", spaces_check);
         probe.section("9b Program moved", program_moved);
         probe.section("9c Stop", stop_check);
+        probe.section("9d Consent waiter", consent_waiter);
         probe.section("10 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -5011,6 +5013,114 @@ mod probe {
         if !whole_state || !whole_picture {
             p.fail("a stop during a tick left a state or a wallpaper that does not read whole");
         }
+        Ok(())
+    }
+
+    fn consent_windows() -> usize {
+        windows().iter().filter(|(owner, _, _)| owner == "UserNotificationCenter").count()
+    }
+
+    fn consent_lines(p: &Probe, from: usize) -> Vec<String> {
+        daemon_log(p).lines().skip(from).filter(|line| line.contains(" consent ")).map(str::to_string).collect()
+    }
+
+    fn waits(threads: &[String]) -> bool {
+        threads.iter().any(|thread| thread.starts_with("scooch-consent"))
+    }
+
+    fn consent_waiter(p: &mut Probe) -> Result<()> {
+        if !scooch_processes(p).is_empty() || launchd::loaded() || launchd::plist_path().is_ok_and(|path| path.exists()) {
+            let ran = p.scooch(&["off"], Duration::from_secs(60));
+            p.line(format!("- scooch off before these checks exit {:?}: {}", ran.code, ran.text()));
+            reap(p);
+        }
+        let closed = close_consent(p);
+        std::thread::sleep(Duration::from_secs(1));
+        p.limit("a runner cannot press Allow or Don't Allow, so the wake at Allow is proven by tests and this case shows the waiter, the windows and the asks");
+        let screen = main_screen(p)?;
+        let (width, height) = pixels(&screen);
+        let picture = picture_file(p, "consent.jpg", &subject_picture(width, height, (0.4, 0.5)))?;
+        let mark = daemon_log(p).lines().count();
+        let on = p.scooch(&["use", &picture.to_string_lossy()], Duration::from_secs(60));
+        let mut first = None;
+        wait_until(Duration::from_secs(10), || {
+            first = daemon_pid(p);
+            first.is_some()
+        });
+        let asked = wait_until(Duration::from_secs(15), || asking(p));
+        let shown = wait_until(Duration::from_secs(10), || consent_windows() >= 1);
+        let windows_first = consent_windows();
+        p.line(format!("- closed {closed:?} first, then scooch use turned on with exit {:?}, job A {first:?}, the saved problem asks for Allow after {asked:?}, a consent window after {shown:?}, consent windows {windows_first}", on.code));
+        let Some(a) = first else {
+            p.fail("job A did not start");
+            return Ok(());
+        };
+        let threads_a = sample_threads(p, a, "consent-a", "1");
+        p.line(format!("  - job A's threads {threads_a:?}, its consent lines {:?}", consent_lines(p, mark)));
+        let _ = Command::new("/bin/launchctl").args(["bootout", &target()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let ended = wait_until(STOP_LIMIT, || !pid_lives(a));
+        std::thread::sleep(Duration::from_secs(1));
+        let windows_left = consent_windows();
+        p.line(format!("- job A booted out, gone after {ended:?}, consent windows still on screen {windows_left}"));
+        let from = daemon_log(p).lines().count();
+        let plist = launchd::plist_path()?;
+        let booted = p.tool("/bin/launchctl", &["bootstrap", &format!("gui/{}", uid()), &plist.to_string_lossy()]);
+        let mut second = None;
+        wait_until(Duration::from_secs(10), || {
+            second = daemon_pid(p);
+            second.is_some()
+        });
+        std::thread::sleep(Duration::from_secs(4));
+        let windows_second = consent_windows();
+        let Some(b) = second else {
+            p.fail(format!("job B did not start from the same login item, bootstrap exit {:?} {}", booted.code, booted.text()));
+            return Ok(());
+        };
+        let threads_b = sample_threads(p, b, "consent-b", "1");
+        p.line(format!("- job B {b} started from the same login item as a login would, consent windows {windows_second}, its threads {threads_b:?}, its consent lines {:?}", consent_lines(p, from)));
+        if !waits(&threads_b) {
+            p.fail("job B keeps no waiter for the answer while the permission is undecided");
+        }
+        let calm = rusage(b).context("job B's usage could not be read")?;
+        std::thread::sleep(Duration::from_secs(60));
+        let later = rusage(b).context("job B's usage could not be read after the minute")?;
+        let woke = (later.idle_wakeups.saturating_sub(calm.idle_wakeups), later.interrupt_wakeups.saturating_sub(calm.interrupt_wakeups));
+        let cpu = nanos((later.user + later.system).saturating_sub(calm.user + calm.system)) / 1_000_000;
+        p.line(format!("- a quiet 60 s of job B with the permission undecided and its waiter waiting: CPU {cpu} ms, idle and interrupt wakeups {woke:?}, the same minute of check 6 without any watch {:?}", p.quiet));
+        if crate::woke_more(woke, p.quiet, 0) {
+            p.fail("job B's waiter woke more at rest than the daemon in check 6");
+        }
+        let listening = consent_lines(p, from).iter().any(|line| line.contains("waits for the answer without asking again"));
+        p.line(format!("  - job B's own ask {}", if listening { "came back without a decision, so its waiter waits without asking" } else { "still waits on the open window, so its waiter is that ask" }));
+        let nudged_from = daemon_log(p).lines().count();
+        let opened = p.tool("/usr/bin/open", &["-a", "Calculator"]);
+        std::thread::sleep(Duration::from_secs(3));
+        let windows_nudged = consent_windows();
+        let rechecks = consent_lines(p, nudged_from);
+        let _ = p.tool("/usr/bin/killall", &["Calculator"]);
+        p.line(format!("- another app came to the front, open exit {:?}, job B's consent lines since {rechecks:?}, consent windows {windows_nudged} against {windows_second} before", opened.code));
+        if windows_nudged > windows_second {
+            p.fail("a check without asking brought up another consent window");
+        }
+        if listening && !rechecks.iter().any(|line| line.contains("checked again without asking")) {
+            p.fail("job B did not check again when another app came to the front");
+        }
+        let closed = close_consent(p);
+        std::thread::sleep(Duration::from_secs(3));
+        let threads_after = sample_threads(p, b, "consent-b-after", "1");
+        let lines = consent_lines(p, from);
+        let asks = lines.iter().filter(|line| line.contains(" asks whether")).count();
+        p.line(format!("- closed {closed:?} unanswered, consent windows now {}, job B asked {asks} times in all, its threads {threads_after:?}", consent_windows()));
+        if asks > 1 {
+            p.fail(format!("job B asked the person {asks} times, where it may ask once"));
+        }
+        if !waits(&threads_after) {
+            p.fail("after the window closed unanswered job B kept no waiter");
+        }
+        let _ = Command::new("/bin/launchctl").args(["bootout", &target()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let gone = wait_until(STOP_LIMIT, || !pid_lives(b));
+        let closed = close_consent(p);
+        p.line(format!("- job B booted out, gone after {gone:?}, closed {closed:?}"));
         Ok(())
     }
 
