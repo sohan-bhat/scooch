@@ -44,7 +44,7 @@ irm https://sohanbhat.me/scooch/install.ps1 | iex
 | `scooch doctor` | Checks permissions and the desktop. |
 | `scooch render` | Renders one picture to a file without touching the wallpaper. |
 
-The app window has the same switches, named Slide, Clouds, Flip and Quick drop.
+The app window has the same switches, named Slide, Clouds, Flip and Quick drop. Slide shows on macOS and Windows, and Quick drop on Xfce and on Plasma 5 under X11. A picture pressed or picked in the window while Scooch is off is only selected, and turning Scooch on then uses it.
 
 ## How it works
 
@@ -66,6 +66,8 @@ One background process does this work. It is event driven and uses no CPU at res
 
 Two monitors are tested on Plasma 6.7, GNOME 46 and MATE 1.26 with an icon moved onto the second monitor, and on Xfce 4.18 and 4.20 and Plasma 6.8 under Wayland with a picture set on each.
 
+Every control of the app window is pressed by a probe on macOS, Windows and Linux, through each system's accessibility interface.
+
 ### Not yet tested
 
 - More than one monitor on macOS, Windows, Plasma 5 and Cinnamon.
@@ -74,6 +76,10 @@ Two monitors are tested on Plasma 6.7, GNOME 46 and MATE 1.26 with an icon moved
 - GNOME under X11.
 - The slide from a real mouse or trackpad, at 60 frames a second on real hardware, and on several monitors at once.
 - A monitor unplugged while Scooch is on, on real hardware.
+- A real pointer click on the app window, and dropping a file on it.
+- Signing and notarization.
+- Open Anyway on a real download.
+- Choosing Allow in the Finder permission window.
 
 ## Limits
 
@@ -82,14 +88,14 @@ Two monitors are tested on Plasma 6.7, GNOME 46 and MATE 1.26 with an icon moved
 - On macOS choose Allow once so Scooch can read icon positions from Finder. Colors outside sRGB are clipped in the rendered picture.
 - GNOME, Cinnamon and MATE use one picture for every monitor, so Scooch arranges the picture for the main one.
 - Linux has no slide. The new picture replaces the old one at once.
-- On GNOME, Cinnamon, MATE and Plasma 6 under X11 the picture moves a median of 0.1 to 0.25 s after the drop. On Xfce and Plasma 5 under X11 Scooch guesses where a single dragged icon lands and moves the picture at the drop. After other moves there, such as several icons at once, the picture moves once the desktop saves its positions, about 1 to 2 s later. On Plasma under Wayland the picture moves when Plasma saves, which is not timed yet.
+- On GNOME, Cinnamon, MATE, Xfce and Plasma 5.27 and 6.7 under X11 the new picture is set a median of 75 to 230 ms after a dragged icon is released, and about 400 ms on Xfce at a scale of 2. On Xfce and Plasma 5 that holds for a single dragged icon, whose landing Scooch guesses at the drop. After other moves there, such as several icons at once, the picture moves once the desktop saves its positions, about 1 to 2 s later. On Plasma under Wayland the picture moves when Plasma saves, which is not timed yet.
 - On Windows a change of icon size, or icons moved by another program, is not noticed until the next drag or click on the desktop.
 - Clouds go only on a blue sky that reaches the top of the picture, and islands only on teal or blue water. Other pictures get no scenery.
 - The app does not update itself. A new version is a new download.
 
 ## Remove
 
-Moving the app or the AppImage to the Trash turns Scooch off and puts the wallpaper back. The Windows uninstaller does the same, and so does removing the .deb or .rpm while you are logged in to your desktop. For a command install, run `scooch off` and delete the program.
+Moving the app or the AppImage to the Trash turns Scooch off and puts the wallpaper back. The Windows uninstaller does the same, and so does removing the .deb or .rpm while you are logged in to your desktop. For a command install, run `scooch off` and delete the program. A screen that is unplugged at that moment can keep Scooch's picture when it comes back.
 
 ## Build
 
