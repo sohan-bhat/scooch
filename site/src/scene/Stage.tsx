@@ -17,6 +17,7 @@ import { nativeHopeful } from './still';
 import { Surroundings, World } from './World';
 
 const Controls = lazy(() => import('./Controls'));
+const DemoPanel = lazy(() => import('./DemoPanel'));
 
 performance.mark('scooch:stage');
 
@@ -102,6 +103,12 @@ function posterShown() {
 export default function Stage({ onReady }: { onReady: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const shown = useShown();
+  const [demo, setDemo] = useState(false);
+  useEffect(() => {
+    const open = () => setDemo(true);
+    window.addEventListener('scooch:demo', open);
+    return () => window.removeEventListener('scooch:demo', open);
+  }, []);
   const phone = layoutFor(window.innerWidth, window.innerHeight) === 'phone';
   const deviceDpr = window.devicePixelRatio || 1;
   const detected = suspend(detectTier, ['scooch-tier']);
@@ -142,6 +149,11 @@ export default function Stage({ onReady }: { onReady: () => void }) {
       {shown ? (
         <Suspense fallback={null}>
           <Controls />
+        </Suspense>
+      ) : null}
+      {demo ? (
+        <Suspense fallback={null}>
+          <DemoPanel />
         </Suspense>
       ) : null}
     </div>

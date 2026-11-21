@@ -293,6 +293,12 @@ html.still-shot.share-shot .share-only {
   transition: opacity 600ms var(--ease-out);
 }
 
+html.demo-open .beats {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 200ms var(--ease-out), visibility 0s linear 200ms;
+}
+
 .js .beats [data-overlay="hint"] {
   transition: opacity 300ms var(--ease-out), visibility 0s linear 300ms;
 }
