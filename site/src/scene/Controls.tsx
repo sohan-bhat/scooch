@@ -10,7 +10,7 @@ import { live } from './touch';
 const words = content.story.desk;
 
 function read() {
-  return { lamp: live.lampTarget > 0.5, power: live.power, tape: tune.wanted };
+  return { lamp: live.lampTarget > 0.5, power: live.power, tape: tune.wanted, empty: live.juice <= 0 };
 }
 
 export default function Controls() {
@@ -36,7 +36,7 @@ export default function Controls() {
     { key: 'power', label: state.power ? words.tvOff : words.tvOn, run: press('power', 'power') },
     { key: 'tape', label: state.tape ? words.stop : words.play, run: press('tape', 'cassette') },
     { key: 'ring', label: words.ring, run: press('ring', 'clock') },
-    { key: 'sip', label: words.sip, run: press('sip', 'glass') },
+    { key: 'sip', label: state.empty ? words.fill : words.sip, run: press('sip', 'glass') },
     { key: 'staple', label: words.staple, run: press('staple', 'stapler') },
   ];
 

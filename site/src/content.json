@@ -121,7 +121,8 @@
       "play": "Play the tape",
       "stop": "Stop the tape",
       "ring": "Ring the clock",
-      "sip": "Sip the juice",
+      "sip": "Pour the juice",
+      "fill": "Fill the glass",
       "staple": "Press the stapler"
     },
     "loading": "Page loading"

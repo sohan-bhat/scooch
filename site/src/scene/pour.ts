@@ -419,3 +419,519 @@ function choose(plant: Plant, from: Vector3, camera: Camera, blocks: Block[]) {
   return best?.dir ?? new Vector3(from.x - plant.x, 0, from.z - plant.z).normalize();
 }
 
+function lipOf(dir: Vector3, out: Vector3) {
+  return out.set(dir.x * LIP.r, LIP.y, dir.z * LIP.r);
+}
+
+function lipNow(press: Press, holder: Object3D, out: Vector3) {
+  return lipOf(press.dir, out).applyQuaternion(holder.quaternion).add(holder.position);
+}
+
+function tilt(press: Press, theta: number) {
+  scratch.axis.crossVectors(scratch.up, press.dir).normalize();
+  return scratch.q.setFromAxisAngle(scratch.axis, theta);
+}
+
+function poseAt(press: Press, theta: number, holder: Object3D) {
+  const q = tilt(press, theta);
+  const lip = lipOf(press.dir, scratch.a).applyQuaternion(q);
+  holder.quaternion.copy(q);
+  holder.position.copy(press.lip).sub(lip);
+}
+
+function travel(press: Press, u: number, back: boolean, holder: Object3D, step: number) {
+  along(press, back ? 1 - ease(u) : ease(u), scratch.b);
+  const endY = press.lip.y - LIP.y;
+  const v = back ? 1 - u : u;
+  const low = back ? DESK_TOP : press.from.y;
+  const top = Math.max(DESK_TOP + LIFT, endY);
+  const y = low + (top - low) * smooth(0, 0.3, v) + (endY - top) * smooth(0.7, 1, v);
+  const lastX = holder.position.x;
+  const lastZ = holder.position.z;
+  holder.position.set(scratch.b.x, Math.max(y, DESK_TOP), scratch.b.z);
+  const vx = step > 0 ? (holder.position.x - lastX) / step : 0;
+  const vz = step > 0 ? (holder.position.z - lastZ) / step : 0;
+  holder.rotation.set(Math.max(-0.1, Math.min(0.1, vz * 0.05)), 0, Math.max(-0.1, Math.min(0.1, -vx * 0.05)));
+}
+
+function sourceAbove(camera: Camera, x: number, z: number, bottom: number) {
+  const point = new Vector3();
+  let lo = bottom + 0.05;
+  let hi = bottom + 3;
+  for (let k = 0; k < 24; k++) {
+    const mid = (lo + hi) / 2;
+    point.set(x, mid, z).project(camera);
+    if (point.y > 1.06 && point.z < 1) hi = mid;
+    else lo = mid;
+  }
+  return hi;
+}
+
+const view = { camera: null as Camera | null };
+
+export function pressGlass(now: number) {
+  const camera = view.camera;
+  const parts = glass.parts;
+  if (!parts || !camera || now < live.pourUntil) return false;
+  if (!state.shape) state.shape = shapeOf(parts.profile, parts.floor);
+  const holder = parts.holder;
+  const full = parts.full;
+  const empty = live.juice <= 0;
+  const plant = empty ? null : plantNow();
+  const base: Press = {
+    kind: 'still',
+    start: now,
+    total: 0.5,
+    from: holder.position.clone(),
+    path: [],
+    lengths: [0],
+    go: 0,
+    tip: 0,
+    flow: 0,
+    untip: 0,
+    lip: new Vector3(),
+    dir: new Vector3(1, 0, 0),
+    rise: 0,
+    v0: 0,
+    theta: 0,
+    volume: glass.level * full,
+    loss: empty ? -(full - glass.level * full) : Math.min(full / 4, glass.level * full),
+    source: new Vector3(),
+    emitted: 0,
+    emitEnd: 0,
+    landY: 0,
+    landed: false,
+    set: false,
+    drips: [],
+  };
+  live.juice = empty ? 4 : Math.max(0, live.juice - 1);
+  state.drops = [];
+  state.head = null;
+  state.landed = 0;
+  state.fill = false;
+  state.dripped = false;
+  state.wet.peak = wetAmount(now);
+  state.wet.at = now;
+  if (reduced() || (!empty && !plant)) {
+    state.press = base;
+    live.pourUntil = now + 600;
+    live.fadeUntil = Math.max(live.fadeUntil, now + 700);
+    if (plant) {
+      state.wet = { x: plant.x, y: plant.soil, z: plant.z, peak: 1, at: now };
+      live.fadeUntil = Math.max(live.fadeUntil, now + DRY);
+    }
+    play(empty ? 'pour' : 'stream');
+    return true;
+  }
+  if (empty) {
+    const top = holder.position.y + 0.1;
+    const y = sourceAbove(camera, holder.position.x, holder.position.z, top);
+    const fall = Math.sqrt((2 * (y - (holder.position.y + parts.floor))) / G);
+    const flow = 1.1;
+    const press: Press = { ...base, kind: 'fill', total: fall * 2 + flow + 0.4, flow, source: new Vector3(holder.position.x, y, holder.position.z), emitEnd: flow };
+    let sent = 0;
+    for (let k = 0; k * STEP <= flow; k++) sent += fillShape((k * STEP) / flow) * STEP;
+    state.sent = sent / flow;
+    state.fill = true;
+    state.press = press;
+    live.pourUntil = now + press.total * 1000;
+    live.fadeUntil = Math.max(live.fadeUntil, live.pourUntil + 300);
+    return true;
+  }
+  const p = plant as Plant;
+  const blocks = blocksExcept([p.root]);
+  const dir = choose(p, holder.position, camera, blocks);
+  const lip = new Vector3(p.x + dir.x * p.radius * 1.12, Math.max(p.rim + 0.105, DESK_TOP + LIFT + LIP.y), p.z + dir.z * p.radius * 1.12);
+  const pre: [number, number] = [p.x + dir.x * (p.radius * 1.12 + LIP.r + 0.07), p.z + dir.z * (p.radius * 1.12 + LIP.r + 0.07)];
+  const stop: [number, number] = [lip.x + dir.x * LIP.r, lip.z + dir.z * LIP.r];
+  const plantBlock = blocksExcept(obstacles.filter((object) => object !== p.root));
+  const path = rounded([...route([holder.position.x, holder.position.z], pre, [...blocks, ...plantBlock]), stop], blocks);
+  const lengths = measure(path);
+  const go = Math.min(Math.max(0.32 + lengths[lengths.length - 1] * 0.3, 0.4), 0.62);
+  const shape = state.shape;
+  const theta = thetaFor(shape, base.volume);
+  const land = new Vector3(p.x + dir.x * p.radius * 0.5, p.soil, p.z + dir.z * p.radius * 0.5);
+  const fall = Math.sqrt((2 * Math.max(lip.y - land.y, 0.02)) / G);
+  const pour = new Vector3(-dir.x, 0, -dir.z);
+  const press: Press = {
+    ...base,
+    kind: 'pour',
+    path,
+    lengths,
+    go,
+    tip: 0.28,
+    flow: 0.5,
+    untip: 0.25,
+    lip,
+    dir: pour,
+    v0: Math.hypot(land.x - lip.x, land.z - lip.z) / fall,
+    theta,
+    landY: p.soil,
+    total: go * 2 + 0.28 + 0.5 + 0.25,
+  };
+  press.emitEnd = go + press.tip + press.flow;
+  press.drips = [0.03, 0.09, 0.16, 0.24].map((t) => press.emitEnd + t);
+  state.press = press;
+  live.pourUntil = now + press.total * 1000;
+  live.fadeUntil = Math.max(live.fadeUntil, live.pourUntil + 200);
+  state.wet.x = land.x;
+  state.wet.y = p.soil;
+  state.wet.z = land.z;
+  play('lift');
+  return true;
+}
+
+function drive(now: number, step: number) {
+  const press = state.press;
+  const parts = glass.parts;
+  if (!press || !parts) return false;
+  const holder = parts.holder;
+  const full = parts.full;
+  const t = (now - press.start) / 1000;
+  if (press.kind === 'still') {
+    const u = Math.min(t / 0.5, 1);
+    glass.level = (press.volume - press.loss * ease(u)) / full;
+    holder.position.set(live.glass.x, DESK_TOP, live.glass.z);
+    holder.rotation.set(0, 0, 0);
+    if (u >= 1) state.press = null;
+    return true;
+  }
+  if (press.kind === 'fill') {
+    holder.position.set(live.glass.x, DESK_TOP, live.glass.z);
+    holder.rotation.set(0, 0, 0);
+    glass.level = Math.min(1, (press.volume + state.landed) / full);
+    if (t >= press.total) {
+      glass.level = 1;
+      state.press = null;
+      return false;
+    }
+    return true;
+  }
+  const { go, tip, flow, untip } = press;
+  if (t < go) travel(press, t / go, false, holder, step);
+  else if (t < go + tip) poseAt(press, press.theta * ease((t - go) / tip), holder);
+  else if (t < go + tip + flow) {
+    const u = (t - go - tip) / flow;
+    const gone = press.loss * (1 - (1 - u) ** 1.6);
+    glass.level = (press.volume - gone) / full;
+    poseAt(press, thetaFor(state.shape as Shape, press.volume - gone) + 0.04 * Math.sin(Math.PI * u), holder);
+  } else if (t < go + tip + flow + untip) {
+    glass.level = (press.volume - press.loss) / full;
+    const end = thetaFor(state.shape as Shape, press.volume - press.loss) + 0.0;
+    poseAt(press, end * (1 - ease((t - go - tip - flow) / untip)), holder);
+  } else if (t < press.total) {
+    holder.quaternion.identity();
+    travel(press, (t - go - tip - flow - untip) / go, true, holder, step);
+  } else {
+    holder.position.set(live.glass.x, DESK_TOP, live.glass.z);
+    holder.rotation.set(0, 0, 0);
+    glass.level = (press.volume - press.loss) / full;
+    if (!press.set) {
+      press.set = true;
+      play('down');
+    }
+    state.press = null;
+    return false;
+  }
+  return true;
+}
+
+function emitPour(press: Press, now: number, holder: Object3D) {
+  const t = (now - press.start) / 1000;
+  const begin = press.go + press.tip;
+  const lip = lipNow(press, holder, scratch.c);
+  while (press.emitted * STEP + begin <= Math.min(t, press.emitEnd)) {
+    const te = press.emitted * STEP + begin;
+    const u = (te - begin) / press.flow;
+    const rate = (press.loss * 1.6 * (1 - u) ** 0.6) / press.flow;
+    state.drops.push({ t: press.start / 1000 + te, x: lip.x, y: lip.y, z: lip.z, vx: press.dir.x * press.v0, vy: -0.05, vz: press.dir.z * press.v0, q: Math.max(rate, 0) });
+    press.emitted += 1;
+  }
+}
+
+function fillShape(u: number) {
+  return Math.max(0, Math.min(1, u / 0.08, (1 - u) / 0.08 + 0.2));
+}
+
+function emitFill(press: Press, now: number) {
+  const t = (now - press.start) / 1000;
+  while (press.emitted * STEP <= Math.min(t, press.emitEnd)) {
+    const te = press.emitted * STEP;
+    const u = te / press.flow;
+    const rate = (-press.loss / press.flow) * fillShape(u) / state.sent;
+    state.drops.push({ t: press.start / 1000 + te, x: press.source.x, y: press.source.y, z: press.source.z, vx: 0, vy: -0.1, vz: 0, q: Math.max(rate, 0) });
+    press.emitted += 1;
+  }
+}
+
+function at(drop: Drop, time: number, out: Vector3) {
+  const a = Math.max(time - drop.t, 0);
+  return out.set(drop.x + drop.vx * a, drop.y + drop.vy * a - 0.5 * G * a * a, drop.z + drop.vz * a);
+}
+
+function speed(drop: Drop, time: number) {
+  const a = Math.max(time - drop.t, 0);
+  return Math.hypot(drop.vx, drop.vy - G * a, drop.vz);
+}
+
+function surfaceY(x: number, z: number) {
+  const plane = glass.plane;
+  return (plane.w - plane.x * x - plane.z * z) / Math.max(plane.y, 1e-3);
+}
+
+export function makeStream() {
+  const geometry = new BufferGeometry();
+  const positions = new Float32Array(RINGS * SIDES * 3);
+  const normals = new Float32Array(RINGS * SIDES * 3);
+  const index: number[] = [];
+  for (let r = 0; r < RINGS - 1; r++) {
+    for (let s = 0; s < SIDES; s++) {
+      const a = r * SIDES + s;
+      const b = r * SIDES + ((s + 1) % SIDES);
+      const c = a + SIDES;
+      const d = b + SIDES;
+      index.push(a, c, b, b, c, d);
+    }
+  }
+  geometry.setAttribute('position', new BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new BufferAttribute(normals, 3));
+  geometry.setIndex(index);
+  geometry.setDrawRange(0, 0);
+  const material = tumblerMaterial(2);
+  const mesh = new Mesh(geometry, material);
+  mesh.name = 'stream';
+  mesh.frustumCulled = false;
+  mesh.visible = false;
+  const group = new Group();
+  group.add(mesh);
+  const bead = new SphereGeometry(1, 10, 8);
+  state.beads = [0, 1, 2, 3].map(() => {
+    const drop = new Mesh(bead, material);
+    drop.visible = false;
+    drop.frustumCulled = false;
+    group.add(drop);
+    return { t: 0, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, q: 0, mesh: drop, alive: false, land: 0 };
+  });
+  state.stream = mesh;
+  return group;
+}
+
+const ring = { p: new Vector3(), v: new Vector3(), n: new Vector3(), b1: new Vector3(), b2: new Vector3() };
+
+function build(list: { p: Vector3; v: Vector3; r: number }[], side: Vector3) {
+  const mesh = state.stream;
+  if (!mesh) return;
+  const count = Math.min(list.length, RINGS);
+  mesh.visible = count >= 2;
+  if (count < 2) return;
+  const geometry = mesh.geometry;
+  const positions = geometry.attributes.position.array as Float32Array;
+  const normals = geometry.attributes.normal.array as Float32Array;
+  for (let i = 0; i < count; i++) {
+    const { p, v, r } = list[i];
+    ring.v.copy(v).normalize();
+    ring.b1.copy(side).addScaledVector(ring.v, -side.dot(ring.v));
+    if (ring.b1.lengthSq() < 1e-8) ring.b1.set(0, 0, 1);
+    ring.b1.normalize();
+    ring.b2.crossVectors(ring.v, ring.b1);
+    for (let s = 0; s < SIDES; s++) {
+      const angle = (s / SIDES) * Math.PI * 2;
+      ring.n.copy(ring.b1).multiplyScalar(Math.cos(angle)).addScaledVector(ring.b2, Math.sin(angle));
+      const k = (i * SIDES + s) * 3;
+      normals[k] = ring.n.x;
+      normals[k + 1] = ring.n.y;
+      normals[k + 2] = ring.n.z;
+      positions[k] = p.x + ring.n.x * r;
+      positions[k + 1] = p.y + ring.n.y * r;
+      positions[k + 2] = p.z + ring.n.z * r;
+    }
+  }
+  geometry.attributes.position.needsUpdate = true;
+  geometry.attributes.normal.needsUpdate = true;
+  geometry.setDrawRange(0, (count - 1) * SIDES * 6);
+}
+
+const rings = Array.from({ length: RINGS }, () => ({ p: new Vector3(), v: new Vector3(), r: 0 }));
+
+function streamFrame(now: number) {
+  const press = state.press;
+  const time = now / 1000;
+  const parts = glass.parts;
+  if (press && parts && press.kind === 'pour') emitPour(press, now, parts.holder);
+  if (press && press.kind === 'fill') emitFill(press, now);
+  const fill = state.fill;
+  const point = scratch.a;
+  let landedNow = 0;
+  while (state.drops.length) {
+    const oldest = state.drops[0];
+    at(oldest, time, point);
+    const floor = fill ? surfaceY(point.x, point.z) : state.wet.y;
+    if (point.y > floor) break;
+    state.head = state.drops.shift() as Drop;
+    state.landed += state.head.q * STEP;
+    landedNow += 1;
+    if (press && !press.landed) {
+      press.landed = true;
+      play(fill ? 'pour' : 'stream');
+    }
+    if (!fill) {
+      state.wet.at = now;
+      state.wet.peak = Math.min(1, state.wet.peak + (state.head.q * STEP * 0.9) / Math.max(press?.loss ?? 1e-5, 1e-6));
+    }
+  }
+  if (fill && landedNow) state.ripple = Math.min(state.ripple + landedNow * 0.03, 0.22);
+  const emitting = !!press && ((press.kind === 'pour' && (now - press.start) / 1000 < press.emitEnd && (now - press.start) / 1000 > press.go + press.tip) || (press.kind === 'fill' && (now - press.start) / 1000 < press.emitEnd));
+  let count = 0;
+  const maxR = fill ? 0.004 : 0.007;
+  const radius = (drop: Drop) => Math.min(Math.max(0.7 * Math.sqrt(drop.q / (Math.PI * Math.max(speed(drop, time), 0.05))), 0.0007), maxR);
+  for (let i = state.drops.length - 1; i >= 0 && count < RINGS - 1; i--) {
+    const drop = state.drops[i];
+    const r = rings[count];
+    at(drop, time, r.p);
+    const a = Math.max(time - drop.t, 0);
+    r.v.set(drop.vx, drop.vy - G * a, drop.vz);
+    r.r = radius(drop);
+    count += 1;
+  }
+  if (count > 0 && state.head) {
+    const last = rings[count - 1];
+    const below = at(state.head, time, scratch.b);
+    const floor = fill ? surfaceY(below.x, below.z) : state.wet.y;
+    const k = Math.min(Math.max((last.p.y - floor) / Math.max(last.p.y - below.y, 1e-6), 0), 1);
+    const r = rings[count];
+    r.p.copy(last.p).lerp(below, k);
+    r.v.copy(last.v);
+    r.r = last.r;
+    count += 1;
+  } else if (count > 1) {
+    rings[count - 1].r *= 0.4;
+  }
+  if (count > 1 && !emitting) rings[0].r *= 0.4;
+  const side = press && press.kind === 'pour' ? scratch.side.set(-press.dir.z, 0, press.dir.x) : scratch.side.set(1, 0, 0);
+  build(rings.slice(0, count), side);
+  if (state.drops.length === 0 && !emitting) {
+    state.head = null;
+    if (!press) state.fill = false;
+  }
+}
+
+function beadFrame(now: number) {
+  const press = state.press;
+  const parts = glass.parts;
+  const time = now / 1000;
+  if (press && parts && press.kind === 'pour') {
+    const t = (now - press.start) / 1000;
+    press.drips.forEach((when, index) => {
+      const bead = state.beads[index];
+      if (!bead || bead.alive || bead.land || t < when) return;
+      const lip = lipNow(press, parts.holder, scratch.c);
+      Object.assign(bead, { t: time, x: lip.x, y: lip.y - 0.003, z: lip.z, vx: press.dir.x * 0.04, vy: 0, vz: press.dir.z * 0.04, alive: true, land: 0 });
+      bead.mesh.scale.setScalar(index % 2 ? 0.0024 : 0.003);
+    });
+  }
+  for (const bead of state.beads) {
+    if (!bead.alive) continue;
+    at(bead, time, bead.mesh.position);
+    bead.mesh.visible = true;
+    if (bead.mesh.position.y <= state.wet.y) {
+      bead.alive = false;
+      bead.land = now;
+      bead.mesh.visible = false;
+      state.wet.at = now;
+      state.wet.peak = Math.min(1, state.wet.peak + 0.03);
+      if (!state.dripped) {
+        state.dripped = true;
+        play('drips');
+      }
+    }
+  }
+  if (!press) for (const bead of state.beads) if (!bead.alive) bead.land = 0;
+}
+
+function wetAmount(now: number) {
+  return state.wet.peak * Math.max(0, 1 - Math.max(0, now - state.wet.at - 400) / DRY);
+}
+
+function wetFrame(now: number) {
+  const wet = state.wet;
+  const amount = wetAmount(now);
+  if (amount <= 0 && wet.peak > 0) wet.peak = 0;
+  const uniform = state.wetUniform.value;
+  uniform[0] = wet.x;
+  uniform[1] = wet.y;
+  uniform[2] = wet.z;
+  uniform[3] = amount;
+  if (amount > 0) live.fadeUntil = Math.max(live.fadeUntil, now + 100);
+}
+
+function rippleFrame(step: number) {
+  const ripple = glass.ripple;
+  const parts = glass.parts;
+  if (state.ripple <= 1e-5) {
+    state.ripple = 0;
+    ripple.w = 0;
+    return;
+  }
+  if (parts) {
+    ripple.x = parts.holder.position.x;
+    ripple.y = parts.holder.position.z;
+  }
+  ripple.z += step * 28;
+  ripple.w = state.ripple;
+  state.ripple *= Math.exp(-step * (state.drops.length ? 1.5 : 4.5));
+}
+
+const wetCode = {
+  vertex: ['#include <project_vertex>', '#include <project_vertex>\nvWetWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;'] as const,
+  fragment:
+    '#include <normal_fragment_maps>\n{\nfloat wetUp = smoothstep(0.35, 0.75, dot(normal, (viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz));\nfloat wetNear = 1.0 - smoothstep(0.012, 0.04, distance(vWetWorld.xz, uWet.xz));\nfloat wetBand = step(uWet.y - 0.03, vWetWorld.y) * step(vWetWorld.y, uWet.y + 0.02);\nfloat wet = uWet.w * wetUp * wetNear * wetBand;\ndiffuseColor.rgb *= 1.0 - 0.55 * wet;\nroughnessFactor = mix(roughnessFactor, 0.35, wet);\n}',
+};
+
+export function soak(gl: { compileAsync: (scene: Object3D, camera: Camera) => Promise<unknown> }, camera: Camera) {
+  const root = things.plant;
+  if (!root || state.patched === root) return;
+  state.patched = root;
+  const seen = new Set<MeshStandardMaterial>();
+  root.traverse((child) => {
+    const mesh = child as Mesh;
+    if (!mesh.isMesh) return;
+    const material = mesh.material as MeshStandardMaterial;
+    if (!material.isMeshStandardMaterial || seen.has(material)) return;
+    seen.add(material);
+    const previous = material.onBeforeCompile;
+    const key = material.customProgramCacheKey();
+    material.onBeforeCompile = (shader, renderer) => {
+      previous.call(material, shader, renderer);
+      shader.uniforms.uWet = state.wetUniform;
+      shader.vertexShader = `varying vec3 vWetWorld;\n${shader.vertexShader.replace(...wetCode.vertex)}`;
+      shader.fragmentShader = `uniform vec4 uWet;\nvarying vec3 vWetWorld;\n${shader.fragmentShader.replace('#include <normal_fragment_maps>', wetCode.fragment)}`;
+    };
+    material.customProgramCacheKey = () => `${key}|wet`;
+    material.needsUpdate = true;
+  });
+  void gl.compileAsync(root, camera).catch(() => undefined);
+}
+
+export function pourFrame(now: number, step: number, gl: { compileAsync: (scene: Object3D, camera: Camera) => Promise<unknown> }) {
+  if (things.plant && state.patched !== things.plant && view.camera) soak(gl, view.camera);
+  streamFrame(now);
+  beadFrame(now);
+  wetFrame(now);
+  rippleFrame(step);
+}
+
+export function installPour(camera: Camera) {
+  view.camera = camera;
+  glass.drive = drive;
+  glass.solve = (normal, volume) => {
+    const parts = glass.parts;
+    if (!parts) return normal.y * volume;
+    if (!state.shape) state.shape = shapeOf(parts.profile, parts.floor);
+    return solve(state.shape, normal, volume);
+  };
+  return () => {
+    glass.drive = null;
+    glass.solve = null;
+    view.camera = null;
+  };
+}

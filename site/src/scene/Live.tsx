@@ -8,6 +8,7 @@ import { ask, begin, dragged, end } from './drag';
 import { warm } from './engine';
 import { CHANNELS, hooks, live, liveId, obstacles, release, rimOf, things } from './touch';
 import { tune } from '@/lib/audio';
+import { pressGlass } from './pour';
 import { hush, play, prepare, toggleTape } from './sound';
 import { bounds } from './bounds';
 
@@ -152,9 +153,7 @@ export function actions(now = performance.now()) {
       live.stapleAt = now;
     },
     sip() {
-      if (now - live.sipAt < 1600) return;
-      live.sipAt = now;
-      live.juice = live.juice <= 0 ? 4 : live.juice - 1;
+      pressGlass(now);
     },
   };
 }
