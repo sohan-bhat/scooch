@@ -23,7 +23,7 @@ const wrapped = ShaderChunk.lights_physical_pars_fragment.replace(
 );
 
 const edge =
-  'if ( uJuice < 0.5 ) {\nfloat edge = pow(1.0 - abs(dot(normal, normalize(vViewPosition))), 2.2);\ndiffuseColor.a = mix(0.05, 0.5, edge);\noutgoingLight = min(outgoingLight + vec3(0.62, 0.66, 0.68) * edge * 0.09, vec3(0.5));\n}\n#include <opaque_fragment>';
+  '#ifdef STREAM\noutgoingLight += diffuseColor.rgb * vec3( 1.0, 0.62, 0.32 ) * 0.3 * vThin;\n#endif\nif ( uJuice < 0.5 ) {\nfloat edge = pow(1.0 - abs(dot(normal, normalize(vViewPosition))), 2.2);\ndiffuseColor.a = mix(0.05, 0.5, edge);\noutgoingLight = min(outgoingLight + vec3(0.62, 0.66, 0.68) * edge * 0.09, vec3(0.5));\n}\nif ( !juiceCap ) {\nfloat nv = abs( dot( normal, normalize( vViewPosition ) ) );\ndiffuseColor.a *= clamp( nv / max( fwidth( nv ) * 1.5, 1e-4 ), 0.0, 1.0 );\n}\n#include <opaque_fragment>';
 
 const lit = ShaderChunk.lights_fragment_begin
   .replaceAll('directLight.visible && receiveShadow', 'directLight.visible && receiveShadow && !juiceCap')
@@ -33,26 +33,26 @@ const surface = { uSurface: { value: new Vector4(0, 1, 0, 1e3) }, uRipple: { val
 const worldVarying = ['#include <project_vertex>', '#include <project_vertex>\nvJuiceWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;'] as const;
 const cut = 'if ( uCut > 0.5 && dot( vJuiceWorld, uSurface.xyz ) > uSurface.w ) discard;';
 const top =
-  '#include <normal_fragment_maps>\nvec3 juiceView = - vViewPosition;\nbool juiceCap = uCut > 0.5 && !gl_FrontFacing;\n#ifdef FLIP_SIDED\njuiceCap = uCut > 0.5;\n#endif\nif ( juiceCap ) {\nvec3 ray = vJuiceWorld - cameraPosition;\nvec3 cap = cameraPosition + ray * clamp( ( uSurface.w - dot( uSurface.xyz, cameraPosition ) ) / dot( uSurface.xyz, ray ), 0.0, 1.0 );\nvec2 out2 = cap.xz - uAxis.xy;\nfloat r = length( out2 ) + 1e-5;\nfloat f = clamp( r / uAxis.z, 0.0, 1.0 );\nvec2 q = cap.xz - uRipple.xy;\nfloat d = length( q ) + 1e-4;\nfloat w = uRipple.w * sin( d * 300.0 - uRipple.z ) * exp( -d * 45.0 );\nvec3 n = uSurface.xyz * ( 1.0 - 0.389 * f ) + vec3( out2.x, 0.0, out2.y ) / r * 0.791 * f + vec3( q.x, 0.0, q.y ) / d * w;\nnormal = normalize( ( viewMatrix * vec4( n, 0.0 ) ).xyz );\njuiceView = ( viewMatrix * vec4( cap, 1.0 ) ).xyz;\n}';
+  '#include <normal_fragment_maps>\nvec3 juiceView = - vViewPosition;\nbool juiceCap = uCut > 0.5 && !gl_FrontFacing;\n#ifdef FLIP_SIDED\njuiceCap = uCut > 0.5;\n#endif\nif ( juiceCap ) {\nvec3 ray = vJuiceWorld - cameraPosition;\nvec3 cap = cameraPosition + ray * clamp( ( uSurface.w - dot( uSurface.xyz, cameraPosition ) ) / dot( uSurface.xyz, ray ), 0.0, 1.0 );\nvec2 out2 = cap.xz - uAxis.xy;\nfloat r = length( out2 ) + 1e-5;\nfloat f = clamp( r / uAxis.z, 0.0, 1.0 );\nvec2 q = cap.xz - uRipple.xy;\nfloat d = length( q ) + 1e-4;\nfloat w = uRipple.w * sin( d * 300.0 - uRipple.z ) * exp( -d * 45.0 );\nvec3 n = uSurface.xyz * ( 1.0 - 0.389 * f ) + vec3( out2.x, 0.0, out2.y ) / r * 0.791 * f + vec3( q.x, 0.0, q.y ) / d * ( w - uAxis.w * exp( -d * 55.0 ) );\nnormal = normalize( ( viewMatrix * vec4( n, 0.0 ) ).xyz );\njuiceView = ( viewMatrix * vec4( cap, 1.0 ) ).xyz;\n}';
 
 export function tumblerMaterial(kind: 0 | 1 | 2) {
   const juice = kind > 0;
   const material = juice
-    ? new MeshStandardMaterial({ color: tokenColor('lamp'), transparent: true, opacity: 1, roughness: 0.24, metalness: 0, side: DoubleSide })
+    ? new MeshStandardMaterial({ color: tokenColor('lamp'), transparent: true, opacity: 1, roughness: kind === 2 ? 0.1 : 0.24, metalness: 0, side: DoubleSide })
     : new MeshStandardMaterial({ color: '#e7eef0', transparent: true, opacity: 1, roughness: 0.2, metalness: 0, depthWrite: false });
   const uniforms = { uJuice: { value: juice ? 1 : 0 }, uCut: { value: kind === 1 ? 1 : 0 }, ...surface };
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
-    shader.vertexShader = `varying vec3 vJuiceWorld;\n${shader.vertexShader.replace(...worldVarying)}`;
-    shader.fragmentShader = `uniform float uJuice;\nuniform float uCut;\nuniform vec4 uSurface;\nuniform vec4 uRipple;\nuniform vec4 uAxis;\nvarying vec3 vJuiceWorld;\n${shader.fragmentShader
+    shader.vertexShader = `varying vec3 vJuiceWorld;\n${kind === 2 ? 'attribute float aThin;\nvarying float vThin;\n' : ''}${shader.vertexShader.replace(worldVarying[0], kind === 2 ? `${worldVarying[1]}\nvThin = aThin;` : worldVarying[1])}`;
+    shader.fragmentShader = `${kind === 2 ? 'varying float vThin;\n' : ''}uniform float uJuice;\nuniform float uCut;\nuniform vec4 uSurface;\nuniform vec4 uRipple;\nuniform vec4 uAxis;\nvarying vec3 vJuiceWorld;\n${shader.fragmentShader
       .replace('#include <lights_physical_pars_fragment>', wrapped)
       .replace('#include <opaque_fragment>', edge)
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\n${cut}`)
       .replace('#include <normal_fragment_maps>', top)
       .replace('#include <lights_fragment_begin>', lit)}`;
   };
-  material.customProgramCacheKey = () => 'tumbler';
-  material.defines = { WINDOW_WRAP: '' };
+  material.customProgramCacheKey = () => (kind === 2 ? 'tumbler-stream' : 'tumbler');
+  material.defines = kind === 2 ? { WINDOW_WRAP: '', STREAM: '' } : { WINDOW_WRAP: '' };
   windowLit(material);
   const lightWindow = material.onBeforeCompile;
   material.onBeforeCompile = (shader, renderer) => {
@@ -79,6 +79,7 @@ export const glass = {
   level: 1,
   ripple: surface.uRipple.value,
   plane: surface.uSurface.value,
+  axis: surface.uAxis.value,
   solve: null as null | ((normal: Vector3, volume: number) => number),
   drive: null as null | ((now: number, step: number) => boolean),
   parts: null as null | { holder: Group; juice: Mesh; profile: [number, number][]; floor: number; table: [number, number][]; full: number },
@@ -288,7 +289,7 @@ export function Tumbler() {
     surface.uSurface.value.set(normal.x, normal.y, normal.z, normal.dot(point));
     point.set(0, Math.max(height, built.floor), 0);
     holder.localToWorld(point);
-    surface.uAxis.value.set(point.x, point.z, radiusAt(built.profile, height) * 0.97, 0);
+    surface.uAxis.value.set(point.x, point.z, radiusAt(built.profile, height) * 0.97, surface.uAxis.value.w);
   });
 
   return (

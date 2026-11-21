@@ -1,4 +1,4 @@
-import { Box3, BufferAttribute, BufferGeometry, Group, Mesh, Quaternion, SphereGeometry, Vector3, type Camera, type MeshStandardMaterial, type Object3D } from 'three';
+import { Box3, BufferAttribute, BufferGeometry, Group, InstancedMesh, Matrix4, Mesh, Quaternion, SphereGeometry, Vector3, type Camera, type MeshStandardMaterial, type Object3D } from 'three';
 import { DESK_TOP } from './layout';
 import { play } from './sound';
 import { glass, radiusAt, tumblerMaterial } from './Tumbler';
@@ -10,15 +10,14 @@ const LIP = { r: 0.0455, y: 0.0985 };
 const OUTER = 0.0465;
 const LIFT = 0.09;
 const POT = { soil: 0.14, rim: 0.157, radius: 0.084 };
-const RINGS = 72;
+const RINGS = 120;
 const SIDES = 8;
-const STEP = 1 / 120;
+const STEP = 1 / 240;
 const DRY = 6000;
 const TILT = 0.025;
 
 type Shape = { points: Float32Array; weights: Float32Array; total: number; rim: { r: number; y: number }; spill: Float32Array; scratch: Float32Array };
 type Plant = { x: number; z: number; soil: number; rim: number; radius: number; root: Object3D };
-type Drop = { t: number; x: number; y: number; z: number; vx: number; vy: number; vz: number; q: number };
 type Block = { cx: number; cz: number; cos: number; sin: number; hx: number; hz: number; top: number };
 type Press = {
   kind: 'pour' | 'fill' | 'still';
@@ -50,13 +49,14 @@ type Press = {
 const state = {
   shape: null as Shape | null,
   press: null as Press | null,
-  drops: [] as Drop[],
-  head: null as Drop | null,
-  beads: [] as (Drop & { mesh: Mesh; alive: boolean; land: number })[],
   landed: 0,
   wet: { x: 0, y: 0, z: 0, peak: 0, at: 0 },
   wetUniform: { value: [0, 0, 0, 0] as number[] },
   ripple: 0,
+  flowing: 0,
+  dip: 0,
+  surface: 0,
+  beadMesh: null as InstancedMesh | null,
   fill: false,
   dripped: false,
   sent: 1,
@@ -505,9 +505,7 @@ export function pressGlass(now: number) {
     drips: [],
   };
   live.juice = empty ? 4 : Math.max(0, live.juice - 1);
-  state.drops = [];
-  state.head = null;
-  state.landed = 0;
+  resetStream();
   state.fill = false;
   state.dripped = false;
   state.wet.peak = wetAmount(now);
@@ -636,6 +634,60 @@ function drive(now: number, step: number) {
   return true;
 }
 
+const CAP = 640;
+const DROPS = 64;
+const pool = {
+  t: new Float64Array(CAP),
+  x: new Float32Array(CAP),
+  y: new Float32Array(CAP),
+  z: new Float32Array(CAP),
+  vx: new Float32Array(CAP),
+  vy: new Float32Array(CAP),
+  vz: new Float32Array(CAP),
+  q: new Float32Array(CAP),
+  head: 0,
+  count: 0,
+};
+const last = { on: false, index: CAP };
+const spray = {
+  t: new Float64Array(16),
+  x: new Float32Array(16),
+  y: new Float32Array(16),
+  z: new Float32Array(16),
+  vx: new Float32Array(16),
+  vy: new Float32Array(16),
+  vz: new Float32Array(16),
+  r: new Float32Array(16),
+  floor: new Float32Array(16),
+  alive: new Uint8Array(16),
+  next: 0,
+};
+const drips = { t: new Float64Array(4), x: new Float32Array(4), y: new Float32Array(4), z: new Float32Array(4), vx: new Float32Array(4), vz: new Float32Array(4), alive: new Uint8Array(4), done: new Uint8Array(4) };
+
+function resetStream() {
+  pool.head = 0;
+  pool.count = 0;
+  last.on = false;
+  state.landed = 0;
+  spray.alive.fill(0);
+  drips.alive.fill(0);
+  drips.done.fill(0);
+}
+
+function emit(t: number, x: number, y: number, z: number, vx: number, vy: number, vz: number, q: number) {
+  if (pool.count >= CAP) return;
+  const i = (pool.head + pool.count) % CAP;
+  pool.t[i] = t;
+  pool.x[i] = x;
+  pool.y[i] = y;
+  pool.z[i] = z;
+  pool.vx[i] = vx;
+  pool.vy[i] = vy;
+  pool.vz[i] = vz;
+  pool.q[i] = q;
+  pool.count += 1;
+}
+
 function emitPour(press: Press, now: number, holder: Object3D) {
   const t = (now - press.start) / 1000;
   const begin = press.go + press.tip;
@@ -644,7 +696,7 @@ function emitPour(press: Press, now: number, holder: Object3D) {
     const te = press.emitted * STEP + begin;
     const u = (te - begin) / press.flow;
     const rate = (press.loss * 1.6 * (1 - u) ** 0.6) / press.flow;
-    state.drops.push({ t: press.start / 1000 + te, x: lip.x, y: lip.y, z: lip.z, vx: press.dir.x * press.v0, vy: -0.05, vz: press.dir.z * press.v0, q: Math.max(rate, 0) });
+    emit(press.start / 1000 + te, lip.x, lip.y, lip.z, press.dir.x * press.v0, -0.05, press.dir.z * press.v0, Math.max(rate, 0));
     press.emitted += 1;
   }
 }
@@ -657,21 +709,20 @@ function emitFill(press: Press, now: number) {
   const t = (now - press.start) / 1000;
   while (press.emitted * STEP <= Math.min(t, press.emitEnd)) {
     const te = press.emitted * STEP;
-    const u = te / press.flow;
-    const rate = (-press.loss / press.flow) * fillShape(u) / state.sent;
-    state.drops.push({ t: press.start / 1000 + te, x: press.source.x, y: press.source.y, z: press.source.z, vx: 0, vy: -0.1, vz: 0, q: Math.max(rate, 0) });
+    const rate = ((-press.loss / press.flow) * fillShape(te / press.flow)) / state.sent;
+    emit(press.start / 1000 + te, press.source.x, press.source.y, press.source.z, 0, -0.1, 0, Math.max(rate, 0));
     press.emitted += 1;
   }
 }
 
-function at(drop: Drop, time: number, out: Vector3) {
-  const a = Math.max(time - drop.t, 0);
-  return out.set(drop.x + drop.vx * a, drop.y + drop.vy * a - 0.5 * G * a * a, drop.z + drop.vz * a);
+function at(i: number, time: number, out: Vector3) {
+  const a = Math.max(time - pool.t[i], 0);
+  return out.set(pool.x[i] + pool.vx[i] * a, pool.y[i] + pool.vy[i] * a - 0.5 * G * a * a, pool.z[i] + pool.vz[i] * a);
 }
 
-function speed(drop: Drop, time: number) {
-  const a = Math.max(time - drop.t, 0);
-  return Math.hypot(drop.vx, drop.vy - G * a, drop.vz);
+function velocity(i: number, time: number, out: Vector3) {
+  const a = Math.max(time - pool.t[i], 0);
+  return out.set(pool.vx[i], pool.vy[i] - G * a, pool.vz[i]);
 }
 
 function surfaceY(x: number, z: number) {
@@ -683,18 +734,18 @@ export function makeStream() {
   const geometry = new BufferGeometry();
   const positions = new Float32Array(RINGS * SIDES * 3);
   const normals = new Float32Array(RINGS * SIDES * 3);
+  const thin = new Float32Array(RINGS * SIDES);
   const index: number[] = [];
   for (let r = 0; r < RINGS - 1; r++) {
-    for (let s = 0; s < SIDES; s++) {
-      const a = r * SIDES + s;
-      const b = r * SIDES + ((s + 1) % SIDES);
-      const c = a + SIDES;
-      const d = b + SIDES;
-      index.push(a, c, b, b, c, d);
+    for (let k = 0; k < SIDES; k++) {
+      const a = r * SIDES + k;
+      const b = r * SIDES + ((k + 1) % SIDES);
+      index.push(a, a + SIDES, b, b, a + SIDES, b + SIDES);
     }
   }
   geometry.setAttribute('position', new BufferAttribute(positions, 3));
   geometry.setAttribute('normal', new BufferAttribute(normals, 3));
+  geometry.setAttribute('aThin', new BufferAttribute(thin, 1));
   geometry.setIndex(index);
   geometry.setDrawRange(0, 0);
   const material = tumblerMaterial(2);
@@ -702,56 +753,83 @@ export function makeStream() {
   mesh.name = 'stream';
   mesh.frustumCulled = false;
   mesh.visible = false;
+  const bead = new SphereGeometry(1, 12, 8);
+  bead.setAttribute('aThin', new BufferAttribute(new Float32Array(bead.attributes.position.count).fill(0.8), 1));
+  const beads = new InstancedMesh(bead, material, DROPS);
+  beads.name = 'drops';
+  beads.frustumCulled = false;
+  beads.count = 0;
   const group = new Group();
-  group.add(mesh);
-  const bead = new SphereGeometry(1, 10, 8);
-  state.beads = [0, 1, 2, 3].map(() => {
-    const drop = new Mesh(bead, material);
-    drop.visible = false;
-    drop.frustumCulled = false;
-    group.add(drop);
-    return { t: 0, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, q: 0, mesh: drop, alive: false, land: 0 };
-  });
+  group.add(mesh, beads);
   state.stream = mesh;
+  state.beadMesh = beads;
   return group;
 }
 
-const ring = { p: new Vector3(), v: new Vector3(), n: new Vector3(), b1: new Vector3(), b2: new Vector3() };
+const ringP = new Float32Array(RINGS * 3);
+const ringV = new Float32Array(RINGS * 3);
+const ringR = new Float32Array(RINGS);
+const ring = { p: new Vector3(), v: new Vector3(), n: new Vector3(), b1: new Vector3(), b2: new Vector3(), m: new Matrix4(), q: new Quaternion(), s: new Vector3(), up: new Vector3(0, 1, 0) };
 
-function build(list: { p: Vector3; v: Vector3; r: number }[], side: Vector3) {
+function setRing(k: number, p: Vector3, v: Vector3, r: number) {
+  ringP[k * 3] = p.x;
+  ringP[k * 3 + 1] = p.y;
+  ringP[k * 3 + 2] = p.z;
+  ringV[k * 3] = v.x;
+  ringV[k * 3 + 1] = v.y;
+  ringV[k * 3 + 2] = v.z;
+  ringR[k] = r;
+}
+
+function build(count: number, side: Vector3) {
   const mesh = state.stream;
   if (!mesh) return;
-  const count = Math.min(list.length, RINGS);
   mesh.visible = count >= 2;
   if (count < 2) return;
   const geometry = mesh.geometry;
   const positions = geometry.attributes.position.array as Float32Array;
   const normals = geometry.attributes.normal.array as Float32Array;
+  const thin = geometry.attributes.aThin.array as Float32Array;
   for (let i = 0; i < count; i++) {
-    const { p, v, r } = list[i];
-    ring.v.copy(v).normalize();
+    ring.v.set(ringV[i * 3], ringV[i * 3 + 1], ringV[i * 3 + 2]).normalize();
     ring.b1.copy(side).addScaledVector(ring.v, -side.dot(ring.v));
     if (ring.b1.lengthSq() < 1e-8) ring.b1.set(0, 0, 1);
     ring.b1.normalize();
     ring.b2.crossVectors(ring.v, ring.b1);
-    for (let s = 0; s < SIDES; s++) {
-      const angle = (s / SIDES) * Math.PI * 2;
+    const r = ringR[i];
+    const clear = 1 - Math.min(Math.max((r - 0.0012) / 0.0035, 0), 1);
+    for (let k = 0; k < SIDES; k++) {
+      const angle = (k / SIDES) * Math.PI * 2;
       ring.n.copy(ring.b1).multiplyScalar(Math.cos(angle)).addScaledVector(ring.b2, Math.sin(angle));
-      const k = (i * SIDES + s) * 3;
-      normals[k] = ring.n.x;
-      normals[k + 1] = ring.n.y;
-      normals[k + 2] = ring.n.z;
-      positions[k] = p.x + ring.n.x * r;
-      positions[k + 1] = p.y + ring.n.y * r;
-      positions[k + 2] = p.z + ring.n.z * r;
+      const j = i * SIDES + k;
+      normals[j * 3] = ring.n.x;
+      normals[j * 3 + 1] = ring.n.y;
+      normals[j * 3 + 2] = ring.n.z;
+      positions[j * 3] = ringP[i * 3] + ring.n.x * r;
+      positions[j * 3 + 1] = ringP[i * 3 + 1] + ring.n.y * r;
+      positions[j * 3 + 2] = ringP[i * 3 + 2] + ring.n.z * r;
+      thin[j] = clear;
     }
   }
   geometry.attributes.position.needsUpdate = true;
   geometry.attributes.normal.needsUpdate = true;
+  geometry.attributes.aThin.needsUpdate = true;
   geometry.setDrawRange(0, (count - 1) * SIDES * 6);
 }
 
-const rings = Array.from({ length: RINGS }, () => ({ p: new Vector3(), v: new Vector3(), r: 0 }));
+function placeBead(slot: number, p: Vector3, v: Vector3, r: number) {
+  const beads = state.beadMesh;
+  if (!beads || slot >= DROPS) return slot;
+  ring.v.copy(v);
+  const length = ring.v.length();
+  if (length > 1e-4) ring.q.setFromUnitVectors(ring.up, ring.v.multiplyScalar(1 / length));
+  else ring.q.identity();
+  const stretch = 1 + Math.min(length * 0.12, 0.5);
+  ring.s.set(r, r * stretch, r);
+  ring.m.compose(p, ring.q, ring.s);
+  beads.setMatrixAt(slot, ring.m);
+  return slot + 1;
+}
 
 function streamFrame(now: number) {
   const press = state.press;
@@ -761,91 +839,159 @@ function streamFrame(now: number) {
   if (press && press.kind === 'fill') emitFill(press, now);
   const fill = state.fill;
   const point = scratch.a;
+  const vel = scratch.b;
+  if (parts) state.surface = surfaceY(parts.holder.position.x, parts.holder.position.z);
   let landedNow = 0;
-  while (state.drops.length) {
-    const oldest = state.drops[0];
-    at(oldest, time, point);
+  while (pool.count) {
+    const i = pool.head;
+    at(i, time, point);
     const floor = fill ? surfaceY(point.x, point.z) : state.wet.y;
     if (point.y > floor) break;
-    state.head = state.drops.shift() as Drop;
-    state.landed += state.head.q * STEP;
+    last.on = true;
+    last.index = i;
+    state.landed += pool.q[i] * STEP;
+    pool.head = (pool.head + 1) % CAP;
+    pool.count -= 1;
     landedNow += 1;
     if (press && !press.landed) {
       press.landed = true;
       play(fill ? 'pour' : 'stream');
     }
-    if (!fill) {
+    if (fill) state.dip = Math.min(state.dip + pool.q[i] * STEP * 900, 0.5);
+    else {
       state.wet.at = now;
-      state.wet.peak = Math.min(1, state.wet.peak + (state.head.q * STEP * 0.9) / Math.max(press?.loss ?? 1e-5, 1e-6));
+      state.wet.peak = Math.min(1, state.wet.peak + (pool.q[i] * STEP * 0.9) / Math.max(press?.loss ?? 1e-5, 1e-6));
+      if (landedNow === 1 && Math.sin(pool.t[i] * 997) > 0.55) splash(point, now, floor);
     }
   }
-  if (fill && landedNow) state.ripple = Math.min(state.ripple + landedNow * 0.03, 0.22);
-  const emitting = !!press && ((press.kind === 'pour' && (now - press.start) / 1000 < press.emitEnd && (now - press.start) / 1000 > press.go + press.tip) || (press.kind === 'fill' && (now - press.start) / 1000 < press.emitEnd));
+  if (fill && landedNow) state.ripple = Math.min(state.ripple + landedNow * 0.012, 0.22);
+  const sinceStart = press ? (now - press.start) / 1000 : 0;
+  const emitting = !!press && ((press.kind === 'pour' && sinceStart < press.emitEnd && sinceStart > press.go + press.tip) || (press.kind === 'fill' && sinceStart < press.emitEnd));
+  const endAt = press ? press.start / 1000 + press.emitEnd : time;
+  const maxR = fill ? 0.0042 : 0.0072;
   let count = 0;
-  const maxR = fill ? 0.004 : 0.007;
-  const radius = (drop: Drop) => Math.min(Math.max(0.7 * Math.sqrt(drop.q / (Math.PI * Math.max(speed(drop, time), 0.05))), 0.0007), maxR);
-  for (let i = state.drops.length - 1; i >= 0 && count < RINGS - 1; i--) {
-    const drop = state.drops[i];
-    const r = rings[count];
-    at(drop, time, r.p);
-    const a = Math.max(time - drop.t, 0);
-    r.v.set(drop.vx, drop.vy - G * a, drop.vz);
-    r.r = radius(drop);
+  let beads = 0;
+  const landY = fill ? state.surface : state.wet.y;
+  let broken = false;
+  for (let k = pool.count - 1; k >= 0 && count < RINGS - 1; k--) {
+    const i = (pool.head + k) % CAP;
+    at(i, time, point);
+    velocity(i, time, vel);
+    const speed = Math.max(vel.length(), 0.05);
+    const te = pool.t[i];
+    let r = Math.min(Math.max(0.7 * Math.sqrt(pool.q[i] / (Math.PI * speed)), 0.0007), maxR);
+    r *= 1 + 0.14 * Math.sin(te * 41 + time * 5.3) + 0.06 * Math.sin(te * 97 - time * 8.1);
+    const sway = Math.min((time - te) / 0.12, 1) * (fill ? 0.0011 : 0.0006);
+    point.x += sway * Math.sin(te * 23 + time * 6.1);
+    point.z += sway * Math.cos(te * 19 - time * 4.7);
+    const fall = (pool.y[i] - point.y) / Math.max(pool.y[i] - landY, 0.01);
+    const lower = fill ? fall > 0.95 && r < 0.0024 : fall > 0.7 && r < 0.0034;
+    const tail = !emitting && endAt - te < 0.07;
+    if (lower || tail || broken) {
+      if (lower) broken = true;
+      const step = Math.round(te / STEP);
+      if (fill || step % 2 === 0) beads = placeBead(beads, point, vel, r * (1.15 + 0.2 * Math.sin(te * 311)));
+      continue;
+    }
+    setRing(count, point, vel, r);
     count += 1;
   }
-  if (count > 0 && state.head) {
-    const last = rings[count - 1];
-    const below = at(state.head, time, scratch.b);
-    const floor = fill ? surfaceY(below.x, below.z) : state.wet.y;
-    const k = Math.min(Math.max((last.p.y - floor) / Math.max(last.p.y - below.y, 1e-6), 0), 1);
-    const r = rings[count];
-    r.p.copy(last.p).lerp(below, k);
-    r.v.copy(last.v);
-    r.r = last.r;
+  if (count > 0 && last.on && pool.count && !broken) {
+    const k = count - 1;
+    at(last.index, time, vel);
+    const ly = fill ? surfaceY(vel.x, vel.z) : state.wet.y;
+    const py = ringP[k * 3 + 1];
+    const f = Math.min(Math.max((py - ly) / Math.max(py - vel.y, 1e-6), 0), 1);
+    point.set(ringP[k * 3], py, ringP[k * 3 + 2]).lerp(vel, f);
+    setRing(count, point, scratch.c.set(ringV[k * 3], ringV[k * 3 + 1], ringV[k * 3 + 2]), ringR[k]);
     count += 1;
-  } else if (count > 1) {
-    rings[count - 1].r *= 0.4;
-  }
-  if (count > 1 && !emitting) rings[0].r *= 0.4;
+  } else if (count > 1) ringR[count - 1] *= 0.45;
+  if (count > 1 && !emitting) ringR[0] *= 0.45;
   const side = press && press.kind === 'pour' ? scratch.side.set(-press.dir.z, 0, press.dir.x) : scratch.side.set(1, 0, 0);
-  build(rings.slice(0, count), side);
-  if (state.drops.length === 0 && !emitting) {
-    state.head = null;
+  build(count, side);
+  beads = sprayFrame(now, beads);
+  beads = dripFrame(now, beads);
+  if (state.beadMesh) {
+    state.beadMesh.count = beads;
+    state.beadMesh.instanceMatrix.needsUpdate = true;
+  }
+  state.flowing = pool.count;
+  if (pool.count === 0 && !emitting) {
+    last.on = false;
     if (!press) state.fill = false;
   }
 }
 
-function beadFrame(now: number) {
+function splash(at: Vector3, now: number, floor: number) {
+  for (let n = 0; n < 3; n++) {
+    const i = spray.next;
+    spray.next = (spray.next + 1) % 16;
+    const angle = (now * 0.013 + n * 2.1) % (Math.PI * 2);
+    const speed = 0.12 + 0.1 * ((n * 0.37 + now * 0.0007) % 1);
+    spray.t[i] = now / 1000;
+    spray.x[i] = at.x;
+    spray.y[i] = floor + 0.002;
+    spray.z[i] = at.z;
+    spray.vx[i] = Math.cos(angle) * speed;
+    spray.vz[i] = Math.sin(angle) * speed;
+    spray.vy[i] = 0.35 + 0.25 * ((n * 0.61 + now * 0.0003) % 1);
+    spray.r[i] = 0.0011 + 0.0007 * n;
+    spray.floor[i] = floor;
+    spray.alive[i] = 1;
+  }
+}
+
+function sprayFrame(now: number, slot: number) {
+  const time = now / 1000;
+  for (let i = 0; i < 16; i++) {
+    if (!spray.alive[i]) continue;
+    const a = time - spray.t[i];
+    ring.p.set(spray.x[i] + spray.vx[i] * a, spray.y[i] + spray.vy[i] * a - 0.5 * G * a * a, spray.z[i] + spray.vz[i] * a);
+    if (ring.p.y < spray.floor[i] || a > 0.4) {
+      spray.alive[i] = 0;
+      continue;
+    }
+    slot = placeBead(slot, ring.p, scratch.b.set(spray.vx[i], spray.vy[i] - G * a, spray.vz[i]), spray.r[i]);
+  }
+  return slot;
+}
+
+function dripFrame(now: number, slot: number) {
   const press = state.press;
   const parts = glass.parts;
   const time = now / 1000;
   if (press && parts && press.kind === 'pour') {
     const t = (now - press.start) / 1000;
-    press.drips.forEach((when, index) => {
-      const bead = state.beads[index];
-      if (!bead || bead.alive || bead.land || t < when) return;
+    for (let k = 0; k < 4; k++) {
+      if (drips.alive[k] || drips.done[k] || t < press.drips[k]) continue;
       const lip = lipNow(press, parts.holder, scratch.c);
-      Object.assign(bead, { t: time, x: lip.x, y: lip.y - 0.003, z: lip.z, vx: press.dir.x * 0.04, vy: 0, vz: press.dir.z * 0.04, alive: true, land: 0 });
-      bead.mesh.scale.setScalar(index % 2 ? 0.0024 : 0.003);
-    });
+      drips.t[k] = time;
+      drips.x[k] = lip.x;
+      drips.y[k] = lip.y - 0.003;
+      drips.z[k] = lip.z;
+      drips.vx[k] = press.dir.x * 0.04;
+      drips.vz[k] = press.dir.z * 0.04;
+      drips.alive[k] = 1;
+    }
   }
-  for (const bead of state.beads) {
-    if (!bead.alive) continue;
-    at(bead, time, bead.mesh.position);
-    bead.mesh.visible = true;
-    if (bead.mesh.position.y <= state.wet.y) {
-      bead.alive = false;
-      bead.land = now;
-      bead.mesh.visible = false;
+  for (let k = 0; k < 4; k++) {
+    if (!drips.alive[k]) continue;
+    const a = time - drips.t[k];
+    ring.p.set(drips.x[k] + drips.vx[k] * a, drips.y[k] - 0.5 * G * a * a, drips.z[k] + drips.vz[k] * a);
+    if (ring.p.y <= state.wet.y) {
+      drips.alive[k] = 0;
+      drips.done[k] = 1;
       state.wet.at = now;
       state.wet.peak = Math.min(1, state.wet.peak + 0.03);
       if (!state.dripped) {
         state.dripped = true;
         play('drips');
       }
+      continue;
     }
+    slot = placeBead(slot, ring.p, scratch.b.set(drips.vx[k], -G * a, drips.vz[k]), k % 2 ? 0.0024 : 0.003);
   }
-  if (!press) for (const bead of state.beads) if (!bead.alive) bead.land = 0;
+  return slot;
 }
 
 function wetAmount(now: number) {
@@ -867,6 +1013,7 @@ function wetFrame(now: number) {
 function rippleFrame(step: number) {
   const ripple = glass.ripple;
   const parts = glass.parts;
+  glass.axis.w = state.dip > 1e-4 ? state.dip : 0;
   if (state.ripple <= 1e-5) {
     state.ripple = 0;
     ripple.w = 0;
@@ -878,7 +1025,8 @@ function rippleFrame(step: number) {
   }
   ripple.z += step * 28;
   ripple.w = state.ripple;
-  state.ripple *= Math.exp(-step * (state.drops.length ? 1.5 : 4.5));
+  state.ripple *= Math.exp(-step * (pool.count ? 1.5 : 4.5));
+  state.dip *= Math.exp(-step * (pool.count ? 3 : 7));
 }
 
 const wetCode = {
@@ -915,9 +1063,22 @@ export function soak(gl: { compileAsync: (scene: Object3D, camera: Camera) => Pr
 export function pourFrame(now: number, step: number, gl: { compileAsync: (scene: Object3D, camera: Camera) => Promise<unknown> }) {
   if (things.plant && state.patched !== things.plant && view.camera) soak(gl, view.camera);
   streamFrame(now);
-  beadFrame(now);
   wetFrame(now);
   rippleFrame(step);
+}
+
+export function warmStream(gl: { compileAsync: (scene: Object3D, camera: Camera) => Promise<unknown> }, camera: Camera, group: Object3D) {
+  const mesh = state.stream;
+  const beads = state.beadMesh;
+  if (!mesh || !beads) return;
+  mesh.visible = true;
+  beads.count = 1;
+  void gl.compileAsync(group, camera).catch(() => undefined).finally(() => {
+    if (!pool.count) {
+      mesh.visible = false;
+      beads.count = 0;
+    }
+  });
 }
 
 export function installPour(camera: Camera) {
