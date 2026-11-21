@@ -25,6 +25,10 @@ async function guess(): Promise<{ system: string; arch: Arch; kind: string }> {
   return { system, arch, kind };
 }
 
+function click() {
+  void import('@/lib/audio').then((audio) => audio.shot('click', { gain: 0.45 }));
+}
+
 export function Install() {
   const { install } = content;
   const [system, setSystem] = useState('macos');
@@ -60,7 +64,7 @@ export function Install() {
             return (
               <TabsContent key={item.id} value={item.id} className="flex flex-col items-start gap-5 data-[state=active]:animate-[tip-in_240ms_var(--ease-out)]">
                 <Button asChild size="lg">
-                  <a href={`${install.release}${main.file}`} download>
+                  <a href={`${install.release}${main.file}`} download onClick={click}>
                     <DownloadSimple weight="bold" aria-hidden />
                     {main.label}
                   </a>
@@ -69,14 +73,14 @@ export function Install() {
                   <nav aria-label={install.others} className="flex flex-wrap items-center gap-2.5">
                     {same.map((download) => (
                       <Button key={download.file} asChild variant="quiet" size="sm">
-                        <a href={`${install.release}${download.file}`} download aria-label={download.name}>
+                        <a href={`${install.release}${download.file}`} download aria-label={download.name} onClick={click}>
                           {download.format}
                         </a>
                       </Button>
                     ))}
                     {otherArch && other.length === 1 && (
                       <Button asChild variant="quiet" size="sm">
-                        <a href={`${install.release}${other[0].file}`} download aria-label={other[0].name}>
+                        <a href={`${install.release}${other[0].file}`} download aria-label={other[0].name} onClick={click}>
                           {install.processors[otherArch]}
                         </a>
                       </Button>
