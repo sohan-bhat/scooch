@@ -8,8 +8,65 @@ fn main() -> std::process::ExitCode {
     probe::main()
 }
 
+#[cfg(any(target_os = "linux", test))]
+const TRIES: usize = 3;
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Footing {
+    Proven,
+    Again,
+    Wrong,
+    Unreached,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn footing(tries: usize, reached: bool, held: bool) -> Footing {
+    match (reached, held) {
+        (true, true) => Footing::Proven,
+        (true, false) => Footing::Wrong,
+        (false, _) if tries < TRIES => Footing::Again,
+        (false, _) => Footing::Unreached,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{footing, Footing, TRIES};
+
+    #[test]
+    fn a_release_over_the_desktop_with_the_right_answer_holds() {
+        assert_eq!(footing(1, true, true), Footing::Proven);
+        assert_eq!(footing(TRIES, true, true), Footing::Proven);
+    }
+
+    #[test]
+    fn a_wrong_answer_after_a_release_elsewhere_is_tried_again() {
+        assert_eq!(footing(1, false, false), Footing::Again);
+        assert_eq!(footing(TRIES - 1, false, false), Footing::Again);
+    }
+
+    #[test]
+    fn a_right_answer_after_a_release_elsewhere_proves_nothing() {
+        assert_eq!(footing(1, false, true), Footing::Again);
+        assert_eq!(footing(TRIES, false, true), Footing::Unreached);
+    }
+
+    #[test]
+    fn three_tries_that_never_reach_the_desktop_fail_as_unreached() {
+        assert_eq!(footing(TRIES, false, false), Footing::Unreached);
+    }
+
+    #[test]
+    fn a_wrong_answer_over_the_desktop_fails_on_any_try() {
+        assert_eq!(footing(1, true, false), Footing::Wrong);
+        assert_eq!(footing(TRIES, true, false), Footing::Wrong);
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod probe {
+    use super::{footing, Footing, TRIES};
     use anyhow::{anyhow, bail, Context, Result};
     use scooch::platform::linux::parse::desktop::{Kind, Session};
     use scooch::platform::linux::parse::geometry::{intersect, Insets};
@@ -1293,14 +1350,46 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         (guessed, sets, after == before)
     }
 
-    fn untouched(p: &mut Probe, name: &str, (guessed, sets, unchanged): (bool, usize, bool), moves: bool) {
+    fn untouched(name: &str, (guessed, sets, unchanged): (bool, usize, bool), moves: bool) -> Option<String> {
         if guessed {
-            p.fail(format!("the daemon predicted the {name}, which it must never do"));
+            Some(format!("the daemon predicted the {name}, which it must never do"))
         } else if unchanged && sets != 0 {
-            p.fail(format!("the {name} changed no place and yet the daemon set the wallpaper {sets} times"));
+            Some(format!("the {name} changed no place and yet the daemon set the wallpaper {sets} times"))
         } else if !unchanged && !moves {
-            p.fail(format!("the {name} changed the places, where it must change nothing"));
+            Some(format!("the {name} changed the places, where it must change nothing"))
+        } else {
+            None
         }
+    }
+
+    fn stamps_seen(bench: &Bench) -> usize {
+        bench.stamps.lock().map(|list| list.len()).unwrap_or(0)
+    }
+
+    fn over_desktop_since(bench: &Bench, mark: usize) -> bool {
+        bench.stamps.lock().is_ok_and(|list| list.iter().skip(mark).any(|(_, which)| *which == "xinput desktop"))
+    }
+
+    fn footed(p: &mut Probe, name: &str, mut attempt: impl FnMut(&mut Probe, usize) -> Option<(bool, bool)>) -> Option<(Footing, usize)> {
+        for tries in 1..=TRIES {
+            let (reached, held) = attempt(p, tries)?;
+            let step = footing(tries, reached, held);
+            let next = match step {
+                Footing::Proven => "the check holds",
+                Footing::Wrong => "the daemon's answer is wrong",
+                Footing::Again => "the check has not run and the probe tries again",
+                Footing::Unreached => "the desktop was never reached",
+            };
+            p.line(format!("    - {name}, try {tries} of {TRIES}: the probe saw its release over the desktop {reached}, the daemon answered as it must {held}, so {next}"));
+            if step != Footing::Again {
+                return Some((step, tries));
+            }
+        }
+        None
+    }
+
+    fn unreached(name: &str) -> String {
+        format!("{name} never ended over the desktop in {TRIES} tries, so the daemon was not judged on it")
     }
 
     fn specials(p: &mut Probe, bench: &Bench, point: (f32, f32), at: &dyn Fn(f32, f32) -> (i16, i16)) {
@@ -1318,17 +1407,36 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             drag(from, onto)?;
             Ok(format!("the probe icon from {},{} onto {} at {},{}", from.0, from.1, PROBES[2].0, onto.0, onto.1))
         });
-        let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
-        let _ = clicks(&[from]);
-        let control = special(p, bench, "drag after a Control click", || {
-            control_click(onto)?;
-            drag(from, free)?;
-            Ok(format!("a Control click on the icon at {},{}, then the probe icon from {},{} to {},{}", onto.0, onto.1, from.0, from.1, free.0, free.1))
+        let (mut start, mut failure, mut guessed) = (from, None, None);
+        let control = footed(p, "drag after a Control click", |p, _| {
+            let (from, free) = (start, farther(start, [at(0.5, 0.5), at(0.35, 0.55)]));
+            let before = places(bench.linux);
+            let _ = clicks(&[from]);
+            let mark = std::cell::Cell::new(stamps_seen(bench));
+            let seen = special(p, bench, "drag after a Control click", || {
+                control_click(onto)?;
+                mark.set(stamps_seen(bench));
+                drag(from, free)?;
+                Ok(format!("a Control click on the icon at {},{}, then the probe icon from {},{} to {},{}", onto.0, onto.1, from.0, from.1, free.0, free.1))
+            });
+            let _ = clicks(&[at(0.92, 0.92)]);
+            let now = places(bench.linux);
+            if now != before {
+                start = nearest(&now, (f32::from(free.0) / scale, f32::from(free.1) / scale)).map_or(from, |icon| grab(&icon, scale));
+            }
+            failure = untouched("drag after a Control click", seen, true);
+            if seen.0 {
+                guessed.clone_from(&failure);
+            }
+            Some((over_desktop_since(bench, mark.get()), failure.is_none()))
         });
-        let _ = clicks(&[at(0.92, 0.92)]);
-        let now = places(bench.linux);
-        let Some(icon) = nearest(&now, (f32::from(free.0) / scale, f32::from(free.1) / scale)) else { return };
-        let from = grab(&icon, scale);
+        match (guessed, control) {
+            (Some(guess), _) => p.fail(guess),
+            (None, Some((Footing::Wrong, tries))) => p.fail(format!("{}, with its release over the desktop on try {tries}", failure.unwrap_or_default())),
+            (None, Some((Footing::Unreached, _))) => p.fail(unreached("the drag after a Control click")),
+            _ => {}
+        }
+        let from = start;
         let _ = clicks(&[from]);
         let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
         let escape = special(p, bench, "drag ended with Escape", || {
@@ -1336,8 +1444,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             Ok(format!("the probe icon from {},{} toward {},{}, Escape before the release", from.0, from.1, free.0, free.1))
         });
         let _ = clicks(&[at(0.92, 0.92)]);
-        untouched(p, "drag after a Control click", control, true);
-        untouched(p, "drag ended with Escape", escape, false);
+        if let Some(failure) = untouched("drag ended with Escape", escape, false) {
+            p.fail(failure);
+        }
     }
 
     fn plasma_boards(linux: &Linux) -> Option<Vec<kde::Board>> {
@@ -1483,29 +1592,39 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         let lines = log_lines(&bench.log);
         p.line(format!("  - drop.log lines about keys while the keys went elsewhere {:?}", key_lines(lines.get(mark..).unwrap_or_default())));
-        let _ = clicks(&[at(0.92, 0.92)]);
-        let on_desktop = desktop_active().unwrap_or(false);
-        let before = places(bench.linux);
-        let icon = tracked.and_then(|point| nearest(&before, point))?;
-        let from = grab(&icon, bench.scale);
-        let to = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
-        let mark = log_lines(&bench.log).len();
-        let typed = special(p, bench, "a drag after Shift went down with the desktop active", || {
-            tap_shift()?;
-            drag(from, to)?;
-            Ok(format!("Shift pressed and let go with the desktop the active window {on_desktop}, then the probe icon from {},{} to {},{}", from.0, from.1, to.0, to.1))
+        let (mut tracked, mut predicted, mut why) = (tracked, false, String::new());
+        let step = footed(p, "a drag after Shift went down with the desktop active", |p, _| {
+            let _ = clicks(&[at(0.92, 0.92)]);
+            let on_desktop = desktop_active().unwrap_or(false);
+            let before = places(bench.linux);
+            let icon = tracked.and_then(|point| nearest(&before, point))?;
+            let from = grab(&icon, bench.scale);
+            let to = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
+            let mark = log_lines(&bench.log).len();
+            let stamp = std::cell::Cell::new(stamps_seen(bench));
+            let typed = special(p, bench, "a drag after Shift went down with the desktop active", || {
+                tap_shift()?;
+                stamp.set(stamps_seen(bench));
+                drag(from, to)?;
+                Ok(format!("Shift pressed and let go with the desktop the active window {on_desktop}, then the probe icon from {},{} to {},{}", from.0, from.1, to.0, to.1))
+            });
+            let lines = log_lines(&bench.log);
+            let fresh = lines.get(mark..).unwrap_or_default();
+            p.line(format!("  - drop.log lines about keys around that drag {:?}", key_lines(fresh)));
+            why = unguessed(fresh);
+            predicted |= typed.0;
+            let after = places(bench.linux);
+            tracked = after.iter().find(|rect| !before.contains(rect)).map(center).or(tracked);
+            Some((on_desktop && over_desktop_since(bench, stamp.get()), !typed.0 && why.contains("the selection may hold more than one icon")))
         });
-        let lines = log_lines(&bench.log);
-        let fresh = lines.get(mark..).unwrap_or_default();
-        p.line(format!("  - drop.log lines about keys around that drag {:?}", key_lines(fresh)));
-        let why = unguessed(fresh);
-        if typed.0 {
-            p.fail("the daemon predicted a drag after a key went down on the active desktop, where the selection may hold more than one icon");
-        } else if on_desktop && !why.contains("the selection may hold more than one icon") {
-            p.fail(format!("a key on the active desktop did not make the selection unknown to the daemon{why}"));
+        match (predicted, step) {
+            (true, _) => p.fail("the daemon predicted a drag after a key went down on the active desktop, where the selection may hold more than one icon"),
+            (false, Some((Footing::Wrong, tries))) => p.fail(format!("a key on the active desktop did not make the selection unknown to the daemon{why}, with the desktop active and the release over the desktop on try {tries}")),
+            (false, Some((Footing::Unreached, _))) => p.fail(format!("the drag after a key never had the desktop active and its release over the desktop in {TRIES} tries, so the daemon was not judged on a key on the active desktop")),
+            _ => {}
         }
-        let after = places(bench.linux);
-        after.iter().find(|rect| !before.contains(rect)).map(center).or(tracked)
+        step?;
+        tracked
     }
 
     fn walked(grid: &kde_rules::Grid, from: i64, start: i64) -> Option<i64> {
@@ -1583,87 +1702,127 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         ((point.0 * scale) as i16, (point.1 * scale) as i16)
     }
 
-    fn plasma_specials(p: &mut Probe, bench: &Bench, point: (f32, f32), at: &dyn Fn(f32, f32) -> (i16, i16)) {
+    fn learning_drag(p: &mut Probe, bench: &Bench, from: (i16, i16), at: &dyn Fn(f32, f32) -> (i16, i16)) -> ((i16, i16), bool) {
         let scale = bench.scale;
-        let Some(icon) = nearest(&places(bench.linux), point) else { return };
-        let from = grab(&icon, scale);
-        let press = (f32::from(from.0) / scale, f32::from(from.1) / scale);
-        let Some(boards) = plasma_boards(bench.linux) else {
-            p.fail("Plasma's grid could not be read for the drop on a taken cell");
-            return;
-        };
-        let Some((spot, landing, walk)) = taken_drop(&boards, press, scale) else {
-            p.fail("no release point lands the probe icon on a taken cell with a free cell under the pointer");
-            return;
-        };
-        let onto = physical_point(spot, scale);
-        let before = places(bench.linux);
-        let mark = log_lines(&bench.log).len();
-        let released = std::cell::Cell::new(wall());
-        let taken = special(p, bench, "a drop whose landing cell is taken, which gives no guess and follows the save", || {
-            drag(from, onto)?;
-            released.set(wall());
-            Ok(format!("the probe icon from {},{} to {},{}, where Plasma's rule lands it on the taken cell {landing} and walks it on to cell {walk}", from.0, from.1, onto.0, onto.1))
-        });
-        let fresh = log_lines(&bench.log);
-        let sets = set_times(fresh.get(mark..).unwrap_or_default(), released.get());
-        let why = unguessed(fresh.get(mark..).unwrap_or_default());
-        if taken.0 {
-            p.fail("the daemon predicted a drop whose landing cell is taken, which it must never do");
-        } else if !why.contains("the landing cell is taken") {
-            p.fail(format!("the drop on a taken cell was not refused for its taken cell{why}"));
-        } else if taken.2 {
-            p.fail("the drop on a taken cell moved no icon, so it could not show the save being followed");
-        } else if !sets.first().is_some_and(|first| *first >= 1500.0) {
-            p.fail(format!("the drop on a taken cell set the wallpaper at {sets:?} ms after the drop, where it must follow Plasma's save at about 2 s"));
-        }
-        let now = places(bench.linux);
-        let Some(icon) = now.iter().find(|rect| !before.contains(rect)).copied().or_else(|| nearest(&now, point)) else { return };
-        let from = grab(&icon, scale);
         let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
+        let before = places(bench.linux);
+        let stamp = stamps_seen(bench);
         special(p, bench, "a plain drag so the daemon learns the selection again", || {
             drag(from, free)?;
             Ok(format!("the probe icon from {},{} to {},{}", from.0, from.1, free.0, free.1))
         });
         let now = places(bench.linux);
-        let Some(icon) = nearest(&now, (f32::from(free.0) / scale, f32::from(free.1) / scale)) else { return };
-        let from = grab(&icon, scale);
-        let press = (f32::from(from.0) / scale, f32::from(from.1) / scale);
-        let plan = plasma_boards(bench.linux).and_then(|boards| hook_plan(&boards, press).map(|plan| (boards, plan)));
-        let Some((boards, (jump, release, hooked, straight))) = plan else {
-            p.fail("no release point gives the hook drag a landing apart from a straight drag");
-            return;
-        };
-        let Ok((board, _)) = plasma_board(&boards, press) else { return };
-        let (hooked_rect, straight_rect) = (rounded(&board.grid.icon(hooked)), rounded(&board.grid.icon(straight)));
-        let (jump_at, release_at) = (physical_point(jump, scale), physical_point(release, scale));
-        let mark = log_lines(&bench.log).len();
-        let released = std::cell::Cell::new(wall());
-        let hook = special(p, bench, "a hook drag whose first motion leaves the icon's row, which the prediction follows", || {
-            hook_drag(from, jump_at, release_at)?;
-            released.set(wall());
-            Ok(format!("the probe icon pressed at {},{}, first moved to {},{} in the row above, then let go at {},{}, where Plasma, which takes the drag from that first motion, lands it in cell {hooked} and a drag taken from the press would land in cell {straight}", from.0, from.1, jump_at.0, jump_at.1, release_at.0, release_at.1))
+        let moved = if now == before { from } else { nearest(&now, (f32::from(free.0) / scale, f32::from(free.1) / scale)).map_or(from, |icon| grab(&icon, scale)) };
+        (moved, over_desktop_since(bench, stamp))
+    }
+
+    fn moved_from(before: &Rects, now: &Rects, from: (i16, i16), scale: f32) -> (i16, i16) {
+        now.iter().find(|rect| !before.contains(rect)).map_or(from, |icon| grab(icon, scale))
+    }
+
+    fn plasma_specials(p: &mut Probe, bench: &Bench, point: (f32, f32), at: &dyn Fn(f32, f32) -> (i16, i16)) {
+        let scale = bench.scale;
+        let Some(icon) = nearest(&places(bench.linux), point) else { return };
+        let mut start = grab(&icon, scale);
+        let (mut predicted, mut seen, mut why, mut sets) = (false, (false, 0, true), String::new(), Vec::new());
+        let taken = footed(p, "a drop whose landing cell is taken", |p, tries| {
+            let learned = if tries > 1 {
+                let (moved, reached) = learning_drag(p, bench, start, at);
+                start = moved;
+                reached
+            } else {
+                true
+            };
+            let from = start;
+            let press = (f32::from(from.0) / scale, f32::from(from.1) / scale);
+            let Some(boards) = plasma_boards(bench.linux) else {
+                p.fail("Plasma's grid could not be read for the drop on a taken cell");
+                return None;
+            };
+            let Some((spot, landing, walk)) = taken_drop(&boards, press, scale) else {
+                p.fail("no release point lands the probe icon on a taken cell with a free cell under the pointer");
+                return None;
+            };
+            let onto = physical_point(spot, scale);
+            let before = places(bench.linux);
+            let mark = log_lines(&bench.log).len();
+            let stamp = stamps_seen(bench);
+            let released = std::cell::Cell::new(wall());
+            seen = special(p, bench, "a drop whose landing cell is taken, which gives no guess and follows the save", || {
+                drag(from, onto)?;
+                released.set(wall());
+                Ok(format!("the probe icon from {},{} to {},{}, where Plasma's rule lands it on the taken cell {landing} and walks it on to cell {walk}", from.0, from.1, onto.0, onto.1))
+            });
+            let fresh = log_lines(&bench.log);
+            sets = set_times(fresh.get(mark..).unwrap_or_default(), released.get());
+            why = unguessed(fresh.get(mark..).unwrap_or_default());
+            predicted |= seen.0;
+            start = moved_from(&before, &places(bench.linux), from, scale);
+            Some((learned && over_desktop_since(bench, stamp), !seen.0 && why.contains("the landing cell is taken")))
         });
-        let fresh = log_lines(&bench.log);
-        let fresh = fresh.get(mark..).unwrap_or_default();
-        let sets = set_times(fresh, released.get());
-        let (agreed, began) = (fresh.iter().any(|line| line.contains("predicted drop agreed")), fresh.iter().filter(|line| line.contains(" drop drag began at ")).cloned().collect::<Vec<_>>());
-        let now = places(bench.linux);
-        let (landed, astray) = (now.contains(&hooked_rect), now.contains(&straight_rect));
-        p.line(format!("    - drag starts seen {began:?}, wallpaper sets at {sets:?} ms after the drop, the net agreed {agreed}, the icon in the hooked cell {landed} and in the straight cell {astray}"));
-        if !hook.0 || !agreed || !landed || sets.len() != 1 || !sets.first().is_some_and(|first| *first < KDE_DROP_BAR) {
-            p.fail(format!("the hook drag was not predicted where Plasma put it, guessed {}, agreed {agreed}, in the hooked cell {landed}, sets {sets:?} ms", hook.0));
+        let Some((step, tries)) = taken else { return };
+        if predicted {
+            p.fail("the daemon predicted a drop whose landing cell is taken, which it must never do");
+        } else if step == Footing::Wrong {
+            p.fail(format!("the drop on a taken cell was not refused for its taken cell{why}, with its release over the desktop on try {tries}"));
+        } else if step == Footing::Unreached {
+            p.fail(unreached("the drop on a taken cell"));
+        } else if seen.2 {
+            p.fail("the drop on a taken cell moved no icon, so it could not show the save being followed");
+        } else if !sets.first().is_some_and(|first| *first >= 1500.0) {
+            p.fail(format!("the drop on a taken cell set the wallpaper at {sets:?} ms after the drop, where it must follow Plasma's save at about 2 s"));
+        }
+        let mut missed = String::new();
+        let hook = footed(p, "a hook drag whose first motion leaves the icon's row", |p, _| {
+            let (moved, learned) = learning_drag(p, bench, start, at);
+            start = moved;
+            let from = start;
+            let press = (f32::from(from.0) / scale, f32::from(from.1) / scale);
+            let plan = plasma_boards(bench.linux).and_then(|boards| hook_plan(&boards, press).map(|plan| (boards, plan)));
+            let Some((boards, (jump, release, hooked, straight))) = plan else {
+                p.fail("no release point gives the hook drag a landing apart from a straight drag");
+                return None;
+            };
+            let (board, _) = plasma_board(&boards, press).ok()?;
+            let (hooked_rect, straight_rect) = (rounded(&board.grid.icon(hooked)), rounded(&board.grid.icon(straight)));
+            let (jump_at, release_at) = (physical_point(jump, scale), physical_point(release, scale));
+            let before = places(bench.linux);
+            let mark = log_lines(&bench.log).len();
+            let stamp = stamps_seen(bench);
+            let released = std::cell::Cell::new(wall());
+            let guess = special(p, bench, "a hook drag whose first motion leaves the icon's row, which the prediction follows", || {
+                hook_drag(from, jump_at, release_at)?;
+                released.set(wall());
+                Ok(format!("the probe icon pressed at {},{}, first moved to {},{} in the row above, then let go at {},{}, where Plasma, which takes the drag from that first motion, lands it in cell {hooked} and a drag taken from the press would land in cell {straight}", from.0, from.1, jump_at.0, jump_at.1, release_at.0, release_at.1))
+            });
+            let fresh = log_lines(&bench.log);
+            let fresh = fresh.get(mark..).unwrap_or_default();
+            let sets = set_times(fresh, released.get());
+            let (agreed, began) = (fresh.iter().any(|line| line.contains("predicted drop agreed")), fresh.iter().filter(|line| line.contains(" drop drag began at ")).cloned().collect::<Vec<_>>());
+            let now = places(bench.linux);
+            let (landed, astray) = (now.contains(&hooked_rect), now.contains(&straight_rect));
+            p.line(format!("    - drag starts seen {began:?}, wallpaper sets at {sets:?} ms after the drop, the net agreed {agreed}, the icon in the hooked cell {landed} and in the straight cell {astray}"));
+            missed = format!("guessed {}, agreed {agreed}, in the hooked cell {landed}, sets {sets:?} ms", guess.0);
+            start = moved_from(&before, &now, from, scale);
+            let held = guess.0 && agreed && landed && sets.len() == 1 && sets.first().is_some_and(|first| *first < KDE_DROP_BAR);
+            Some((learned && over_desktop_since(bench, stamp), held))
+        });
+        match hook {
+            Some((Footing::Wrong, tries)) => p.fail(format!("the hook drag was not predicted where Plasma put it, {missed}, with its release over the desktop on try {tries}")),
+            Some((Footing::Unreached, _)) => p.fail(unreached("the hook drag")),
+            None => return,
+            _ => {}
         }
         let _ = clicks(&[at(0.92, 0.92)]);
-        let now = places(bench.linux);
-        let Some(icon) = nearest(&now, center(&hooked_rect)) else { return };
-        let from = grab(&icon, scale);
+        let from = start;
         let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
         let escape = special(p, bench, "drag ended with Escape", || {
             drag_ending(from, free, true)?;
             Ok(format!("the probe icon from {},{} toward {},{}, Escape before the release", from.0, from.1, free.0, free.1))
         });
-        untouched(p, "drag ended with Escape", escape, false);
+        if let Some(failure) = untouched("drag ended with Escape", escape, false) {
+            p.fail(failure);
+        }
     }
 
     fn steady_lines(p: &mut Probe, tally: &mut Tally, plan: &Plan, reads: &[Taken<Rects>], last: &[[i64; 4]], slot: usize) {

@@ -57,7 +57,7 @@ enum Command {
     Scenery,
     #[command(about = "Turn the sliding of your picture on or off")]
     Glide,
-    #[command(about = "Turn on or off moving the picture the moment an icon drops on Xfce")]
+    #[command(about = "Turn on or off moving the picture the moment an icon drops on Xfce or Plasma 5 under X11")]
     Predict,
     #[command(about = "Run in the foreground, which is what the login item does")]
     Watch,
