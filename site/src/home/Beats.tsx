@@ -38,7 +38,7 @@ export function Beats({ refs }: { refs: React.RefObject<HTMLElement[]> }) {
   return (
     <div className="beats page-gutter pointer-events-none absolute inset-0 z-10" data-pending="">
       <div className="relative h-full w-full">
-        <div ref={keep(0)} data-overlay="hero" className={`${overlay} wide:top-[19vh] wide:left-0 wide:w-[min(40vw,36rem)]`}>
+        <div ref={keep(0)} data-overlay="hero" className={`${overlay} wide:top-[19vh] wide:left-0 wide:w-[min(46vw,40rem)]`}>
           <Hero live />
         </div>
         <ol className="sr-only">
