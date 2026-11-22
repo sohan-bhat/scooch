@@ -4787,7 +4787,8 @@ pub mod tests {
         daemon.gather(&signal);
         let ended = Instant::now();
         assert!(ended >= last + SAVE_QUIET, "the tick began {:?} after the last save", ended.saturating_duration_since(last));
-        assert!(ended < first + QUIET, "the saves waited for the settle, {:?}", ended.duration_since(first));
+        assert_eq!(*daemon.saves.lock().unwrap(), Some(last), "the saves were not taken as saves");
+        assert!(daemon.handed.lock().unwrap().is_some(), "the saves took the settle path");
         assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
         assert!(signal.pending.lock().unwrap().last.is_none());
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
@@ -4797,20 +4798,24 @@ pub mod tests {
     #[test]
     fn a_save_skips_the_settle_and_any_other_wake_still_settles() {
         let (daemon, fake) = saved_rig("saves-settle");
-        *fake.saves.lock().unwrap() = vec![Instant::now()];
+        let saved = Instant::now();
+        *fake.saves.lock().unwrap() = vec![saved];
         let signal = Signal::default();
         signal.wake();
-        let started = Instant::now();
+        let before = fake.snapshots.load(Ordering::SeqCst);
         daemon.gather(&signal);
-        assert!(started.elapsed() < Duration::from_millis(200), "the save waited for the settle, {:?}", started.elapsed());
-        assert!(daemon.handed.lock().unwrap().is_some());
+        assert!(Instant::now() >= saved + SAVE_QUIET, "the save was read before its quiet");
+        assert_eq!(*daemon.saves.lock().unwrap(), Some(saved), "the save was not taken as a save");
+        assert!(daemon.handed.lock().unwrap().is_some(), "the save took the settle path");
+        assert_eq!(fake.snapshots.load(Ordering::SeqCst), before + 1);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
         fake.place(vec![corner()]);
+        let woke = Instant::now();
         signal.wake();
-        let started = Instant::now();
         daemon.gather(&signal);
-        assert!(started.elapsed() >= Duration::from_millis(200), "a wake with no new save did not settle, {:?}", started.elapsed());
-        assert!(daemon.handed.lock().unwrap().is_none());
+        assert!(Instant::now() >= woke + QUIET, "a wake with no new save did not settle, gather ended {:?} after it", woke.elapsed());
+        assert!(daemon.handed.lock().unwrap().is_none(), "a wake with no new save was taken at once");
+        assert_eq!(*daemon.saves.lock().unwrap(), Some(saved));
     }
 
     #[test]
