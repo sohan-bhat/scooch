@@ -30,9 +30,119 @@ fn footing(tries: usize, reached: bool, held: bool) -> Footing {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn untaught(plain: &[String], alone: bool) -> Option<&'static str> {
+    if !plain.iter().any(|line| line.contains("predicted drop agreed")) {
+        Some("the daemon showed no guess its net agreed with for the plain drag just before it, so it may not have known the selection or shown its guesses")
+    } else if !alone {
+        Some("the plain drag just before it did not move the probe icon alone with its release over the desktop")
+    } else {
+        None
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn unfooted(plain: &[String], alone: bool, hook: &[String], released: f64, over: bool) -> Option<&'static str> {
+    let keyed = hook.iter().filter(|line| line.contains(" drop key went down")).any(|line| line.split_whitespace().next().and_then(|stamp| stamp.parse::<f64>().ok()).is_none_or(|stamp| stamp <= released));
+    untaught(plain, alone).or(if keyed {
+        Some("a key went down during the drag")
+    } else if !over {
+        Some("its release was not seen over the desktop")
+    } else {
+        None
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Drag {
+    Footed,
+    Late,
+    Shadow,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn footings(drags: &[(bool, bool)], window: usize) -> Vec<Drag> {
+    let mut since: Option<usize> = None;
+    drags
+        .iter()
+        .map(|&(moved, predicted)| {
+            if !moved {
+                since = Some(0);
+                return Drag::Late;
+            }
+            match since {
+                Some(count) if !predicted && count < window => {
+                    since = Some(count + 1);
+                    Drag::Shadow
+                }
+                _ => {
+                    since = None;
+                    Drag::Footed
+                }
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{footing, Footing, TRIES};
+    use super::{footing, footings, unfooted, Drag, Footing, TRIES};
+
+    fn lines(list: &[&str]) -> Vec<String> {
+        list.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn a_hook_after_a_plain_drag_the_daemon_did_not_show_is_not_judged() {
+        let plain = lines(&["1795301513.452 drop not predicted, the selection is unknown"]);
+        let hook = lines(&["1795301516.451 drop drag began at 1914,303"]);
+        let lacking = unfooted(&plain, true, &hook, 1795301517.9, true);
+        assert!(lacking.is_some_and(|why| why.contains("showed no guess")));
+    }
+
+    #[test]
+    fn a_hook_after_a_shown_plain_drag_its_net_agreed_with_is_footed() {
+        let plain = lines(&["1795301492.415 predicted drop agreed with the file"]);
+        let hook = lines(&["1795301516.451 drop drag began at 1914,303", "1795301522.004 drop key went down, desktop active true"]);
+        assert_eq!(unfooted(&plain, true, &hook, 1795301517.9, true), None);
+        assert!(unfooted(&plain, false, &hook, 1795301517.9, true).is_some_and(|why| why.contains("alone")));
+        assert!(unfooted(&plain, true, &hook, 1795301517.9, false).is_some_and(|why| why.contains("release")));
+    }
+
+    #[test]
+    fn a_key_before_the_release_leaves_the_hook_without_footing() {
+        let plain = lines(&["1795301492.415 predicted drop agreed with the file"]);
+        let hook = lines(&["1795301517.100 drop key went down, desktop active true"]);
+        assert_eq!(unfooted(&plain, true, &hook, 1795301517.9, true), Some("a key went down during the drag"));
+    }
+
+    #[test]
+    fn the_failed_run_reaches_ten_single_drags_with_footing_by_the_fifteenth() {
+        let mut drags = vec![(true, false)];
+        drags.extend([(true, true); 7]);
+        drags.push((false, true));
+        drags.extend([(true, false); 4]);
+        drags.extend([(true, true); 2]);
+        let marks = footings(&drags, 4);
+        assert_eq!(marks[8], Drag::Late);
+        assert_eq!(&marks[9..13], &[Drag::Shadow; 4]);
+        assert_eq!(marks.iter().filter(|mark| **mark == Drag::Footed).count(), 10);
+    }
+
+    #[test]
+    fn a_daemon_that_stays_off_after_a_late_save_is_counted_after_the_window() {
+        let mut drags = vec![(false, true)];
+        drags.extend([(true, false); 6]);
+        assert_eq!(footings(&drags, 4), vec![Drag::Late, Drag::Shadow, Drag::Shadow, Drag::Shadow, Drag::Shadow, Drag::Footed, Drag::Footed]);
+    }
+
+    #[test]
+    fn a_daemon_that_stops_guessing_with_every_save_seen_is_counted() {
+        let drags = [(true, true), (true, false), (true, false), (true, false)];
+        assert_eq!(footings(&drags, 4), vec![Drag::Footed; 4]);
+        assert_eq!(footings(&[(false, false), (true, true), (true, false)], 4), vec![Drag::Late, Drag::Footed, Drag::Footed]);
+    }
 
     #[test]
     fn a_release_over_the_desktop_with_the_right_answer_holds() {
@@ -66,7 +176,7 @@ mod tests {
 
 #[cfg(target_os = "linux")]
 mod probe {
-    use super::{footing, Footing, TRIES};
+    use super::{footing, footings, unfooted, untaught, Drag, Footing, TRIES};
     use anyhow::{anyhow, bail, Context, Result};
     use scooch::platform::linux::parse::desktop::{Kind, Session};
     use scooch::platform::linux::parse::geometry::{intersect, Insets};
@@ -1025,6 +1135,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     const OFFSETS: [u64; 16] = [0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600, 2000];
     const STEADY: Duration = Duration::from_millis(400);
     const TRUTH: Duration = Duration::from_millis(2500);
+    const SINGLES: usize = 10;
+    const MOST_SINGLES: usize = 16;
+    const WINDOW: usize = scooch::platform::linux::parse::drops::SHADOWS + 1;
     const LIVE_UNTIL: Duration = Duration::from_millis(2300);
     const PREFIX: &str = "scooch-probe";
 
@@ -1095,6 +1208,16 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         held: [usize; 2],
         guessed_sets: Vec<f64>,
         live_firsts: Vec<u128>,
+        made: [usize; 2],
+        judged: [usize; 2],
+        singles: Vec<(bool, bool)>,
+    }
+
+    fn enough(tally: &Tally, predicts: bool, made: usize) -> bool {
+        if !predicts {
+            return made >= SINGLES;
+        }
+        made >= MOST_SINGLES || footings(&tally.singles, WINDOW).iter().filter(|mark| **mark == Drag::Footed).count() >= SINGLES
     }
 
     fn after_drop(p: &mut Probe) -> Result<()> {
@@ -1137,10 +1260,13 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         let bench = Bench { linux: &linux, log: p.out.join("drop.log"), stamps, live, lattice, steady, scale, plasma5, pid: process };
         let back = if steady { ", back to back for the first 400 ms on this desktop" } else { "" };
-        p.line(format!("- ten drags of the probe icon, each to whichever of two spots lies farther from it, then five drags of the same three icons from the leftmost column, selected by three control clicks after a click on empty desktop, each by XTest, with reads at 0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600 and 2000 ms after the drop{back}, against the places read 2.5 s after the drop, each read printed as began+took:moved places it shows"));
+        p.line(format!("- ten drags of the probe icon, or where the daemon predicts up to sixteen until ten have footing, each to whichever of two spots lies farther from it, then five drags of the same three icons from the leftmost column, selected by three control clicks after a click on empty desktop, each by XTest, with reads at 0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600 and 2000 ms after the drop{back}, against the places read 2.5 s after the drop, each read printed as began+took:moved places it shows"));
         let mut tally = Tally::default();
         let mut tracked = probe_icon(p, &linux).ok().map(|rect| ((rect.x + rect.w / 2.0) / scale, (rect.y + rect.h / 2.0) / scale));
-        for index in 0..10 {
+        for index in 0..MOST_SINGLES {
+            if enough(&tally, bench.predicts(), index) {
+                break;
+            }
             let before = places(&linux);
             let Some(icon) = tracked.and_then(|point| nearest(&before, point)) else {
                 p.line(format!("  - single drag {}: the probe icon could not be found", index + 1));
@@ -1212,6 +1338,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let last = places(bench.linux);
         let live_last = bench.live.as_ref().map(Live::read);
         let changed: Rects = last.iter().filter(|rect| !plan.before.contains(rect)).copied().collect();
+        tally.made[slot] += 1;
         let first_final = reads.iter().find(|taken| !changed.is_empty() && taken.seen == last).map(|taken| taken.began.as_millis());
         if !changed.is_empty() && reads.first().is_some_and(|taken| taken.seen == last) {
             tally.whole[slot] += 1;
@@ -1264,9 +1391,20 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             if guessed && slot == 0 {
                 tally.guessed_sets.extend(set);
             }
-            tally.held[slot] += usize::from(verdict == "agreed");
+            let moved = !changed.is_empty();
+            tally.judged[slot] += usize::from(guessed && moved);
+            tally.held[slot] += usize::from(verdict == "agreed" && moved);
             let why = unguessed(lines.get(log_mark..).unwrap_or_default());
             p.line(format!("    - the daemon predicted a move {guessed}{why}, its net found {verdict}"));
+            if slot == 0 {
+                tally.singles.push((moved, guessed));
+                let counted = match footings(&tally.singles, WINDOW).last() {
+                    Some(Drag::Late) => "no place moved by 2.5 s after the drop, so the save came late or never and this drag is not counted",
+                    Some(Drag::Shadow) => "the daemon did not predict it while it came back after a drop whose save came late, so it is not counted",
+                    _ => "the probe saw the save, so this drag is counted",
+                };
+                p.line(format!("    - footing: {counted}"));
+            }
         }
         if bench.steady {
             steady_lines(p, tally, &plan, &reads, &last, slot);
@@ -1378,9 +1516,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 Footing::Proven => "the check holds",
                 Footing::Wrong => "the daemon's answer is wrong",
                 Footing::Again => "the check has not run and the probe tries again",
-                Footing::Unreached => "the desktop was never reached",
+                Footing::Unreached => "the footing was never proven",
             };
-            p.line(format!("    - {name}, try {tries} of {TRIES}: the probe saw its release over the desktop {reached}, the daemon answered as it must {held}, so {next}"));
+            p.line(format!("    - {name}, try {tries} of {TRIES}: its footing proven {reached}, the daemon answered as it must {held}, so {next}"));
             if step != Footing::Again {
                 return Some((step, tries));
             }
@@ -1702,18 +1840,28 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         ((point.0 * scale) as i16, (point.1 * scale) as i16)
     }
 
-    fn learning_drag(p: &mut Probe, bench: &Bench, from: (i16, i16), at: &dyn Fn(f32, f32) -> (i16, i16)) -> ((i16, i16), bool) {
+    struct Plain {
+        at: (i16, i16),
+        over: bool,
+        alone: bool,
+        lines: Vec<String>,
+    }
+
+    fn learning_drag(p: &mut Probe, bench: &Bench, from: (i16, i16), at: &dyn Fn(f32, f32) -> (i16, i16)) -> Plain {
         let scale = bench.scale;
         let free = farther(from, [at(0.5, 0.5), at(0.35, 0.55)]);
         let before = places(bench.linux);
         let stamp = stamps_seen(bench);
+        let mark = log_lines(&bench.log).len();
         special(p, bench, "a plain drag so the daemon learns the selection again", || {
             drag(from, free)?;
             Ok(format!("the probe icon from {},{} to {},{}", from.0, from.1, free.0, free.1))
         });
         let now = places(bench.linux);
+        let lines = log_lines(&bench.log).get(mark..).map(<[String]>::to_vec).unwrap_or_default();
+        let alone = now.iter().filter(|rect| !before.contains(rect)).count() == 1 && before.iter().filter(|rect| !now.contains(rect)).count() == 1;
         let moved = if now == before { from } else { nearest(&now, (f32::from(free.0) / scale, f32::from(free.1) / scale)).map_or(from, |icon| grab(&icon, scale)) };
-        (moved, over_desktop_since(bench, stamp))
+        Plain { at: moved, over: over_desktop_since(bench, stamp), alone, lines }
     }
 
     fn moved_from(before: &Rects, now: &Rects, from: (i16, i16), scale: f32) -> (i16, i16) {
@@ -1727,9 +1875,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let (mut predicted, mut seen, mut why, mut sets) = (false, (false, 0, true), String::new(), Vec::new());
         let taken = footed(p, "a drop whose landing cell is taken", |p, tries| {
             let learned = if tries > 1 {
-                let (moved, reached) = learning_drag(p, bench, start, at);
-                start = moved;
-                reached
+                let plain = learning_drag(p, bench, start, at);
+                start = plain.at;
+                plain.over
             } else {
                 true
             };
@@ -1772,10 +1920,16 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         } else if !sets.first().is_some_and(|first| *first >= 1500.0) {
             p.fail(format!("the drop on a taken cell set the wallpaper at {sets:?} ms after the drop, where it must follow Plasma's save at about 2 s"));
         }
-        let mut missed = String::new();
+        let (mut missed, mut lacked) = (String::new(), "");
         let hook = footed(p, "a hook drag whose first motion leaves the icon's row", |p, _| {
-            let (moved, learned) = learning_drag(p, bench, start, at);
-            start = moved;
+            let mut plain = learning_drag(p, bench, start, at);
+            for _ in 0..WINDOW {
+                if untaught(&plain.lines, plain.alone && plain.over).is_none() {
+                    break;
+                }
+                plain = learning_drag(p, bench, plain.at, at);
+            }
+            start = plain.at;
             let from = start;
             let press = (f32::from(from.0) / scale, f32::from(from.1) / scale);
             let plan = plasma_boards(bench.linux).and_then(|boards| hook_plan(&boards, press).map(|plan| (boards, plan)));
@@ -1805,11 +1959,14 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             missed = format!("guessed {}, agreed {agreed}, in the hooked cell {landed}, sets {sets:?} ms", guess.0);
             start = moved_from(&before, &now, from, scale);
             let held = guess.0 && agreed && landed && sets.len() == 1 && sets.first().is_some_and(|first| *first < KDE_DROP_BAR);
-            Some((learned && over_desktop_since(bench, stamp), held))
+            let lacking = unfooted(&plain.lines, plain.alone && plain.over, fresh, released.get(), over_desktop_since(bench, stamp));
+            lacked = lacking.unwrap_or_default();
+            p.line(format!("    - footing: {}", lacking.unwrap_or("the plain drag just before it had a shown guess its net agreed with and moved the probe icon alone, no key went down during the hook drag and its release was over the desktop")));
+            Some((lacking.is_none(), held))
         });
         match hook {
-            Some((Footing::Wrong, tries)) => p.fail(format!("the hook drag was not predicted where Plasma put it, {missed}, with its release over the desktop on try {tries}")),
-            Some((Footing::Unreached, _)) => p.fail(unreached("the hook drag")),
+            Some((Footing::Wrong, tries)) => p.fail(format!("the hook drag was not predicted where Plasma put it, {missed}, with its footing proven on try {tries}")),
+            Some((Footing::Unreached, _)) => p.fail(format!("the hook drag never had its footing in {TRIES} tries, the last since {lacked}, so the daemon was not judged on it")),
             None => return,
             _ => {}
         }
@@ -1854,7 +2011,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn summary(p: &mut Probe, bench: &Bench, tally: &Tally) {
-        p.line(format!("- the first read after the drop showed the whole move in {} of 10 single drags and in {} of 5 group drags", tally.whole[0], tally.whole[1]));
+        p.line(format!("- the first read after the drop showed the whole move in {} of {} single drags and in {} of {} group drags", tally.whole[0], tally.made[0], tally.whole[1], tally.made[1]));
         p.line(format!("- the first final read began at {} ms in single drags and at {} ms in group drags", sorted(&tally.firsts[0]), sorted(&tally.firsts[1])));
         p.line(format!(
             "- XInput2 saw the release at a median {} ms after the drop in {} drags and over the desktop in {}, the 10 ms poll at a median {} ms in {} drags",
@@ -1864,24 +2021,33 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             shown_ms(median(&tally.poll)),
             tally.poll.len()
         ));
-        p.line(format!("- the daemon set the wallpaper at a median {} ms after the drop, in {} of 15 drags", shown_ms(median(&tally.sets)), tally.sets.len()));
+        p.line(format!("- the daemon set the wallpaper at a median {} ms after the drop, in {} of {} drags", shown_ms(median(&tally.sets)), tally.sets.len(), tally.made[0] + tally.made[1]));
         if let Some(why) = quick_limit(p) {
             set_limit(p, &format!("section 7b on {why}"), &tally.sets, 600.0);
         }
         if bench.predicts() {
             let (name, limit) = if bench.plasma5 { ("Plasma 5", KDE_DROP_BAR) } else { ("XFCE", if bench.scale > 1.0 { 900.0 } else { 700.0 }) };
             set_limit(p, &format!("the predicted single drags of section 7b on {name}"), &tally.guessed_sets, limit);
-            let (guessed, held) = (tally.guessed[0] + tally.guessed[1], tally.held[0] + tally.held[1]);
-            if held < guessed {
-                p.fail(format!("{} of {guessed} guesses of a move on {name} did not agree with the file", guessed - held));
+            let (guessed, judged, held) = (tally.guessed[0] + tally.guessed[1], tally.judged[0] + tally.judged[1], tally.held[0] + tally.held[1]);
+            p.line(format!("- the net is judged on the {judged} of {guessed} guesses whose drop moved a place within 2.5 s, the others had no save to judge by"));
+            if held < judged {
+                p.fail(format!("{} of {judged} guesses of a move on {name} did not agree with the file", judged - held));
             }
-            if tally.guessed[0] < 6 {
-                p.fail(format!("the daemon predicted only {} of 10 single drags on {name}, where at least 6 must be predicted", tally.guessed[0]));
+            let marks = footings(&tally.singles, WINDOW);
+            let count = |want: Drag| marks.iter().filter(|mark| **mark == want).count();
+            let (footed, late, shadow) = (count(Drag::Footed), count(Drag::Late), count(Drag::Shadow));
+            let predicted = tally.singles.iter().zip(&marks).filter(|((_, guessed), mark)| *guessed && **mark == Drag::Footed).count();
+            let others = format!("{late} moved no place by 2.5 s after the drop and {shadow} came unpredicted while the daemon came back after such a drop");
+            p.line(format!("- {footed} of {} single drags had footing, {others}, and the daemon predicted {predicted} of the {footed}", tally.singles.len()));
+            if footed < SINGLES {
+                p.fail(format!("only {footed} of {} single drags on {name} had footing, where {SINGLES} must, {others}", tally.singles.len()));
+            } else if predicted < 6 {
+                p.fail(format!("the daemon predicted only {predicted} of {footed} single drags with footing on {name}, where at least 6 must be predicted"));
             }
         }
         if bench.steady {
             let costs: Vec<f64> = tally.cost.iter().map(|cost| *cost as f64).collect();
-            p.line(format!("- a read showed the move partly done in {} of 10 single drags and in {} of 5 group drags", tally.partly[0], tally.partly[1]));
+            p.line(format!("- a read showed the move partly done in {} of {} single drags and in {} of {} group drags", tally.partly[0], tally.made[0], tally.partly[1], tally.made[1]));
             p.line(format!(
                 "- the read twice rule had a pair to judge in {} single and {} group drags, went on in {} and {}, with a half done move in {} and {}, its second read cost a median {} ms and at most {} ms",
                 tally.rule[0][0],
@@ -1895,11 +2061,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             ));
         }
         if bench.plasma5 {
-            p.line(format!("- the daemon predicted {} of 10 single drags and {} of 5 group drags, and its net found {} and {} of those guesses agreed", tally.guessed[0], tally.guessed[1], tally.held[0], tally.held[1]));
-            p.line(format!("- the Plasma 5 landing rule from the press equalled the final places in {} of 10 single drags", tally.predicted[0]));
+            p.line(format!("- the daemon predicted {} of {} single drags and {} of {} group drags, and its net found {} and {} of those guesses agreed", tally.guessed[0], tally.made[0], tally.guessed[1], tally.made[1], tally.held[0], tally.held[1]));
+            p.line(format!("- the Plasma 5 landing rule from the press equalled the final places in {} of {} single drags", tally.predicted[0], tally.made[0]));
         }
         if bench.lattice.is_some() {
-            p.line(format!("- the daemon predicted {} of 10 single drags and {} of 5 group drags, and its net found {} and {} of those guesses agreed", tally.guessed[0], tally.guessed[1], tally.held[0], tally.held[1]));
+            p.line(format!("- the daemon predicted {} of {} single drags and {} of {} group drags, and its net found {} and {} of those guesses agreed", tally.guessed[0], tally.made[0], tally.guessed[1], tally.made[1], tally.held[0], tally.held[1]));
             p.line(format!(
                 "- the prediction from the press equalled the final places in {} single drags and {} group drags, anchored at the last clicked icon in {} group drags, and knowing only the pressed icon in {} group drags",
                 tally.predicted[0], tally.predicted[1], tally.last_clicked, tally.pressed_only
