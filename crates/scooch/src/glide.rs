@@ -108,6 +108,22 @@ fn wakes(reply: Option<&Reply>) -> bool {
     reply.is_none_or(|reply| matches!(reply, Reply::Ready { warm_id: Some(PARK_WARM), .. } | Reply::Failed { id: None, .. }))
 }
 
+fn take_failure(failed: &mut Vec<(Option<u32>, String)>, id: u32) -> Option<String> {
+    let index = failed.iter().position(|(failed, _)| *failed == Some(id))?;
+    Some(failed.remove(index).1)
+}
+
+fn take_warm_failure(failed: &mut Vec<(Option<u32>, String)>, warm_id: Option<u32>) -> Option<String> {
+    let prefix = warm_id.map(|id| format!("warm {id}: "));
+    let index = failed.iter().position(|(id, why)| id.is_none() && if why.starts_with("warm ") { prefix.as_ref().is_some_and(|prefix| why.starts_with(prefix.as_str())) } else { true })?;
+    Some(failed.remove(index).1)
+}
+
+fn take_heard(failed: &mut Vec<(Option<u32>, String)>) -> Option<(Option<u32>, String)> {
+    let index = failed.iter().position(|(id, why)| id.is_some() || !why.starts_with("warm "))?;
+    Some(failed.remove(index))
+}
+
 pub fn program() -> Option<PathBuf> {
     let me = std::env::current_exe().ok()?;
     if cfg!(windows) {
@@ -187,9 +203,8 @@ impl Real {
         while matches!(self.pump(Duration::ZERO), Ok(true)) {}
     }
 
-    fn failure(&mut self, id: Option<u32>) -> Option<String> {
-        let index = self.failed.iter().position(|(failed, _)| failed.is_none() || *failed == id)?;
-        Some(self.failed.remove(index).1)
+    fn failure(&mut self, id: u32) -> Option<String> {
+        take_failure(&mut self.failed, id)
     }
 
     fn wait<T>(&mut self, timeout: Duration, mut done: impl FnMut(&mut Self) -> Option<Result<T>>) -> Result<T> {
@@ -224,6 +239,8 @@ impl Link for Real {
     }
 
     fn warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>, scales: &BTreeMap<String, f32>) -> Result<()> {
+        let park = self.park_id.map(|id| format!("warm {id}: "));
+        self.failed.retain(|(id, why)| id.is_some() || !why.starts_with("warm ") || park.as_ref().is_some_and(|park| why.starts_with(park.as_str())));
         self.warm_id = Some(self.helper.ask_warm_with(Hints::default(), Some(picture), Some(size), canvas, scales.clone())?);
         self.marks.canvas = None;
         self.marks.ready = None;
@@ -238,9 +255,7 @@ impl Link for Real {
                 me.readies.drain(..index);
                 return Some(Ok(me.readies[0].1.clone()));
             }
-            let prefix = wanted.map(|id| format!("warm {id}: "));
-            let index = me.failed.iter().position(|(id, why)| id.is_none() && prefix.as_ref().is_none_or(|prefix| why.starts_with(prefix.as_str()) || !why.starts_with("warm ")))?;
-            Some(Err(anyhow!("{}", me.failed.remove(index).1)))
+            take_warm_failure(&mut me.failed, wanted).map(|why| Err(anyhow!("{why}")))
         })
     }
 
@@ -259,7 +274,7 @@ impl Link for Real {
             if let Some(index) = me.shown.iter().position(|(shown, _)| *shown == id) {
                 return Some(Ok(me.shown.remove(index).1));
             }
-            me.failure(Some(id)).map(|why| Err(anyhow!("{why}")))
+            me.failure(id).map(|why| Err(anyhow!("{why}")))
         })
     }
 
@@ -281,14 +296,14 @@ impl Link for Real {
         if !self.heard.is_empty() {
             return Ok(self.heard.remove(0));
         }
-        if let Some((id, why)) = (!self.failed.is_empty()).then(|| self.failed.remove(0)) {
+        if let Some((id, why)) = take_heard(&mut self.failed) {
             return Ok(Heard::Failed(id, why));
         }
         self.pump(timeout)?;
         if !self.heard.is_empty() {
             return Ok(self.heard.remove(0));
         }
-        Ok((!self.failed.is_empty()).then(|| self.failed.remove(0)).map_or(Heard::Nothing, |(id, why)| Heard::Failed(id, why)))
+        Ok(take_heard(&mut self.failed).map_or(Heard::Nothing, |(id, why)| Heard::Failed(id, why)))
     }
 
     fn close(&mut self, id: u32) {
@@ -1460,6 +1475,19 @@ pub mod tests {
         slid.slid("");
         assert!(slid.line().starts_with("glide slid, on left, times from the tick"), "{}", slid.line());
         assert!(!line.contains(['\u{2014}', '\u{2013}', ';']), "{line}");
+    }
+
+    #[test]
+    fn a_failure_goes_only_to_its_own_layer_or_its_own_warm() {
+        let warm = |id: u32, why: &str| (None, format!("warm {id}: {why}"));
+        let mut failed = vec![warm(3, "the picture is too large for this GPU"), (Some(7), "layer 7 failed".to_string())];
+        assert_eq!(take_failure(&mut failed, 8), None, "a leftover warm failure was blamed on layer 8");
+        assert_eq!(take_failure(&mut failed, 7).as_deref(), Some("layer 7 failed"));
+        assert_eq!(take_heard(&mut failed), None, "a glide heard a warm failure");
+        assert_eq!(take_warm_failure(&mut failed, Some(4)), None, "warm 4 took the failure of warm 3");
+        assert_eq!(take_warm_failure(&mut failed, Some(3)).as_deref(), Some("warm 3: the picture is too large for this GPU"));
+        let mut broken = vec![(None, "unreadable line from the helper".to_string())];
+        assert!(take_heard(&mut broken).is_some(), "a failure of the whole helper was not heard");
     }
 
     #[test]
