@@ -637,7 +637,7 @@ impl Daemon {
         let Ok(key) = tables_key(&entry.source, &state.options) else { return false };
         let scene = scene::scene(screen, &[]);
         let canvas = Some(self.store.canvas_for(&screen.id, key)).filter(|canvas| canvas.is_file());
-        let warm = Warmup { picture: entry.source.clone(), size: [scene.width, scene.height], canvas };
+        let warm = Warmup { picture: entry.source.clone(), size: [scene.width, scene.height], canvas, key };
         let stills = self.stills_of(output, key);
         let mut glider = self.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         glider.prime(&Prime { screen, warm: &warm, stills, drag })
@@ -966,7 +966,7 @@ impl Daemon {
         }
         let scene = scene::scene(screen, &[]);
         let canvas = Some(self.store.canvas_for(&screen.id, key)).filter(|canvas| canvas.is_file());
-        glider.open_early(screen, &entry.source, [scene.width, scene.height], &self.stills_of(output, key), canvas.as_deref());
+        glider.open_early(screen, (&entry.source, key), [scene.width, scene.height], &self.stills_of(output, key), canvas.as_deref());
     }
 
     fn pass(&self, state: &mut State, snapshot: &Snapshot, report: &mut Report, (mut gliding, blocked): (Option<&mut Glider>, Option<&'static str>)) {
@@ -1209,7 +1209,7 @@ impl Daemon {
             match (tables_key, from, shown.as_deref()) {
                 (Some(_), Some(_), Some(_)) if stale.is_some() => trail.skip("old tables", stale.as_deref().unwrap_or_default()),
                 (Some(tables_key), Some(from), Some(still)) => {
-                    let plan = Plan { screen, picture: &source, canvas: canvas.as_deref(), size, stills: self.stills_of(still, tables_key) };
+                    let plan = Plan { screen, picture: &source, canvas: canvas.as_deref(), key: tables_key, size, stills: self.stills_of(still, tables_key) };
                     if let Some((reason, detail)) = glider.refused(&plan) {
                         glider.close_early_for(&screen.id);
                         trail.skip(reason, detail);
@@ -1245,7 +1245,7 @@ impl Daemon {
                     }
                 }
                 (Some(tables_key), None, Some(still)) if changed => {
-                    let plan = Plan { screen, picture: &source, canvas: canvas.as_deref(), size, stills: Stills { tables: None, ..self.stills_of(still, tables_key) } };
+                    let plan = Plan { screen, picture: &source, canvas: canvas.as_deref(), key: tables_key, size, stills: Stills { tables: None, ..self.stills_of(still, tables_key) } };
                     finished = Some(beside(&mut clock, &mut || {
                         if let Some(id) = glider.cross(&plan, &mut trail) {
                             flight = Some(id);

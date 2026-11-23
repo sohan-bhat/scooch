@@ -149,7 +149,7 @@ mod running {
         picture: Picture,
     }
 
-    type Key = (PathBuf, [u32; 2]);
+    type Key = (PathBuf, [u32; 2], u64);
 
     struct Want {
         key: Option<Key>,
@@ -740,7 +740,7 @@ mod running {
             self.gpu.is_some() && key.as_ref().is_none_or(|key| self.pictures.iter().any(|(kept, _)| kept == key))
         }
 
-        fn warm(&mut self, hints: Hints, (picture, canvas): (Option<PathBuf>, Option<PathBuf>), size: Option<[u32; 2]>, warm_id: Option<u32>, answer: bool) {
+        fn warm(&mut self, hints: Hints, (picture, canvas, stamp): (Option<PathBuf>, Option<PathBuf>, u64), size: Option<[u32; 2]>, warm_id: Option<u32>, answer: bool) {
             let composition = match self.platform.composition(&hints) {
                 Ok(composition) => composition,
                 Err(error) => {
@@ -764,7 +764,7 @@ mod running {
                 (None, None) => {}
             }
             self.hints = hints;
-            let key = picture.map(|path| (path, size.unwrap_or([0, 0])));
+            let key = picture.map(|path| (path, size.unwrap_or([0, 0]), stamp));
             let waiters = if answer { vec![warm_id] } else { Vec::new() };
             if self.has(&key) {
                 for waiter in waiters {
@@ -805,7 +805,7 @@ mod running {
                 }
                 let usable = device.clone().or_else(|| made.clone().and_then(Result::ok));
                 let mut from = None;
-                let loaded = key.map(|(path, [width, height])| {
+                let loaded = key.map(|(path, [width, height], _)| {
                     let gpu = usable.ok_or_else(|| "no device".to_string())?;
                     gpu.ready()?;
                     if width > 0 && height > 0 {
@@ -937,7 +937,7 @@ mod running {
             self.pending.push(Pending { id, stills, asked: Instant::now(), pane, found, window: None });
             if self.gpu.is_none() && self.running.is_none() {
                 let hints = self.hints.clone();
-                self.warm(hints, (None, None), None, None, false);
+                self.warm(hints, (None, None, 0), None, None, false);
             }
         }
 
@@ -1133,13 +1133,13 @@ mod running {
                 Command::Park { warm_id } => {
                     self.parked = true;
                     let hints = self.hints.clone();
-                    self.warm(hints, (None, None), None, warm_id, true);
+                    self.warm(hints, (None, None, 0), None, warm_id, true);
                 }
-                Command::Warm { hints, picture, size, warm_id, canvas, scales } => {
+                Command::Warm { hints, picture, size, warm_id, canvas, key, scales } => {
                     if !scales.is_empty() {
                         self.scales = scales;
                     }
-                    self.warm(hints, (picture, canvas), size, warm_id, true)
+                    self.warm(hints, (picture, canvas, key.unwrap_or(0)), size, warm_id, true)
                 }
                 Command::Window { screen, rect, scale, stills } => self.make_early(Screen { id: screen, frame: rect, scale }, stills),
                 Command::Open { id, screen, rect, scale, stills } => self.open(id, Screen { id: screen, frame: rect, scale }, stills),
@@ -1703,7 +1703,7 @@ mod running {
             for (index, made) in [&first, &second].into_iter().enumerate() {
                 let id = index as u32 + 1;
                 let (name, rect) = screen(made);
-                helper.event(Event::Command(Command::Warm { hints: Hints { present: None, scale: Some(1.0) }, picture: Some(made.picture.clone()), size: Some(made.size), warm_id: Some(id), canvas: Some(made.canvas.clone()), scales: BTreeMap::new() }));
+                helper.event(Event::Command(Command::Warm { hints: Hints { present: None, scale: Some(1.0) }, picture: Some(made.picture.clone()), size: Some(made.size), warm_id: Some(id), canvas: Some(made.canvas.clone()), key: None, scales: BTreeMap::new() }));
                 helper.event(Event::Command(Command::Open { id, screen: name, rect, scale: 1.0, stills: Stills::of(&made.still) }));
             }
             let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().filter(|reply| matches!(reply, Reply::Shown { .. } | Reply::Ready { .. })).count() >= 4);
@@ -1731,6 +1731,16 @@ mod running {
             assert_eq!(replies.iter().filter(|reply| matches!(reply, Reply::Closed { .. })).count(), 2, "{replies:?}");
             assert_eq!(scooch_live::devices_made() - before, 1, "the helper made more than one device");
             assert_eq!(helper.pictures.len(), 2);
+            for (warm_id, key) in [(3, None), (4, Some(9))] {
+                helper.event(Event::Command(Command::Warm { hints: Hints { present: None, scale: Some(1.0) }, picture: Some(second.picture.clone()), size: Some(second.size), warm_id: Some(warm_id), canvas: Some(second.canvas.clone()), key, scales: BTreeMap::new() }));
+            }
+            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Ready { warm_id: Some(4), .. })));
+            let from = |wanted: u32| replies.iter().find_map(|reply| match reply {
+                Reply::Ready { warm_id: Some(warm_id), from, .. } if *warm_id == wanted => from.clone(),
+                _ => None,
+            });
+            assert_eq!(from(3).as_deref(), Some("kept"), "{replies:?}");
+            assert_ne!(from(4).as_deref(), Some("kept"), "a picture rewritten with a new key was answered from the old load {replies:?}");
             let _ = std::fs::remove_dir_all(&folder);
         }
 
@@ -1747,7 +1757,7 @@ mod running {
             let log = Arc::new(Mutex::new(Vec::new()));
             let platform = Fake { reveal, log: log.clone(), ..Fake::default() };
             let mut helper = testing(platform, Arc::new(Mutex::new(Box::new(out.clone()))), events);
-            helper.event(Event::Command(Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: Some(1), canvas: None, scales: BTreeMap::new() }));
+            helper.event(Event::Command(Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: Some(1), canvas: None, key: None, scales: BTreeMap::new() }));
             helper.event(Event::Command(Command::Open { id: 1, screen: "main".into(), rect: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0, stills: Stills::of(&still) }));
             let started = Instant::now();
             let mut replies = Vec::new();

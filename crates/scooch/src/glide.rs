@@ -47,7 +47,7 @@ pub struct Milestones {
 pub trait Link: Send {
     fn park(&mut self) -> Result<()>;
     fn parked(&mut self) -> Option<Result<Adapter, String>>;
-    fn warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>, scales: &BTreeMap<String, f32>) -> Result<()>;
+    fn warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>, key: u64, scales: &BTreeMap<String, f32>) -> Result<()>;
     fn ready(&mut self, timeout: Duration) -> Result<Adapter>;
     fn prime(&mut self, screen: &Screen, stills: &Stills) -> Result<()>;
     fn open(&mut self, id: u32, screen: &Screen, stills: &Stills) -> Result<()>;
@@ -238,10 +238,10 @@ impl Link for Real {
         Some(Err(self.failed.remove(index).1))
     }
 
-    fn warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>, scales: &BTreeMap<String, f32>) -> Result<()> {
+    fn warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>, key: u64, scales: &BTreeMap<String, f32>) -> Result<()> {
         let park = self.park_id.map(|id| format!("warm {id}: "));
         self.failed.retain(|(id, why)| id.is_some() || !why.starts_with("warm ") || park.as_ref().is_some_and(|park| why.starts_with(park.as_str())));
-        self.warm_id = Some(self.helper.ask_warm_with(Hints::default(), Some(picture), Some(size), canvas, scales.clone())?);
+        self.warm_id = Some(self.helper.ask_warm_keyed(Hints::default(), (Some(picture), Some(key)), Some(size), canvas, scales.clone())?);
         self.marks.canvas = None;
         self.marks.ready = None;
         Ok(())
@@ -340,6 +340,7 @@ pub struct Warmup {
     pub picture: PathBuf,
     pub size: [u32; 2],
     pub canvas: Option<PathBuf>,
+    pub key: u64,
 }
 
 pub struct Prime<'a> {
@@ -353,6 +354,7 @@ pub struct Plan<'a> {
     pub screen: &'a Screen,
     pub picture: &'a Path,
     pub canvas: Option<&'a Path>,
+    pub key: u64,
     pub size: [u32; 2],
     pub stills: Stills,
 }
@@ -578,7 +580,7 @@ pub struct Glider {
     replaced: bool,
     given_up: bool,
     doomed: bool,
-    warmed: Option<(PathBuf, [u32; 2])>,
+    warmed: Option<(PathBuf, [u32; 2], u64)>,
     next: u32,
     flights: Vec<Flight>,
     early: Vec<Early>,
@@ -836,7 +838,7 @@ impl Glider {
         if !prime.drag && (self.thrown >= BARE || self.last_wake_prime.is_some_and(|at| at.elapsed() < WAKE_EVERY)) {
             return false;
         }
-        if self.send_warm(&prime.warm.picture, prime.warm.size, prime.warm.canvas.as_deref()).is_err() {
+        if self.send_warm(&prime.warm.picture, prime.warm.size, prime.warm.canvas.as_deref(), prime.warm.key).is_err() {
             return false;
         }
         let Some(link) = self.link.as_mut() else { return false };
@@ -862,14 +864,14 @@ impl Glider {
         std::mem::take(&mut self.learned)
     }
 
-    fn send_warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>) -> Result<()> {
-        let wanted = (picture.to_path_buf(), size);
+    fn send_warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>, key: u64) -> Result<()> {
+        let wanted = (picture.to_path_buf(), size, key);
         let kept = self.link.as_ref().is_some_and(|link| link.quiet() < FORGOTTEN);
         if self.warmed.as_ref() == Some(&wanted) && kept {
             return Ok(());
         }
         let scales = self.scales_for(size);
-        self.link.as_mut().ok_or_else(|| anyhow!("the helper is not running"))?.warm(picture, size, canvas, &scales)?;
+        self.link.as_mut().ok_or_else(|| anyhow!("the helper is not running"))?.warm(picture, size, canvas, key, &scales)?;
         note(&mut self.said, format!("warm {} at {}x{} from {}", picture.display(), size[0], size[1], canvas.map_or("the picture".to_string(), |canvas| canvas.display().to_string())));
         self.warmed = Some(wanted);
         Ok(())
@@ -894,7 +896,7 @@ impl Glider {
         }
     }
 
-    pub fn open_early(&mut self, screen: &Screen, picture: &Path, size: [u32; 2], stills: &Stills, canvas: Option<&Path>) {
+    pub fn open_early(&mut self, screen: &Screen, (picture, key): (&Path, u64), size: [u32; 2], stills: &Stills, canvas: Option<&Path>) {
         let Some(still) = stills.still.clone() else { return };
         self.check_park();
         if !self.usable() || self.parked.is_none() || self.too_large(&screen.id, size) || self.early.iter().any(|early| early.screen == screen.id) || !exact(&still) {
@@ -902,7 +904,7 @@ impl Glider {
         }
         let id = self.fresh_id();
         let result = (|| -> Result<()> {
-            self.send_warm(picture, size, canvas)?;
+            self.send_warm(picture, size, canvas, key)?;
             self.link.as_mut().ok_or_else(|| anyhow!("the helper is not running"))?.open(id, screen, stills)
         })();
         match result {
@@ -1006,7 +1008,7 @@ impl Glider {
     fn decide(&mut self, plan: &Plan, id: u32, started: Instant, trail: &mut Move) -> Result<()> {
         let deadline = hold_until(started, self.woke);
         trail.allowed = Some(deadline.saturating_duration_since(started));
-        self.send_warm(plan.picture, plan.size, plan.canvas)?;
+        self.send_warm(plan.picture, plan.size, plan.canvas, plan.key)?;
         let link = self.link.as_mut().ok_or_else(|| anyhow!("the helper is not running"))?;
         if trail.opened.is_none() {
             link.open(id, plan.screen, &plan.stills)?;
@@ -1310,7 +1312,7 @@ pub mod tests {
     }
 
     fn plan(screen: &Screen) -> Plan<'_> {
-        Plan { screen, picture: Path::new("p.jpg"), canvas: None, size: [160, 100], stills: Stills::of(Path::new("s.png")) }
+        Plan { screen, picture: Path::new("p.jpg"), canvas: None, key: 1, size: [160, 100], stills: Stills::of(Path::new("s.png")) }
     }
 
     pub fn parked(spawner: FakeSpawner) -> Glider {
@@ -1424,7 +1426,7 @@ pub mod tests {
         let log = spawner.log.clone();
         let mut glider = parked(spawner);
         let screen = lone_screen();
-        let warm = Warmup { picture: PathBuf::from("p.jpg"), size: [160, 100], canvas: None };
+        let warm = Warmup { picture: PathBuf::from("p.jpg"), size: [160, 100], canvas: None, key: 1 };
         let wake = |still: &str| Prime { screen: &screen, warm: &warm, stills: Stills::of(Path::new(still)), drag: false };
         assert!(glider.prime(&wake("a.png")));
         assert!(!glider.prime(&wake("a.png")), "a live prime was sent again");
@@ -1444,12 +1446,26 @@ pub mod tests {
     }
 
     #[test]
+    fn a_picture_rewritten_at_the_same_path_is_warmed_again() {
+        let spawner = FakeSpawner::new(Arc::new(Mutex::new(Vec::new())));
+        let log = spawner.log.clone();
+        let mut glider = parked(spawner);
+        let screen = lone_screen();
+        let before = Warmup { picture: PathBuf::from("p.jpg"), size: [160, 100], canvas: None, key: 1 };
+        let after = Warmup { key: 2, ..Warmup { picture: PathBuf::from("p.jpg"), size: [160, 100], canvas: None, key: 1 } };
+        assert!(glider.prime(&Prime { screen: &screen, warm: &before, stills: Stills::of(Path::new("a.png")), drag: true }));
+        assert!(glider.prime(&Prime { screen: &screen, warm: &after, stills: Stills::of(Path::new("b.png")), drag: true }));
+        let warms = said(&log).iter().filter(|what| what.starts_with("warm ")).count();
+        assert_eq!(warms, 2, "a picture rewritten with a new key was not warmed again {:?}", said(&log));
+    }
+
+    #[test]
     fn a_helper_quiet_long_enough_to_let_its_picture_go_is_warmed_again() {
         let spawner = FakeSpawner::new(Arc::new(Mutex::new(Vec::new())));
         let (log, script) = (spawner.log.clone(), spawner.script.clone());
         let mut glider = parked(spawner);
         let screen = lone_screen();
-        let warm = Warmup { picture: PathBuf::from("p.jpg"), size: [160, 100], canvas: None };
+        let warm = Warmup { picture: PathBuf::from("p.jpg"), size: [160, 100], canvas: None, key: 1 };
         let drag = |still: &str| Prime { screen: &screen, warm: &warm, stills: Stills::of(Path::new(still)), drag: true };
         let warms = |log: &Events| said(log).iter().filter(|what| what.starts_with("warm ")).count();
         assert!(glider.prime(&drag("a.png")));
@@ -1629,7 +1645,7 @@ pub mod tests {
             Some(Ok(self.adapter()))
         }
 
-        fn warm(&mut self, _picture: &Path, size: [u32; 2], canvas: Option<&Path>, scales: &BTreeMap<String, f32>) -> Result<()> {
+        fn warm(&mut self, _picture: &Path, size: [u32; 2], canvas: Option<&Path>, _key: u64, scales: &BTreeMap<String, f32>) -> Result<()> {
             self.living()?;
             self.warmed = Some(Instant::now());
             self.say(format!("warm {}x{}{}{}", size[0], size[1], if canvas.is_some() { " canvas" } else { "" }, scales.iter().map(|(adapter, scale)| format!(" {adapter}={scale}")).collect::<String>()));

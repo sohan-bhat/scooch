@@ -63,6 +63,8 @@ pub enum Command {
         warm_id: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         canvas: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<u64>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         scales: BTreeMap<String, f32>,
     },
@@ -325,9 +327,13 @@ impl Helper {
     }
 
     pub fn ask_warm_with(&mut self, hints: Hints, picture: Option<&Path>, size: Option<[u32; 2]>, canvas: Option<&Path>, scales: BTreeMap<String, f32>) -> Result<u32> {
+        self.ask_warm_keyed(hints, (picture, None), size, canvas, scales)
+    }
+
+    pub fn ask_warm_keyed(&mut self, hints: Hints, (picture, key): (Option<&Path>, Option<u64>), size: Option<[u32; 2]>, canvas: Option<&Path>, scales: BTreeMap<String, f32>) -> Result<u32> {
         self.warms = self.warms.wrapping_add(1).max(1);
         let warm_id = self.warms;
-        self.send(&Command::Warm { hints, picture: picture.map(Path::to_path_buf), size, warm_id: Some(warm_id), canvas: canvas.map(Path::to_path_buf), scales })?;
+        self.send(&Command::Warm { hints, picture: picture.map(Path::to_path_buf), size, warm_id: Some(warm_id), canvas: canvas.map(Path::to_path_buf), key, scales })?;
         Ok(warm_id)
     }
 
@@ -481,7 +487,7 @@ mod tests {
     fn commands_and_replies_read_back_the_same() {
         let commands = [
             Command::Hello { version: VERSION },
-            Command::Warm { hints: Hints { present: Some("bare".into()), scale: Some(0.5) }, picture: Some(PathBuf::from("p.jpg")), size: Some([1024, 768]), warm_id: Some(4), canvas: Some(PathBuf::from("main.canvas")), scales: BTreeMap::from([("gpu".to_string(), 0.75)]) },
+            Command::Warm { hints: Hints { present: Some("bare".into()), scale: Some(0.5) }, picture: Some(PathBuf::from("p.jpg")), size: Some([1024, 768]), warm_id: Some(4), canvas: Some(PathBuf::from("main.canvas")), key: Some(7), scales: BTreeMap::from([("gpu".to_string(), 0.75)]) },
             Command::Park { warm_id: Some(2) },
             Command::Window { screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5, stills: Stills { still: Some(PathBuf::from("a.jpg")), raw: Some(PathBuf::from("a.jpg.still")), tables: Some(PathBuf::from("a.tables")) } },
             Command::Open { id: 3, screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5, stills: Stills::of(Path::new("a.png")) },
@@ -536,7 +542,7 @@ mod tests {
     fn the_ready_answer_carries_the_warm_it_answers() {
         let text = line(&Reply::Ready { adapter: "gpu".into(), ms: 1, uploads: 1, kind: "integrated".into(), warm_id: Some(9), from: None, scale: None }).unwrap();
         assert!(text.contains(r#""warm_id":9"#), "{text}");
-        let warm = line(&Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: Some(3), canvas: None, scales: BTreeMap::new() }).unwrap();
+        let warm = line(&Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: Some(3), canvas: None, key: None, scales: BTreeMap::new() }).unwrap();
         assert!(warm.contains(r#""warm_id":3"#), "{warm}");
         assert_eq!(warm_failed(Some(3), "no device"), "warm 3: no device");
     }
@@ -546,7 +552,7 @@ mod tests {
         let read: Command = serde_json::from_str(r#"{"kind":"open","id":1,"screen":"s","rect":{"x":0,"y":0,"w":10,"h":10}}"#).unwrap();
         assert_eq!(read, Command::Open { id: 1, screen: "s".into(), rect: Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 }, scale: 1.0, stills: Stills::default() });
         let warm: Command = serde_json::from_str(r#"{"kind":"warm"}"#).unwrap();
-        assert_eq!(warm, Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: None, canvas: None, scales: BTreeMap::new() });
+        assert_eq!(warm, Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: None, canvas: None, key: None, scales: BTreeMap::new() });
         let settle: Command = serde_json::from_str(r#"{"kind":"settle","id":2,"still":"b.png"}"#).unwrap();
         assert_eq!(settle, Command::Settle { id: 2, still: PathBuf::from("b.png"), ms: None });
     }
