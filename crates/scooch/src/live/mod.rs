@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 pub const HELPER: &str = "--live-helper";
@@ -177,9 +177,41 @@ pub fn warm_failed(warm_id: Option<u32>, why: &str) -> String {
 
 pub type Watch = Box<dyn Fn(Option<&Reply>) + Send>;
 
+pub const BACKLOG: usize = 32;
+
+struct Pipe {
+    lines: mpsc::Sender<String>,
+    backlog: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Pipe {
+    fn new(mut input: ChildStdin) -> Result<Pipe> {
+        let (lines, waiting) = mpsc::channel::<String>();
+        let backlog = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let written = backlog.clone();
+        std::thread::Builder::new().name("scooch-live-commands".into()).spawn(move || {
+            for text in waiting {
+                if input.write_all(text.as_bytes()).and_then(|()| input.flush()).is_err() {
+                    break;
+                }
+                written.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        })?;
+        Ok(Pipe { lines, backlog })
+    }
+
+    fn send(&self, text: String) -> Result<()> {
+        if self.backlog.load(std::sync::atomic::Ordering::SeqCst) >= BACKLOG {
+            bail!("the helper has not read its last {BACKLOG} commands, so it is stopped");
+        }
+        self.backlog.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.lines.send(text).map_err(|_| anyhow!("the pipe to the helper is closed"))
+    }
+}
+
 pub struct Helper {
     child: Child,
-    input: Option<ChildStdin>,
+    input: Option<Pipe>,
     replies: mpsc::Receiver<(Instant, Reply)>,
     #[cfg(windows)]
     guard: Option<job::Guard>,
@@ -251,7 +283,7 @@ impl Helper {
             }
         })?;
         let pid = child.id();
-        let input = child.stdin.take();
+        let input = child.stdin.take().map(Pipe::new).transpose()?;
         let mut helper = Helper {
             child,
             input,
@@ -282,9 +314,7 @@ impl Helper {
 
     pub fn send(&mut self, command: &Command) -> Result<()> {
         let text = line(command)?;
-        let input = self.input.as_mut().context("the pipe to the helper is closed")?;
-        input.write_all(text.as_bytes())?;
-        input.flush()?;
+        self.input.as_ref().context("the pipe to the helper is closed")?.send(text)?;
         self.sent = Instant::now();
         Ok(())
     }
@@ -482,6 +512,32 @@ mod job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn commands_to_a_helper_that_stops_reading_fail_instead_of_blocking() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = crate::state::scratch("helper-stopped");
+        let program = folder.join("never-reads");
+        std::fs::write(&program, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut helper = Helper::launch(&program).unwrap();
+        let long = PathBuf::from(format!("/{}", "p".repeat(4000)));
+        let started = Instant::now();
+        let mut refused = None;
+        for index in 0..200 {
+            if let Err(error) = helper.ask_warm_with(Hints::default(), Some(&long), Some([1, 1]), None, BTreeMap::new()) {
+                refused = Some((index, format!("{error:#}")));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(started.elapsed() < Duration::from_secs(10), "a send to a helper that stopped reading blocked");
+        let (index, why) = refused.expect("every send to a helper that stopped reading was taken");
+        assert!(why.contains("has not read its last"), "{why}");
+        assert!(index > BACKLOG, "{index}");
+        drop(helper);
+    }
 
     #[test]
     fn commands_and_replies_read_back_the_same() {
