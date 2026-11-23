@@ -127,6 +127,11 @@
     "pick": "Pick a file",
     "drop": "Drop to use this picture."
   },
+  "tray": {
+    "open": "Open Scooch",
+    "on": "On",
+    "quit": "Quit Scooch"
+  },
   "dmg": {
     "first": "In System Settings, press Privacy and Security, then Open Anyway."
   }
