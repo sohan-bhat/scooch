@@ -534,7 +534,7 @@ pub fn stamp() -> String {
 
 impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
-        let grace = desktop.read_lag();
+        let grace = std::env::var(crate::live::READ_LAG).ok().and_then(|ms| ms.parse::<u64>().ok()).map_or_else(|| desktop.read_lag(), |ms| Duration::from_millis(ms.min(60_000)));
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
         Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), last_wake: Mutex::new(None), canvases: Arc::new(Mutex::new(HashSet::new())), ledger: Mutex::new(Ledger::default()), glider, woke: Mutex::new(None), reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()), stills: Mutex::new(HashMap::new()), saves: Mutex::new(None), #[cfg(test)] marks: Mutex::new(None) }
     }

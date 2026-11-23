@@ -531,6 +531,10 @@ pub fn ours_left() -> usize {
     layers().len()
 }
 
+pub fn shown_layers() -> usize {
+    layers().into_iter().filter(|window| unsafe { IsWindowVisible(hwnd(*window)) }.as_bool()).count()
+}
+
 pub fn under_icons(window: isize) -> bool {
     let Ok(progman) = (unsafe { FindWindowW(w!("Progman"), PCWSTR::null()) }) else { return false };
     match seen(progman) {

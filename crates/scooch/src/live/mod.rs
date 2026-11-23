@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 pub const HELPER: &str = "--live-helper";
 pub const VERSION: u32 = 5;
 pub const SLOW_HELLO: &str = "SCOOCH_HELPER_SLOW_HELLO_MS";
+pub const READ_LAG: &str = "SCOOCH_READ_LAG_MS";
 pub const SPIN: &str = "SCOOCH_HELPER_SPIN";
 const QUIT_WAIT: Duration = Duration::from_millis(500);
 
