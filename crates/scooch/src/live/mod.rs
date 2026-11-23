@@ -14,7 +14,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 pub const HELPER: &str = "--live-helper";
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 pub const SLOW_HELLO: &str = "SCOOCH_HELPER_SLOW_HELLO_MS";
 pub const SPIN: &str = "SCOOCH_HELPER_SPIN";
 const QUIT_WAIT: Duration = Duration::from_millis(500);
@@ -77,6 +77,7 @@ pub enum Command {
     Glide { id: u32, a: PathBuf, b: PathBuf, ms: u32 },
     Settle { id: u32, still: PathBuf, #[serde(default)] ms: Option<u32> },
     Close { id: u32 },
+    Unprime { screen: String },
     Quit,
 }
 
@@ -141,6 +142,7 @@ pub enum Reply {
     Glided { id: u32, frames: u32, slow_frames: u32, first_frame_ms: u64, #[serde(default)] uploads: u32, #[serde(default = "one")] scale: f32 },
     Settled { id: u32 },
     Closed { id: u32 },
+    Unprimed { screen: String },
     Failed { #[serde(default)] id: Option<u32>, why: String },
 }
 
@@ -379,6 +381,10 @@ impl Helper {
     pub fn warm(&mut self, hints: Hints, picture: Option<&Path>, size: Option<[u32; 2]>, timeout: Duration) -> Result<Ready> {
         let warm_id = self.ask_warm(hints, picture, size)?;
         self.ready_for(warm_id, timeout)
+    }
+
+    pub fn ask_unprime(&mut self, screen: &str) -> Result<()> {
+        self.send(&Command::Unprime { screen: screen.to_string() })
     }
 
     pub fn ask_window(&mut self, screen: &Screen, stills: &Stills) -> Result<()> {

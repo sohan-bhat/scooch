@@ -106,6 +106,7 @@ mod running {
         fn screen_gpu(&self, _layer: &Self::Layer) -> Option<String> {
             None
         }
+        fn hide(&mut self, _layer: &Self::Layer) {}
         fn room(&mut self, _screen: &Screen, _layer: &Self::Layer) -> Result<bool> {
             Ok(true)
         }
@@ -894,6 +895,18 @@ mod running {
             }
         }
 
+        fn unprime(&mut self, screen: String) {
+            if self.primed.and_then(|id| self.layers.get(&id)).and_then(|live| live.primed.as_ref()).is_some_and(|primed| primed.screen.id == screen) {
+                self.drop_primed();
+            }
+            if self.early.as_ref().is_some_and(|early| early.screen.id == screen) {
+                if let Some(early) = self.early.take() {
+                    self.drop_pane(early);
+                }
+            }
+            self.tell(Reply::Unprimed { screen });
+        }
+
         fn make_early(&mut self, screen: Screen, stills: Stills) {
             if self.primed_for(&screen, &stills) {
                 if let Some(live) = self.primed.and_then(|id| self.layers.get_mut(&id)) {
@@ -1091,6 +1104,9 @@ mod running {
             if live.closing.is_none() {
                 live.closing = Some((Instant::now(), answer));
                 let _ = live.jobs.send(Job::Stop);
+                if let Some(layer) = live.layer.as_ref() {
+                    self.platform.hide(layer);
+                }
             }
             if live.stopped {
                 self.finish(id);
@@ -1164,6 +1180,7 @@ mod running {
                     self.send_job(id, Job::Settle { still, ms }, Duration::from_millis(u64::from(ms.min(LONGEST))));
                 }
                 Command::Close { id } => self.begin_close(id, true),
+                Command::Unprime { screen } => self.unprime(screen),
                 Command::Quit => self.leaving = true,
             }
         }
@@ -1573,6 +1590,10 @@ mod running {
                 return Ok(Build::Whole(Drawn { window: window(size.0, size.1)?, size, screen: screen.id.clone() }, "window"));
             }
 
+            fn hide(&mut self, layer: &Drawn) {
+                self.log.lock().unwrap().push(format!("hide {}", layer.screen));
+            }
+
             fn room(&mut self, _screen: &Screen, _layer: &Drawn) -> Result<bool> {
                 if self.covered {
                     anyhow::bail!("Windows cover the whole desktop on this screen, so Scooch keeps the plain swap.");
@@ -1829,7 +1850,7 @@ mod running {
         fn a_first_frame_that_fails_closes_its_layer_with_no_commit_and_no_show() {
             let Some((replies, seen, closed)) = opening(crate::live::Reveal::from(None), false) else { return };
             assert!(replies.iter().any(|reply| matches!(reply, Reply::Failed { id: Some(1), .. })) && !replies.iter().any(|reply| matches!(reply, Reply::Shown { .. })), "{replies:?}");
-            assert!(seen.is_empty(), "{seen:?}");
+            assert!(seen.iter().all(|event| event.starts_with("hide ")), "{seen:?}");
             assert_eq!(closed, 1, "{replies:?}");
         }
 
@@ -2082,6 +2103,27 @@ mod running {
             let replies = out.replies();
             assert!(replies.iter().any(|reply| matches!(reply, Reply::Failed { id: Some(9), why } if why.contains("cover the whole desktop"))), "a primed window was shown over a covered desktop {replies:?}");
             assert!(!replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 9, .. })), "{replies:?}");
+            helper.platform.covered = false;
+            let primes = out.replies().iter().filter(|reply| matches!(reply, Reply::Primed { .. })).count();
+            helper.event(Event::Command(Command::Window { screen: screen().0, rect: screen().1, scale: 1.0, stills: stills.clone() }));
+            let started = Instant::now();
+            while out.replies().iter().filter(|reply| matches!(reply, Reply::Primed { .. })).count() <= primes && started.elapsed() < Duration::from_secs(30) {
+                while let Ok(event) = inbox.try_recv() {
+                    helper.event(event);
+                }
+                helper.advance();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            log.lock().unwrap().clear();
+            helper.event(Event::Command(Command::Unprime { screen: "elsewhere".into() }));
+            assert!(helper.primed.is_some(), "an unprime for another screen dropped this one {:?}", out.replies());
+            assert!(log.lock().unwrap().is_empty(), "an unprime for another screen hid a window {:?}", log.lock().unwrap());
+            helper.event(Event::Command(Command::Unprime { screen: screen().0 }));
+            assert!(helper.primed.is_none(), "the primed window was kept after its screen was cleared");
+            assert_eq!(log.lock().unwrap().clone(), vec!["hide main".to_string()], "the primed window was not hidden at once");
+            let replies = out.replies();
+            let unprimed = replies.iter().rposition(|reply| matches!(reply, Reply::Unprimed { screen } if screen == "main"));
+            assert!(unprimed.is_some(), "{replies:?}");
             let _ = std::fs::remove_dir_all(&folder);
         }
 

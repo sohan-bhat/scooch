@@ -373,6 +373,15 @@ impl Layer {
         CATransaction::flush();
     }
 
+    pub fn hide(&self) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.metal.setHidden(true);
+        CATransaction::commit();
+        CATransaction::flush();
+        self.window.orderOut(None);
+    }
+
     pub fn watched(&self) -> bool {
         self.metal.delegate().is_some_and(|delegate| AsRef::<AnyObject>::as_ref(&*delegate).class().name() == c"ScoochLayerWatch")
     }

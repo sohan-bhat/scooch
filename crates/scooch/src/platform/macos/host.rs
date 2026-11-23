@@ -105,6 +105,10 @@ impl Platform for Host {
         std::mem::take(&mut self.revealed)
     }
 
+    fn hide(&mut self, layer: &layer::Layer) {
+        objc2::rc::autoreleasepool(|_| layer.hide());
+    }
+
     fn room(&mut self, screen: &Screen, layer: &layer::Layer) -> Result<bool> {
         objc2::rc::autoreleasepool(|_| layer::room(screen, layer))
     }
