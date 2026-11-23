@@ -4491,8 +4491,7 @@ mod probe {
         p.line(format!("- the real data folder {} holds a record for a monitor that is not attached, {absent}, with its own picture and its output", real.display()));
         let command: Vec<u16> = layout::command_line(&twin).encode_utf16().chain(Some(0)).collect();
         let written = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, startup::RUN, startup::VALUE, REG_SZ.0, Some(command.as_ptr() as *const c_void), (command.len() * 2) as u32) };
-        let log = fs::File::create(p.out.join("final-off.log"))?;
-        let launched = Command::new(&twin).arg("watch").env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn().map(|child| child.id());
+        let launched = Command::new(&twin).arg("watch").env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map(|child| child.id());
         std::env::remove_var("SCOOCH_HOME");
         let installed = (written, launched.map_err(|error| error.to_string()));
         let id = screen.id.clone();
@@ -4518,6 +4517,13 @@ mod probe {
         std::env::set_var("SCOOCH_HOME", &p.home);
         if !off.as_ref().is_ok_and(|out| out.status.success()) || !gone || entry.is_some() || !parked || !parked_out.exists() {
             p.failed.push("the final off left a scoochw process or the Run entry, or did not keep the record of the monitor it could not reach".into());
+        }
+        let written = fs::read_to_string(real.join("watch.log")).unwrap_or_default();
+        let _ = fs::write(p.out.join("final-off.log"), &written);
+        let ticks = written.lines().filter(|line| line.contains(" tick ")).count();
+        p.line(format!("- the daemon started with no stderr to keep, as the login item starts it, wrote watch.log in its data folder with {} lines, {ticks} of them ticks, kept as final-off.log", written.lines().count()));
+        if ticks == 0 {
+            p.failed.push("a daemon with no stderr to keep wrote no watch.log, so a report from a real Windows machine would have no lines".into());
         }
         let _ = startup::remove();
         Ok(())
