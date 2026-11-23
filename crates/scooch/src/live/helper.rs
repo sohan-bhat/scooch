@@ -71,6 +71,8 @@ mod running {
     const STILLS_KEPT: usize = 2;
     const PRIMED: u32 = 1 << 31;
     const TIMED_FRAMES: usize = 5;
+    const WARM_LIMIT: Duration = Duration::from_secs(60);
+    const STUCK: &str = "the GPU device or the picture did not come up within 60 s, so this helper makes no more";
 
     pub enum Build<M, L> {
         Partly(M, &'static str),
@@ -156,6 +158,7 @@ mod running {
         canvas: Option<PathBuf>,
         waiters: Vec<Option<u32>>,
         composition: bool,
+        begun: Option<Instant>,
     }
 
     enum Image {
@@ -407,6 +410,7 @@ mod running {
         layers: BTreeMap<u32, Live<P::Layer>>,
         last: Instant,
         parked: bool,
+        stuck: bool,
         holding: bool,
         leaving: bool,
     }
@@ -693,6 +697,7 @@ mod running {
                 layers: BTreeMap::new(),
                 last: Instant::now(),
                 parked: false,
+                stuck: false,
                 holding: true,
                 leaving: false,
             }
@@ -766,6 +771,12 @@ mod running {
             self.hints = hints;
             let key = picture.map(|path| (path, size.unwrap_or([0, 0]), stamp));
             let waiters = if answer { vec![warm_id] } else { Vec::new() };
+            if self.stuck {
+                for waiter in waiters {
+                    self.fail(None, warm_failed(waiter, STUCK));
+                }
+                return;
+            }
             if self.has(&key) {
                 for waiter in waiters {
                     self.ready(waiter, 0, Some("kept".into()));
@@ -780,7 +791,7 @@ mod running {
                 queued.waiters.extend(waiters);
                 return;
             }
-            let want = Want { key, canvas, waiters, composition };
+            let want = Want { key, canvas, waiters, composition, begun: None };
             if self.running.is_none() {
                 self.start(want);
             } else {
@@ -851,7 +862,7 @@ mod running {
             });
             match spawned {
                 Ok(_) => {
-                    self.running = Some(want);
+                    self.running = Some(Want { begun: Some(Instant::now()), ..want });
                     self.platform.begin();
                 }
                 Err(error) => {
@@ -1355,6 +1366,13 @@ mod running {
         }
 
         fn sweep(&mut self) {
+            if self.running.as_ref().is_some_and(|running| running.begun.is_some_and(|begun| begun.elapsed() > WARM_LIMIT)) {
+                self.stuck = true;
+                let hung = self.running.take().into_iter().chain(std::mem::take(&mut self.queue));
+                for waiter in hung.flat_map(|want| want.waiters) {
+                    self.fail(None, warm_failed(waiter, STUCK));
+                }
+            }
             if self.last.elapsed() > IDLE_EXIT {
                 if self.parked {
                     self.unload();
@@ -1862,7 +1880,7 @@ mod running {
         fn waiting(platform: Fake) -> (Helper<Fake>, Receiver<Event>, Captured) {
             let (events, inbox) = mpsc::channel();
             let out = Captured::default();
-            let running = Some(Want { key: None, canvas: None, waiters: Vec::new(), composition: false });
+            let running = Some(Want { key: None, canvas: None, waiters: Vec::new(), composition: false, begun: None });
             let helper = Helper { running, ..testing(platform, Arc::new(Mutex::new(Box::new(out.clone()))), events) };
             (helper, inbox, out)
         }
@@ -1944,7 +1962,7 @@ mod running {
         #[test]
         fn ready_is_said_before_the_window_is_done_when_the_canvas_is_done_first() {
             let (mut helper, inbox, out) = waiting(Fake { steps: 3, ..Fake::default() });
-            helper.running = Some(Want { key: None, canvas: None, waiters: vec![Some(1)], composition: false });
+            helper.running = Some(Want { key: None, canvas: None, waiters: vec![Some(1)], composition: false, begun: None });
             helper.platform.watched = Some(out.clone());
             let events = helper.events.clone();
             helper.platform.during = Some(Box::new(move || {
@@ -1955,6 +1973,26 @@ mod running {
             assert_eq!(helper.platform.made, 1);
             assert!(out.replies().iter().any(|reply| matches!(reply, Reply::Ready { warm_id: Some(1), .. })), "{:?}", out.replies());
             assert_eq!(helper.platform.ready_when_made, Some(true), "the window held Ready back until it was done");
+        }
+
+        #[test]
+        fn a_device_that_never_comes_up_fails_its_warm_after_a_minute_and_the_helper_stops_polling() {
+            let (events, _inbox) = mpsc::channel();
+            let out = Captured::default();
+            let mut helper = testing(Fake::default(), Arc::new(Mutex::new(Box::new(out.clone()))), events);
+            helper.parked = true;
+            helper.holding = false;
+            helper.running = Some(Want { key: None, canvas: None, waiters: vec![Some(5)], composition: false, begun: Some(Instant::now() - WARM_LIMIT + Duration::from_secs(5)) });
+            helper.sweep();
+            assert!(helper.running.is_some() && helper.pause() == TICK, "a warm inside its minute was given up");
+            helper.running.as_mut().unwrap().begun = Some(Instant::now() - WARM_LIMIT - Duration::from_secs(1));
+            helper.sweep();
+            assert!(out.replies().iter().any(|reply| matches!(reply, Reply::Failed { id: None, why } if why.starts_with("warm 5: "))), "{:?}", out.replies());
+            assert!(helper.running.is_none());
+            assert_eq!(helper.pause(), REST, "a helper whose device never came up kept polling");
+            helper.event(Event::Command(Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: Some(6), canvas: None, key: None, scales: BTreeMap::new() }));
+            assert!(out.replies().iter().any(|reply| matches!(reply, Reply::Failed { id: None, why } if why.starts_with("warm 6: "))), "{:?}", out.replies());
+            assert!(helper.running.is_none(), "a stuck helper started another device");
         }
 
         #[test]
