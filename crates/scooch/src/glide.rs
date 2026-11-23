@@ -11,6 +11,7 @@ const SOFTWARE: [&str; 3] = ["basic render driver", "llvmpipe", "swiftshader"];
 const STRIKES: u32 = 2;
 pub const GLIDE_MS: u32 = 450;
 pub const SETTLE_WAIT: Duration = Duration::from_secs(2);
+const SETTLE_AFTER_GLIDE: Duration = Duration::from_millis(1500);
 pub const CHECK: Duration = Duration::from_millis(50);
 pub const PATIENCE: Duration = Duration::from_millis(150);
 pub const SHOWN_AFTER_WAKE: Duration = Duration::from_millis(450);
@@ -1171,7 +1172,7 @@ impl Glider {
             return;
         }
         let started = Instant::now();
-        let deadline = started + SETTLE_WAIT;
+        let mut deadline = started + SETTLE_WAIT;
         while self.flights.iter().any(|flight| !flight.settled) {
             if interrupted() {
                 let ids: Vec<u32> = self.flights.iter().map(|flight| flight.id).collect();
@@ -1207,6 +1208,7 @@ impl Glider {
                     }
                 }
                 Ok(Heard::Glided { id, frames, slow, scale, first }) => {
+                    deadline = deadline.max(Instant::now() + SETTLE_AFTER_GLIDE);
                     if let Some(flight) = self.flights.iter_mut().find(|flight| flight.id == id) {
                         flight.trail.first = flight.trail.glide.map(|sent| sent + Duration::from_millis(first));
                         let size = flight.size;
@@ -1467,6 +1469,7 @@ pub mod tests {
         pub dies_after_glide: bool,
         pub dies: bool,
         pub settle_after: Duration,
+        pub glided_after: Duration,
         pub slow_hello: Duration,
         pub shown_after: Duration,
         pub ready_after: Duration,
@@ -1481,7 +1484,7 @@ pub mod tests {
         waits: Waits,
         script: Arc<Mutex<Script>>,
         settles: Vec<(u32, Instant)>,
-        glides: Vec<u32>,
+        glides: Vec<(u32, Instant)>,
         opened: Vec<(u32, Instant)>,
         warmed: Option<Instant>,
         parking: bool,
@@ -1627,7 +1630,8 @@ pub mod tests {
         fn glide(&mut self, id: u32, a: &Path, b: &Path, _ms: u32) -> Result<()> {
             self.living()?;
             self.say(format!("glide {id} {} {}", a.exists(), b.exists()));
-            self.glides.push(id);
+            let due = Instant::now() + self.script().glided_after;
+            self.glides.push((id, due));
             if self.script().dies_after_glide {
                 self.dead = true;
             }
@@ -1648,7 +1652,8 @@ pub mod tests {
                 std::thread::sleep(timeout.min(Duration::from_millis(5)));
                 return Ok(Heard::Nothing);
             }
-            if let (Some((frames, slow)), Some(id)) = (script.glided, self.glides.pop()) {
+            if let (Some((frames, slow)), Some(index)) = (script.glided, self.glides.iter().position(|(_, due)| *due <= Instant::now())) {
+                let (id, _) = self.glides.remove(index);
                 return Ok(Heard::Glided { id, frames, slow, scale: 1.0, first: 16 });
             }
             if let Some(index) = self.settles.iter().position(|(_, at)| *at <= Instant::now()) {

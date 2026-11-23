@@ -5341,6 +5341,20 @@ pub mod tests {
     }
 
     #[test]
+    fn a_slow_glide_that_reports_its_end_gets_time_to_settle_and_keeps_its_helper() {
+        let (daemon, fake, script, _) = glide_rig("glide-slow-settle", true);
+        {
+            let mut script = script.lock().unwrap();
+            script.glided = Some((27, 0));
+            script.glided_after = Duration::from_millis(1800);
+            script.settle_after = Duration::from_millis(2600);
+        }
+        assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
+        assert_eq!(landing_words(&daemon), (true, false), "{:?}", daemon.glider.lock().unwrap().said);
+        assert_eq!(events(&fake).iter().filter(|event| *event == "spawn").count(), 1, "{:?}", events(&fake));
+    }
+
+    #[test]
     fn a_settle_given_up_writes_its_own_words_and_not_the_settled_words() {
         let (daemon, fake, script, _) = glide_rig("glide-settle-given-up", true);
         script.lock().unwrap().settle_never = true;
