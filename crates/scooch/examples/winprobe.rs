@@ -3820,6 +3820,10 @@ mod probe {
     }
 
     fn start_glide_daemon(p: &mut Probe, log: &Path, forced: bool) -> Result<Child> {
+        start_glide_daemon_with(p, log, forced, None)
+    }
+
+    fn start_glide_daemon_with(p: &mut Probe, log: &Path, forced: bool, lag: Option<u64>) -> Result<Child> {
         let twin = twin()?;
         let file = fs::File::create(log)?;
         let mut command = Command::new(&twin);
@@ -3829,7 +3833,95 @@ mod probe {
         } else {
             command.env_remove("SCOOCH_GLIDE_ANYWAY");
         }
+        match lag {
+            Some(ms) => command.env(scooch::live::READ_LAG, ms.to_string()),
+            None => command.env_remove(scooch::live::READ_LAG),
+        };
         Ok(command.spawn()?)
+    }
+
+    const PROBE_LAG_MS: u64 = 8000;
+
+    fn watch_shown() -> (std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<Vec<(f64, usize)>>) {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = stop.clone();
+        let handle = std::thread::spawn(move || {
+            let mut samples = Vec::new();
+            while !stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                samples.push((epoch(), layer::shown_layers()));
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            samples
+        });
+        (stop, handle)
+    }
+
+    fn stop_shown((stop, handle): (std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<Vec<(f64, usize)>>)) -> Vec<(f64, usize)> {
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        handle.join().unwrap_or_default()
+    }
+
+    fn left_at_sets(samples: &[(f64, usize)], log: &[String]) -> Vec<(String, usize)> {
+        let mut found = Vec::new();
+        for (index, line) in log.iter().enumerate() {
+            if !(line.contains(" glide skipped, ") && line.contains(" times from the ")) {
+                continue;
+            }
+            let Some(set) = log[..index].iter().rev().find(|line| line.split_whitespace().nth(1) == Some("set")).and_then(|line| stamp_of(line)) else { continue };
+            let left = samples.iter().filter(|(at, _)| *at >= set && *at <= set + 0.15).map(|(_, shown)| *shown).max().unwrap_or(0);
+            let reason = line.split(" glide skipped, ").nth(1).and_then(|rest| rest.split(',').next()).unwrap_or_default().to_string();
+            found.push((reason, left));
+        }
+        found
+    }
+
+    fn unslid(p: &mut Probe, screen: &Screen, name: &str, folder: bool, (aside, centre): (POINT, POINT)) -> Result<()> {
+        let log = p.out.join("glide-daemon-lag.log");
+        let mut child = start_glide_daemon_with(p, &log, true, Some(PROBE_LAG_MS))?;
+        let parked = wait_until(Duration::from_secs(90), || log_lines(&log).iter().any(|line| line.contains(" glide helper parked on ")));
+        let _ = quiet_log(&log, Duration::from_millis(1500), Duration::from_secs(15));
+        let shown = watch_shown();
+        let first = watch_change(&log, screen, || drag_icon(name, folder, aside), false);
+        let second = watch_change(&log, screen, || drag_icon(name, folder, centre), false);
+        let samples = stop_shown(shown);
+        let all = log_lines(&log);
+        let primed = all.iter().filter(|line| line.contains(" glide primed ") && line.ends_with("at the drag start")).count();
+        let slid = |watched: &Watched| watched.log.iter().any(|line| line.contains(" glide slid, ") && !line.contains("then the helper"));
+        let checked = left_at_sets(&samples, &all);
+        p.line(format!("- with the daemon told the read lag is {PROBE_LAG_MS} ms, the helper parked {}, two drags back to back: the first slid {}, the second slid {}, primes at the drag start {primed}, visible layer windows within 150 ms of each plain set {checked:?}, over {} samples", parked.is_some(), slid(&first), slid(&second), samples.len()));
+        decisions(p, &second);
+        if parked.is_none() || !slid(&first) || slid(&second) || primed < 2 {
+            p.failed.push("the second drag inside the read lag was not a primed move that did not slide, so the window rule was not judged, which is the footing failing and not a pass".into());
+        } else if checked.is_empty() || checked.iter().any(|(_, left)| *left > 0) {
+            p.failed.push("a window primed inside the read lag was still visible when the plain swap set its picture".into());
+        }
+        let desktop = platform::current()?;
+        let source = fs::read_to_string(p.home.join("state.json")).ok().and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok()).and_then(|state| state["screens"].as_object().and_then(|screens| screens.values().next().and_then(|entry| entry["source"].as_str().map(PathBuf::from))));
+        let picked = p.home.join("probe-system-pick.jpg");
+        let made = source.as_deref().and_then(|source| fs::copy(source, &picked).ok());
+        let _ = quiet_log(&log, Duration::from_millis(1500), Duration::from_secs(15));
+        let start = log_lines(&log).len();
+        let shown = watch_shown();
+        let set = made.map(|_| desktop.set_wallpaper(screen, &picked));
+        pump(Duration::from_secs(3));
+        let samples = stop_shown(shown);
+        let after: Vec<String> = log_lines(&log).into_iter().skip(start).collect();
+        let woke = after.iter().any(|line| line.contains(" wake ") || line.contains(" tick "));
+        let primes = after.iter().filter(|line| line.contains(" glide primed ")).count();
+        let most = samples.iter().map(|(_, shown)| *shown).max().unwrap_or(0);
+        p.line(format!("- a picture picked in the system's settings, set {:?}: the daemon woke {woke}, primes after it {primes}, visible layer windows at most {most} over {} samples in 3 s", set.as_ref().map(|set| set.as_ref().map_err(|error| error.to_string())), samples.len()));
+        if !set.as_ref().is_some_and(Result::is_ok) || !woke {
+            p.failed.push("the picture picked in the system's settings did not wake the daemon, so it was not judged, which is the footing failing and not a pass".into());
+        } else if primes > 0 || most > 0 {
+            p.failed.push("a picture picked in the system's settings was covered by a layer with Scooch's old picture".into());
+        }
+        if let Some(source) = source {
+            let _ = desktop.set_wallpaper(screen, &source);
+            pump(Duration::from_secs(3));
+        }
+        let stopped = stop_glide_daemon(&mut child);
+        p.line(format!("- the daemon with the read lag hint stopped {stopped:?}"));
+        Ok(())
     }
 
     fn quiet_log(log: &Path, quiet: Duration, limit: Duration) -> bool {
@@ -4240,6 +4332,8 @@ mod probe {
         decisions(p, &rested);
         let stopped = stop_glide_daemon(&mut child);
         p.line(format!("- daemon stopped {stopped:?}"));
+        pump(Duration::from_millis(800));
+        unslid(p, &screen, name, folder, (aside, centre))?;
         pump(Duration::from_millis(800));
         let plain_log = p.out.join("glide-daemon-software.log");
         let mut plain = start_glide_daemon(p, &plain_log, false)?;
