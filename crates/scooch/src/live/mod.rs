@@ -185,6 +185,7 @@ pub struct Helper {
     warms: u32,
     launched: Instant,
     arrived: Option<Instant>,
+    sent: Instant,
 }
 
 impl Helper {
@@ -259,6 +260,7 @@ impl Helper {
             warms: 0,
             launched,
             arrived: None,
+            sent: launched,
         };
         helper.send(&Command::Hello { version: VERSION })?;
         Ok(helper)
@@ -281,7 +283,12 @@ impl Helper {
         let input = self.input.as_mut().context("the pipe to the helper is closed")?;
         input.write_all(text.as_bytes())?;
         input.flush()?;
+        self.sent = Instant::now();
         Ok(())
+    }
+
+    pub fn since_sent(&self) -> Duration {
+        self.sent.elapsed()
     }
 
     pub fn expect<T>(&mut self, timeout: Duration, mut pick: impl FnMut(&Reply) -> Option<Result<T>>) -> Result<T> {

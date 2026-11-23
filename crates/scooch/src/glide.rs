@@ -12,6 +12,7 @@ const STRIKES: u32 = 2;
 pub const GLIDE_MS: u32 = 450;
 pub const SETTLE_WAIT: Duration = Duration::from_secs(2);
 const SETTLE_AFTER_GLIDE: Duration = Duration::from_millis(1500);
+const FORGOTTEN: Duration = Duration::from_secs(crate::live::helper::IDLE_EXIT.as_secs() - 5);
 pub const CHECK: Duration = Duration::from_millis(50);
 pub const PATIENCE: Duration = Duration::from_millis(150);
 pub const SHOWN_AFTER_WAKE: Duration = Duration::from_millis(450);
@@ -58,6 +59,7 @@ pub trait Link: Send {
     fn close(&mut self, id: u32);
     fn quit(&mut self);
     fn alive(&mut self) -> bool;
+    fn quiet(&self) -> Duration;
     fn milestones(&mut self) -> Milestones;
 }
 
@@ -307,6 +309,10 @@ impl Link for Real {
 
     fn alive(&mut self) -> bool {
         !self.helper.exited()
+    }
+
+    fn quiet(&self) -> Duration {
+        self.helper.since_sent()
     }
 
     fn milestones(&mut self) -> Milestones {
@@ -843,7 +849,8 @@ impl Glider {
 
     fn send_warm(&mut self, picture: &Path, size: [u32; 2], canvas: Option<&Path>) -> Result<()> {
         let wanted = (picture.to_path_buf(), size);
-        if self.warmed.as_ref() == Some(&wanted) {
+        let kept = self.link.as_ref().is_some_and(|link| link.quiet() < FORGOTTEN);
+        if self.warmed.as_ref() == Some(&wanted) && kept {
             return Ok(());
         }
         let scales = self.scales_for(size);
@@ -1417,6 +1424,24 @@ pub mod tests {
     }
 
     #[test]
+    fn a_helper_quiet_long_enough_to_let_its_picture_go_is_warmed_again() {
+        let spawner = FakeSpawner::new(Arc::new(Mutex::new(Vec::new())));
+        let (log, script) = (spawner.log.clone(), spawner.script.clone());
+        let mut glider = parked(spawner);
+        let screen = lone_screen();
+        let warm = Warmup { picture: PathBuf::from("p.jpg"), size: [160, 100], canvas: None };
+        let drag = |still: &str| Prime { screen: &screen, warm: &warm, stills: Stills::of(Path::new(still)), drag: true };
+        let warms = |log: &Events| said(log).iter().filter(|what| what.starts_with("warm ")).count();
+        assert!(glider.prime(&drag("a.png")));
+        script.lock().unwrap().quiet = FORGOTTEN - Duration::from_secs(1);
+        assert!(glider.prime(&drag("b.png")));
+        assert_eq!(warms(&log), 1, "a helper that still holds its picture was warmed again {:?}", said(&log));
+        script.lock().unwrap().quiet = crate::live::helper::IDLE_EXIT;
+        assert!(glider.prime(&drag("c.png")));
+        assert_eq!(warms(&log), 2, "a helper that let its picture go was not warmed again {:?}", said(&log));
+    }
+
+    #[test]
     fn the_line_counts_times_from_the_drop_and_says_before_and_after() {
         let drop = Instant::now() + Duration::from_millis(300);
         let mut trail = Move::new("left", Some(drop));
@@ -1470,6 +1495,7 @@ pub mod tests {
         pub dies: bool,
         pub settle_after: Duration,
         pub glided_after: Duration,
+        pub quiet: Duration,
         pub slow_hello: Duration,
         pub shown_after: Duration,
         pub ready_after: Duration,
@@ -1675,6 +1701,10 @@ pub mod tests {
             if !self.dead {
                 self.say("quit".into());
             }
+        }
+
+        fn quiet(&self) -> Duration {
+            self.script().quiet
         }
 
         fn alive(&mut self) -> bool {
