@@ -615,6 +615,7 @@ pub fn watch() -> Result<()> {
     if idle(desktop.as_ref(), &store)? {
         return Ok(());
     }
+    crate::icon::show(&store.load());
     daemon::watch(desktop, store)
 }
 
