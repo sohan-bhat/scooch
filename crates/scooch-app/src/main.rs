@@ -30,7 +30,7 @@ const FINDER: &str = "/System/Library/CoreServices/Finder.app";
 const ISSUES: &str = "https://github.com/sohan-bhat/scooch/issues/new?title=Support%20for%20";
 const KINDS: [&str; 10] = ["jpg", "jpeg", "png", "heic", "heif", "webp", "tif", "tiff", "bmp", "avif"];
 
-struct Kept(Mutex<Option<notify::RecommendedWatcher>>);
+struct Kept(Mutex<Option<watch::Watch>>);
 
 const SAVES: [(&str, &str); 3] = [("so try again in a moment.", "held"), ("so check that the disk has room.", "full"), ("so check that its folder can be written.", "unwritable")];
 
@@ -253,7 +253,12 @@ fn place_on_pointer<R: Runtime>(window: &WebviewWindow<R>) {
 static PRESENTING: Mutex<()> = Mutex::new(());
 
 fn made_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
-    let config = app.config().app.windows.iter().find(|window| window.label == "main").cloned().ok_or(tauri::Error::WindowNotFound)?;
+    #[allow(unused_mut)]
+    let mut config = app.config().app.windows.iter().find(|window| window.label == "main").cloned().ok_or(tauri::Error::WindowNotFound)?;
+    #[cfg(target_os = "linux")]
+    if config.theme.is_none() {
+        config.theme = session::portal_theme();
+    }
     let window = tauri::WebviewWindowBuilder::from_config(app, &config)?.build()?;
     if let Ok(theme) = window.theme() {
         paint(&window, theme);
@@ -365,6 +370,15 @@ fn main() {
             })
             .ok();
             app.manage(Kept(Mutex::new(watcher)));
+            #[cfg(target_os = "linux")]
+            {
+                let handle = app.handle().clone();
+                session::follow_theme(move |theme| {
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.set_theme(Some(theme));
+                    }
+                });
+            }
             if offered {
                 if let Err(error) = tray::make(app.handle()) {
                     eprintln!("scooch-app tray failed: {error}");
