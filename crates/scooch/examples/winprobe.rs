@@ -4223,7 +4223,7 @@ mod probe {
         let rest_target = if last_target.x == centre.x && last_target.y == centre.y { aside } else { centre };
         let rested = watch_change(&log, &screen, || drag_icon(name, folder, rest_target), false);
         let stamp = |word: &str| rested.log.iter().find(|line| line.contains(word)).and_then(|line| stamp_of(line));
-        let rest_glided = rested.log.iter().any(|line| lands(line));
+        let rest_glided = rested.log.iter().any(|line| lands(line)) && rested.log.iter().any(|line| line.contains(" glide slid, ") && !line.contains("then the helper"));
         let rest_skips: Vec<String> = rested.log.iter().filter(|line| line.contains("glide skipped")).map(|line| line.chars().take(200).collect()).collect();
         let shown = stamp(" glide open after snapshot").zip(rested.log.iter().find(|line| gliding(line)).and_then(|line| stamp_of(line))).map(|(asked, shown)| ((shown - asked) * 1000.0).round());
         let decided = rested.log.iter().find(|line| line.contains(" glide slid") || (line.contains(" glide skipped, ") && line.contains(" times from the "))).cloned();
