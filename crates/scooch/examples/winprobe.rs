@@ -1648,6 +1648,22 @@ mod probe {
         Some((counters.WorkingSetSize, counters.PrivateUsage))
     }
 
+    fn process_cpu(pid: u32) -> Option<Duration> {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION, false, pid) }.ok()?;
+        let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        let read = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) }.ok();
+        let _ = unsafe { CloseHandle(handle) };
+        read.map(|_| Duration::from_nanos((filetime(kernel) + filetime(user)) * 100))
+    }
+
+    fn process_memory(pid: u32) -> Option<(usize, usize)> {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) }.ok()?;
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+        let read = unsafe { GetProcessMemoryInfo(handle, &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS, counters.cb) }.ok();
+        let _ = unsafe { CloseHandle(handle) };
+        read.map(|_| (counters.WorkingSetSize, counters.PrivateUsage))
+    }
+
     fn threads(process: u32) -> Option<usize> {
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }.ok()?;
         let mut entry = THREADENTRY32 { dwSize: size_of::<THREADENTRY32>() as u32, ..Default::default() };
@@ -2602,7 +2618,7 @@ mod probe {
             }
         }
         let asked = Instant::now();
-        helper.ask_open(id, screen, &run.old.0)?;
+        helper.ask_open(id, screen, &scooch::live::Stills::of(&run.old.0))?;
         let mut opening: Vec<(u128, RgbImage)> = Vec::new();
         let mut shown: Option<(u64, u128)> = None;
         while asked.elapsed() < Duration::from_secs(4) {
@@ -3011,7 +3027,7 @@ mod probe {
         for _ in 0..5 {
             *id += 1;
             let asked = Instant::now();
-            helper.ask_open(*id, screen, &kit.stills[0].0)?;
+            helper.ask_open(*id, screen, &scooch::live::Stills::of(&kit.stills[0].0))?;
             told.push(u128::from(helper.shown(*id, ANSWER)?));
             shown.push(asked.elapsed().as_millis());
             pump(Duration::from_millis(100));
@@ -3025,7 +3041,7 @@ mod probe {
             pump(Duration::from_millis(200));
             *id += 1;
             let asked = Instant::now();
-            helper.ask_open(*id, screen, &kit.other.0)?;
+            helper.ask_open(*id, screen, &scooch::live::Stills::of(&kit.other.0))?;
             let seen = patch_until(kit.spot, &other_patch, true, Duration::from_secs(2));
             helper.shown(*id, ANSWER)?;
             visible.push(seen.map(|d| d.as_millis().min(asked.elapsed().as_millis())));
@@ -3516,7 +3532,7 @@ mod probe {
     }
 
     fn decisions(p: &mut Probe, watched: &Watched) {
-        for line in watched.log.iter().filter(|line| line.contains("glide decision at the set")) {
+        for line in watched.log.iter().filter(|line| line.contains(" glide slid") || (line.contains(" glide skipped, ") && line.contains(" times from the "))) {
             p.line(format!("  - {line}"));
         }
     }
@@ -3593,7 +3609,11 @@ mod probe {
     }
 
     fn commanded(line: &str) -> bool {
-        ["glide open", "glide warm", "glide helper started", "glide closed", "glide settle", "glide ready", "glide glided", "glide interrupted"].iter().any(|marker| line.contains(marker))
+        ["glide open", "glide closed", "glide settle", "glide glided", "glide interrupted", "glide slid"].iter().any(|marker| line.contains(marker))
+    }
+
+    fn primed(line: &str) -> bool {
+        line.contains(" glide primed ")
     }
 
     fn gliding_id(watched: &Watched) -> Option<String> {
@@ -3998,6 +4018,13 @@ mod probe {
             stop_glide_daemon(&mut child);
             return Ok(());
         }
+        let parked = wait_until(Duration::from_secs(90), || log_lines(&log).iter().any(|line| line.contains(" glide helper parked on ")));
+        p.line(format!("- the helper parked {:?} ms after the first render, `{}`", parked.map(|time| time.as_millis()), log_lines(&log).iter().find(|line| line.contains(" glide helper parked on ")).cloned().unwrap_or_default()));
+        if parked.is_none() {
+            p.failed.push("the helper never parked within 90 s, so no glide was judged, which is the footing failing and not a pass".into());
+            stop_glide_daemon(&mut child);
+            return Ok(());
+        }
         let (name, folder) = PROBES[0];
         let centre = POINT { x: (screen.frame.x + screen.frame.w * 0.5) as i32, y: (screen.frame.y + screen.frame.h * 0.5) as i32 };
         let aside = POINT { x: (screen.frame.x + screen.frame.w * 0.62) as i32, y: (screen.frame.y + screen.frame.h * 0.32) as i32 };
@@ -4093,8 +4120,8 @@ mod probe {
         pump(Duration::from_millis(400));
         let shut_glided = shut.log.iter().any(|line| gliding(line));
         let hidden = shut.log.iter().any(|line| line.contains("glide skipped, hidden"));
-        let shut_waited = shut.log.iter().find_map(|line| line.split("glide decision at the set").nth(1).and_then(|rest| rest.split("waited ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<u64>().ok()));
-        let at_once = !shut_glided && shut_waited == Some(0);
+        let shut_waited = shut.log.iter().find_map(|line| line.split(" glide skipped, ").nth(1).and_then(|rest| rest.split("waited ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<u64>().ok()));
+        let at_once = !shut_glided && shut_waited.is_none_or(|waited| waited <= 20);
         p.line(format!("- the same move while a window covers the whole desktop, covered seen {covered_desktop}: new wallpaper {}, glided {shut_glided}, logged skipped hidden {hidden}, tick `{}`, log {:?}", shut.new != shut.old, tick_of(&shut), shut.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         p.line(format!("  - the decision waited {shut_waited:?} ms, a plain swap at once {at_once}"));
         if shut.new == shut.old || shut_glided || !(hidden || at_once) {
@@ -4158,45 +4185,29 @@ mod probe {
         let wakes = woken.iter().filter(|line| line.contains(" wake ")).count();
         let ticks = woken.iter().filter(|line| line.contains(" tick ")).count();
         let sent: Vec<String> = woken.iter().filter(|line| commanded(line)).map(|line| line.chars().take(160).collect()).collect();
-        p.line(format!("- thirty wakes with nothing moved over {} s after the last drag: wakes logged {wakes}, ticks {ticks}, helper commands {} {sent:?}", last.elapsed().as_secs(), sent.len()));
-        if !sent.is_empty() {
-            p.failed.push("a wake with nothing moved sent the helper a command".into());
+        let primes = woken.iter().filter(|line| primed(line)).count();
+        p.line(format!("- thirty wakes with nothing moved over {} s after the last drag: wakes logged {wakes}, ticks {ticks}, primes {primes}, helper commands past a prime {} {sent:?}", last.elapsed().as_secs(), sent.len()));
+        if !sent.is_empty() || primes > 2 {
+            p.failed.push("a wake with nothing moved opened a layer, or bare wakes primed more often than the rule allows".into());
         }
-        let gone = wait_until(Duration::from_secs(40).saturating_sub(last.elapsed()), || helper_children(daemon).is_empty());
+        let before = helper_children(daemon);
         pump(Duration::from_secs(35).saturating_sub(last.elapsed()));
-        let still = helper_children(daemon);
-        let checked = epoch();
-        let launch = log_lines(&log).into_iter().skip(before_wakes).rev().find(|line| line.contains("glide early launch") && stamp_of(line).is_some_and(|at| checked - at < 2.0));
-        let gone_soon = !still.is_empty() && launch.is_some() && wait_until(Duration::from_secs(3), || helper_children(daemon).is_empty()).is_some();
-        let launched_at = launch.as_deref().and_then(stamp_of);
-        let after: Vec<String> = log_lines(&log).into_iter().skip(before_wakes).filter(|line| launched_at.is_some_and(|at| stamp_of(line).is_some_and(|stamp| stamp >= at))).collect();
-        let quit = after.iter().find(|line| line.contains("glide early helper quit")).cloned();
-        let lived = quit.as_deref().and_then(|line| line.split("it lived ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<f64>().ok());
-        let worked = after.iter().any(|line| commanded(line));
-        let early = gone_soon && lived.is_some_and(|lived| lived <= 2000.0) && !worked;
+        let parked = helper_children(daemon);
+        p.line(format!("- 35 s after the last drag the parked helper {parked:?}, before the rest {before:?}"));
+        if parked.len() != 1 || parked != before {
+            p.failed.push("the parked helper was not one steady process through the rest".into());
+        }
+        let helper = parked.first().copied();
+        let helper_cpu = helper.and_then(process_cpu);
+        pump(Duration::from_secs(60));
+        let helper_after = helper.and_then(process_cpu);
         p.line(format!(
-            "- no helper {:?} s after the last drag, 35 s after it helper processes {still:?}{}",
-            gone.map(|_| last.elapsed().as_secs()),
-            if still.is_empty() { String::new() } else { format!(", judged by the launch line {launch:?} and the quit line {quit:?}, sent work {worked}, gone within 3 s {gone_soon}, so launched early by a wake {early}") }
+            "- the parked helper {helper:?} over a quiet minute: CPU used {:?} ms, memory {:?}",
+            helper_cpu.zip(helper_after).map(|(before, after)| after.saturating_sub(before).as_millis()),
+            helper.and_then(process_memory)
         ));
-        if !still.is_empty() && !early {
-            p.failed.push("a helper was still running 35 s after the last drag".into());
-        }
-        let before_bare = log_lines(&log).len();
-        for _ in 0..30 {
-            let _ = scooch::poke::send(daemon);
-            pump(Duration::from_millis(400));
-        }
-        pump(Duration::from_millis(2000));
-        let bare: Vec<String> = log_lines(&log).into_iter().skip(before_bare).collect();
-        let starts: Vec<usize> = bare.iter().enumerate().filter(|(_, line)| line.contains("glide early launch")).map(|(index, _)| index).collect();
-        let launches = starts.len();
-        let lived: Vec<f64> = starts.iter().filter_map(|start| bare.iter().skip(start + 1).find_map(|line| line.split("it lived ").nth(1).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse().ok()))).collect();
-        let sent: Vec<String> = bare.iter().filter(|line| commanded(line)).map(|line| line.chars().take(160).collect()).collect();
-        let left = helper_children(daemon);
-        p.line(format!("- thirty wakes with nothing moved after the helper was gone: early launches {launches}, each quit after living {lived:?} ms, helper commands or picture warms {sent:?}, helper processes two seconds after the last wake {left:?}"));
-        if launches > 2 || lived.len() != launches || lived.iter().any(|lived| *lived > 2000.0) || !sent.is_empty() || !left.is_empty() {
-            p.failed.push("thirty bare wakes launched more than two helpers, kept one past two seconds, or sent it work".into());
+        if helper_cpu.zip(helper_after).is_some_and(|(before, after)| after.saturating_sub(before) > Duration::from_millis(50)) {
+            p.failed.push("the parked helper used CPU at rest".into());
         }
         let (cpu_before, quiet_from) = (cpu(&child), epoch());
         pump(Duration::from_secs(60));
@@ -4214,20 +4225,18 @@ mod probe {
         let stamp = |word: &str| rested.log.iter().find(|line| line.contains(word)).and_then(|line| stamp_of(line));
         let rest_glided = rested.log.iter().any(|line| lands(line));
         let rest_skips: Vec<String> = rested.log.iter().filter(|line| line.contains("glide skipped")).map(|line| line.chars().take(200).collect()).collect();
-        let cold = stamp(" glide early launch").or_else(|| stamp(" glide helper launched")).zip(stamp(" glide ready")).map(|(started, ready)| ((ready - started) * 1000.0).round());
         let shown = stamp(" glide open after snapshot").zip(rested.log.iter().find(|line| gliding(line)).and_then(|line| stamp_of(line))).map(|(asked, shown)| ((shown - asked) * 1000.0).round());
-        let decided = rested.log.iter().find(|line| line.contains("glide decision at the set"));
-        let launched_early = rested.log.iter().any(|line| line.contains("glide early launch"));
-        let early_window = decided.and_then(|line| line.split("made it in ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<u64>().ok()).filter(|_| launched_early);
-        let found_made = decided.and_then(|line| line.split("open found it made ").nth(1)).and_then(|rest| rest.split(',').next()).and_then(|word| word.trim().parse::<bool>().ok());
+        let decided = rested.log.iter().find(|line| line.contains(" glide slid") || (line.contains(" glide skipped, ") && line.contains(" times from the "))).cloned();
         p.line(format!(
-            "- the first drag after the helper went away, to {},{} and now at {:?}: glided {rest_glided}, skip reasons {rest_skips:?}, helper start to ready {cold:?} ms, open after the snapshot to shown {shown:?} ms, wallpaper set {:?} ms after the drop, the early window took {early_window:?} ms, open found it made {found_made:?}, log {:?}",
+            "- the first drag after a quiet minute with the helper parked, to {},{} and now at {:?}: glided {rest_glided}, skip reasons {rest_skips:?}, open after the snapshot to shown {shown:?} ms, wallpaper set {:?} ms after the drop, the daemon's line {decided:?}",
             rest_target.x,
             rest_target.y,
             icon_spot(name, folder),
             stamp(" set ").map(|set| ((set - rested.dropped) * 1000.0).round()),
-            rested.log.iter().filter(|line| line.contains(" glide ") || line.contains(" set ")).map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()
         ));
+        if !rest_glided {
+            p.failed.push("the first drag after a quiet minute did not slide with the helper parked".into());
+        }
         decisions(p, &rested);
         let stopped = stop_glide_daemon(&mut child);
         p.line(format!("- daemon stopped {stopped:?}"));
