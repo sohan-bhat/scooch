@@ -83,7 +83,7 @@ def main():
         return
     name, path, ident, menu = found
     if mode == "menu":
-        print("|".join(("%s %s%s" % (label, mark, "" if enabled else " dim")).strip() for _, label, mark, enabled in layout(connection, name, menu)))
+        print("|".join(" ".join(part for part in (label, mark, "" if enabled else "dim") if part) for _, label, mark, enabled in layout(connection, name, menu)))
         return
     if mode == "press":
         wanted = sys.argv[3]

@@ -138,6 +138,16 @@ sleep 2
 
 line
 line "#### Quit Scooch"
+sentences=$(python3 -c 'import json, sys; print("\n".join(json.load(open(sys.argv[1]))["failure"].values()))' crates/scooch-app/ui/src/copy/en.json)
+said_first() { tray menu "$(app_pid)" | cut -d'|' -f1 | sed 's/ dim$//' | grep -qxF -f <(printf '%s\n' "$sentences"); }
+chmod a-w "$data"
+press_item 'Quit Scooch'
+sleep 4
+line "- with the data folder read only, Quit left app processes $(app_count), saved on $(grep -c '"on": true' "$data/state.json"), the menu reads $(tray menu "$(app_pid)")"
+chmod u+w "$data"
+expect "a Quit whose off fails keeps the icon" app_alive
+expect "a Quit whose off fails keeps Scooch on" state_on
+expect "a Quit whose off fails shows a sentence of the window's copy in the menu" said_first
 press_item 'Quit Scooch'
 wait_for 30 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
 wait_for 30 state_off >/dev/null
