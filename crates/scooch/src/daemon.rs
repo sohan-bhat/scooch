@@ -5,7 +5,7 @@ use crate::live::Stills;
 use crate::{cache, poke, scene};
 use anyhow::{Context, Result};
 use scooch_core::{Analysis, Options, Placement, Rect, RgbImage, Scene};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -384,6 +384,7 @@ pub struct Daemon {
     pub grace: Duration,
     recent: Mutex<HashMap<String, Instant>>,
     last_wake: Mutex<Option<Instant>>,
+    canvases: Arc<Mutex<HashSet<PathBuf>>>,
     ledger: Mutex<Ledger>,
     pub glider: Arc<Mutex<Glider>>,
     woke: Mutex<Option<Instant>>,
@@ -494,7 +495,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), last_wake: Mutex::new(None), ledger: Mutex::new(Ledger::default()), glider, woke: Mutex::new(None), reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()), stills: Mutex::new(HashMap::new()), saves: Mutex::new(None), #[cfg(test)] marks: Mutex::new(None) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), last_wake: Mutex::new(None), canvases: Arc::new(Mutex::new(HashSet::new())), ledger: Mutex::new(Ledger::default()), glider, woke: Mutex::new(None), reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()), stills: Mutex::new(HashMap::new()), saves: Mutex::new(None), #[cfg(test)] marks: Mutex::new(None) }
     }
 
     #[cfg(test)]
@@ -1394,7 +1395,8 @@ impl Daemon {
         if !self.store.still_for(output).is_file() {
             self.keep_still(output, None);
         }
-        if tables.is_file() && stale_tables(&tables).is_none() {
+        let tables_ready = tables.is_file() && stale_tables(&tables).is_none();
+        if tables_ready && self.canvas_ready(&screen.id, key) {
             return;
         }
         let Ok(pixel_key) = cache::key(&entry.source) else { return };
@@ -1403,9 +1405,14 @@ impl Daemon {
         let bare_off = Options { scenery: scooch_core::Scenery::Off, ..*options };
         let options = if entry.belongs.is_some_and(|known| known.key == pixel_key && !known.answer) { &bare_off } else { options };
         let bundle = self.session_tables(&screen.id, pixel_key, (&decoded, &analysis, placement, scene, options));
-        if std::fs::create_dir_all(self.store.tables()).is_ok() && crate::state::write_unsynced(&tables, &bundle.tables_to_bytes()).is_ok() {
+        if std::fs::create_dir_all(self.store.tables()).is_ok() && (tables_ready || crate::state::write_unsynced(&tables, &bundle.tables_to_bytes()).is_ok()) {
             self.keep_canvas(&screen.id, key, bundle);
         }
+    }
+
+    fn canvas_ready(&self, screen: &str, key: u64) -> bool {
+        let canvas = self.store.canvas_for(screen, key);
+        cfg!(not(any(windows, target_os = "macos"))) || canvas.is_file() || self.canvases.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(&canvas)
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -1414,27 +1421,20 @@ impl Daemon {
     #[cfg(any(windows, target_os = "macos"))]
     fn keep_canvas(&self, screen: &str, key: u64, bundle: Arc<scooch_core::Bundle>) {
         let path = self.store.canvas_for(screen, key);
-        if path.is_file() {
+        if path.is_file() || !self.canvases.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(path.clone()) {
             return;
         }
-        let (tables, prefix) = (self.store.tables(), format!("{}.", file_safe(screen)));
-        let _ = std::thread::Builder::new().name("scooch-canvas".into()).spawn(move || {
+        let writing = self.canvases.clone();
+        let spawned = std::thread::Builder::new().name("scooch-canvas".into()).spawn(move || {
             let print = crate::live::canvas::fingerprint(bundle.canvas_width, bundle.canvas_height, &bundle.canvas);
             let canvas = scooch_core::Canvas { width: bundle.canvas_width, height: bundle.canvas_height, pixels: bundle.canvas.clone() };
             drop(bundle);
-            if crate::live::canvas::write(&path, canvas.width, canvas.height, &scooch_live::levels(&canvas), print).is_err() {
-                return;
-            }
-            if let Ok(found) = std::fs::read_dir(&tables) {
-                for file in found.flatten() {
-                    let other = file.path();
-                    let name = file.file_name().to_string_lossy().into_owned();
-                    if other != path && name.starts_with(&prefix) && name.ends_with(".canvas") {
-                        let _ = std::fs::remove_file(other);
-                    }
-                }
-            }
+            let _ = crate::live::canvas::write(&path, canvas.width, canvas.height, &scooch_live::levels(&canvas), print);
+            writing.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&path);
         });
+        if spawned.is_err() {
+            self.canvases.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&self.store.canvas_for(screen, key));
+        }
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -4256,6 +4256,37 @@ pub mod tests {
         fake.place(vec![moved_subject()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
         assert!(events(&fake).iter().any(|event| event.starts_with("glide ")), "{:?}", events(&fake));
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_late_canvas_thread_leaves_the_canvas_on_screen_and_a_missing_canvas_is_made_before_a_move() {
+        let (daemon, fake, _, _) = glide_rig("glide-late-canvas", true);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let state = daemon.store.load();
+        let key = tables_key(&state.screens["main"].source, &state.options).unwrap();
+        let canvas = daemon.store.canvas_for("main", key);
+        let wait = |path: &Path| {
+            let started = Instant::now();
+            while !path.is_file() && started.elapsed() < Duration::from_secs(20) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            path.is_file()
+        };
+        assert!(wait(&canvas), "no canvas after the first set");
+        let image = RgbImage::from_fn(32, 24, |x, y| [(x * 8) as u8, (y * 10) as u8, 90].into());
+        let analysis = scooch_core::analyze(&image);
+        let scene = Scene { width: 32, height: 24, icons: Vec::new() };
+        let options = Options::default();
+        let placement = scooch_core::solve(&analysis, &scene, &options, None);
+        daemon.keep_canvas("main", key ^ 1, Arc::new(scooch_core::bundle(&image, &analysis, &placement, &scene, &options)));
+        assert!(wait(&daemon.store.canvas_for("main", key ^ 1)), "the late canvas was never written");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(canvas.is_file(), "a late canvas thread deleted the canvas of the picture on screen");
+        std::fs::remove_file(&canvas).unwrap();
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        assert!(wait(&canvas), "a canvas missing beside its tables was not made again before a move");
     }
 
     #[test]
