@@ -54,7 +54,7 @@ mod table;
 mod warp;
 
 pub use bundle::{Bundle, Constants, RAMP};
-pub use pack::{half_bits, Canvas, TablesError, TABLES_VERSION};
+pub use pack::{fingerprint, half_bits, Canvas, TablesError, TABLES_VERSION};
 pub use session::{Map, Session};
 #[doc(hidden)]
 pub use puffs::SITES_MOST;
