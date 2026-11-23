@@ -20,8 +20,8 @@ fn say(out: &Out, reply: &Reply) {
     }
 }
 
-pub fn read(text: &str) -> Result<Command, Reply> {
-    serde_json::from_str::<Command>(text).map_err(|error| Reply::Failed { id: None, why: format!("unreadable command {error}") })
+pub fn read(text: &str) -> Result<Command, Box<Reply>> {
+    serde_json::from_str::<Command>(text).map_err(|error| Box::new(Reply::Failed { id: None, why: format!("unreadable command {error}") }))
 }
 
 pub fn refuse(why: &str) -> ExitCode {
@@ -46,11 +46,11 @@ pub use running::{serve, Build, Platform};
 #[cfg(any(windows, target_os = "macos"))]
 mod running {
     use super::{read, say, Commit, Out, Waker, IDLE_EXIT, LAYER_IDLE};
-    use crate::live::{warm_failed, Command, Hints, Reply, VERSION};
+    use crate::live::{warm_failed, Command, Hints, Reply, Stills, VERSION};
     use crate::platform::Screen;
     use anyhow::Result;
-    use scooch_core::{Bundle, Canvas, RgbImage};
-    use scooch_live::{Glide, Gpu, Look, Picture, Still, Target};
+    use scooch_core::{Bundle, RgbImage};
+    use scooch_live::{Glide, Gpu, Look, Picture, Side, Still, Target};
     use std::collections::{BTreeMap, VecDeque};
     use std::io::BufRead;
     use std::path::{Path, PathBuf};
@@ -67,6 +67,10 @@ mod running {
     const FLUSH: usize = 2;
     const COMPOSE_WAIT: Duration = Duration::from_secs(1);
     const POLL: Duration = Duration::from_millis(10);
+    const REST: Duration = Duration::from_secs(1 << 20);
+    const STILLS_KEPT: usize = 2;
+    const PRIMED: u32 = 1 << 31;
+    const TIMED_FRAMES: usize = 5;
 
     pub enum Build<M, L> {
         Partly(M, &'static str),
@@ -97,6 +101,9 @@ mod running {
         fn committer(&self) -> Option<Commit> {
             None
         }
+        fn screen_gpu(&self, _layer: &Self::Layer) -> Option<String> {
+            None
+        }
         fn close(&mut self, layer: Self::Layer);
         fn abandon(&mut self, layer: Self::Layer) {
             std::mem::forget(layer);
@@ -118,6 +125,7 @@ mod running {
         {
         }
         fn prepare(&mut self) {}
+        fn rest(&mut self) {}
         fn begin(&mut self) {}
     }
 
@@ -134,7 +142,7 @@ mod running {
 
     #[derive(Clone)]
     struct Loaded {
-        canvas: Arc<Canvas>,
+        print: u64,
         picture: Picture,
     }
 
@@ -147,25 +155,56 @@ mod running {
         composition: bool,
     }
 
-    enum Decoding {
-        Thread(std::thread::JoinHandle<Result<RgbImage, String>>),
-        Path(PathBuf),
+    enum Image {
+        Rgb(RgbImage),
+        Rgba(crate::live::still::Raw),
     }
 
-    impl Decoding {
-        fn start<P: Platform>(path: PathBuf) -> Decoding {
-            let moved = path.clone();
-            match std::thread::Builder::new().name("scooch-live-still".into()).spawn(move || P::decode(&moved).map_err(|error| format!("{error:#}"))) {
-                Ok(handle) => Decoding::Thread(handle),
-                Err(_) => Decoding::Path(path),
+    type Fetched = Result<(Image, &'static str), String>;
+
+    enum Source {
+        Kept(Arc<Still>),
+        Loading(std::thread::JoinHandle<Fetched>),
+        Here(Stills),
+        Missing,
+    }
+
+    fn fetch(stills: &Stills) -> Fetched {
+        let Some(still) = stills.still.as_deref() else { return Err("open needs the still the system shows now".into()) };
+        if let Some(raw) = stills.raw.as_deref().and_then(|raw| crate::live::still::read(raw).ok()) {
+            return Ok((Image::Rgba(raw), "raw"));
+        }
+        scooch_core::open(still).map(|image| (Image::Rgb(image), "decoded")).map_err(|error| format!("the still {} could not be read {error}", still.display()))
+    }
+
+    impl Source {
+        fn start(stills: &Stills, kept: Option<Arc<Still>>) -> Source {
+            if let Some(still) = kept {
+                return Source::Kept(still);
+            }
+            if stills.still.is_none() {
+                return Source::Missing;
+            }
+            let wanted = stills.clone();
+            match std::thread::Builder::new().name("scooch-live-still".into()).spawn(move || fetch(&wanted)) {
+                Ok(handle) => Source::Loading(handle),
+                Err(_) => Source::Here(stills.clone()),
             }
         }
 
-        fn finish<P: Platform>(self) -> Result<RgbImage, String> {
-            match self {
-                Decoding::Thread(handle) => handle.join().unwrap_or_else(|_| Err("the still could not be decoded".into())),
-                Decoding::Path(path) => P::decode(&path).map_err(|error| format!("{error:#}")),
-            }
+        fn finish(self, gpu: &Gpu) -> Result<(Arc<Still>, &'static str), String> {
+            let fetched = match self {
+                Source::Kept(still) => return Ok((still, "kept")),
+                Source::Missing => return Err("open needs the still the system shows now".into()),
+                Source::Loading(handle) => handle.join().unwrap_or_else(|_| Err("the still could not be read".into())),
+                Source::Here(stills) => fetch(&stills),
+            };
+            let (image, from) = fetched?;
+            let still = match image {
+                Image::Rgb(image) => gpu.still(&image)?,
+                Image::Rgba(raw) => gpu.still_rgba(raw.width, raw.height, raw.rgba())?,
+            };
+            Ok((Arc::new(still), from))
         }
     }
 
@@ -181,11 +220,12 @@ mod running {
         Warmed { gpu: Option<Result<Gpu, String>>, loaded: Option<Result<Loaded, String>>, from: Option<String>, ms: u64 },
         Device { gpu: Gpu, composition: bool },
         Timed { timed: Option<Duration> },
-        Presented { id: u32, result: Result<(), String>, first: u64 },
+        Presented { id: u32, result: Result<(), String>, first: u64, still: &'static str },
         Glided { id: u32, frames: u32, slow: u32, first: u64, scale: f32, timed: Option<Duration> },
         Settled { id: u32 },
         Broke { id: u32, why: String },
         Stopped { id: u32 },
+        Kept { path: PathBuf, still: Arc<Still> },
     }
 
     #[derive(Default)]
@@ -195,6 +235,12 @@ mod running {
         present: u64,
         found: bool,
         steps: Vec<(&'static str, u64)>,
+    }
+
+    struct Primed {
+        screen: Screen,
+        hints: Hints,
+        still: Option<PathBuf>,
     }
 
     struct Live<L> {
@@ -207,6 +253,8 @@ mod running {
         stopped: bool,
         closing: Option<(Instant, bool)>,
         told: Option<String>,
+        primed: Option<Primed>,
+        drawn: Option<(u64, &'static str)>,
     }
 
     fn spent(since: Instant) -> u64 {
@@ -223,6 +271,7 @@ mod running {
     struct Pane<P: Platform> {
         screen: Screen,
         hints: Hints,
+        stills: Stills,
         win: Option<Win<P>>,
         steps: Vec<(&'static str, u64)>,
         make: u64,
@@ -231,12 +280,16 @@ mod running {
     }
 
     impl<P: Platform> Pane<P> {
-        fn new(screen: Screen, hints: Hints) -> Self {
-            Self { screen, hints, win: Some(Win::Making(None)), steps: Vec::new(), make: 0, present: 0, asked: Instant::now() }
+        fn new(screen: Screen, hints: Hints, stills: Stills) -> Self {
+            Self { screen, hints, stills, win: Some(Win::Making(None)), steps: Vec::new(), make: 0, present: 0, asked: Instant::now() }
         }
 
         fn fits(&self, screen: &Screen, hints: &Hints) -> bool {
             self.screen == *screen && self.hints == *hints
+        }
+
+        fn primes(&self) -> bool {
+            self.stills.still.is_some()
         }
 
         fn made(&self) -> bool {
@@ -318,7 +371,7 @@ mod running {
 
     struct Pending<P: Platform> {
         id: u32,
-        still: Option<Decoding>,
+        stills: Stills,
         asked: Instant,
         pane: Pane<P>,
         found: bool,
@@ -339,13 +392,19 @@ mod running {
         timing: bool,
         gpu: Option<(Gpu, bool)>,
         pictures: Vec<(Key, Loaded)>,
+        stills: Vec<(PathBuf, Arc<Still>)>,
         uploads: u32,
         running: Option<Want>,
         queue: VecDeque<Want>,
         pending: Vec<Pending<P>>,
         early: Option<Pane<P>>,
+        primed: Option<u32>,
+        aliases: BTreeMap<u32, u32>,
+        next_primed: u32,
         layers: BTreeMap<u32, Live<P::Layer>>,
         last: Instant,
+        parked: bool,
+        holding: bool,
         leaving: bool,
     }
 
@@ -383,6 +442,7 @@ mod running {
 
     struct Settling {
         incoming: Option<Receiver<Result<RgbImage, String>>>,
+        path: PathBuf,
         still: Option<Arc<Still>>,
         length: Duration,
         from: Vec<(Shown, f32)>,
@@ -393,26 +453,32 @@ mod running {
         id: u32,
         gpu: Gpu,
         surface: Surface,
-        still: Option<Decoding>,
+        source: Source,
+        stills: Stills,
         size: (u32, u32),
         period: Duration,
         commit: Option<Commit>,
     }
 
-    fn load_pair(a: &Path, b: &Path, pictures: &[Loaded]) -> Result<(Bundle, Bundle, Loaded), String> {
-        let read = |path: &Path| std::fs::read(path).map_err(|error| format!("could not read {} {error}", path.display()));
-        let (first, second) = (read(a)?, read(b)?);
-        let mut last = "glide needs a warm with a picture first".to_string();
-        for loaded in pictures {
-            match Bundle::tables_from_bytes(&first, (*loaded.canvas).clone()) {
-                Ok(one) => {
-                    let two = Bundle::tables_from_bytes(&second, (*loaded.canvas).clone()).map_err(|error| format!("{} {error}", b.display()))?;
-                    return Ok((one, two, loaded.clone()));
-                }
-                Err(error) => last = format!("{} {error}", a.display()),
-            }
-        }
-        Err(last)
+    type Prepared = (PathBuf, (u32, u32, u64), Side);
+
+    fn side_of(gpu: &Gpu, path: &Path) -> Result<((u32, u32, u64), Side), String> {
+        let bytes = std::fs::read(path).map_err(|error| format!("could not read {} {error}", path.display()))?;
+        let key = crate::live::canvas::tables_canvas(&bytes).ok_or_else(|| format!("{} {}", path.display(), scooch_core::TablesError::Short))?;
+        let bundle = Bundle::tables_for(&bytes, key.0, key.1, key.2).map_err(|error| format!("{} {error}", path.display()))?;
+        Ok((key, gpu.side(&bundle)?))
+    }
+
+    fn build_glide(gpu: &Gpu, (a, b): (&Path, &Path), loaded: &[Loaded], prepared: Option<Prepared>) -> Result<Glide, String> {
+        let (key, first) = match prepared.filter(|(path, _, _)| path == a) {
+            Some((_, key, side)) => (key, side),
+            None => side_of(gpu, a)?,
+        };
+        let picture = loaded.iter().find(|loaded| (loaded.picture.width, loaded.picture.height, loaded.print) == key).ok_or("glide needs a warm with a picture first")?;
+        let bytes = std::fs::read(b).map_err(|error| format!("could not read {} {error}", b.display()))?;
+        let bundle = Bundle::tables_for(&bytes, key.0, key.1, key.2).map_err(|error| format!("{} {error}", b.display()))?;
+        let second = gpu.side(&bundle)?;
+        gpu.glide_between(&picture.picture, &first, &second)
     }
 
     fn render<P: Platform>(start: Start, jobs: Receiver<Job>, events: Sender<Event>, waker: Waker) {
@@ -420,28 +486,28 @@ mod running {
             let _ = events.send(event);
             waker();
         };
-        let Start { id, gpu, surface, still, size, period, commit } = start;
+        let Start { id, gpu, surface, source, stills, size, period, commit } = start;
         let begun = Instant::now();
-        let made = still
-            .ok_or_else(|| "open needs the still the system shows now".to_string())
-            .and_then(Decoding::finish::<P>)
-            .and_then(|image| gpu.still(&image))
-            .and_then(|first| gpu.screen(surface.0, size.0, size.1).map(|screen| (first, screen)));
-        let (first, mut screen) = match made {
+        let made = source.finish(&gpu).and_then(|(first, from)| gpu.screen(surface.0, size.0, size.1).map(|screen| (first, from, screen)));
+        let (first, from, mut screen) = match made {
             Ok(made) => made,
             Err(why) => {
-                tell(Event::Presented { id, result: Err(why), first: 0 });
+                tell(Event::Presented { id, result: Err(why), first: 0, still: "" });
                 tell(Event::Stopped { id });
                 return;
             }
         };
-        let mut shown = vec![(Shown::Still(Arc::new(first)), 1.0f32)];
+        if let (Some(path), false) = (stills.still.clone(), from == "kept") {
+            tell(Event::Kept { path, still: first.clone() });
+        }
+        let mut shown = vec![(Shown::Still(first), 1.0f32)];
         let result = P::frame(|| screen.show(&looks(&shown)));
         let ok = result.is_ok();
         if let (true, Some(commit)) = (ok, commit.as_ref()) {
             commit();
         }
-        tell(Event::Presented { id, result, first: begun.elapsed().as_millis() as u64 });
+        tell(Event::Presented { id, result, first: begun.elapsed().as_millis() as u64, still: from });
+        let mut prepared: Option<Prepared> = stills.tables.as_deref().filter(|_| ok).and_then(|path| side_of(&gpu, path).ok().map(|(key, side)| (path.to_path_buf(), key, side)));
         let slow_after = period.mul_f32(1.5);
         let mut motion: Option<Motion> = None;
         let mut settling: Option<Settling> = None;
@@ -461,12 +527,9 @@ mod running {
                 Some(Job::Stop) => stop = true,
                 Some(Job::Glide { a, b, ms, loaded, asked, scale }) => {
                     screen.scale = scale;
-                    let built = load_pair(&a, &b, &loaded).and_then(|(a, b, loaded)| {
-                        let compatible = scooch_core::compatible(&a, &b);
-                        gpu.glide(&loaded.picture, &a, &b).map(|glide| (glide, compatible))
-                    });
-                    match built {
-                        Ok((glide, compatible)) => {
+                    match build_glide(&gpu, (&a, &b), &loaded, prepared.take()) {
+                        Ok(glide) => {
+                            let compatible = glide.compatible();
                             let from = motion.take().map(|moving| vec![(Shown::Glide(moving.glide, 1.0), 1.0)]).unwrap_or_else(|| shown.clone());
                             motion = Some(Motion { glide: Arc::new(glide), compatible, from, started: Instant::now(), length: Duration::from_millis(u64::from(ms.clamp(1, LONGEST))), asked, frames: 0, slow: 0, first: None, last: None });
                         }
@@ -475,11 +538,12 @@ mod running {
                 }
                 Some(Job::Settle { still, ms }) => {
                     let (sender, incoming) = mpsc::channel();
+                    let path = still.clone();
                     let spawned = std::thread::Builder::new().name("scooch-live-decode".into()).spawn(move || {
                         let _ = sender.send(P::decode(&still).map_err(|error| format!("{error:#}")));
                     });
                     match spawned {
-                        Ok(_) => settling = Some(Settling { incoming: Some(incoming), still: None, length: Duration::from_millis(u64::from(ms.clamp(1, LONGEST))), from: Vec::new(), started: None }),
+                        Ok(_) => settling = Some(Settling { incoming: Some(incoming), path, still: None, length: Duration::from_millis(u64::from(ms.clamp(1, LONGEST))), from: Vec::new(), started: None }),
                         Err(error) => tell(Event::Broke { id, why: format!("could not start the decode thread {error}") }),
                     }
                 }
@@ -494,7 +558,11 @@ mod running {
                         Ok(Ok(image)) => {
                             settle.incoming = None;
                             match gpu.still(&image) {
-                                Ok(still) => settle.still = Some(Arc::new(still)),
+                                Ok(still) => {
+                                    let still = Arc::new(still);
+                                    tell(Event::Kept { path: settle.path.clone(), still: still.clone() });
+                                    settle.still = Some(still);
+                                }
                                 Err(why) => {
                                     tell(Event::Broke { id, why });
                                     settling = None;
@@ -542,7 +610,7 @@ mod running {
                         Some((vec![(Shown::Still(still), 1.0)], true))
                     } else {
                         let mut layers = settle.from.clone();
-                        layers.push((Shown::Still(still), u));
+                        layers.push((Shown::Still(still), ease(u)));
                         Some((layers, false))
                     }
                 } else {
@@ -595,6 +663,38 @@ mod running {
     }
 
     impl<P: Platform> Helper<P> {
+        fn new(platform: P, out: Out, events: Sender<Event>, waker: Waker) -> Self {
+            Helper {
+                platform,
+                out,
+                events,
+                waker,
+                hints: Hints::default(),
+                scale: 1.0,
+                pinned: None,
+                timed: None,
+                scales: BTreeMap::new(),
+                untimed: None,
+                timing: false,
+                gpu: None,
+                pictures: Vec::new(),
+                stills: Vec::new(),
+                uploads: 0,
+                running: None,
+                queue: VecDeque::new(),
+                pending: Vec::new(),
+                early: None,
+                primed: None,
+                aliases: BTreeMap::new(),
+                next_primed: PRIMED,
+                layers: BTreeMap::new(),
+                last: Instant::now(),
+                parked: false,
+                holding: true,
+                leaving: false,
+            }
+        }
+
         fn tell(&self, reply: Reply) {
             say(&self.out, &reply);
         }
@@ -614,7 +714,7 @@ mod running {
         }
 
         fn time_later(&mut self) {
-            if self.timing || self.pinned.is_some() || !self.layers.is_empty() {
+            if self.timing || self.pinned.is_some() || !self.layers.is_empty() || self.early.is_some() || !self.pending.is_empty() {
                 return;
             }
             let (Some((gpu, _)), Some(([width, height], picture))) = (self.gpu.as_ref().map(|(gpu, made)| (gpu.clone(), *made)), self.untimed.take()) else { return };
@@ -623,8 +723,9 @@ mod running {
                 let heavy = scooch_live::heavy(width.max(1), height.max(1), &picture);
                 let timed = gpu.glide(&picture, &heavy, &heavy).ok().and_then(|glide| {
                     let look = [(Look::Glide(&glide, 0.5), 1.0)];
-                    let _ = gpu.time(width.max(1), height.max(1), &look);
-                    gpu.time(width.max(1), height.max(1), &look).ok()
+                    let (mut each, _) = gpu.burst_at(width.max(1), height.max(1), &look, 1.0, TIMED_FRAMES).ok()?;
+                    each.sort();
+                    each.get(each.len() / 2).copied()
                 });
                 let _ = events.send(Event::Timed { timed });
                 waker();
@@ -712,21 +813,21 @@ mod running {
                         Some(Ok(cached)) => {
                             let checking = {
                                 let cached = cached.clone();
-                                std::thread::spawn(move || cached.canvas().map_err(|error| format!("{error:#}")))
+                                std::thread::spawn(move || cached.canvas().map(|_| cached.print()).map_err(|error| format!("{error:#}")))
                             };
                             let picture = gpu.try_picture_levels(cached.width, cached.height, &cached.levels());
                             match (checking.join().unwrap_or_else(|_| Err("the canvas check stopped".into())), picture) {
-                                (Ok(canvas), Ok(picture)) => Ok((canvas, picture)),
+                                (Ok(print), Ok(picture)) => Ok(Loaded { print, picture }),
                                 (Err(why), _) | (_, Err(why)) => Err(why),
                             }
                         }
                         Some(Err(why)) => Err(why),
                         None => Err(String::new()),
                     };
-                    let (canvas, picture) = match cached {
-                        Ok(made) => {
+                    match cached {
+                        Ok(loaded) => {
                             from = Some("cache".to_string());
-                            made
+                            Ok(loaded)
                         }
                         Err(why) => {
                             from = Some(if why.is_empty() { "picture".to_string() } else { format!("picture, {why}") });
@@ -734,11 +835,10 @@ mod running {
                             let (width, height) = if width == 0 || height == 0 { (image.width(), image.height()) } else { (width, height) };
                             gpu.fits(width.max(1), height.max(1))?;
                             let canvas = scooch_core::canvas(&image, width.max(1), height.max(1));
-                            let picture = gpu.try_picture(&canvas)?;
-                            (canvas, picture)
+                            let print = scooch_core::fingerprint(canvas.width, canvas.height, &canvas.pixels);
+                            Ok(Loaded { print, picture: gpu.try_picture(&canvas)? })
                         }
-                    };
-                    Ok(Loaded { canvas: Arc::new(canvas), picture })
+                    }
                 });
                 if let Some(Ok(_)) = &loaded {
                     say(&out, &Reply::Canvas { warm_id, ms: started.elapsed().as_millis() as u64 });
@@ -765,41 +865,94 @@ mod running {
             }
         }
 
-        fn make_early(&mut self, screen: Screen) {
+        fn kept_still(&self, stills: &Stills) -> Option<Arc<Still>> {
+            let wanted = stills.still.as_ref()?;
+            self.stills.iter().find(|(path, _)| path == wanted).map(|(_, still)| still.clone())
+        }
+
+        fn primed_for(&self, screen: &Screen, stills: &Stills) -> bool {
+            self.primed.and_then(|id| self.layers.get(&id)).and_then(|live| live.primed.as_ref()).is_some_and(|primed| primed.screen == *screen && primed.hints == self.hints && primed.still == stills.still)
+        }
+
+        fn drop_primed(&mut self) {
+            if let Some(id) = self.primed.take() {
+                self.begin_close(id, false);
+            }
+        }
+
+        fn make_early(&mut self, screen: Screen, stills: Stills) {
+            if self.primed_for(&screen, &stills) {
+                if let Some(live) = self.primed.and_then(|id| self.layers.get_mut(&id)) {
+                    live.asked = Instant::now();
+                }
+                return;
+            }
+            self.drop_primed();
             if let Some(stale) = self.early.take() {
                 self.drop_pane(stale);
             }
             if !self.leaving {
-                self.early = Some(Pane::new(screen, self.hints.clone()));
+                self.early = Some(Pane::new(screen, self.hints.clone(), stills));
             }
         }
 
-        fn open(&mut self, id: u32, screen: Screen, still: Option<Decoding>) {
+        fn open(&mut self, id: u32, screen: Screen, stills: Stills) {
             if self.layers.contains_key(&id) || self.pending.iter().any(|waiting| waiting.id == id) {
                 self.fail(Some(id), format!("layer {id} is already open"));
                 return;
             }
+            if self.primed_for(&screen, &stills) {
+                self.adopt(id);
+                return;
+            }
+            self.drop_primed();
             let pane = match self.early.take() {
                 Some(early) if early.fits(&screen, &self.hints) => early,
                 other => {
                     if let Some(stale) = other {
                         self.drop_pane(stale);
                     }
-                    Pane::new(screen, self.hints.clone())
+                    Pane::new(screen, self.hints.clone(), stills.clone())
                 }
             };
-            let found = pane.made();
-            self.pending.push(Pending { id, still, asked: Instant::now(), pane, found, window: None });
+            let found = pane.made() || pane.shown();
+            self.pending.push(Pending { id, stills, asked: Instant::now(), pane, found, window: None });
             if self.gpu.is_none() && self.running.is_none() {
                 let hints = self.hints.clone();
                 self.warm(hints, (None, None), None, None, false);
             }
         }
 
+        fn adopt(&mut self, id: u32) {
+            let Some(primed) = self.primed.take() else { return };
+            let Some(mut live) = self.layers.remove(&primed) else { return };
+            self.aliases.insert(primed, id);
+            live.primed = None;
+            live.asked = Instant::now();
+            live.touched = live.asked;
+            let drawn = live.drawn;
+            self.layers.insert(id, live);
+            if let Some((first, still)) = drawn {
+                self.reveal(id, Ok(()), first, still);
+            }
+        }
+
         fn pause(&self) -> Duration {
             let pending = self.pending.iter().filter_map(|pending| pending.pane.pause(true));
-            let early = self.early.iter().filter_map(|early| early.pause(false));
-            pending.chain(early).min().unwrap_or(TICK)
+            let early = self.early.iter().filter_map(|early| early.pause(early.primes() && self.gpu.is_some()));
+            let busy = !self.layers.is_empty() || self.early.is_some() || !self.pending.is_empty() || self.timing || self.running.is_some() || !self.queue.is_empty();
+            let idle = if busy || !self.parked {
+                TICK
+            } else if self.loaded() {
+                IDLE_EXIT.saturating_sub(self.last.elapsed()) + POLL
+            } else {
+                REST
+            };
+            pending.chain(early).min().unwrap_or(idle)
+        }
+
+        fn loaded(&self) -> bool {
+            !self.pictures.is_empty() || !self.stills.is_empty() || self.untimed.is_some() || self.holding
         }
 
         fn advance(&mut self) {
@@ -830,8 +983,10 @@ mod running {
                 }
             }
             if !worked {
+                let present = self.gpu.is_some();
                 if let Some(early) = self.early.as_mut() {
-                    if early.step(&mut self.platform, false).is_err() {
+                    let prime = early.primes() && present;
+                    if early.step(&mut self.platform, prime).is_err() {
                         self.early = None;
                     }
                 }
@@ -845,31 +1000,48 @@ mod running {
             while index < self.pending.len() {
                 if self.pending[index].pane.shown() {
                     let pending = self.pending.remove(index);
-                    self.launch(pending, gpu.clone());
+                    self.launch(pending, gpu.clone(), None);
                 } else {
                     index += 1;
                 }
             }
+            if self.early.as_ref().is_some_and(|early| early.primes() && early.shown()) {
+                if let Some(early) = self.early.take() {
+                    let id = self.next_primed;
+                    self.next_primed = self.next_primed.wrapping_add(1).max(PRIMED);
+                    let primed = Primed { screen: early.screen.clone(), hints: early.hints.clone(), still: early.stills.still.clone() };
+                    let pending = Pending { id, stills: early.stills.clone(), asked: early.asked, window: Some(spent(early.asked)), found: true, pane: early };
+                    self.launch(pending, gpu, Some(primed));
+                    if self.layers.contains_key(&id) {
+                        self.primed = Some(id);
+                    }
+                }
+            }
         }
 
-        fn launch(&mut self, pending: Pending<P>, gpu: Gpu) {
-            let Pending { id, still, asked, mut pane, found, window } = pending;
+        fn launch(&mut self, pending: Pending<P>, gpu: Gpu, primed: Option<Primed>) {
+            let Pending { id, stills, asked, mut pane, found, window } = pending;
             let split = Split { window: window.unwrap_or_else(|| spent(asked)), make: pane.make, present: pane.present, found, steps: std::mem::take(&mut pane.steps) };
             let Some(layer) = pane.into_layer() else {
-                self.fail(Some(id), "the layer window is gone");
+                if primed.is_none() {
+                    self.fail(Some(id), "the layer window is gone");
+                }
                 return;
             };
-            let start = Start { id, gpu, surface: Surface(self.platform.target(&layer)), still, size: self.platform.pixels(&layer), period: self.platform.period(&layer), commit: self.platform.committer() };
+            let source = Source::start(&stills, self.kept_still(&stills));
+            let start = Start { id, gpu, surface: Surface(self.platform.target(&layer)), source, stills, size: self.platform.pixels(&layer), period: self.platform.period(&layer), commit: self.platform.committer() };
             let (jobs, receiver) = mpsc::channel();
             let (events, waker) = (self.events.clone(), self.waker.clone());
             let spawned = std::thread::Builder::new().name(format!("scooch-live-render-{id}")).spawn(move || render::<P>(start, receiver, events, waker));
             if let Err(error) = spawned {
                 self.platform.close(layer);
-                self.fail(Some(id), format!("could not start the render thread {error}"));
+                if primed.is_none() {
+                    self.fail(Some(id), format!("could not start the render thread {error}"));
+                }
                 return;
             }
             let now = Instant::now();
-            self.layers.insert(id, Live { layer: Some(layer), jobs, split, asked, touched: now, shown: false, stopped: false, closing: None, told: None });
+            self.layers.insert(id, Live { layer: Some(layer), jobs, split, asked, touched: now, shown: false, stopped: false, closing: None, told: None, primed, drawn: None });
         }
 
         fn begin_close(&mut self, id: u32, answer: bool) {
@@ -898,6 +1070,10 @@ mod running {
 
         fn finish(&mut self, id: u32) {
             let Some(mut live) = self.layers.remove(&id) else { return };
+            self.aliases.retain(|_, real| *real != id);
+            if self.primed == Some(id) {
+                self.primed = None;
+            }
             if let Some(layer) = live.layer.take() {
                 if live.stopped {
                     self.platform.close(layer);
@@ -926,23 +1102,29 @@ mod running {
 
         fn command(&mut self, command: Command) {
             self.last = Instant::now();
+            if !self.holding {
+                self.platform.prepare();
+                self.holding = true;
+            }
             match command {
                 Command::Hello { version } if version != VERSION => {
                     self.fail(None, format!("the helper speaks version {VERSION}, not {version}"));
                     self.leaving = true;
                 }
                 Command::Hello { .. } => {}
+                Command::Park { warm_id } => {
+                    self.parked = true;
+                    let hints = self.hints.clone();
+                    self.warm(hints, (None, None), None, warm_id, true);
+                }
                 Command::Warm { hints, picture, size, warm_id, canvas, scales } => {
                     if !scales.is_empty() {
                         self.scales = scales;
                     }
                     self.warm(hints, (picture, canvas), size, warm_id, true)
                 }
-                Command::Window { screen, rect, scale } => self.make_early(Screen { id: screen, frame: rect, scale }),
-                Command::Open { id, screen, rect, scale, still } => {
-                    let still = still.map(Decoding::start::<P>);
-                    self.open(id, Screen { id: screen, frame: rect, scale }, still)
-                }
+                Command::Window { screen, rect, scale, stills } => self.make_early(Screen { id: screen, frame: rect, scale }, stills),
+                Command::Open { id, screen, rect, scale, stills } => self.open(id, Screen { id: screen, frame: rect, scale }, stills),
                 Command::Glide { id, a, b, ms } => {
                     let loaded = self.pictures.iter().rev().map(|(_, loaded)| loaded.clone()).collect();
                     let job = Job::Glide { a, b, ms, loaded, asked: Instant::now(), scale: self.scale };
@@ -974,7 +1156,7 @@ mod running {
             match (loaded, want.as_ref().and_then(|want| want.key.clone())) {
                 (Some(Ok(loaded)), Some(key)) => {
                     if self.timed.is_none() && self.pinned.is_none() {
-                        let size = if key.1[0] > 0 && key.1[1] > 0 { key.1 } else { [loaded.canvas.width, loaded.canvas.height] };
+                        let size = if key.1[0] > 0 && key.1[1] > 0 { key.1 } else { [loaded.picture.width, loaded.picture.height] };
                         self.untimed = Some((size, loaded.picture.clone()));
                     }
                     self.pictures.retain(|(kept, _)| *kept != key);
@@ -1020,6 +1202,35 @@ mod running {
             }
         }
 
+        fn reveal(&mut self, id: u32, result: Result<(), String>, first: u64, still: &'static str) {
+            let revealing = Instant::now();
+            let shown = match (result, self.layers.get(&id).and_then(|live| live.layer.as_ref())) {
+                (Ok(()), Some(layer)) => self.platform.show(layer).map_err(|error| format!("{error:#}")),
+                (Ok(()), None) => Err("the layer window is gone".to_string()),
+                (Err(why), _) => Err(why),
+            };
+            let revealing_steps: Vec<(String, u64)> = self.platform.revealed().into_iter().map(|(name, took)| (String::from(name), took)).collect();
+            match shown {
+                Ok(()) => {
+                    let screen_gpu = self.layers.get(&id).and_then(|live| live.layer.as_ref()).and_then(|layer| self.platform.screen_gpu(layer));
+                    if let Some(live) = self.layers.get_mut(&id) {
+                        live.shown = true;
+                        live.touched = Instant::now();
+                        let ms = live.asked.elapsed().as_millis() as u64;
+                        let split = &live.split;
+                        let steps = split.steps.iter().map(|(name, took)| (String::from(*name), *took)).collect();
+                        let drawn = Reply::Drawn { id, window: split.window, first, reveal: spent(revealing), make: split.make, present: split.present, found: split.found, steps, revealing: revealing_steps, still: Some(still.to_string()), screen_gpu };
+                        self.tell(drawn);
+                        self.tell(Reply::Shown { id, ms });
+                    }
+                }
+                Err(why) => {
+                    self.fail(Some(id), why);
+                    self.begin_close(id, false);
+                }
+            }
+        }
+
         fn event(&mut self, event: Event) {
             match event {
                 Event::Command(command) => self.command(command),
@@ -1041,38 +1252,34 @@ mod running {
                         self.scale = scooch_live::choose(timed, self.platform.refresh());
                     }
                 }
-                Event::Presented { id, result, first } => {
-                    let Some(live) = self.layers.get(&id) else { return };
+                Event::Kept { path, still } => {
+                    self.stills.retain(|(kept, _)| *kept != path);
+                    self.stills.push((path, still));
+                    if self.stills.len() > STILLS_KEPT {
+                        self.stills.remove(0);
+                    }
+                }
+                Event::Presented { id, result, first, still } => {
+                    let id = self.aliases.get(&id).copied().unwrap_or(id);
+                    let Some(live) = self.layers.get_mut(&id) else { return };
                     if live.closing.is_some() {
                         return;
                     }
-                    let revealing = Instant::now();
-                    let shown = match (result, live.layer.as_ref()) {
-                        (Ok(()), Some(layer)) => self.platform.show(layer).map_err(|error| format!("{error:#}")),
-                        (Ok(()), None) => Err("the layer window is gone".to_string()),
-                        (Err(why), _) => Err(why),
-                    };
-                    let revealing_steps: Vec<(String, u64)> = self.platform.revealed().into_iter().map(|(name, took)| (String::from(name), took)).collect();
-                    match shown {
-                        Ok(()) => {
-                            if let Some(live) = self.layers.get_mut(&id) {
-                                live.shown = true;
-                                live.touched = Instant::now();
-                                let ms = live.asked.elapsed().as_millis() as u64;
-                                let split = &live.split;
-                                let steps = split.steps.iter().map(|(name, took)| (String::from(*name), *took)).collect();
-                                let drawn = Reply::Drawn { id, window: split.window, first, reveal: spent(revealing), make: split.make, present: split.present, found: split.found, steps, revealing: revealing_steps };
-                                self.tell(drawn);
-                                self.tell(Reply::Shown { id, ms });
+                    if let Some(primed) = live.primed.as_ref() {
+                        match result {
+                            Ok(()) => {
+                                live.drawn = Some((first, still));
+                                let primed = Reply::Primed { screen: primed.screen.id.clone(), window: live.split.window, first, still: still.to_string() };
+                                self.tell(primed);
                             }
+                            Err(_) => self.drop_primed(),
                         }
-                        Err(why) => {
-                            self.fail(Some(id), why);
-                            self.begin_close(id, false);
-                        }
+                        return;
                     }
+                    self.reveal(id, result, first, still);
                 }
                 Event::Glided { id, frames, slow, first, scale, timed } => {
+                    let id = self.aliases.get(&id).copied().unwrap_or(id);
                     if self.pinned.is_none() {
                         if let Some(timed) = timed {
                             self.untimed = None;
@@ -1086,16 +1293,23 @@ mod running {
                     self.tell(Reply::Glided { id, frames, slow_frames: slow, first_frame_ms: first, uploads: self.uploads, scale });
                 }
                 Event::Settled { id } => {
+                    let id = self.aliases.get(&id).copied().unwrap_or(id);
                     if let Some(live) = self.layers.get_mut(&id) {
                         live.touched = Instant::now();
                     }
                     self.tell(Reply::Settled { id });
                 }
                 Event::Broke { id, why } => {
+                    let id = self.aliases.get(&id).copied().unwrap_or(id);
+                    if self.primed == Some(id) {
+                        self.drop_primed();
+                        return;
+                    }
                     self.fail(Some(id), why);
                     self.begin_close(id, false);
                 }
                 Event::Stopped { id } => {
+                    let id = self.aliases.get(&id).copied().unwrap_or(id);
                     if let Some(live) = self.layers.get_mut(&id) {
                         live.stopped = true;
                         if live.closing.is_some() {
@@ -1106,9 +1320,29 @@ mod running {
             }
         }
 
+        fn unload(&mut self) {
+            if !self.loaded() || !self.layers.is_empty() || !self.pending.is_empty() || self.running.is_some() {
+                return;
+            }
+            self.pictures.clear();
+            self.stills.clear();
+            self.untimed = None;
+            if let Some(early) = self.early.take() {
+                self.drop_pane(early);
+            }
+            if self.holding {
+                self.platform.rest();
+                self.holding = false;
+            }
+        }
+
         fn sweep(&mut self) {
             if self.last.elapsed() > IDLE_EXIT {
-                self.leaving = true;
+                if self.parked {
+                    self.unload();
+                } else {
+                    self.leaving = true;
+                }
             }
             if self.leaving || self.early.as_ref().is_some_and(|early| early.asked.elapsed() > LAYER_IDLE) {
                 if let Some(early) = self.early.take() {
@@ -1119,6 +1353,9 @@ mod running {
                 for pending in std::mem::take(&mut self.pending) {
                     self.drop_pane(pending.pane);
                 }
+            }
+            if self.primed.and_then(|id| self.layers.get(&id)).is_some_and(|live| live.asked.elapsed() > LAYER_IDLE) {
+                self.drop_primed();
             }
             if self.untimed.is_some() && !self.leaving {
                 self.time_later();
@@ -1177,7 +1414,7 @@ mod running {
             say(&out, &Reply::Failed { id: None, why: "could not start the protocol thread".into() });
             return ExitCode::from(1);
         }
-        let mut helper = Helper { platform, out, events, waker, hints: Hints::default(), scale: 1.0, pinned: None, timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+        let mut helper = Helper::new(platform, out, events, waker);
         loop {
             let pause = helper.pause();
             helper.platform.wait(pause);
@@ -1201,6 +1438,10 @@ mod running {
         use std::io::Write;
 
         static DEVICE: Mutex<()> = Mutex::new(());
+
+        fn testing(platform: Fake, out: Out, events: Sender<Event>) -> Helper<Fake> {
+            Helper { pinned: Some(1.0), ..Helper::new(platform, out, events, Arc::new(|| {})) }
+        }
 
         #[derive(Clone, Default)]
         struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -1237,6 +1478,7 @@ mod running {
             reveal: crate::live::Reveal,
             log: Arc<Mutex<Vec<String>>>,
             failed_at_close: Option<bool>,
+            rested: usize,
         }
 
         #[cfg(target_os = "macos")]
@@ -1352,6 +1594,10 @@ mod running {
                 std::thread::sleep(timeout.min(Duration::from_millis(5)));
             }
 
+            fn rest(&mut self) {
+                self.rested += 1;
+            }
+
             fn waker(&self) -> Waker {
                 Arc::new(|| {})
             }
@@ -1422,14 +1668,14 @@ mod running {
             std::fs::write(&first.canvas, damaged).unwrap();
             let (events, inbox) = mpsc::channel();
             let out = Captured::default();
-            let mut helper = Helper { platform: Fake::default(), out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let mut helper = testing(Fake::default(), Arc::new(Mutex::new(Box::new(out.clone()))), events);
             let before = scooch_live::devices_made();
             let screen = |made: &Made| (format!("screen-{}", made.size[0]), Rect { x: 0.0, y: 0.0, w: made.size[0] as f32, h: made.size[1] as f32 });
             for (index, made) in [&first, &second].into_iter().enumerate() {
                 let id = index as u32 + 1;
                 let (name, rect) = screen(made);
                 helper.event(Event::Command(Command::Warm { hints: Hints { present: None, scale: Some(1.0) }, picture: Some(made.picture.clone()), size: Some(made.size), warm_id: Some(id), canvas: Some(made.canvas.clone()), scales: BTreeMap::new() }));
-                helper.event(Event::Command(Command::Open { id, screen: name, rect, scale: 1.0, still: Some(made.still.clone()) }));
+                helper.event(Event::Command(Command::Open { id, screen: name, rect, scale: 1.0, stills: Stills::of(&made.still) }));
             }
             let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().filter(|reply| matches!(reply, Reply::Shown { .. } | Reply::Ready { .. })).count() >= 4);
             if replies.iter().any(|reply| matches!(reply, Reply::Failed { why, .. } if why.contains("no device"))) {
@@ -1471,9 +1717,9 @@ mod running {
             let out = Captured::default();
             let log = Arc::new(Mutex::new(Vec::new()));
             let platform = Fake { reveal, log: log.clone(), ..Fake::default() };
-            let mut helper = Helper { platform, out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let mut helper = testing(platform, Arc::new(Mutex::new(Box::new(out.clone()))), events);
             helper.event(Event::Command(Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: Some(1), canvas: None, scales: BTreeMap::new() }));
-            helper.event(Event::Command(Command::Open { id: 1, screen: "main".into(), rect: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0, still: Some(still) }));
+            helper.event(Event::Command(Command::Open { id: 1, screen: "main".into(), rect: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0, stills: Stills::of(&still) }));
             let started = Instant::now();
             let mut replies = Vec::new();
             while started.elapsed() < Duration::from_secs(90) {
@@ -1516,6 +1762,7 @@ mod running {
         #[test]
         fn the_drawn_reply_goes_out_before_shown_so_the_daemon_holds_it_at_shown() {
             let Some((replies, _, _)) = opening(crate::live::Reveal::from(None), true) else { return };
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Drawn { id: 1, still: Some(still), .. } if still == "decoded")), "a still with no raw file was not decoded {replies:?}");
             let drawn = replies.iter().position(|reply| matches!(reply, Reply::Drawn { id: 1, .. }));
             let shown = replies.iter().position(|reply| matches!(reply, Reply::Shown { id: 1, .. }));
             assert!(drawn.zip(shown).is_some_and(|(drawn, shown)| drawn < shown), "{replies:?}");
@@ -1534,12 +1781,12 @@ mod running {
             let (events, _inbox) = mpsc::channel();
             let out = Captured::default();
             let platform = Fake { watched: Some(out.clone()), ..Fake::default() };
-            let mut helper = Helper { platform, out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let mut helper = testing(platform, Arc::new(Mutex::new(Box::new(out.clone()))), events);
             let screen = Screen { id: "idle".into(), frame: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0 };
             let Ok(Build::Whole(layer, _)) = helper.platform.make(&screen, &Hints::default(), None) else { panic!("the fake made no layer") };
             let (jobs, _receiver) = mpsc::channel();
             let idle = Instant::now().checked_sub(LAYER_IDLE + Duration::from_millis(50)).unwrap_or_else(Instant::now);
-            helper.layers.insert(7, Live { layer: Some(layer), jobs, split: Split::default(), asked: idle, touched: idle, shown: true, stopped: true, closing: None, told: None });
+            helper.layers.insert(7, Live { layer: Some(layer), jobs, split: Split::default(), asked: idle, touched: idle, shown: true, stopped: true, closing: None, told: None, primed: None, drawn: None });
             helper.sweep();
             let replies = out.replies();
             assert_eq!(helper.platform.closed, 1, "{replies:?}");
@@ -1550,11 +1797,11 @@ mod running {
         fn closed_after_stop(stopped: bool) -> (usize, usize, Vec<Reply>) {
             let (events, _inbox) = mpsc::channel();
             let out = Captured::default();
-            let mut helper = Helper { platform: Fake::default(), out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running: None, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let mut helper = testing(Fake::default(), Arc::new(Mutex::new(Box::new(out.clone()))), events);
             let screen = Screen { id: "stuck".into(), frame: Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 }, scale: 1.0 };
             let Ok(Build::Whole(layer, _)) = helper.platform.make(&screen, &Hints::default(), None) else { panic!("the fake made no layer") };
             let (jobs, _receiver) = mpsc::channel();
-            helper.layers.insert(1, Live { layer: Some(layer), jobs, split: Split::default(), asked: Instant::now(), touched: Instant::now(), shown: true, stopped, closing: None, told: None });
+            helper.layers.insert(1, Live { layer: Some(layer), jobs, split: Split::default(), asked: Instant::now(), touched: Instant::now(), shown: true, stopped, closing: None, told: None, primed: None, drawn: None });
             helper.begin_close(1, true);
             if let Some(live) = helper.layers.get_mut(&1) {
                 live.closing = Instant::now().checked_sub(STOP_WAIT + Duration::from_millis(50)).map(|since| (since, true));
@@ -1577,7 +1824,7 @@ mod running {
             let (events, inbox) = mpsc::channel();
             let out = Captured::default();
             let running = Some(Want { key: None, canvas: None, waiters: Vec::new(), composition: false });
-            let helper = Helper { platform, out: Arc::new(Mutex::new(Box::new(out.clone()))), events, waker: Arc::new(|| {}), hints: Hints::default(), scale: 1.0, pinned: Some(1.0), timed: None, scales: BTreeMap::new(), untimed: None, timing: false, gpu: None, pictures: Vec::new(), uploads: 0, running, queue: VecDeque::new(), pending: Vec::new(), early: None, layers: BTreeMap::new(), last: Instant::now(), leaving: false };
+            let helper = Helper { running, ..testing(platform, Arc::new(Mutex::new(Box::new(out.clone()))), events) };
             (helper, inbox, out)
         }
 
@@ -1595,11 +1842,11 @@ mod running {
         }
 
         fn window_for(screen: &Screen) -> Event {
-            Event::Command(Command::Window { screen: screen.id.clone(), rect: screen.frame, scale: screen.scale })
+            Event::Command(Command::Window { screen: screen.id.clone(), rect: screen.frame, scale: screen.scale, stills: Stills::default() })
         }
 
         fn open_on(id: u32, screen: &Screen) -> Event {
-            Event::Command(Command::Open { id, screen: screen.id.clone(), rect: screen.frame, scale: screen.scale, still: None })
+            Event::Command(Command::Open { id, screen: screen.id.clone(), rect: screen.frame, scale: screen.scale, stills: Stills::default() })
         }
 
         #[test]
@@ -1672,9 +1919,80 @@ mod running {
         }
 
         #[test]
+        fn a_parked_helper_rests_with_no_timer_and_lets_its_picture_go_thirty_seconds_after_its_last_command() {
+            let (events, _inbox) = mpsc::channel();
+            let out = Captured::default();
+            let mut helper = testing(Fake::default(), Arc::new(Mutex::new(Box::new(out.clone()))), events.clone());
+            helper.parked = true;
+            helper.last = Instant::now() - IDLE_EXIT + Duration::from_secs(1);
+            let waiting = helper.pause();
+            assert!(waiting > Duration::from_millis(500) && waiting <= Duration::from_secs(1) + POLL, "{waiting:?}");
+            helper.last = Instant::now() - IDLE_EXIT - Duration::from_secs(1);
+            helper.sweep();
+            assert!(!helper.leaving && !helper.holding && helper.platform.rested == 1);
+            assert_eq!(helper.pause(), REST);
+            helper.sweep();
+            assert_eq!(helper.platform.rested, 1, "the rest was taken twice");
+            helper.event(Event::Command(Command::Hello { version: VERSION }));
+            assert!(helper.holding && helper.pause() <= IDLE_EXIT + POLL && helper.pause() > IDLE_EXIT - Duration::from_secs(1), "a command did not bring the timer for the letting go back {:?}", helper.pause());
+            let mut passing = testing(Fake::default(), Arc::new(Mutex::new(Box::new(out.clone()))), events);
+            passing.last = Instant::now() - IDLE_EXIT - Duration::from_secs(1);
+            passing.sweep();
+            assert!(passing.leaving, "a helper that was never parked stayed past thirty seconds");
+        }
+
+        fn still_files(folder: &Path, raw: bool) -> Stills {
+            std::fs::create_dir_all(folder).unwrap();
+            let image = RgbImage::from_fn(64, 48, |x, y| [(x * 4) as u8, (y * 5) as u8, 90].into());
+            let still = folder.join("still.png");
+            std::fs::write(&still, scooch_core::encode_png(&image).unwrap()).unwrap();
+            let kept = folder.join("still.png.still");
+            if raw {
+                crate::live::still::write_rgb(&kept, &image).unwrap();
+            }
+            Stills { still: Some(still), raw: raw.then_some(kept), tables: None }
+        }
+
+        #[test]
+        fn a_primed_window_draws_its_first_frame_hidden_and_the_open_only_shows_it() {
+            let _device = DEVICE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let folder = std::env::temp_dir().join(format!("scooch-primed-{}", std::process::id()));
+            let stills = still_files(&folder, true);
+            let (events, inbox) = mpsc::channel();
+            let out = Captured::default();
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let mut helper = testing(Fake { log: log.clone(), ..Fake::default() }, Arc::new(Mutex::new(Box::new(out.clone()))), events);
+            let screen = || (String::from("main"), Rect { x: 0.0, y: 0.0, w: 64.0, h: 48.0 });
+            helper.event(Event::Command(Command::Park { warm_id: Some(1) }));
+            helper.event(Event::Command(Command::Window { screen: screen().0, rect: screen().1, scale: 1.0, stills: stills.clone() }));
+            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Primed { .. })));
+            if replies.iter().any(|reply| matches!(reply, Reply::Failed { why, .. } if why.contains("no device"))) {
+                assert!(std::env::var_os("SCOOCH_NEED_ADAPTER").is_none(), "no adapter, and this runner must have one");
+                println!("skipped: no adapter");
+                return;
+            }
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Primed { still, .. } if still == "raw")), "{replies:?}");
+            assert_eq!(log.lock().unwrap().clone(), vec!["commit".to_string()], "the primed window was shown");
+            assert_eq!(helper.platform.presented, vec!["main".to_string()]);
+            helper.event(Event::Command(Command::Open { id: 1, screen: screen().0, rect: screen().1, scale: 1.0, stills: stills.clone() }));
+            let replies = out.replies();
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Drawn { id: 1, found: true, still: Some(still), .. } if still == "raw")), "the open did not show the primed window at once {replies:?}");
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 1, .. })), "{replies:?}");
+            assert_eq!(log.lock().unwrap().clone(), vec!["commit".to_string(), "show".to_string()]);
+            assert_eq!(helper.platform.made, 1, "the open made a second window");
+            helper.event(Event::Command(Command::Close { id: 1 }));
+            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Closed { id: 1 })));
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Closed { id: 1 })), "{replies:?}");
+            helper.event(Event::Command(Command::Open { id: 2, screen: screen().0, rect: screen().1, scale: 1.0, stills: Stills { raw: None, ..stills } }));
+            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 2, .. })));
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Drawn { id: 2, still: Some(still), .. } if still == "kept")), "the still drawn for the first open was not kept {replies:?}");
+            let _ = std::fs::remove_dir_all(&folder);
+        }
+
+        #[test]
         fn a_line_that_cannot_be_read_is_answered() {
-            assert!(matches!(read(""), Err(Reply::Failed { id: None, .. })));
-            assert!(matches!(read("{\"kind\":\"warm\""), Err(Reply::Failed { id: None, .. })));
+            assert!(read("").is_err_and(|answer| matches!(*answer, Reply::Failed { id: None, .. })));
+            assert!(read("{\"kind\":\"warm\"").is_err_and(|answer| matches!(*answer, Reply::Failed { id: None, .. })));
             assert!(matches!(read(line(&Command::Quit).unwrap().trim()), Ok(Command::Quit)));
         }
 

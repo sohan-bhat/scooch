@@ -92,6 +92,13 @@ extern "C" {
     fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> Ref;
     fn CGWindowLevelForKey(key: i32) -> i32;
     fn CGMainDisplayID() -> u32;
+    fn CGDirectDisplayCopyCurrentMetalDevice(display: u32) -> *mut AnyObject;
+}
+
+pub fn display_gpu(display: u32) -> Option<String> {
+    let device = unsafe { Retained::from_raw(CGDirectDisplayCopyCurrentMetalDevice(display)) }?;
+    let name: Option<Retained<objc2_foundation::NSString>> = unsafe { msg_send![&*device, name] };
+    name.map(|name| name.to_string())
 }
 
 pub fn main_display() -> u32 {
