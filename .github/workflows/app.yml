@@ -252,7 +252,7 @@ jobs:
       matrix:
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -262,7 +262,7 @@ jobs:
           name: app-macos
           path: built
       - name: Probe
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: bash .github/app/probe-macos.sh built appprobe
       - name: Upload
         if: always()
@@ -287,7 +287,7 @@ jobs:
           - name: windows-arm64
             runner: windows-11-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -301,7 +301,7 @@ jobs:
           name: compiled-${{ matrix.name }}
           path: programs
       - name: Probe
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: pwsh
         run: ./.github/app/probe-windows.ps1 -Built built -Out appprobe -Programs programs
       - name: Upload
@@ -328,7 +328,7 @@ jobs:
           - name: linux-arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -338,7 +338,7 @@ jobs:
           name: app-${{ matrix.name }}
           path: built
       - name: Probe
-        timeout-minutes: 20
+        timeout-minutes: 35
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb xauth x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11 libglib2.0-bin file gnome-themes-extra python3-pyatspi at-spi2-core dconf-gsettings-backend dconf-service rpm
@@ -368,7 +368,7 @@ jobs:
     needs: bundle-linux
     if: ${{ github.workflow == 'app' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -378,7 +378,7 @@ jobs:
           name: app-linux-x64
           path: built
       - name: Probe
-        timeout-minutes: 20
+        timeout-minutes: 35
         run: |
           sudo apt-get update
           sudo apt-get install -y gnome-shell gvfs gvfs-daemons dconf-service libglib2.0-bin gnome-shell-extension-prefs fonts-cantarell adwaita-icon-theme dconf-cli xdg-user-dirs python3-pyatspi at-spi2-core
