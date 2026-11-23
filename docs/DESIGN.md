@@ -262,7 +262,7 @@ On macOS the layer is a borderless window at the desktop window level, above the
 
 **The canvas file.** One per screen, `<screen>.<key>.canvas` beside the tables. Its 36 byte header is `SCCV`, then version 2, width, height, 4 channels, colour 1 for sRGB and the number of mip levels as 32 bit numbers, then the canvas fingerprint that the tables also hold. Every mip level follows as RGBA. A 3840 by 2160 picture makes a file of 44,236,256 bytes. The daemon writes the file on its own thread after the first set of a picture with those options, and deletes the screen's older canvas files. The helper reads it when it is primed, uploads the stored levels and checks the fingerprint. When the file is missing or does not match, the helper decodes the picture instead.
 
-**The raw still.** One per screen, `<output>.still` beside the tables, the picture on screen as raw RGBA after a 16 byte header, `SCST`, version 1, width and height. A 2880 by 1800 screen makes a file of 20,736,016 bytes. The daemon writes it on its own thread after each set, from the picture it drew when the output is lossless and otherwise from the output decoded the way the system decodes it, so it is the picture on screen. The helper reads it in about 5 ms where decoding the JPEG took 170 to 280 ms on an Intel Mac. When it is missing the helper decodes the output with the image crate. The helper keeps the last two stills it drew, so a move from the picture it just settled on reads nothing.
+**The raw still.** One per screen, `<output>.still` beside the tables, the picture on screen as raw RGBA after a 16 byte header, `SCST`, version 1, width and height. A 2880 by 1800 screen makes a file of 20,736,016 bytes. The daemon writes it on its own thread after each set, from the picture it drew when the output is lossless and otherwise from the output decoded the way the system decodes it, so it is the picture on screen. The helper reads it in about 5 ms where decoding the JPEG took 170 to 280 ms on an Intel Mac. When it is missing the helper decodes the output with the system's decoder, since the image crate's decode was off by up to 3 of 255 against the system's on GitHub's arm64 Mac. The helper keeps the last two stills it drew, so a move from the picture it just settled on reads nothing.
 
 **Milestones.** Each is signalled by the thread that reaches it:
 
@@ -307,6 +307,22 @@ Runner numbers come from GitHub's hosted virtual machines. Their GPUs are virtua
 | Change outside the dropped icon between the settled layer and one second after close | 0 of 255 | macOS arm64 and Intel runners, 8b2666c |
 | The drag after the helper is killed mid glide | Glides | macOS and Windows runners, 8b2666c |
 | The first drag after the helper left | Plain at once, since no cold start is remembered there | Windows Server 2022 and 2025 runners, 8b2666c |
+
+The steps of a glide timed offscreen with no window, on the owner's Mac with an Intel UHD Graphics 630 at 2880 by 1800 and the Sequoia Sunrise picture. `cargo run --release -p scooch --example glidetime [picture] [high]` prints this table again.
+
+| Step | ms |
+|---|---|
+| Make the device as the helper parks, of it the shaders | 43.1, 10.5 |
+| Footprint before the device and with it and the shaders | 1.1 MB, 4.7 MB |
+| Tables of a move, still of a move, encode the still | 26.2, 24.5, 91.6 |
+| Decode the output as the system does, with the image crate | 208.9, 72.0 |
+| Write the raw still, read it | 58.0, 5.6 |
+| Canvas mip levels, write the canvas file, read it, check it | 254.4, 86.1, 23.2, 34.5 |
+| Parse both tables without the canvas | 12.4 |
+| Upload the canvas levels, the still, both tables | 58.6, 26.6, 20.3 |
+| Still frame, median of a burst | 6.1 |
+| Glide frame at scale 1, 0.75, 0.6, 0.5, one after rest | 36.1, 25.7, 20.0, 22.9 |
+| Glide frame at scale 1, 0.75, 0.6, 0.5, median of a burst | 11.1, 9.6, 7.5, 6.3 |
 
 ## Command
 
