@@ -602,6 +602,10 @@ if ($script:dialog) {
     $button = $script:dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byName) | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button } | Select-Object -First 1
     $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     $gone = Wait-For 120 { -not (Test-Path (Join-Path $folder 'scooch-app.exe')) }
+    if ($gone -lt 0) {
+        Screen-Shot 'uninstall-stuck'
+        Line "- the removal did not finish, windows $(Top-Windows), Scooch processes $(@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'scooch*' } | ForEach-Object { "$($_.Name) $($_.ProcessId) $($_.ExecutablePath)" }) -join '; ')"
+    }
     foreach ($label in 'Finish', 'Close') {
         $byLabel = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $label)
         $end = $script:dialog.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $byLabel)

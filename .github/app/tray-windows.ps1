@@ -8,6 +8,9 @@ public static class Tray {
     static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")]
     static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
+    public static void Move(int x, int y) {
+        SetCursorPos(x, y);
+    }
     public static void Press(int x, int y, bool right) {
         SetCursorPos(x, y);
         System.Threading.Thread.Sleep(200);
@@ -17,7 +20,8 @@ public static class Tray {
     }
     [DllImport("ntdll.dll")]
     static extern int NtQuerySystemInformation(int kind, IntPtr buffer, int length, out int needed);
-    public static long Switches(int pid) {
+    public static Dictionary<long, long> Snap(int pid) {
+        var told = new Dictionary<long, long>();
         int length = 1 << 20;
         while (true) {
             IntPtr buffer = Marshal.AllocHGlobal(length);
@@ -25,7 +29,7 @@ public static class Tray {
                 int needed;
                 int status = NtQuerySystemInformation(5, buffer, length, out needed);
                 if (status == unchecked((int)0xC0000004)) { length *= 2; continue; }
-                if (status != 0) return -1;
+                if (status != 0) return told;
                 long offset = 0;
                 while (true) {
                     IntPtr entry = new IntPtr(buffer.ToInt64() + offset);
@@ -33,19 +37,28 @@ public static class Tray {
                     int threads = Marshal.ReadInt32(entry, 4);
                     long id = Marshal.ReadIntPtr(entry, 0x50).ToInt64();
                     if (id == pid) {
-                        long total = 0;
                         for (int index = 0; index < threads; index++) {
-                            total += (uint)Marshal.ReadInt32(entry, 0x100 + index * 0x50 + 0x40);
+                            int at = 0x100 + index * 0x50;
+                            long thread = Marshal.ReadIntPtr(entry, at + 0x30).ToInt64();
+                            told[thread] = (uint)Marshal.ReadInt32(entry, at + 0x40);
                         }
-                        return total;
+                        return told;
                     }
-                    if (next == 0) return -1;
+                    if (next == 0) return told;
                     offset += next;
                 }
             } finally {
                 Marshal.FreeHGlobal(buffer);
             }
         }
+    }
+    public static long Woke(Dictionary<long, long> before, Dictionary<long, long> after) {
+        long total = 0;
+        foreach (var pair in after) {
+            long was;
+            total += before.TryGetValue(pair.Key, out was) ? pair.Value - was : pair.Value;
+        }
+        return total;
     }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct Entry {
@@ -105,7 +118,7 @@ function Tray-Button {
     foreach ($top in $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
         if ($shell -notcontains $top.Current.ProcessId) { continue }
         foreach ($button in $top.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttons)) {
-            if ($button.Current.Name -like 'Scooch*' -and $button.Current.BoundingRectangle.Width -gt 0) { return $button }
+            if ($button.Current.Name -eq 'Scooch' -and $button.Current.BoundingRectangle.Width -gt 0) { return $button }
         }
     }
     return $null
@@ -206,15 +219,44 @@ function Press-Item([string]$Label) {
     return "found no $Label in the menu"
 }
 
-function Quiet-Minute {
+function Quiet-Minute([string]$Which) {
+    [Tray]::Move(300, 200)
+    Start-Sleep -Seconds 3
     $process = Icon-Processes | Select-Object -First 1
-    $switches = [Tray]::Switches($process.Id)
+    $before = [Tray]::Snap($process.Id)
     $cpu = $process.TotalProcessorTime.TotalMilliseconds
     Start-Sleep -Seconds 60
     $process.Refresh()
-    $script:quietSwitches = [Tray]::Switches($process.Id) - $switches
+    $script:quietSwitches = [Tray]::Woke($before, [Tray]::Snap($process.Id))
     $used = [int]($process.TotalProcessorTime.TotalMilliseconds - $cpu)
-    Line "- over a quiet minute with no window the icon process $($process.Id) switched in $($script:quietSwitches) times over its $($process.Threads.Count) threads, used $used ms of CPU, and holds $([math]::Round($process.PrivateMemorySize64 / 1MB, 1)) MB private with a working set of $([math]::Round($process.WorkingSet64 / 1MB, 1)) MB"
+    Line "- over a quiet minute, $Which, the icon process $($process.Id) woke its threads $($script:quietSwitches) times over $($process.Threads.Count) threads, used $used ms of CPU, and holds $([math]::Round($process.PrivateMemorySize64 / 1MB, 1)) MB private with a working set of $([math]::Round($process.WorkingSet64 / 1MB, 1)) MB"
+}
+
+function Clear-Privacy {
+    $labels = 'Accept', 'Next', 'Skip', 'Not now', 'Skip for now', 'Continue', 'Close'
+    $pressed = @()
+    for ($round = 0; $round -lt 12; $round++) {
+        $setup = @(Setup-Windows)
+        if ($setup.Count -eq 0) { break }
+        $done = $false
+        foreach ($window in $setup) {
+            foreach ($label in $labels) {
+                $byName = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $label)
+                $button = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byName) | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button } | Select-Object -First 1
+                $invoke = $null
+                if ($button -and $button.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
+                    $invoke.Invoke()
+                    $pressed += $label
+                    $done = $true
+                    break
+                }
+            }
+            if ($done) { break }
+        }
+        if (-not $done) { break }
+        Start-Sleep -Seconds 3
+    }
+    return $pressed
 }
 
 function Close-Window {
@@ -226,6 +268,11 @@ function Close-Window {
 
 Line ''
 Line '### The notification area icon'
+$privacy = Clear-Privacy
+if ($privacy.Count -gt 0) {
+    Screen-Shot 'setup-pressed'
+    Line "- a Windows setup screen covered the taskbar, the probe pressed $($privacy -join ', ') in it, setup windows left $(@(Setup-Windows).Count)"
+}
 Close-Window
 $spot = Icon-Center
 Line "- closed the window, window $([bool](Find-Window)), app processes $(Icon-Count), the icon $(if ($spot) { "$($spot[2]) at $($spot[0]) $($spot[1])" } else { 'not found' })"
@@ -233,8 +280,8 @@ Expect "closing the window while Scooch is on leaves the app process" ((Icon-Cou
 Expect "closing the window removes the window" (-not (Find-Window))
 Expect "the icon sits in the notification area after the window closed" ([bool]$spot)
 Screen-Shot 'notification-area'
-Quiet-Minute
-Expect "the icon process switched in at most 6 times in a quiet minute" ($script:quietSwitches -ge 0 -and $script:quietSwitches -le 6)
+Quiet-Minute 'after the window closed'
+$afterWindow = $script:quietSwitches
 
 Line ''
 Line '#### A left press opens the window, a right press opens the menu'
@@ -334,6 +381,8 @@ Line "- the icon process $icon came up $up s after the login entry ran, made by 
 $spot = Icon-Center
 Expect "after a login with Scooch on the icon is there" ([bool]$spot)
 Expect "after a login with Scooch on no window opens" (-not (Find-Window))
+Quiet-Minute 'started at the login with no window ever'
+Expect "the icon started at the login woke its threads at most 6 times in a quiet minute" ($script:quietSwitches -ge 0 -and $script:quietSwitches -le 6)
 Get-Process -Name scoochw -ErrorAction SilentlyContinue | Stop-Process -Force
 Wait-For 15 { (Daemons) -eq 0 } | Out-Null
 Start-Sleep -Seconds 3
