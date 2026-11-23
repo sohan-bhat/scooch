@@ -22,6 +22,8 @@ pub const NORMAL: [&str; 6] = ["hidden", "no room", "too large", "helper cold", 
 
 pub type Nudge = Arc<dyn Fn() + Send + Sync>;
 
+const PARK_WARM: u32 = 1;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Heard {
     Glided { id: u32, frames: u32, slow: u32, scale: f32, first: u64 },
@@ -82,17 +84,25 @@ pub struct Adapter {
 }
 
 pub trait Spawn: Send + Sync {
-    fn spawn(&self, gone: Option<Nudge>) -> Result<Box<dyn Link>>;
+    fn spawn(&self, nudge: Option<Nudge>) -> Result<Box<dyn Link>>;
 }
 
 pub struct Program(pub Option<PathBuf>);
 
 impl Spawn for Program {
-    fn spawn(&self, gone: Option<Nudge>) -> Result<Box<dyn Link>> {
+    fn spawn(&self, nudge: Option<Nudge>) -> Result<Box<dyn Link>> {
         let program = self.0.as_deref().ok_or_else(|| anyhow!("Scooch could not find its own program"))?;
-        let gone: Option<Box<dyn FnOnce() + Send>> = gone.map(|nudge| Box::new(move || nudge()) as Box<dyn FnOnce() + Send>);
-        Ok(Box::new(Real::new(Helper::launch_watched(program, gone)?)))
+        let watch = Box::new(move |reply: Option<&Reply>| {
+            if let (true, Some(nudge)) = (wakes(reply), nudge.as_ref()) {
+                nudge();
+            }
+        });
+        Ok(Box::new(Real::new(Helper::launch_watched(program, watch)?)))
     }
+}
+
+fn wakes(reply: Option<&Reply>) -> bool {
+    reply.is_none_or(|reply| matches!(reply, Reply::Ready { warm_id: Some(PARK_WARM), .. } | Reply::Failed { id: None, .. }))
 }
 
 pub fn program() -> Option<PathBuf> {
@@ -1421,6 +1431,17 @@ pub mod tests {
     }
 
     #[test]
+    fn the_daemon_is_woken_when_its_helper_parks_fails_or_exits_and_for_nothing_else() {
+        let ready = |warm_id: Option<u32>| Reply::Ready { adapter: "gpu".into(), ms: 1, uploads: 0, kind: "integrated".into(), warm_id, from: None, scale: None };
+        assert!(wakes(None));
+        assert!(wakes(Some(&ready(Some(PARK_WARM)))));
+        assert!(wakes(Some(&Reply::Failed { id: None, why: "warm 1: no device".into() })));
+        assert!(!wakes(Some(&ready(Some(2)))));
+        assert!(!wakes(Some(&Reply::Shown { id: 1, ms: 3 })));
+        assert!(!wakes(Some(&Reply::Failed { id: Some(4), why: "layer 4 is not open".into() })));
+    }
+
+    #[test]
     fn every_move_writes_its_own_line_and_repeats_are_never_folded() {
         let mut glider = Glider::new(Box::new(FakeSpawner::new(Arc::new(Mutex::new(Vec::new())))));
         for _ in 0..3 {
@@ -1481,7 +1502,7 @@ pub mod tests {
     }
 
     impl Spawn for FakeSpawner {
-        fn spawn(&self, _gone: Option<Nudge>) -> Result<Box<dyn Link>> {
+        fn spawn(&self, _nudge: Option<Nudge>) -> Result<Box<dyn Link>> {
             self.waits.lock().unwrap().push(("spawn", Duration::ZERO));
             if self.script.lock().unwrap().spawn_fails {
                 return Err(anyhow!("the test helper could not start"));

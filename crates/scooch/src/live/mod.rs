@@ -173,6 +173,8 @@ pub fn warm_failed(warm_id: Option<u32>, why: &str) -> String {
     }
 }
 
+pub type Watch = Box<dyn Fn(Option<&Reply>) + Send>;
+
 pub struct Helper {
     child: Child,
     input: Option<ChildStdin>,
@@ -209,11 +211,11 @@ impl Helper {
         Self::launch_full(program, env, None)
     }
 
-    pub fn launch_watched(program: &Path, gone: Option<Box<dyn FnOnce() + Send>>) -> Result<Helper> {
-        Self::launch_full(program, &[], gone)
+    pub fn launch_watched(program: &Path, watch: Watch) -> Result<Helper> {
+        Self::launch_full(program, &[], Some(watch))
     }
 
-    fn launch_full(program: &Path, env: &[(&str, &str)], gone: Option<Box<dyn FnOnce() + Send>>) -> Result<Helper> {
+    fn launch_full(program: &Path, env: &[(&str, &str)], watch: Option<Watch>) -> Result<Helper> {
         let launched = Instant::now();
         let mut command = std::process::Command::new(program);
         #[cfg(target_os = "linux")]
@@ -233,12 +235,16 @@ impl Helper {
             for text in BufReader::new(output).lines() {
                 let Ok(text) = text else { break };
                 let reply = serde_json::from_str::<Reply>(&text).unwrap_or_else(|error| Reply::Failed { id: None, why: format!("unreadable line from the helper {error}") });
-                if sender.send((Instant::now(), reply)).is_err() {
+                let arrived = Instant::now();
+                if let Some(watch) = &watch {
+                    watch(Some(&reply));
+                }
+                if sender.send((arrived, reply)).is_err() {
                     break;
                 }
             }
-            if let Some(gone) = gone {
-                gone();
+            if let Some(watch) = &watch {
+                watch(None);
             }
         })?;
         let pid = child.id();
