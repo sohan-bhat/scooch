@@ -446,14 +446,7 @@ Expect "Turn on turned Scooch on again" ($again -ge 0)
 Start-Sleep -Seconds 5
 
 . (Join-Path $PSScriptRoot 'presses-windows.ps1')
-
-$window = Find-Window
-if ($window) {
-    $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close()
-}
-$closed = Wait-For 15 { @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count -eq 0 }
-Line "- closing the window ended the app process after $closed s, daemons still running $(Daemons)"
-Expect "closing the window ended the app process" ($closed -ge 0)
+. (Join-Path $PSScriptRoot 'tray-windows.ps1')
 
 Get-CimInstance Win32_Process -Filter "Name = 'scoochw.exe'" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 2
@@ -490,6 +483,7 @@ Line "- user PATH still holds the folder $([bool]($userPath -split ';' | Where-O
 Expect "removal put the photo back" ([Desk]::Wallpaper() -ieq $photo)
 Expect "removal left no login entry" (-not (Run-Value))
 Expect "removal left no daemon" ((Daemons) -eq 0)
+Expect "removal ended the icon process" (@(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count -eq 0)
 Expect "removal left the install folder empty" (@(Get-ChildItem $folder -ErrorAction SilentlyContinue).Count -eq 0)
 Expect "removal kept the Path entry the older command install had made" ([bool]($userPath -split ';' | Where-Object { $_.TrimEnd('\') -ieq $folder }))
 Copy-Item "$data\state.json" (Join-Path $Out 'state.json') -ErrorAction SilentlyContinue

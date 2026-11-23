@@ -1,0 +1,356 @@
+Add-Type @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+public static class Tray {
+    [DllImport("user32.dll")]
+    static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")]
+    static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
+    public static void Press(int x, int y, bool right) {
+        SetCursorPos(x, y);
+        System.Threading.Thread.Sleep(200);
+        mouse_event(right ? 0x0008u : 0x0002u, 0, 0, 0, UIntPtr.Zero);
+        System.Threading.Thread.Sleep(80);
+        mouse_event(right ? 0x0010u : 0x0004u, 0, 0, 0, UIntPtr.Zero);
+    }
+    [DllImport("ntdll.dll")]
+    static extern int NtQuerySystemInformation(int kind, IntPtr buffer, int length, out int needed);
+    public static long Switches(int pid) {
+        int length = 1 << 20;
+        while (true) {
+            IntPtr buffer = Marshal.AllocHGlobal(length);
+            try {
+                int needed;
+                int status = NtQuerySystemInformation(5, buffer, length, out needed);
+                if (status == unchecked((int)0xC0000004)) { length *= 2; continue; }
+                if (status != 0) return -1;
+                long offset = 0;
+                while (true) {
+                    IntPtr entry = new IntPtr(buffer.ToInt64() + offset);
+                    int next = Marshal.ReadInt32(entry, 0);
+                    int threads = Marshal.ReadInt32(entry, 4);
+                    long id = Marshal.ReadIntPtr(entry, 0x50).ToInt64();
+                    if (id == pid) {
+                        long total = 0;
+                        for (int index = 0; index < threads; index++) {
+                            total += (uint)Marshal.ReadInt32(entry, 0x100 + index * 0x50 + 0x40);
+                        }
+                        return total;
+                    }
+                    if (next == 0) return -1;
+                    offset += next;
+                }
+            } finally {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+    }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct Entry {
+        public uint Size; public uint Usage; public uint Id; public IntPtr Heap; public uint Module; public uint Threads; public uint Parent; public int Base; public uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Name;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern bool Process32FirstW(IntPtr snapshot, ref Entry entry);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern bool Process32NextW(IntPtr snapshot, ref Entry entry);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
+    public static string Starts(string name, int milliseconds, int[] known) {
+        var seen = new Dictionary<uint, uint>();
+        var watch = Stopwatch.StartNew();
+        while (watch.ElapsedMilliseconds < milliseconds) {
+            IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+            var entry = new Entry();
+            entry.Size = (uint)Marshal.SizeOf(typeof(Entry));
+            if (Process32FirstW(snapshot, ref entry)) {
+                do {
+                    if (string.Equals(entry.Name, name, StringComparison.OrdinalIgnoreCase) && Array.IndexOf(known, (int)entry.Id) < 0) seen[entry.Id] = entry.Parent;
+                } while (Process32NextW(snapshot, ref entry));
+            }
+            CloseHandle(snapshot);
+            System.Threading.Thread.Sleep(15);
+        }
+        var told = new List<string>();
+        foreach (var pair in seen) told.Add(pair.Key + " " + pair.Value);
+        return string.Join(";", told);
+    }
+    [DllImport("kernel32.dll")]
+    static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll")]
+    static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+    public static string Object(int pid) {
+        IntPtr process = OpenProcess(0x1000, false, pid);
+        if (process == IntPtr.Zero) return "gone";
+        uint code;
+        GetExitCodeProcess(process, out code);
+        CloseHandle(process);
+        return code == 259 ? "running" : "kept after it ended";
+    }
+}
+'@
+
+function Icon-Processes { @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue) }
+function Icon-Count { (Icon-Processes).Count }
+function Icon-Pid { (Icon-Processes | Select-Object -First 1).Id }
+
+function Tray-Button {
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $shell = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | ForEach-Object Id)
+    $buttons = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
+    foreach ($top in $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
+        if ($shell -notcontains $top.Current.ProcessId) { continue }
+        foreach ($button in $top.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttons)) {
+            if ($button.Current.Name -like 'Scooch*' -and $button.Current.BoundingRectangle.Width -gt 0) { return $button }
+        }
+    }
+    return $null
+}
+
+function Promote-Icon {
+    $done = @()
+    foreach ($key in @(Get-ChildItem 'HKCU:\Control Panel\NotifyIconSettings' -ErrorAction SilentlyContinue)) {
+        $path = (Get-ItemProperty $key.PSPath -ErrorAction SilentlyContinue).ExecutablePath
+        if ($path -like '*scooch-app.exe') {
+            Set-ItemProperty $key.PSPath -Name IsPromoted -Value 1 -Type DWord
+            $done += $key.PSChildName
+        }
+    }
+    return $done
+}
+
+function Find-Icon {
+    $found = Tray-Button
+    if ($found) { return $found }
+    $promoted = Promote-Icon
+    if ($promoted.Count -gt 0) {
+        Line "- the icon sat among the hidden ones, the probe set it to show on the taskbar as Settings does, key $($promoted -join ' ')"
+        Start-Sleep -Seconds 3
+        $found = Tray-Button
+        if ($found) { return $found }
+    }
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $chevron = $null
+    foreach ($button in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)))) {
+        if ($button.Current.Name -match 'hidden icons') { $chevron = $button; break }
+    }
+    if ($chevron) {
+        $invoke = $null
+        if ($chevron.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) { $invoke.Invoke() }
+        Start-Sleep -Seconds 2
+        Line "- opened the hidden icons through $($chevron.Current.Name)"
+        return Tray-Button
+    }
+    return $null
+}
+
+function Icon-Center {
+    $icon = Find-Icon
+    if (-not $icon) { return $null }
+    $box = $icon.Current.BoundingRectangle
+    return @([int]($box.X + $box.Width / 2), [int]($box.Y + $box.Height / 2), $icon.Current.Name)
+}
+
+function Tray-Menu {
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $owner = @(Icon-Processes | ForEach-Object Id)
+    foreach ($top in $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
+        if ($owner -contains $top.Current.ProcessId -and $top.Current.ControlType -eq [System.Windows.Automation.ControlType]::Menu) { return $top }
+    }
+    return $null
+}
+
+function Menu-Items {
+    $menu = Tray-Menu
+    if (-not $menu) { return @() }
+    $items = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::MenuItem)
+    return @($menu.FindAll([System.Windows.Automation.TreeScope]::Descendants, $items))
+}
+
+function Menu-Reads {
+    @(Menu-Items | Where-Object { $_.Current.Name } | ForEach-Object {
+        $toggle = $null
+        $mark = ''
+        if ($_.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$toggle)) { $mark = " $($toggle.Current.ToggleState)" }
+        "$($_.Current.Name)$mark"
+    }) -join '|'
+}
+
+function Open-Menu {
+    $spot = Icon-Center
+    if (-not $spot) { return 'no icon found in the notification area' }
+    [Tray]::Press($spot[0], $spot[1], $true)
+    $shown = Wait-For 6 { [bool](Tray-Menu) }
+    if ($shown -ge 0) { return "a right press on the icon $($spot[2]) at $($spot[0]) $($spot[1]) opened the menu" }
+    return "a right press on the icon $($spot[2]) opened no menu"
+}
+
+function Press-Item([string]$Label) {
+    $opened = Open-Menu
+    Line "- $opened"
+    Line "- the menu reads $(Menu-Reads)"
+    foreach ($item in Menu-Items) {
+        if ($item.Current.Name -eq $Label) {
+            $invoke = $null
+            if ($item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
+                $invoke.Invoke()
+                Start-Sleep -Seconds 2
+                return "pressed $Label in the menu through UI Automation"
+            }
+        }
+    }
+    return "found no $Label in the menu"
+}
+
+function Quiet-Minute {
+    $process = Icon-Processes | Select-Object -First 1
+    $switches = [Tray]::Switches($process.Id)
+    $cpu = $process.TotalProcessorTime.TotalMilliseconds
+    Start-Sleep -Seconds 60
+    $process.Refresh()
+    $script:quietSwitches = [Tray]::Switches($process.Id) - $switches
+    $used = [int]($process.TotalProcessorTime.TotalMilliseconds - $cpu)
+    Line "- over a quiet minute with no window the icon process $($process.Id) switched in $($script:quietSwitches) times over its $($process.Threads.Count) threads, used $used ms of CPU, and holds $([math]::Round($process.PrivateMemorySize64 / 1MB, 1)) MB private with a working set of $([math]::Round($process.WorkingSet64 / 1MB, 1)) MB"
+}
+
+function Close-Window {
+    $window = Find-Window
+    if ($window) { $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close() }
+    Wait-For 15 { -not (Find-Window) } | Out-Null
+    Start-Sleep -Seconds 2
+}
+
+Line ''
+Line '### The notification area icon'
+Close-Window
+$spot = Icon-Center
+Line "- closed the window, window $([bool](Find-Window)), app processes $(Icon-Count), the icon $(if ($spot) { "$($spot[2]) at $($spot[0]) $($spot[1])" } else { 'not found' })"
+Expect "closing the window while Scooch is on leaves the app process" ((Icon-Count) -eq 1)
+Expect "closing the window removes the window" (-not (Find-Window))
+Expect "the icon sits in the notification area after the window closed" ([bool]$spot)
+Screen-Shot 'notification-area'
+Quiet-Minute
+Expect "the icon process switched in at most 6 times in a quiet minute" ($script:quietSwitches -ge 0 -and $script:quietSwitches -le 6)
+
+Line ''
+Line '#### A left press opens the window, a right press opens the menu'
+[Tray]::Press($spot[0], $spot[1], $false)
+$shown = Wait-For 20 { [bool](Find-Window) }
+Line "- a left press on the icon showed the window after $shown s"
+Expect "a left press on the icon opens the window" ($shown -ge 0)
+Close-Window
+$opened = Open-Menu
+Line "- $opened"
+$read = Menu-Reads
+Line "- the menu reads $read"
+Expect "the menu reads Open Scooch, On and Quit Scooch" ($read -match '^Open Scooch\|On( On| Off)?\|Quit Scooch$')
+if ($read -match '\|On (On|Off)\|') {
+    Expect "On is checked while Scooch is on" ($read -match '\|On On\|')
+} else {
+    Limit "the menu item On shows no check state to UI Automation here, so its mark is read only on macOS and Linux"
+}
+Line "- $(Press-Item 'Open Scooch')"
+$shown = Wait-For 20 { [bool](Find-Window) }
+Line "- Open Scooch showed the window after $shown s"
+Expect "Open Scooch in the menu opens the window" ($shown -ge 0)
+
+Line ''
+Line '#### On in the menu turns Scooch off and on with the window open'
+Line "- $(Press-Item 'On')"
+$off = Wait-For 30 { -not (State-On) }
+Start-Sleep -Seconds 3
+Line "- after On, off after $off s, wallpaper $([Desk]::Wallpaper()), app processes $(Icon-Count), the icon $([bool](Tray-Button))"
+Expect "On in the menu turned Scooch off" ($off -ge 0)
+Expect "off from the menu put the photo back" ([Desk]::Wallpaper() -ieq $photo)
+Expect "with the window open the icon stays while Scooch is off" ([bool](Tray-Button))
+Line "- $(Press-Item 'On')"
+$again = Wait-For 30 { State-On }
+$drawn = Wait-For 40 { (Read-Shared "$data\state.json") -match '"fingerprint": "' }
+Start-Sleep -Seconds 3
+Line "- after On again, on after $again s, wallpaper $([Desk]::Wallpaper())"
+Expect "On in the menu turned Scooch on again" ($again -ge 0)
+Expect "on from the menu drew the desktop" ([Desk]::Wallpaper() -ine $photo)
+
+Line ''
+Line '#### Opening Scooch while only the icon runs'
+Close-Window
+$before = Icon-Pid
+Start-Process -FilePath (Join-Path $folder 'scooch-app.exe')
+$shown = Wait-For 20 { [bool](Find-Window) }
+Start-Sleep -Seconds 2
+Line "- starting scooch-app.exe showed the window after $shown s, app processes $(Icon-Count), the same one $((Icon-Pid) -eq $before)"
+Expect "opening Scooch while the icon runs shows the window" ($shown -ge 0)
+Expect "opening Scooch while the icon runs keeps one app process" ((Icon-Count) -eq 1)
+Start-Process -FilePath (Join-Path $folder 'scooch-app.exe') -ArgumentList '--background'
+Start-Sleep -Seconds 6
+Line "- a start with the hidden argument while the app runs left $(Icon-Count) app process"
+Expect "a background start while the app runs leaves one app process" ((Icon-Count) -eq 1)
+Close-Window
+
+Line ''
+Line '#### Quit Scooch'
+Line "- $(Press-Item 'Quit Scooch')"
+$gone = Wait-For 30 { (Icon-Count) -eq 0 }
+$off = Wait-For 30 { -not (State-On) }
+Start-Sleep -Seconds 3
+Line "- after Quit, app processes $(Icon-Count) after $gone s, on $(State-On), wallpaper $([Desk]::Wallpaper()), login entry '$(Run-Value)', daemons $(Daemons)"
+Expect "Quit Scooch turned Scooch off" (-not (State-On))
+Expect "Quit Scooch put the photo back" ([Desk]::Wallpaper() -ieq $photo)
+Expect "Quit Scooch removed the login entry" (-not (Run-Value))
+Expect "Quit Scooch ended the app process" ((Icon-Count) -eq 0)
+
+Line ''
+Line '#### A background start with Scooch off'
+$hidden = Start-Process -FilePath (Join-Path $folder 'scooch-app.exe') -ArgumentList '--background' -PassThru
+$ended = $hidden.WaitForExit(10000)
+Line "- the hidden start with Scooch off ended $ended, app processes $(Icon-Count)"
+Expect "a background start with Scooch off ends at once" $ended
+Expect "a background start with Scooch off leaves no app process" ((Icon-Count) -eq 0)
+
+Line ''
+Line '#### Login with Scooch on'
+Start-Process -FilePath (Join-Path $folder 'scoochw.exe') -WindowStyle Hidden
+Wait-For 30 { State-On } | Out-Null
+$up = Wait-For 30 { (Icon-Count) -ge 1 }
+Line "- scoochw turned Scooch on, the daemon started the icon after $up s"
+Expect "a daemon started from the login entry starts the icon" ($up -ge 0)
+Get-Process -Name 'scooch-app', 'scoochw' -ErrorAction SilentlyContinue | Stop-Process -Force
+Wait-For 15 { (Icon-Count) -eq 0 -and (Daemons) -eq 0 } | Out-Null
+$entry = Run-Value
+Line "- logged out in effect, no daemon $((Daemons) -eq 0), no app $((Icon-Count) -eq 0), the login entry runs $entry"
+$program = if ($entry -match '^"([^"]+)"\s*(.*)$') { $Matches[1] } else { ($entry -split ' ')[0] }
+$rest = if ($entry -match '^"([^"]+)"\s*(.*)$') { $Matches[2] } else { ($entry -split ' ', 2)[1] }
+Start-Process -FilePath $program -ArgumentList $rest -WindowStyle Hidden
+$up = Wait-For 30 { (Icon-Count) -ge 1 }
+Start-Sleep -Seconds 4
+$icon = Icon-Pid
+$watcher = (Get-Process -Name scoochw -ErrorAction SilentlyContinue | Select-Object -First 1).Id
+$parent = (Get-CimInstance Win32_Process -Filter "ProcessId = $icon" -ErrorAction SilentlyContinue).ParentProcessId
+Line "- the icon process $icon came up $up s after the login entry ran, made by $parent, the daemon is $watcher"
+$spot = Icon-Center
+Expect "after a login with Scooch on the icon is there" ([bool]$spot)
+Expect "after a login with Scooch on no window opens" (-not (Find-Window))
+Get-Process -Name scoochw -ErrorAction SilentlyContinue | Stop-Process -Force
+Wait-For 15 { (Daemons) -eq 0 } | Out-Null
+Start-Sleep -Seconds 3
+Line "- stopped the daemon, the icon process $icon $(if (Get-Process -Id $icon -ErrorAction SilentlyContinue) { 'still runs' } else { 'ended' })"
+Expect "the icon does not die with the daemon" ([bool](Get-Process -Id $icon -ErrorAction SilentlyContinue))
+$known = @(Icon-Processes | ForEach-Object Id)
+Start-Process -FilePath $program -ArgumentList $rest -WindowStyle Hidden
+$starts = [Tray]::Starts('scooch-app.exe', 8000, [int[]]$known)
+$watcher = (Get-Process -Name scoochw -ErrorAction SilentlyContinue | Select-Object -First 1).Id
+Line "- the login entry started the daemon $watcher again while the icon ran, new app processes as id and maker $starts, app processes now $(Icon-Count)"
+$maker = if ($starts -match '^\d+ (\d+)$') { [int]$Matches[1] } else { 0 }
+Expect "a daemon that starts again while the icon runs leaves one app process" ((Icon-Count) -eq 1)
+Expect "the daemon started one short lived app process that the first one took over" ($maker -eq $watcher)
+Start-Sleep -Seconds 60
+$short = if ($starts -match '^(\d+) ') { [int]$Matches[1] } else { 0 }
+$kept = if ($short) { [Tray]::Object($short) } else { 'unknown' }
+Line "- a minute later the short lived app process $short is $kept, the daemon $watcher $(if (Get-Process -Id $watcher -ErrorAction SilentlyContinue) { 'runs' } else { 'is gone' })"
+Expect "a minute later no ended child of the daemon is kept by a handle" ($kept -eq 'gone')
+Wait-For 40 { (Read-Shared "$data\state.json") -match '"fingerprint": "' } | Out-Null
+Line "- Scooch is on with only the icon for the rest of the probe, app processes $(Icon-Count)"
