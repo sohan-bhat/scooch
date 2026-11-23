@@ -100,6 +100,7 @@ if (Test-Path $daemon) {
         Stop-Process -Id $off.Id -Force -ErrorAction SilentlyContinue
     }
 }
+Get-Process -Name scooch-app -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith("$Folder\", [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue
 $appended = [string](Recorded 'PathAppended')
 if ($appended) {
     $existed = [int](Recorded 'PathExisted')

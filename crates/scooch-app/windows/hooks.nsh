@@ -5,6 +5,8 @@ Var ScoochWasRunning
     StrCpy $INSTDIR "$LOCALAPPDATA\Programs\${PRODUCTNAME}"
     SetOutPath $INSTDIR
   ${EndIf}
+  nsExec::Exec `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "Get-Process -Name scooch-app -ErrorAction SilentlyContinue | Where-Object { $$_.Path -and $$_.Path.StartsWith('$INSTDIR\', 'OrdinalIgnoreCase') } | Stop-Process -Force"`
+  Pop $0
   StrCpy $ScoochWasRunning "no"
   nsExec::Exec 'taskkill /F /IM scoochw.exe'
   Pop $0
