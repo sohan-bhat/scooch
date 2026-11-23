@@ -614,7 +614,7 @@ mod probe {
         probe.section("5b Scenery", scenery_check);
         probe.section("5c Glide", glide_check);
         probe.section("5d Drags after a start", cold_drags_check);
-        probe.section("5e Quiet minutes and a move after them", rest_wakes);
+        probe.section("5e Quiet minutes and a move after them", rest_check);
         probe.section("5f Finder after the drop", finder_after_drop);
         probe.section("6 Idle", idle);
         probe.section("7 Off", off);
@@ -4166,7 +4166,17 @@ mod probe {
             p.line("- no daemon runs, so the five quiet minutes were skipped".to_string());
             return Ok(());
         }
-        let lines = whole.lines().count();
+        let found = motion_now(p);
+        set_motion(p, false);
+        poke(p);
+        let parked = wait_parked(p, whole.lines().count(), Duration::from_secs(60)).or_else(|| (found.as_deref() != Some("1")).then(|| crate::parked_in(&watch_log(&p.home.join("watch.log")))).flatten());
+        p.line(format!("- reduce motion found as {found:?} and turned off for the quiet minutes, the helper parked {} ms after its launch", parked.map_or("never".to_string(), |ms| ms.to_string())));
+        if parked.is_none() {
+            p.fail("the helper never parked within 60 s before the quiet minutes, so the move after them was not judged, which is the footing failing and not a pass");
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        let lines = daemon_log(p).lines().count();
         let started = Instant::now();
         std::thread::sleep(Duration::from_secs(300));
         let log = new_lines(&daemon_log(p), lines);
@@ -4193,6 +4203,12 @@ mod probe {
             p.fail(format!("a move five minutes after the last did not slide with the helper parked, skipped as {:?}", moved.skip));
         }
         Ok(())
+    }
+
+    fn rest_check(p: &mut Probe) -> Result<()> {
+        let result = rest_wakes(p);
+        put_motion_back(p);
+        result
     }
 
     fn glide_check(p: &mut Probe) -> Result<()> {
