@@ -57,12 +57,15 @@ cost = 4.0  * saliency hidden under icons, as a share of all saliency
      + 2.0  * subject newly cut by a crop edge
      + 0.6  * (zoom - 1)
      + 0.15 * distance of the crop from the home frame
-     + 0.25 if mirrored
 ```
+
+A flipped crop pays nothing extra. The flip bar below decides when the picture may flip.
 
 **Axis warp.** Columns and rows that hold no subject can stretch or squeeze, so the subject slides without any zoom. Straight horizontal and vertical lines stay straight. For each axis, the bins that hold the subject form a rigid core. Bins outside the core are flexible, less so where the picture is busy. A shift moves the core, stretching flexible bins on one side by up to 45% and squeezing those on the other side by up to 35%. Each shift pays a distortion cost.
 
-**One decision.** The best crop for every zoom level is warped on both axes, and all results are scored with one function. The lowest total wins. On a soft background the subject slides at zoom 1.0. Zoom appears only when a slide cannot clear the icons.
+**One decision.** The best crop for every zoom level, flipped and not, is warped on both axes, and all results are scored with one function. On each side of the flip the lowest total wins, and the flip bar picks the side. On a soft background the subject slides at zoom 1.0. Zoom appears only when a slide cannot clear the icons.
+
+**Flip bar.** The picture changes side only for a clear gain. The best result on the other side must cost less than the best result on the current side by at least 0.09 plus 5% of the current side's cost. The current side is the side of the previous placement, or unflipped when there is none. Flipping back needs the same gain as flipping, so an icon nudged to and fro does not flip the picture to and fro. When the other side falls short, the best result on the current side goes on to the stability rule below. The bar comes from 247 cases on the sample photos. With this bar no sample flip uncovers less than 1% of the subject, unless the unflipped picture needs a large reframe to clear the icons, and 43 of the 45 flips that uncover 2% or more go through. A share alone cannot do that. A flip that uncovers nothing can still cut the cost by 84%, while on a crowded desktop a flip that uncovers 8% of the subject cuts the cost by only 10%.
 
 **Home frame.** When the picture and the screen differ in shape, a fill crops one axis. The home frame is the pan along that axis the screen shows with no icons at all. Among the pans that keep within 2% of the most saliency any pan keeps, it is the one centered nearest the subject's centroid. It replaces the centered crop only when the centered crop keeps under 90% of that most or cuts the subject's border by more than 0.15 of its size, and only when the new pan shows at least 95% of the solid subject or 20 points more of it than the centered crop. Icons never change the home frame, and the crop costs above are measured from it.
 
@@ -112,6 +115,8 @@ Once a release has shipped tables, any change in what a table holds must raise t
 ### What the engine cannot do
 
 A subject that touches the screen edge under the icons cannot slide clear on a screen with the same shape as the picture, because there is no picture beyond that edge to fill in. Flipping the picture clears it. Flipping is off by default, since a flipped photo of a known place or person looks wrong. `scooch flip` turns it on, and the status line says when it would help. It says so only when the solve with flipping allowed, and everything else as it is, ends flipped and hides less than half of what the picture on screen hides, which is exactly the picture turning flipping on then shows.
+
+The flip bar sees only cost. When an icon sits on the subject and the unflipped picture needs a large zoom or warp to clear it, a flip that shows no more of the subject still passes the bar. On a crowded desktop the cost swings a lot between crops, so the bar can also miss a flip that uncovers part of the subject.
 
 ### What scenery cannot do
 
