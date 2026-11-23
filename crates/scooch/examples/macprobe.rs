@@ -3277,8 +3277,21 @@ mod probe {
         after: [u8; 3],
     }
 
-    fn spot(a: &Shot, b: &Shot, from_row: usize) -> Spot {
-        spot_outside(a, b, from_row, None)
+    fn spot_where(a: &Shot, b: &Shot, keep: &impl Fn(usize, usize) -> bool) -> Spot {
+        let mut found = Spot::default();
+        for y in 0..a.height.min(b.height) {
+            for x in 0..a.width.min(b.width) {
+                if !keep(x, y) {
+                    continue;
+                }
+                let (one, two) = (a.at(x, y), b.at(x, y));
+                let worst = (0..3).map(|channel| one[channel].abs_diff(two[channel])).max().unwrap_or(0);
+                if worst > found.worst {
+                    found = Spot { worst, x, y, before: one, after: two };
+                }
+            }
+        }
+        found
     }
 
     fn spot_outside(a: &Shot, b: &Shot, from_row: usize, skip: Option<[usize; 4]>) -> Spot {
@@ -4471,7 +4484,7 @@ mod probe {
             p.fail("the glide did not move steadily under the icons and hand over cleanly");
         }
         quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
-        let menu = (30.0 * screen.scale) as usize;
+        let keep = away_from_icons(&screen);
         let before = grab(display).context("the desktop could not be captured")?;
         let lines = daemon_log(p).lines().count();
         poke(p);
@@ -4481,7 +4494,7 @@ mod probe {
         let mut shots = 0;
         while poked.elapsed() < Duration::from_millis(2500) {
             if let Some(shot) = grab(display) {
-                let found = spot(&before, &shot, menu);
+                let found = spot_where(&before, &shot, &keep);
                 if found.worst > worst.worst {
                     worst = found;
                     worst_at = poked.elapsed().as_millis();
@@ -4494,7 +4507,7 @@ mod probe {
         let woke: Vec<String> = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(180).collect()).collect();
         let sent = woke.iter().filter(|line| commanded(line)).count();
         let primes = woke.iter().filter(|line| primed(line)).count();
-        p.line(format!("- a wake that changes nothing: helper commands past a prime {sent}, primes {primes}, {shots} captures over 2.5 s, largest change from before the wake {} of 255 at {worst_at} ms at pixel {},{} from {:?} to {:?}, captures kept as idle-wake-before.png and idle-wake-worst.png, log {woke:?}", worst.worst, worst.x, worst.y, worst.before, worst.after));
+        p.line(format!("- a wake that changes nothing: helper commands past a prime {sent}, primes {primes}, {shots} captures over 2.5 s, largest change from before the wake {} of 255 at {worst_at} ms at pixel {},{} from {:?} to {:?}, outside the icons and the menu bar, captures kept as idle-wake-before.png and idle-wake-worst.png, log {woke:?}", worst.worst, worst.x, worst.y, worst.before, worst.after));
         if sent > 0 || primes > 1 || worst.worst > 2 {
             p.fail("a wake that changed nothing opened a layer, primed more than once or changed the screen");
         }
