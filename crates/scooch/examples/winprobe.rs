@@ -3626,7 +3626,7 @@ mod probe {
 
     fn tables_file(home: &Path, output: &Path) -> Option<Vec<u8>> {
         let name = output.file_name()?.to_string_lossy().into_owned();
-        let found = fs::read_dir(home.join("cache").join("tables")).ok()?.flatten().find(|file| file.file_name().to_string_lossy().starts_with(&format!("{name}.")))?;
+        let found = fs::read_dir(home.join("cache").join("tables")).ok()?.flatten().find(|file| file.file_name().to_string_lossy().starts_with(&format!("{name}.")) && file.file_name().to_string_lossy().ends_with(".tables"))?;
         fs::read(found.path()).ok()
     }
 
