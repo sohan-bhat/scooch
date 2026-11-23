@@ -222,7 +222,8 @@ impl Link for Real {
         self.drain();
         self.wait(timeout, |me| {
             if let Some(index) = me.readies.iter().position(|(answered, _)| *answered == wanted) {
-                return Some(Ok(me.readies[index].1.clone()));
+                me.readies.drain(..index);
+                return Some(Ok(me.readies[0].1.clone()));
             }
             let prefix = wanted.map(|id| format!("warm {id}: "));
             let index = me.failed.iter().position(|(id, why)| id.is_none() && prefix.as_ref().is_none_or(|prefix| why.starts_with(prefix.as_str()) || !why.starts_with("warm ")))?;
@@ -695,6 +696,9 @@ impl Glider {
         }
         if self.link.as_mut().is_some_and(|link| !link.alive()) {
             self.reap();
+            if self.given_up {
+                return;
+            }
         }
         if self.link.is_some() {
             self.check_park();
