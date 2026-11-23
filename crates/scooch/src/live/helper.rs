@@ -887,6 +887,10 @@ mod running {
                 }
                 return;
             }
+            if let Some(early) = self.early.as_mut().filter(|early| early.fits(&screen, &self.hints) && early.stills == stills) {
+                early.asked = Instant::now();
+                return;
+            }
             self.drop_primed();
             if let Some(stale) = self.early.take() {
                 self.drop_pane(stale);
