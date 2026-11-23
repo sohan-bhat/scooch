@@ -5,8 +5,8 @@ icon_count() { pgrep -f "/Contents/MacOS/scooch-app" | wc -l | tr -d ' '; }
 app_alive() { [ -n "$(icon_pid)" ]; }
 app_gone() { [ -z "$(icon_pid)" ]; }
 window_gone() { [ -z "$(window_id)" ]; }
-dock_item() { limited 15 osascript -e 'tell application "System Events" to tell process "Dock"' -e 'set told to "absent"' -e 'repeat with item_ in (every UI element of list 1)' -e 'if name of item_ is "Scooch" then set told to "running " & (value of attribute "AXIsApplicationRunning" of item_ as text)' -e 'end repeat' -e 'return told' -e 'end tell' 2>/dev/null; }
-in_dock() { [ "$(dock_item)" = "running true" ]; }
+dock_item() { limited 15 osascript -e 'tell application "System Events" to tell process "Dock"' -e 'set told to "items"' -e 'repeat with item_ in (every UI element of list 1)' -e 'if name of item_ is "Scooch" then set told to told & " running " & (value of attribute "AXIsApplicationRunning" of item_ as text)' -e 'end repeat' -e 'return told' -e 'end tell' 2>/dev/null; }
+in_dock() { grep -q 'running true' <<<"$(dock_item)"; }
 not_in_dock() { ! in_dock; }
 kind() { lsappinfo info -only ApplicationType -app me.sohanbhat.scooch.window 2>/dev/null | sed 's/.*=//' | tr -d '"'; }
 
@@ -149,7 +149,7 @@ quiet_minute() {
   line "- over a quiet minute, $1, the icon process $pid woke $quiet_idle times from idle and $quiet_int times by interrupt, used $(awk -v a="$cpu0" -v b="$cpu1" 'BEGIN { printf "%.1f", b - a }') ms of CPU, and holds a footprint of $(awk -v f="$foot1" 'BEGIN { printf "%.1f", f / 1048576 }') MB with $(awk -v r="$res1" 'BEGIN { printf "%.1f", r / 1048576 }') MB resident"
 }
 
-line "- before closing, window $(has_window && echo open || echo closed), app processes $(icon_count), the app is $(kind)"
+line "- before closing, window $(has_window && echo open || echo closed), app processes $(icon_count), the app is $(kind), the Dock reads $(dock_item)"
 expect "while the window is open Scooch shows in the Dock" in_dock
 close_window
 sleep 3
