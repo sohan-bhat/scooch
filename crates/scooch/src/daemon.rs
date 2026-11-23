@@ -4083,6 +4083,8 @@ pub mod tests {
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
         assert_eq!(*spawned.lock().unwrap(), 1);
         assert!(events(&fake).contains(&"park".to_string()), "{:?}", events(&fake));
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.starts_with("skipped, system picture, the system's own picture is on screen")), "the first set did not say the system's picture was on screen {said:?}");
         let mut rendered = 0;
         for spot in 0..12 {
             fake.place(vec![Rect { x: 30.0 + (spot * 13 % 70) as f32, y: 20.0 + (spot * 7 % 40) as f32, w: 40.0, h: 40.0 }]);
@@ -4218,6 +4220,36 @@ pub mod tests {
         assert!(!events(&fake).iter().any(|event| event.starts_with("open ")), "{:?}", events(&fake));
         let said = daemon.glider.lock().unwrap().said.clone();
         assert!(said.iter().any(|line| line.starts_with("skipped, helper cold") && line.contains("the picture changed")), "{said:?}");
+    }
+
+    #[test]
+    fn a_tick_over_scoochs_own_picture_makes_its_missing_tables_and_raw_still() {
+        let (daemon, fake, _, _) = glide_rig("glide-ready-files", true);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let state = daemon.store.load();
+        let output = state.screens["main"].output.clone().unwrap();
+        let tables = daemon.store.tables_for(&output, tables_key(&state.screens["main"].source, &state.options).unwrap());
+        let raw = daemon.store.still_for(&output);
+        let started = Instant::now();
+        while !(tables.is_file() && (raw.is_file() || cfg!(not(any(windows, target_os = "macos"))))) && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let made = std::fs::read(&tables).unwrap();
+        std::fs::remove_file(&tables).unwrap();
+        let _ = std::fs::remove_file(&raw);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        assert_eq!(std::fs::read(&tables).ok(), Some(made), "the tables made again differ from the tables of the set");
+        if cfg!(any(windows, target_os = "macos")) {
+            let started = Instant::now();
+            while !raw.is_file() && started.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(raw.is_file(), "no raw still was made for the picture on screen");
+        }
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert!(events(&fake).iter().any(|event| event.starts_with("glide ")), "{:?}", events(&fake));
     }
 
     #[test]
