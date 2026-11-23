@@ -1,6 +1,5 @@
 line
 line "### No tray in this GNOME"
-switches() { cat /proc/"$1"/task/*/status 2>/dev/null | awk '/ctxt_switches/ { s += $2 } END { print s + 0 }'; }
 threads() { for task in /proc/"$1"/task/*; do printf '%s:%s ' "$(cat "$task/comm" 2>/dev/null)" "$(awk '/ctxt_switches/ { s += $2 } END { print s + 0 }' "$task/status" 2>/dev/null)"; done; }
 state="${XDG_DATA_HOME:-$HOME/.local/share}/scooch/state.json"
 mkdir -p "$(dirname "$state")"
@@ -12,17 +11,17 @@ started=$(date +%s%N)
 GDK_BACKEND=wayland scooch-app --background >"$out/app-background.log" 2>&1 &
 waiting=$!
 sleep 3
-first=$(switches "$waiting")
 early=$(threads "$waiting")
+before=$(for task in /proc/"$waiting"/task/*; do echo "$(basename "$task") $(awk '/ctxt_switches/ { s += $2 } END { print s + 0 }' "$task/status" 2>/dev/null)"; done)
 sleep 24
-second=$(switches "$waiting")
+after=$(for task in /proc/"$waiting"/task/*; do echo "$(basename "$task") $(awk '/ctxt_switches/ { s += $2 } END { print s + 0 }' "$task/status" 2>/dev/null)"; done)
 late=$(threads "$waiting")
 alive=$(kill -0 "$waiting" 2>/dev/null && echo yes || echo no)
 wait "$waiting"
 ended=$(( ($(date +%s%N) - started) / 1000000 ))
-woke=$((second - first))
+woke=$(awk 'NR == FNR { was[$1] = $2; next } { total += $2 - ($1 in was ? was[$1] : 0) } END { print total + 0 }' <(echo "$before") <(echo "$after"))
 line "- a background start with Scooch on still ran after 27 s $alive, its threads as name and switches at 3 s $early"
-line "- and at 27 s $late, so $woke switches in between"
+line "- and at 27 s $late, so the threads still there woke $woke times in between"
 line "- it ended after $ended ms and says $(tr '\n' ' ' <"$out/app-background.log")"
 by_deadline() { [ "$ended" -ge 29000 ] && [ "$ended" -le 36000 ]; }
 expect "with no tray a background start waits for one and ends by its 30 s deadline" by_deadline

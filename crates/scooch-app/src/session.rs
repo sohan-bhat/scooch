@@ -19,8 +19,8 @@ pub fn scheme(value: u32) -> Option<tauri::Theme> {
 }
 
 fn unwrapped(mut value: glib::Variant) -> Option<u32> {
-    while let Some(inner) = value.as_variant() {
-        value = inner;
+    while value.type_() == glib::VariantTy::VARIANT {
+        value = value.as_variant()?;
     }
     value.get::<u32>()
 }
