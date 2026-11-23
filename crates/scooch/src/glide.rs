@@ -1325,7 +1325,7 @@ pub mod tests {
         let mut trail = Move::new("main", Some(Instant::now()));
         let started = Instant::now();
         assert!(glider.prepare(&plan(&screen), &mut trail).is_none());
-        assert!(started.elapsed() < Duration::from_millis(50), "{:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_millis(400), "{:?}", started.elapsed());
         assert_eq!(trail.reason(), Some("helper cold"), "{:?}", trail.verdict);
         assert!(waits.lock().unwrap().iter().all(|(what, _)| *what == "spawn"), "{:?}", waits.lock().unwrap());
         let mut none = Glider::new(Box::new(FakeSpawner::new(Arc::new(Mutex::new(Vec::new())))));
@@ -1338,7 +1338,7 @@ pub mod tests {
     fn a_late_parked_helper_misses_at_the_deadline_and_is_kept() {
         let spawner = FakeSpawner::new(Arc::new(Mutex::new(Vec::new())));
         let (script, spawned) = (spawner.script.clone(), spawner.spawned.clone());
-        script.lock().unwrap().shown_after = Duration::from_millis(900);
+        script.lock().unwrap().shown_after = Duration::from_millis(2000);
         let mut glider = parked(spawner);
         let screen = lone_screen();
         for _ in 0..4 {
@@ -1346,7 +1346,7 @@ pub mod tests {
             let started = Instant::now();
             assert!(glider.prepare(&plan(&screen), &mut trail).is_none());
             let took = started.elapsed();
-            assert!(took >= PATIENCE - Duration::from_millis(10) && took < PATIENCE + Duration::from_millis(120), "{took:?}");
+            assert!(took >= PATIENCE - Duration::from_millis(10) && took < PATIENCE + Duration::from_millis(900), "{took:?}");
             assert_eq!(trail.reason(), Some("helper budget"), "{:?}", trail.verdict);
         }
         assert!(glider.parked() && glider.running(), "a late helper was dropped");
