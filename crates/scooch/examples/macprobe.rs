@@ -49,7 +49,12 @@ fn glide_try(log: &[String], parked: bool) -> Try {
 
 #[cfg(any(target_os = "macos", test))]
 fn parked_in(log: &[String]) -> Option<f64> {
-    log.iter().rev().find_map(|line| line.split(" glide helper parked on ").nth(1)).and_then(|rest| rest.split(" ms after its launch").next()).and_then(|head| head.rsplit(' ').next()).and_then(|ms| ms.parse().ok())
+    let launched = log.iter().rposition(|line| line.contains(" glide helper launched to park"));
+    let (at, line) = log.iter().enumerate().rev().find(|(_, line)| line.contains(" glide helper parked on "))?;
+    if launched.is_some_and(|launched| launched > at) {
+        return None;
+    }
+    line.split(" glide helper parked on ").nth(1).and_then(|rest| rest.split(" ms after its launch").next()).and_then(|head| head.rsplit(' ').next()).and_then(|ms| ms.parse().ok())
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -78,6 +83,8 @@ mod tests {
         assert_eq!(glide_try(&log(&["1 glide skipped, system picture, the system's own picture is on screen"]), true), Try::Skipped("system picture".into()));
         assert_eq!(super::parked_in(&log(&["1795 glide helper parked on Apple M1 of kind integrated 412 ms after its launch"])), Some(412.0));
         assert_eq!(super::parked_in(&log(&["1795 glide helper launched to park in 3 ms"])), None);
+        assert_eq!(super::parked_in(&log(&["1 glide helper launched to park in 3 ms", "2 glide helper parked on Apple M1 of kind integrated 412 ms after its launch", "3 glide helper launched to park in 2 ms"])), None);
+        assert_eq!(super::parked_in(&log(&["1 glide helper parked on GPU of kind integrated 90 ms after its launch", "2 glide helper launched to park in 2 ms", "3 glide helper parked on GPU of kind integrated 80 ms after its launch"])), Some(80.0));
         assert_eq!(glide_try(&log(&["1 glide skipped, old tables, the tables on screen come from another version"]), false), Try::Fault("old tables".into()));
         assert_eq!(glide_try(&log(&["1 glide skipped, setting off"]), false), Try::Fault("setting off".into()));
         assert_eq!(glide_try(&log(&["1 glide open 2", "2 glide glided 2 with 17 frames", "3 glide settled after 40 ms"]), false), Try::Glided);
