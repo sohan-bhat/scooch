@@ -465,6 +465,17 @@ pub enum Making {
     Level(Retained<NSScreen>, u32, i64),
 }
 
+pub fn room(screen: &Screen, layer: &Layer) -> Result<bool> {
+    let (desktop, _) = levels();
+    let seen = listing();
+    let ours = std::process::id() as i64;
+    if covered(&seen, &screen.frame, ours) {
+        anyhow::bail!(COVERED);
+    }
+    let level = choose(&seen, &screen.frame, desktop, ours).context(NO_ROOM)?;
+    Ok(level == layer.level)
+}
+
 pub fn step(marker: MainThreadMarker, screen: &Screen, making: Making) -> Result<Build<Making, Layer>> {
     objc2::rc::autoreleasepool(|_| build_step(marker, screen, making))
 }

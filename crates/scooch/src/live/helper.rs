@@ -104,6 +104,9 @@ mod running {
         fn screen_gpu(&self, _layer: &Self::Layer) -> Option<String> {
             None
         }
+        fn room(&mut self, _screen: &Screen, _layer: &Self::Layer) -> Result<bool> {
+            Ok(true)
+        }
         fn close(&mut self, layer: Self::Layer);
         fn abandon(&mut self, layer: Self::Layer) {
             std::mem::forget(layer);
@@ -906,8 +909,19 @@ mod running {
                 return;
             }
             if self.primed_for(&screen, &stills) {
-                self.adopt(id);
-                return;
+                let layer = self.primed.and_then(|primed| self.layers.get(&primed)).and_then(|live| live.layer.as_ref());
+                match layer.map_or(Ok(false), |layer| self.platform.room(&screen, layer)) {
+                    Ok(true) => {
+                        self.adopt(id);
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.drop_primed();
+                        self.fail(Some(id), format!("{error:#}"));
+                        return;
+                    }
+                }
             }
             self.drop_primed();
             let pane = match self.early.take() {
@@ -1483,6 +1497,7 @@ mod running {
             log: Arc<Mutex<Vec<String>>>,
             failed_at_close: Option<bool>,
             rested: usize,
+            covered: bool,
         }
 
         #[cfg(target_os = "macos")]
@@ -1538,6 +1553,13 @@ mod running {
                 return Ok(Build::Whole(Drawn { metal: objc2_quartz_core::CAMetalLayer::new(), size, screen: screen.id.clone() }, "window"));
                 #[cfg(windows)]
                 return Ok(Build::Whole(Drawn { window: window(size.0, size.1)?, size, screen: screen.id.clone() }, "window"));
+            }
+
+            fn room(&mut self, _screen: &Screen, _layer: &Drawn) -> Result<bool> {
+                if self.covered {
+                    anyhow::bail!("Windows cover the whole desktop on this screen, so Scooch keeps the plain swap.");
+                }
+                Ok(true)
             }
 
             fn present(&mut self, layer: &Drawn) -> Result<()> {
@@ -1988,9 +2010,10 @@ mod running {
             assert_eq!(log.lock().unwrap().clone(), vec!["commit".to_string(), "show".to_string()]);
             assert_eq!(helper.platform.made, 1, "the open made a second window");
             helper.event(Event::Command(Command::Close { id: 1 }));
+
             let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Closed { id: 1 })));
             assert!(replies.iter().any(|reply| matches!(reply, Reply::Closed { id: 1 })), "{replies:?}");
-            helper.event(Event::Command(Command::Open { id: 2, screen: screen().0, rect: screen().1, scale: 1.0, stills: Stills { raw: None, ..stills } }));
+            helper.event(Event::Command(Command::Open { id: 2, screen: screen().0, rect: screen().1, scale: 1.0, stills: Stills { raw: None, ..stills.clone() } }));
             let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 2, .. })));
             assert!(replies.iter().any(|reply| matches!(reply, Reply::Drawn { id: 2, still: Some(still), .. } if still == "kept")), "the still drawn for the first open was not kept {replies:?}");
             helper.event(Event::Command(Command::Close { id: 2 }));
@@ -2001,6 +2024,16 @@ mod running {
             let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 3, .. })));
             assert!(replies.iter().any(|reply| matches!(reply, Reply::Drawn { id: 3, still: Some(still), .. } if still == "decoded")), "{replies:?}");
             assert!(DECODED.lock().unwrap().contains(&other), "a still with no raw copy was not decoded the way the system decodes it");
+            helper.event(Event::Command(Command::Close { id: 3 }));
+            let _ = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Closed { id: 3 })));
+            let primes = out.replies().iter().filter(|reply| matches!(reply, Reply::Primed { .. })).count();
+            helper.event(Event::Command(Command::Window { screen: screen().0, rect: screen().1, scale: 1.0, stills: stills.clone() }));
+            let _ = pump(&mut helper, &inbox, &out, |replies| replies.iter().filter(|reply| matches!(reply, Reply::Primed { .. })).count() > primes);
+            helper.platform.covered = true;
+            helper.event(Event::Command(Command::Open { id: 9, screen: screen().0, rect: screen().1, scale: 1.0, stills: stills.clone() }));
+            let replies = out.replies();
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Failed { id: Some(9), why } if why.contains("cover the whole desktop"))), "a primed window was shown over a covered desktop {replies:?}");
+            assert!(!replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 9, .. })), "{replies:?}");
             let _ = std::fs::remove_dir_all(&folder);
         }
 

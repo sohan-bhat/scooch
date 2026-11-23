@@ -105,6 +105,10 @@ impl Platform for Host {
         std::mem::take(&mut self.revealed)
     }
 
+    fn room(&mut self, screen: &Screen, layer: &layer::Layer) -> Result<bool> {
+        objc2::rc::autoreleasepool(|_| layer::room(screen, layer))
+    }
+
     fn screen_gpu(&self, layer: &layer::Layer) -> Option<String> {
         objc2::rc::autoreleasepool(|_| layer::display_gpu(layer.display))
     }
