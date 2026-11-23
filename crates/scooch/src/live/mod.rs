@@ -1,4 +1,5 @@
 pub mod canvas;
+pub mod still;
 pub mod helper;
 
 use crate::platform::Screen;
@@ -13,7 +14,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub const HELPER: &str = "--live-helper";
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 pub const SLOW_HELLO: &str = "SCOOCH_HELPER_SLOW_HELLO_MS";
 pub const SPIN: &str = "SCOOCH_HELPER_SPIN";
 const QUIT_WAIT: Duration = Duration::from_millis(500);
@@ -65,8 +66,12 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         scales: BTreeMap<String, f32>,
     },
-    Window { screen: String, rect: Rect, scale: f32 },
-    Open { id: u32, screen: String, rect: Rect, #[serde(default = "one")] scale: f32, #[serde(default)] still: Option<PathBuf> },
+    Park {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        warm_id: Option<u32>,
+    },
+    Window { screen: String, rect: Rect, scale: f32, #[serde(default)] stills: Stills },
+    Open { id: u32, screen: String, rect: Rect, #[serde(default = "one")] scale: f32, #[serde(default)] stills: Stills },
     Glide { id: u32, a: PathBuf, b: PathBuf, ms: u32 },
     Settle { id: u32, still: PathBuf, #[serde(default)] ms: Option<u32> },
     Close { id: u32 },
@@ -75,6 +80,22 @@ pub enum Command {
 
 fn one() -> f32 {
     1.0
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Stills {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub still: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tables: Option<PathBuf>,
+}
+
+impl Stills {
+    pub fn of(still: &Path) -> Stills {
+        Stills { still: Some(still.to_path_buf()), raw: None, tables: None }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -96,7 +117,23 @@ pub enum Reply {
         scale: Option<f32>,
     },
     Shown { id: u32, ms: u64 },
-    Drawn { id: u32, window: u64, first: u64, reveal: u64, make: u64, present: u64, found: bool, steps: Vec<(String, u64)>, #[serde(default)] revealing: Vec<(String, u64)> },
+    Drawn {
+        id: u32,
+        window: u64,
+        first: u64,
+        reveal: u64,
+        make: u64,
+        present: u64,
+        found: bool,
+        steps: Vec<(String, u64)>,
+        #[serde(default)]
+        revealing: Vec<(String, u64)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        still: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        screen_gpu: Option<String>,
+    },
+    Primed { screen: String, window: u64, first: u64, still: String },
     Device { ms: u64 },
     Canvas { #[serde(default)] warm_id: Option<u32>, ms: u64 },
     Glided { id: u32, frames: u32, slow_frames: u32, first_frame_ms: u64, #[serde(default)] uploads: u32, #[serde(default = "one")] scale: f32 },
@@ -169,6 +206,14 @@ impl Helper {
     }
 
     pub fn launch_with(program: &Path, env: &[(&str, &str)]) -> Result<Helper> {
+        Self::launch_full(program, env, None)
+    }
+
+    pub fn launch_watched(program: &Path, gone: Option<Box<dyn FnOnce() + Send>>) -> Result<Helper> {
+        Self::launch_full(program, &[], gone)
+    }
+
+    fn launch_full(program: &Path, env: &[(&str, &str)], gone: Option<Box<dyn FnOnce() + Send>>) -> Result<Helper> {
         let launched = Instant::now();
         let mut command = std::process::Command::new(program);
         #[cfg(target_os = "linux")]
@@ -192,6 +237,9 @@ impl Helper {
                     break;
                 }
             }
+            if let Some(gone) = gone {
+                gone();
+            }
         })?;
         let pid = child.id();
         let input = child.stdin.take();
@@ -208,6 +256,10 @@ impl Helper {
         };
         helper.send(&Command::Hello { version: VERSION })?;
         Ok(helper)
+    }
+
+    pub fn launched(&self) -> Instant {
+        self.launched
     }
 
     pub fn arrived(&self) -> Option<Instant> {
@@ -280,12 +332,19 @@ impl Helper {
         self.ready_for(warm_id, timeout)
     }
 
-    pub fn ask_window(&mut self, screen: &Screen) -> Result<()> {
-        self.send(&Command::Window { screen: screen.id.clone(), rect: screen.frame, scale: screen.scale })
+    pub fn ask_window(&mut self, screen: &Screen, stills: &Stills) -> Result<()> {
+        self.send(&Command::Window { screen: screen.id.clone(), rect: screen.frame, scale: screen.scale, stills: stills.clone() })
     }
 
-    pub fn ask_open(&mut self, id: u32, screen: &Screen, still: &Path) -> Result<()> {
-        self.send(&Command::Open { id, screen: screen.id.clone(), rect: screen.frame, scale: screen.scale, still: Some(still.to_path_buf()) })
+    pub fn ask_park(&mut self) -> Result<u32> {
+        self.warms = self.warms.wrapping_add(1).max(1);
+        let warm_id = self.warms;
+        self.send(&Command::Park { warm_id: Some(warm_id) })?;
+        Ok(warm_id)
+    }
+
+    pub fn ask_open(&mut self, id: u32, screen: &Screen, stills: &Stills) -> Result<()> {
+        self.send(&Command::Open { id, screen: screen.id.clone(), rect: screen.frame, scale: screen.scale, stills: stills.clone() })
     }
 
     pub fn shown(&mut self, id: u32, timeout: Duration) -> Result<u64> {
@@ -296,7 +355,7 @@ impl Helper {
     }
 
     pub fn open(&mut self, id: u32, screen: &Screen, still: &Path, timeout: Duration) -> Result<u64> {
-        self.ask_open(id, screen, still)?;
+        self.ask_open(id, screen, &Stills::of(still))?;
         self.shown(id, timeout)
     }
 
@@ -410,8 +469,9 @@ mod tests {
         let commands = [
             Command::Hello { version: VERSION },
             Command::Warm { hints: Hints { present: Some("bare".into()), scale: Some(0.5) }, picture: Some(PathBuf::from("p.jpg")), size: Some([1024, 768]), warm_id: Some(4), canvas: Some(PathBuf::from("main.canvas")), scales: BTreeMap::from([("gpu".to_string(), 0.75)]) },
-            Command::Window { screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5 },
-            Command::Open { id: 3, screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5, still: Some(PathBuf::from("a.png")) },
+            Command::Park { warm_id: Some(2) },
+            Command::Window { screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5, stills: Stills { still: Some(PathBuf::from("a.jpg")), raw: Some(PathBuf::from("a.jpg.still")), tables: Some(PathBuf::from("a.tables")) } },
+            Command::Open { id: 3, screen: "one".into(), rect: Rect { x: 0.0, y: 0.0, w: 1024.0, h: 768.0 }, scale: 1.5, stills: Stills::of(Path::new("a.png")) },
             Command::Glide { id: 3, a: PathBuf::from("a.tables"), b: PathBuf::from("b.tables"), ms: 450 },
             Command::Settle { id: 3, still: PathBuf::from("b.png"), ms: None },
             Command::Close { id: 3 },
@@ -424,7 +484,8 @@ mod tests {
             Reply::Hello { version: VERSION, pid: 9 },
             Reply::Ready { adapter: "gpu".into(), ms: 12, uploads: 1, kind: "integrated".into(), warm_id: Some(4), from: Some("cache".into()), scale: Some(0.6) },
             Reply::Shown { id: 3, ms: 40 },
-            Reply::Drawn { id: 3, window: 12, first: 20, reveal: 34, make: 80, present: 10, found: true, steps: vec![("screen".into(), 2), ("window".into(), 78)], revealing: vec![("spin".into(), 34), ("unhide".into(), 2)] },
+            Reply::Drawn { id: 3, window: 12, first: 20, reveal: 34, make: 80, present: 10, found: true, steps: vec![("screen".into(), 2), ("window".into(), 78)], revealing: vec![("spin".into(), 34), ("unhide".into(), 2)], still: Some("raw".into()), screen_gpu: Some("gpu".into()) },
+            Reply::Primed { screen: "one".into(), window: 20, first: 30, still: "kept".into() },
             Reply::Glided { id: 3, frames: 24, slow_frames: 1, first_frame_ms: 30, uploads: 1, scale: 0.75 },
             Reply::Settled { id: 3 },
             Reply::Closed { id: 3 },
@@ -470,7 +531,7 @@ mod tests {
     #[test]
     fn a_bare_open_line_takes_the_defaults() {
         let read: Command = serde_json::from_str(r#"{"kind":"open","id":1,"screen":"s","rect":{"x":0,"y":0,"w":10,"h":10}}"#).unwrap();
-        assert_eq!(read, Command::Open { id: 1, screen: "s".into(), rect: Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 }, scale: 1.0, still: None });
+        assert_eq!(read, Command::Open { id: 1, screen: "s".into(), rect: Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 }, scale: 1.0, stills: Stills::default() });
         let warm: Command = serde_json::from_str(r#"{"kind":"warm"}"#).unwrap();
         assert_eq!(warm, Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: None, canvas: None, scales: BTreeMap::new() });
         let settle: Command = serde_json::from_str(r#"{"kind":"settle","id":2,"still":"b.png"}"#).unwrap();
