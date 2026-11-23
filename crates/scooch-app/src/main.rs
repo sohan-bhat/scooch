@@ -5,8 +5,11 @@ mod appimage;
 mod children;
 mod pictures;
 mod place;
+#[cfg(target_os = "linux")]
+mod session;
 #[cfg(unix)]
 mod takeover;
+mod tray;
 #[cfg(feature = "updater")]
 mod update;
 mod watch;
@@ -95,26 +98,31 @@ async fn view<R: Runtime>(app: AppHandle<R>) -> Result<View, String> {
     off_main("view", move || Ok(current(&folder))).await
 }
 
+fn switch_on(folder: &std::path::Path) -> anyhow::Result<Started> {
+    let program = ready()?;
+    match pictures::selected(folder).filter(|_| !facade::is_on()) {
+        Some(selection) => {
+            adopted(facade::use_picture(&program, &selection))?;
+            pictures::select(folder, None);
+            Ok(Started::Go)
+        }
+        None => adopted(facade::turn_on(&program)),
+    }
+}
+
+fn switch_off() -> anyhow::Result<Tally> {
+    adopted(facade::turn_off(&place::program()?))
+}
+
 #[tauri::command]
 async fn turn_on<R: Runtime>(app: AppHandle<R>) -> Result<Started, String> {
     let folder = data_folder(&app);
-    off_main("turn-on", move || {
-        let program = ready()?;
-        match pictures::selected(&folder).filter(|_| !facade::is_on()) {
-            Some(selection) => {
-                adopted(facade::use_picture(&program, &selection))?;
-                pictures::select(&folder, None);
-                Ok(Started::Go)
-            }
-            None => adopted(facade::turn_on(&program)),
-        }
-    })
-    .await
+    off_main("turn-on", move || switch_on(&folder)).await
 }
 
 #[tauri::command]
 async fn turn_off() -> Result<Tally, String> {
-    off_main("turn-off", || adopted(facade::turn_off(&place::program()?))).await
+    off_main("turn-off", switch_off).await
 }
 
 #[tauri::command]
@@ -242,15 +250,84 @@ fn place_on_pointer<R: Runtime>(window: &WebviewWindow<R>) {
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 
+static PRESENTING: Mutex<()> = Mutex::new(());
+
+fn made_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
+    let config = app.config().app.windows.iter().find(|window| window.label == "main").cloned().ok_or(tauri::Error::WindowNotFound)?;
+    let window = tauri::WebviewWindowBuilder::from_config(app, &config)?.build()?;
+    if let Ok(theme) = window.theme() {
+        paint(&window, theme);
+    }
+    place_on_pointer(&window);
+    Ok(window)
+}
+
+fn present<R: Runtime>(app: &AppHandle<R>) {
+    let _presenting = PRESENTING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    let window = match app.get_webview_window("main") {
+        Some(window) => window,
+        None => match made_window(app) {
+            Ok(window) => window,
+            Err(error) => {
+                eprintln!("scooch-app window failed: {error}");
+                return;
+            }
+        },
+    };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+fn show_window<R: Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    std::thread::spawn(move || present(&app));
+}
+
+#[cfg(target_os = "linux")]
+fn tray_offered(background: bool) -> bool {
+    session::tray(background)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tray_offered(_background: bool) -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+    let menu = tauri::menu::Menu::default(app)?;
+    if let Some(tauri::menu::MenuItemKind::Submenu(first)) = menu.items()?.into_iter().next() {
+        let count = first.items()?.len();
+        if count > 0 {
+            first.remove_at(count - 1)?;
+        }
+        first.append(&tauri::menu::MenuItem::with_id(app, tray::QUIT, tray::words("tray.quit"), true, Some("CmdOrCtrl+Q"))?)?;
+    }
+    Ok(menu)
+}
+
 fn main() {
     #[cfg(target_os = "linux")]
     facade::child_env(appimage::changes());
+    let arguments: Vec<String> = std::env::args_os().map(|argument| argument.to_string_lossy().into_owned()).collect();
+    let background = tray::background(&arguments);
+    let on = facade::is_on();
+    if background && !on {
+        eprintln!("scooch-app background start with Scooch off ends");
+        return;
+    }
+    let offered = tray_offered(background);
+    if !tray::starts(background, on, offered) {
+        eprintln!("scooch-app background start without a tray ends");
+        return;
+    }
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _arguments, _folder| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
+        .plugin(tauri_plugin_single_instance::init(|app, arguments, _folder| {
+            if !tray::background(&arguments) {
+                show_window(app);
             }
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -258,7 +335,10 @@ fn main() {
         .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(StateFlags::SIZE | StateFlags::MAXIMIZED).build());
     #[cfg(feature = "updater")]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(app_menu);
     builder
+        .on_menu_event(|app, event| tray::pressed(app, event.id().as_ref()))
         .register_asynchronous_uri_scheme_protocol(pictures::SCHEME, |_context, request, responder| {
             std::thread::spawn(move || responder.respond(pictures::answer(&request)));
         })
@@ -270,23 +350,28 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![view, turn_on, turn_off, set, use_picture, pictures, pick, first_open, fix])
-        .setup(|app| {
+        .setup(move |app| {
             facade::host();
             #[cfg(feature = "updater")]
             update::fetch(app.handle());
+            #[cfg(target_os = "macos")]
+            if background {
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
             let handle = app.handle().clone();
             let watcher = watch::follow(&facade::folder(), move || {
                 let _ = handle.emit("changed", ());
+                tray::follow(&handle);
             })
             .ok();
             app.manage(Kept(Mutex::new(watcher)));
-            if let Some(window) = app.get_webview_window("main") {
-                if let Ok(theme) = window.theme() {
-                    paint(&window, theme);
+            if offered {
+                if let Err(error) = tray::make(app.handle()) {
+                    eprintln!("scooch-app tray failed: {error}");
                 }
-                place_on_pointer(&window);
-                let _ = window.show();
-                let _ = window.set_focus();
+            }
+            if !background {
+                present(app.handle());
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || {
@@ -315,14 +400,25 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("the Scooch window failed to start")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { code: None, api, .. } => {
+                if tray::keeps_running(facade::is_on(), false, tray::made(app)) {
+                    api.prevent_exit();
+                    #[cfg(target_os = "macos")]
+                    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    eprintln!("scooch-app window closed, the icon stays");
+                }
+            }
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_window(app),
+            tauri::RunEvent::Exit => {
                 if let Some(kept) = app.try_state::<Kept>() {
                     kept.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
                 }
                 #[cfg(feature = "updater")]
                 update::install(app);
             }
+            _ => {}
         });
 }
 
