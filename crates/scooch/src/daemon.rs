@@ -1134,9 +1134,14 @@ impl Daemon {
             let copied = showing_output && !entry.painted && entry.placement.as_ref().is_some_and(scene::is_identity);
             entry.placement = Some(placement);
             entry.placed = Some(placed);
-            if current.is_some_and(|path| same(path, &source)) {
-                entry.output = None;
-            } else if !copied {
+            let system = current.is_some_and(|path| same(path, &source));
+            if system || copied {
+                if system {
+                    entry.output = None;
+                }
+                trail.skip("kept", "the picture already fits the icons as the system shows it, so it stays");
+                self.tell(glider.as_deref_mut(), &trail);
+            } else {
                 trail.skip(blocked.unwrap_or("plain picture"), "the picture fits the icons as the system shows it, so it is put back plainly");
                 if !self.plain(entry, screen, current, seen)? {
                     return Ok(Outcome::Interrupted);
@@ -1155,6 +1160,8 @@ impl Daemon {
                 glider.close_early_for(&screen.id);
             }
             entry.placed = Some(placed);
+            trail.skip("kept", "the placement already fits the icons, so the picture stays");
+            self.tell(glider.as_deref_mut(), &trail);
             return Ok(Outcome::Kept);
         }
         let painted = wanted && scooch_core::scenery_active(&analysis, &placement, scene, options);
@@ -3501,6 +3508,20 @@ pub mod tests {
     }
 
     #[test]
+    fn a_move_that_keeps_the_picture_writes_its_one_line() {
+        let (daemon, fake, _, _) = glide_rig("glide-kept-line", true);
+        set_scenery(&daemon, false);
+        fake.place(vec![subject(), calm()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        fake.place(vec![subject(), calm_moved()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
+        let said = daemon.glider.lock().unwrap().said.clone();
+        let lines: Vec<&String> = said.iter().filter(|line| line.contains(" times from the ")).collect();
+        assert_eq!(lines.len(), 2, "{said:?}");
+        assert!(lines[1].starts_with("skipped, kept, "), "{said:?}");
+    }
+
+    #[test]
     fn with_scenery_off_the_same_move_is_kept() {
         let (daemon, fake, _) = scenery_rig("scenery-kept", false);
         fake.place(vec![subject(), calm()]);
@@ -5361,6 +5382,11 @@ pub mod tests {
             }
             assert!(!daemon.glider.lock().unwrap().in_flight(), "{name}");
             assert_eq!(daemon.glider.lock().unwrap().running(), matches!(name, "shown" | "dies" | "settle"), "{name}");
+            if matches!(name, "dies" | "settle") {
+                let said = daemon.glider.lock().unwrap().said.clone();
+                let lines = said.iter().filter(|line| (line.starts_with("slid, ") || line.starts_with("skipped, ")) && line.contains(" times from the ")).count();
+                assert_eq!(lines, 2, "{name}: each move writes one line {said:?}");
+            }
             if matches!(name, "dies" | "settle") {
                 assert_eq!(events.iter().filter(|event| *event == "spawn").count(), 2, "{name}: a fresh helper parks after one dies or stops answering {events:?}");
             }
