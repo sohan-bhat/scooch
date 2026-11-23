@@ -381,7 +381,7 @@ jobs:
         timeout-minutes: 20
         run: |
           sudo apt-get update
-          sudo apt-get install -y gnome-shell gvfs gvfs-daemons dconf-service libglib2.0-bin gnome-shell-extension-prefs fonts-cantarell adwaita-icon-theme dconf-cli xdg-user-dirs
+          sudo apt-get install -y gnome-shell gvfs gvfs-daemons dconf-service libglib2.0-bin gnome-shell-extension-prefs fonts-cantarell adwaita-icon-theme dconf-cli xdg-user-dirs python3-pyatspi at-spi2-core
           sudo apt-get install -y ./built/*.deb
           sudo apt-get remove -y gnome-shell-extension-desktop-icons-ng || true
           XDG_RUNTIME_DIR="$(mktemp -d)"
