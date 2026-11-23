@@ -20,7 +20,7 @@ pub const BARE: u32 = 2;
 pub const WAKE_EVERY: Duration = Duration::from_secs(10);
 pub const PRIME_LIFE: Duration = Duration::from_secs(5);
 const NOTHING_NEW: &str = "the new picture is the one on screen or could not be made, so nothing glides";
-pub const NORMAL: [&str; 6] = ["hidden", "no room", "too large", "helper cold", "helper budget", "system picture"];
+pub const NORMAL: [&str; 7] = ["hidden", "no room", "too large", "helper cold", "helper budget", "system picture", "kept"];
 
 pub type Nudge = Arc<dyn Fn() + Send + Sync>;
 
@@ -790,11 +790,20 @@ impl Glider {
             let _ = std::thread::Builder::new().name("scooch-quit".into()).spawn(move || drop(link));
         }
         self.drop_link();
-        self.flights.clear();
+        self.end_flights("then the helper was stopped");
         self.early.clear();
         self.replaced = false;
         self.given_up = false;
         self.doomed = false;
+    }
+
+    fn end_flights(&mut self, why: &str) {
+        for flight in std::mem::take(&mut self.flights) {
+            let mut trail = flight.trail;
+            trail.also(why);
+            let line = trail.write();
+            keep(&mut self.said, line);
+        }
     }
 
     pub fn reap(&mut self) {
@@ -804,7 +813,7 @@ impl Glider {
         }
         let parked = self.parked.is_some();
         self.drop_link();
-        self.flights.clear();
+        self.end_flights("then the helper was gone");
         self.early.clear();
         if self.replaced {
             self.given_up = true;
