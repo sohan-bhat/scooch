@@ -8,6 +8,44 @@ public static class Tray {
     static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")]
     static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
+    delegate bool EnumProc(IntPtr window, IntPtr extra);
+    [DllImport("user32.dll")]
+    static extern bool EnumWindows(EnumProc callback, IntPtr extra);
+    [DllImport("user32.dll")]
+    static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")]
+    static extern bool GetWindowRect(IntPtr window, out Rect rect);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetWindowTextW(IntPtr window, System.Text.StringBuilder text, int count);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetClassNameW(IntPtr window, System.Text.StringBuilder text, int count);
+    [DllImport("user32.dll")]
+    static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+    [DllImport("user32.dll")]
+    static extern int GetSystemMetrics(int index);
+    public struct Rect { public int Left; public int Top; public int Right; public int Bottom; }
+    public static string Covers() {
+        var told = new List<string>();
+        long screen = (long)GetSystemMetrics(0) * GetSystemMetrics(1);
+        EnumWindows((window, extra) => {
+            if (!IsWindowVisible(window)) return true;
+            Rect rect;
+            if (!GetWindowRect(window, out rect)) return true;
+            long area = (long)(rect.Right - rect.Left) * (rect.Bottom - rect.Top);
+            if (area * 10 < screen * 6) return true;
+            var name = new System.Text.StringBuilder(256);
+            var kind = new System.Text.StringBuilder(256);
+            GetWindowTextW(window, name, 256);
+            GetClassNameW(window, kind, 256);
+            string cls = kind.ToString();
+            if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd") return true;
+            uint pid;
+            GetWindowThreadProcessId(window, out pid);
+            told.Add(pid + "|" + cls + "|" + name);
+            return true;
+        }, IntPtr.Zero);
+        return string.Join(";", told);
+    }
     public static void Move(int x, int y) {
         SetCursorPos(x, y);
     }
@@ -232,6 +270,21 @@ function Quiet-Minute([string]$Which) {
     Line "- over a quiet minute, $Which, the icon process $($process.Id) woke its threads $($script:quietSwitches) times over $($process.Threads.Count) threads, used $used ms of CPU, and holds $([math]::Round($process.PrivateMemorySize64 / 1MB, 1)) MB private with a working set of $([math]::Round($process.WorkingSet64 / 1MB, 1)) MB"
 }
 
+function Clear-Covers {
+    $done = @()
+    foreach ($cover in @([Tray]::Covers() -split ';' | Where-Object { $_ })) {
+        $parts = $cover -split '\|', 3
+        $process = Get-Process -Id ([int]$parts[0]) -ErrorAction SilentlyContinue
+        $name = if ($process) { $process.ProcessName } else { 'gone' }
+        $done += "$name $($parts[1]) '$($parts[2])'"
+        if ($name -match 'WWAHost|OOBE|CloudExperience|msoobe') {
+            Stop-Process -Id ([int]$parts[0]) -Force -ErrorAction SilentlyContinue
+            $done[-1] += ' ended'
+        }
+    }
+    return $done
+}
+
 function Clear-Privacy {
     $labels = 'Accept', 'Next', 'Skip', 'Not now', 'Skip for now', 'Continue', 'Close'
     $pressed = @()
@@ -270,8 +323,13 @@ Line ''
 Line '### The notification area icon'
 $privacy = Clear-Privacy
 if ($privacy.Count -gt 0) {
-    Screen-Shot 'setup-pressed'
     Line "- a Windows setup screen covered the taskbar, the probe pressed $($privacy -join ', ') in it, setup windows left $(@(Setup-Windows).Count)"
+}
+$covers = Clear-Covers
+if ($covers.Count -gt 0) {
+    Start-Sleep -Seconds 3
+    Screen-Shot 'covers-cleared'
+    Line "- windows that covered most of the screen $($covers -join '; '), left now $([Tray]::Covers())"
 }
 Close-Window
 $spot = Icon-Center

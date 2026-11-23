@@ -32,7 +32,8 @@ case "$desktop" in
     KDE_SESSION_VERSION="$(plasmashell --version 2>/dev/null | sed -E 's/[^0-9]*([0-9]+).*/\1/')"
     export KDE_SESSION_VERSION
     kwin_x11 >"$out/wm.log" 2>&1 &
-    start_panel() { plasmashell >>"$out/panel.log" 2>&1 & }
+    kded=$(command -v kded5 || command -v kded6 || echo /usr/lib/x86_64-linux-gnu/libexec/kf5/kded5)
+    start_panel() { "$kded" >>"$out/kded.log" 2>&1 & plasmashell >>"$out/panel.log" 2>&1 & }
     stop_panel() { pkill -x plasmashell >/dev/null 2>&1; pkill -f kded >/dev/null 2>&1; }
     version="$(plasmashell --version 2>/dev/null | head -1)"
     ;;
@@ -41,7 +42,7 @@ dbus-update-activation-environment DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP 
 sleep 2
 line "## How late the tray watcher comes on $desktop, $version"
 line
-line "The clock starts when the panel process starts, the moment a session also starts its autostart entries, and stops when $name has an owner on the session bus."
+line "The clock starts when the panel process starts, with kded on KDE as a Plasma session starts both, the moment a session also starts its autostart entries, and stops when $name has an owner on the session bus."
 line
 for run in 1 2 3; do
   started=$(date +%s%N)
