@@ -406,6 +406,42 @@ jobs:
         if: always()
         run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
 
+  tray-watcher:
+    if: ${{ github.workflow == 'app' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - desktop: xfce
+            packages: xvfb x11-utils dbus-x11 xfwm4 xfce4-panel xfconf
+          - desktop: kde
+            packages: xvfb x11-utils dbus-x11 plasma-desktop plasma-workspace kwin-x11
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Measure
+        timeout-minutes: 30
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ${{ matrix.packages }}
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          dbus-run-session -- bash .github/app/watcher-time.sh ${{ matrix.desktop }} watcher
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tray-watcher-${{ matrix.desktop }}
+          path: watcher
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat watcher/report.md >> "$GITHUB_STEP_SUMMARY" || true
+
   rpm-fedora:
     needs: bundle-linux
     if: ${{ github.workflow == 'app' }}
