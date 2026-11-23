@@ -165,20 +165,20 @@ mod running {
     enum Source {
         Kept(Arc<Still>),
         Loading(std::thread::JoinHandle<Fetched>),
-        Here(Stills),
+        Here(Stills, fn(&Path) -> Result<RgbImage>),
         Missing,
     }
 
-    fn fetch(stills: &Stills) -> Fetched {
+    fn fetch(stills: &Stills, decode: fn(&Path) -> Result<RgbImage>) -> Fetched {
         let Some(still) = stills.still.as_deref() else { return Err("open needs the still the system shows now".into()) };
         if let Some(raw) = stills.raw.as_deref().and_then(|raw| crate::live::still::read(raw).ok()) {
             return Ok((Image::Rgba(raw), "raw"));
         }
-        scooch_core::open(still).map(|image| (Image::Rgb(image), "decoded")).map_err(|error| format!("the still {} could not be read {error}", still.display()))
+        decode(still).map(|image| (Image::Rgb(image), "decoded")).map_err(|error| format!("the still {} could not be read {error:#}", still.display()))
     }
 
     impl Source {
-        fn start(stills: &Stills, kept: Option<Arc<Still>>) -> Source {
+        fn start(stills: &Stills, kept: Option<Arc<Still>>, decode: fn(&Path) -> Result<RgbImage>) -> Source {
             if let Some(still) = kept {
                 return Source::Kept(still);
             }
@@ -186,9 +186,9 @@ mod running {
                 return Source::Missing;
             }
             let wanted = stills.clone();
-            match std::thread::Builder::new().name("scooch-live-still".into()).spawn(move || fetch(&wanted)) {
+            match std::thread::Builder::new().name("scooch-live-still".into()).spawn(move || fetch(&wanted, decode)) {
                 Ok(handle) => Source::Loading(handle),
-                Err(_) => Source::Here(stills.clone()),
+                Err(_) => Source::Here(stills.clone(), decode),
             }
         }
 
@@ -197,7 +197,7 @@ mod running {
                 Source::Kept(still) => return Ok((still, "kept")),
                 Source::Missing => return Err("open needs the still the system shows now".into()),
                 Source::Loading(handle) => handle.join().unwrap_or_else(|_| Err("the still could not be read".into())),
-                Source::Here(stills) => fetch(&stills),
+                Source::Here(stills, decode) => fetch(&stills, decode),
             };
             let (image, from) = fetched?;
             let still = match image {
@@ -1032,7 +1032,7 @@ mod running {
                 }
                 return;
             };
-            let source = Source::start(&stills, self.kept_still(&stills));
+            let source = Source::start(&stills, self.kept_still(&stills), P::decode);
             let start = Start { id, gpu, surface: Surface(self.platform.target(&layer)), source, stills, size: self.platform.pixels(&layer), period: self.platform.period(&layer), commit: self.platform.committer() };
             let (jobs, receiver) = mpsc::channel();
             let (events, waker) = (self.events.clone(), self.waker.clone());
