@@ -446,15 +446,39 @@ fn laps() -> String {
     LAPS.with(|laps| laps.borrow_mut().drain(..).map(|(name, millis)| format!("{name} {millis}")).collect::<Vec<_>>().join(", "))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const LOG_MOST: u64 = 1 << 20;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const LOG_KEPT: u64 = 1 << 18;
 
 static LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+#[cfg(not(windows))]
 pub fn log_to(path: PathBuf) {
     let _ = LOG.set(path);
+}
+
+#[cfg(windows)]
+static OWN_LOG: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+pub fn log_to(path: PathBuf) {
+    use std::io::{Seek, SeekFrom};
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_DISK, FILE_TYPE_PIPE};
+    use windows::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_ERROR_HANDLE};
+    let _ = LOG.set(path.clone());
+    let kept = unsafe { GetStdHandle(STD_ERROR_HANDLE) }.ok().filter(|handle| !handle.is_invalid() && !handle.0.is_null()).is_some_and(|handle| matches!(unsafe { GetFileType(handle) }, FILE_TYPE_DISK | FILE_TYPE_PIPE));
+    if kept || OWN_LOG.get().is_some() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
+    let Ok(mut file) = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&path) else { return };
+    let _ = file.seek(SeekFrom::End(0));
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, HANDLE(file.as_raw_handle())) }.is_ok() {
+        let _ = OWN_LOG.set(file);
+    }
 }
 
 #[cfg(unix)]
@@ -465,12 +489,18 @@ pub fn trim_log() {
     trim(path, &stderr);
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+pub fn trim_log() {
+    if let (Some(path), Some(file)) = (LOG.get(), OWN_LOG.get()) {
+        trim(path, file);
+    }
+}
+
+#[cfg(any(unix, windows))]
 fn trim(path: &Path, open: &std::fs::File) -> bool {
     use std::io::{Read, Seek, SeekFrom, Write};
-    use std::os::unix::fs::MetadataExt;
     let (Ok(named), Ok(held)) = (std::fs::metadata(path), open.metadata()) else { return false };
-    if named.dev() != held.dev() || named.ino() != held.ino() || named.len() <= LOG_MOST {
+    if !same_file(&named, &held) || named.len() <= LOG_MOST {
         return false;
     }
     let Ok(mut file) = std::fs::File::open(path) else { return false };
@@ -483,7 +513,18 @@ fn trim(path: &Path, open: &std::fs::File) -> bool {
     open.set_len(0).is_ok() && open.seek(SeekFrom::Start(0)).is_ok() && open.write_all(&tail[start..]).is_ok()
 }
 
-#[cfg(not(unix))]
+#[cfg(unix)]
+fn same_file(named: &std::fs::Metadata, held: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    named.dev() == held.dev() && named.ino() == held.ino()
+}
+
+#[cfg(windows)]
+fn same_file(named: &std::fs::Metadata, held: &std::fs::Metadata) -> bool {
+    named.len() == held.len()
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn trim_log() {}
 
 pub fn stamp() -> String {
@@ -4182,7 +4223,7 @@ pub mod tests {
         assert_eq!(kept, wanted);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn the_log_is_cut_to_its_newest_quarter_megabyte_once_it_passes_a_megabyte() {
         let folder = scratch("log-cut");
@@ -4195,8 +4236,14 @@ pub mod tests {
             index += 1;
         }
         std::fs::write(&path, &text).unwrap();
-        let open = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
-        let other = std::fs::OpenOptions::new().append(true).create(true).open(folder.join("other.log")).unwrap();
+        let open_log = |path: &Path| {
+            use std::io::Seek;
+            let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).append(cfg!(unix)).open(path).unwrap();
+            file.seek(std::io::SeekFrom::End(0)).unwrap();
+            file
+        };
+        let open = open_log(&path);
+        let other = open_log(&folder.join("other.log"));
         assert!(!trim(&path, &other), "a file other than the log was cut");
         assert!(trim(&path, &open));
         let kept = std::fs::read_to_string(&path).unwrap();
