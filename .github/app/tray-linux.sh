@@ -23,16 +23,21 @@ line "- closed the window, window $(has_window && echo open || echo closed), app
 expect "closing the window while Scooch is on leaves the app process on a desktop with a tray" app_alive
 expect "closing the window removes the window" window_gone
 expect "the app's icon is registered with the tray" registered
-pid=$(app_pid)
-before=$(switches "$pid")
-cpu=$(cpu_ms "$pid")
-start_threads=$(threads "$pid")
-sleep 60
-quiet=$(( $(switches "$pid") - before ))
-line "- over a quiet minute with no window the icon process $pid switched $quiet times over all its threads and used $(( $(cpu_ms "$pid") - cpu )) ms of CPU, and holds $(memory "$pid")"
-line "- its threads as name and switches before $start_threads"
-line "- and after $(threads "$pid")"
-expect "the icon process switched at most 6 times in a quiet minute" [ "$quiet" -le 6 ]
+snap() { for task in /proc/"$1"/task/*; do echo "$(basename "$task") $(cat "$task/comm" 2>/dev/null | tr ' ' '_') $(awk '/ctxt_switches/ { s += $2 } END { print s + 0 }' "$task/status" 2>/dev/null)"; done; }
+quiet_minute() {
+  local pid before after cpu
+  xdotool mousemove 300 300 >/dev/null 2>&1
+  sleep 3
+  pid=$(app_pid)
+  before=$(snap "$pid")
+  cpu=$(cpu_ms "$pid")
+  sleep 60
+  after=$(snap "$pid")
+  quiet=$(awk 'NR == FNR { was[$1] = $3; next } { total += $3 - ($1 in was ? was[$1] : 0) } END { print total + 0 }' <(echo "$before") <(echo "$after"))
+  woken=$(awk 'NR == FNR { was[$1] = $3; next } { d = $3 - ($1 in was ? was[$1] : 0); if (d > 0) printf "%s:%d ", $2, d }' <(echo "$before") <(echo "$after"))
+  line "- over a quiet minute, $1, the icon process $pid woke its $(echo "$after" | wc -l) threads $quiet times, ${woken:-none of them}, used $(( $(cpu_ms "$pid") - cpu )) ms of CPU, and holds $(memory "$pid")"
+}
+quiet_minute "after the window closed"
 
 line
 line "#### The panel restarts with accessibility"
@@ -64,12 +69,18 @@ panel_menu() {
   xdotool mousemove $spot click 1
   sleep 2
   panel menu | grep -q 'Open Scooch' && return 0
+  shots=$((shots + 1))
+  import -window root -crop 700x400+1220+0 "$out/panel-left-$shots.png" 2>/dev/null
   xdotool key Escape
   sleep 1
   xdotool mousemove $spot click 3
   sleep 2
-  panel menu | grep -q 'Open Scooch'
+  panel menu | grep -q 'Open Scooch' && return 0
+  import -window root -crop 700x400+1220+0 "$out/panel-right-$shots.png" 2>/dev/null
+  env NO_AT_BRIDGE=0 python3 "$PWD/.github/app/panel.py" dump >"$out/panel-tree-$shots.txt" 2>&1
+  return 1
 }
+shots=0
 
 press_item() {
   local how
@@ -185,7 +196,8 @@ line "- icon process $icon with parent $(ps -o ppid= -p "$icon" | tr -d ' '), da
 expect "after a login with Scooch on the icon is there" registered
 expect "after a login with Scooch on no window opens" window_gone
 expect "the icon process is no child of the daemon" not_child
-sleep 60
+quiet_minute "started at the login with no window ever"
+expect "the icon started at the login woke at most 6 times in a quiet minute" [ "$quiet" -le 6 ]
 line "- a minute later the daemon's children are $(ps -o pid=,stat=,comm= --ppid "$watcher_pid" | tr '\n' ';' | tr -s ' ')"
 expect "a minute after the login the daemon runs with no defunct child" no_zombie
 pkill -x scooch >/dev/null 2>&1

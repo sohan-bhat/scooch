@@ -82,6 +82,16 @@ def main():
         print(";".join("%d,%d,%d,%d %s" % (place + (said,)) for place, said in buttons()) or "none")
     elif mode == "menu":
         print("|".join("%s%s" % (name, (" checked" if checked else " unchecked") if checkable else "") for _, name, checkable, checked in menu_items()) or "none")
+    elif mode == "dump":
+        for app in pyatspi.Registry.getDesktop(0):
+            if app is None:
+                continue
+            for node in walk(app):
+                try:
+                    showing = node.getState().contains(pyatspi.STATE_SHOWING)
+                except Exception:
+                    showing = False
+                print("%s %s %s" % (app.name, describe(node), "showing" if showing else ""))
     elif mode == "press":
         for node, name, _, _ in menu_items():
             if name == sys.argv[2]:
