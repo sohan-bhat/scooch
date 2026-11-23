@@ -676,6 +676,9 @@ impl Daemon {
         }
         let Some(entry) = state.screens.get(&screen.id) else { return false };
         let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { return false };
+        if !self.desktop.wallpaper(screen).ok().flatten().is_some_and(|shown| same(&shown, output)) {
+            return false;
+        }
         let Ok(key) = tables_key(&entry.source, &state.options) else { return false };
         let scene = scene::scene(screen, &[]);
         let canvas = Some(self.store.canvas_for(&screen.id, key)).filter(|canvas| canvas.is_file());
@@ -1117,6 +1120,9 @@ impl Daemon {
             if showing || settling {
                 return Ok(Outcome::Unchanged);
             }
+            if let Some(glider) = glider.as_deref_mut() {
+                glider.clear(&screen.id);
+            }
             let shown = entry.shown().to_path_buf();
             self.show(screen, &shown)?;
             return Ok(Outcome::Reapplied);
@@ -1168,7 +1174,7 @@ impl Daemon {
         let showing_output = matches!((current, &output), (Some(current), Some(output)) if same(current, output));
         if scene::is_identity(&placement) && !pads {
             if let Some(glider) = glider.as_deref_mut() {
-                glider.close_early_for(&screen.id);
+                glider.clear(&screen.id);
             }
             drop(analysis);
             drop(image);
@@ -1198,7 +1204,7 @@ impl Daemon {
         let ours = showing_output || (output.is_some() && current.is_none() && self.settling(&screen.id));
         if !wanted && !entry.painted && ours && entry.placement.as_ref() == Some(&placement) && (options.pads <= 0.0 || entry.drawn.as_deref() == Some(drawn.as_str())) {
             if let Some(glider) = glider.as_deref_mut() {
-                glider.close_early_for(&screen.id);
+                glider.clear(&screen.id);
             }
             entry.placed = Some(placed);
             trail.skip("kept", "the placement already fits the icons, so the picture stays");
@@ -1308,7 +1314,7 @@ impl Daemon {
                 _ => trail.skip("no tables", "the picture on screen has no tables"),
             }
             if flight.is_none() {
-                glider.close_early_for(&screen.id);
+                glider.clear(&screen.id);
             }
         }
         let Finished { bundle, encoded, same, picture } = match finished {
@@ -1350,7 +1356,7 @@ impl Daemon {
             Err(error) => {
                 if let Some(glider) = glider.as_deref_mut() {
                     back(glider, &format!("the new picture could not be encoded, {error:#}"));
-                    glider.close_early_for(&screen.id);
+                    glider.clear(&screen.id);
                 }
                 if flight.is_none() {
                     trail.skip("helper failed", &format!("the new picture could not be encoded, {error:#}"));
@@ -4537,6 +4543,55 @@ pub mod tests {
             }
         }
         assert!(events(&fake).iter().any(|event| event.starts_with("glide ")), "{:?}", events(&fake));
+    }
+
+    fn cleared_before_set(fake: &Fake) -> bool {
+        let events = events(fake);
+        let cleared = events.iter().position(|event| event == "unprime main");
+        let set = events.iter().position(|event| event.starts_with("set "));
+        cleared.zip(set).is_some_and(|(cleared, set)| cleared < set)
+    }
+
+    #[test]
+    fn a_move_that_does_not_slide_clears_its_screen_before_the_new_picture_is_set() {
+        let (daemon, fake, script, _) = glide_rig("glide-clear-budget", true);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert!(daemon.launch_at_drag(center(subject())), "the drag start did not prime");
+        script.lock().unwrap().shown_fails = true;
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert!(cleared_before_set(&fake), "{:?}", events(&fake));
+        let (mut daemon, fake, _, _) = glide_rig("glide-clear-lag", true);
+        daemon.grace = Duration::from_secs(5);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert!(daemon.launch_at_drag(center(subject())), "the drag start inside the read lag did not prime");
+        fake.events.lock().unwrap().clear();
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.starts_with("skipped, output not shown")), "{said:?}");
+        assert!(cleared_before_set(&fake), "the window primed inside the read lag stayed over the plain swap {:?}", events(&fake));
+    }
+
+    #[test]
+    fn a_wake_primes_only_over_scoochs_own_picture() {
+        let (daemon, fake, _, _) = glide_rig("glide-wake-system", true);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        *fake.pointer.lock().unwrap() = Some(center(subject()));
+        daemon.wake_early();
+        let output = fake.showing("main");
+        let folder = scratch("glide-wake-system-picked");
+        fake.show("main", &picture(&folder, "picked.png"));
+        daemon.glider.lock().unwrap().forget_wake_for_test();
+        assert!(!daemon.wake_early(), "a wake primed Scooch's old picture over the picture picked in the system's settings");
+        assert!(!daemon.launch_at_drag(center(subject())), "a drag start primed Scooch's old picture over the picture picked in the system's settings");
+        fake.show("main", &output);
+        daemon.glider.lock().unwrap().forget_wake_for_test();
+        assert!(daemon.wake_early(), "a wake over Scooch's own picture did not prime");
     }
 
     #[test]

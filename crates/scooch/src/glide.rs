@@ -12,6 +12,7 @@ const STRIKES: u32 = 2;
 pub const GLIDE_MS: u32 = 450;
 pub const SETTLE_WAIT: Duration = Duration::from_secs(2);
 const SETTLE_AFTER_GLIDE: Duration = Duration::from_millis(1500);
+const UNPRIME_WAIT: Duration = Duration::from_millis(150);
 const FORGOTTEN: Duration = Duration::from_secs(crate::live::helper::IDLE_EXIT.as_secs() - 5);
 pub const CHECK: Duration = Duration::from_millis(50);
 pub const PATIENCE: Duration = Duration::from_millis(150);
@@ -57,6 +58,7 @@ pub trait Link: Send {
     fn settle(&mut self, id: u32, still: &Path, ms: Option<u32>) -> Result<()>;
     fn hear(&mut self, timeout: Duration) -> Result<Heard>;
     fn close(&mut self, id: u32);
+    fn unprime(&mut self, screen: &str, timeout: Duration) -> Result<()>;
     fn quit(&mut self);
     fn alive(&mut self) -> bool;
     fn quiet(&self) -> Duration;
@@ -134,6 +136,7 @@ pub fn program() -> Option<PathBuf> {
 
 struct Real {
     helper: Helper,
+    unprimed: Vec<String>,
     shown: Vec<(u32, Instant)>,
     gone: Vec<u32>,
     failed: Vec<(Option<u32>, String)>,
@@ -149,7 +152,7 @@ struct Real {
 impl Real {
     fn new(helper: Helper) -> Self {
         let marks = Milestones { launched: Some(helper.launched()), ..Milestones::default() };
-        Self { helper, shown: Vec::new(), gone: Vec::new(), failed: Vec::new(), heard: Vec::new(), readies: Vec::new(), warm_id: None, park_id: None, parked: None, marks, drawn: Vec::new() }
+        Self { helper, unprimed: Vec::new(), shown: Vec::new(), gone: Vec::new(), failed: Vec::new(), heard: Vec::new(), readies: Vec::new(), warm_id: None, park_id: None, parked: None, marks, drawn: Vec::new() }
     }
 
     fn pump(&mut self, timeout: Duration) -> Result<bool> {
@@ -165,6 +168,7 @@ impl Real {
             Reply::Shown { id, .. } if self.gone.contains(&id) => {}
             Reply::Shown { id, .. } => self.shown.push((id, arrived)),
             Reply::Closed { .. } => {}
+            Reply::Unprimed { screen } => self.unprimed.push(screen),
             Reply::Device { .. } => self.marks.device = self.marks.device.or(Some(arrived)),
             Reply::Canvas { warm_id, .. } if warm_id.is_some() && warm_id == self.warm_id => self.marks.canvas = Some(arrived),
             Reply::Canvas { .. } => {}
@@ -316,6 +320,12 @@ impl Link for Real {
             self.gone.push(id);
         }
         let _ = self.helper.send(&live::Command::Close { id });
+    }
+
+    fn unprime(&mut self, screen: &str, timeout: Duration) -> Result<()> {
+        self.unprimed.clear();
+        self.helper.ask_unprime(screen)?;
+        self.wait(timeout, |me| me.unprimed.iter().any(|done| done == screen).then_some(Ok(())))
     }
 
     fn quit(&mut self) {
@@ -585,6 +595,7 @@ pub struct Glider {
     flights: Vec<Flight>,
     early: Vec<Early>,
     primes: Vec<(String, PathBuf, Instant, bool)>,
+    touched: std::collections::BTreeSet<String>,
     huge: std::collections::HashMap<String, [u32; 2]>,
     adapter: Option<String>,
     scales: BTreeMap<String, f32>,
@@ -643,6 +654,7 @@ impl Glider {
             flights: Vec::new(),
             early: Vec::new(),
             primes: Vec::new(),
+            touched: std::collections::BTreeSet::new(),
             huge: std::collections::HashMap::new(),
             adapter: None,
             scales: BTreeMap::new(),
@@ -854,6 +866,7 @@ impl Glider {
         if link.prime(prime.screen, &prime.stills).is_err() {
             return false;
         }
+        self.touched.insert(prime.screen.id.clone());
         let now = Instant::now();
         self.primes.retain(|(screen, _, _, _)| *screen != prime.screen.id);
         self.primes.push((prime.screen.id.clone(), still, now, prime.drag));
@@ -914,6 +927,7 @@ impl Glider {
         let id = self.fresh_id();
         let result = (|| -> Result<()> {
             self.send_warm(picture, size, canvas, key)?;
+            self.touched.insert(screen.id.clone());
             self.link.as_mut().ok_or_else(|| anyhow!("the helper is not running"))?.open(id, screen, stills)
         })();
         match result {
@@ -930,6 +944,18 @@ impl Glider {
         for screen in screens {
             self.close_early_for(&screen);
         }
+    }
+
+    pub fn clear(&mut self, screen: &str) {
+        self.close_early_for(screen);
+        if !self.touched.remove(screen) {
+            return;
+        }
+        self.primes.retain(|(primed, _, _, _)| primed != screen);
+        let Some(link) = self.link.as_mut() else { return };
+        let started = Instant::now();
+        let done = link.unprime(screen, UNPRIME_WAIT);
+        note(&mut self.said, format!("cleared {screen} in {} ms{}", started.elapsed().as_millis(), done.err().map(|error| format!(", {error:#}")).unwrap_or_default()));
     }
 
     pub fn close_early_for(&mut self, screen: &str) {
@@ -1021,6 +1047,7 @@ impl Glider {
         let link = self.link.as_mut().ok_or_else(|| anyhow!("the helper is not running"))?;
         if trail.opened.is_none() {
             link.open(id, plan.screen, &plan.stills)?;
+            self.touched.insert(plan.screen.id.clone());
             trail.opened = Some(Instant::now());
         }
         link.ready(Self::left(deadline)).map_err(|error| if format!("{error:#}").contains("did not answer within") { anyhow!("the picture was not loaded within {} ms of the plain swap being ready, so this move swaps plainly", deadline.saturating_duration_since(started).as_millis()) } else { error })?;
@@ -1065,6 +1092,7 @@ impl Glider {
         let result = (|| -> Result<Instant> {
             let link = self.link.as_mut().ok_or_else(|| anyhow!("the helper is not running"))?;
             link.open(id, plan.screen, &plan.stills)?;
+            self.touched.insert(plan.screen.id.clone());
             trail.opened = Some(Instant::now());
             link.shown(id, Self::left(deadline)).map_err(|error| if format!("{error:#}").contains("did not answer within") { anyhow!("the layer was not shown within {} ms of the plain swap being ready, so the new picture swaps plainly", deadline.saturating_duration_since(started).as_millis()) } else { error })
         })();
@@ -1752,6 +1780,12 @@ pub mod tests {
             }
             std::thread::sleep(timeout.min(Duration::from_millis(5)));
             Ok(Heard::Nothing)
+        }
+
+        fn unprime(&mut self, screen: &str, _timeout: Duration) -> Result<()> {
+            self.living()?;
+            self.say(format!("unprime {screen}"));
+            Ok(())
         }
 
         fn close(&mut self, id: u32) {
