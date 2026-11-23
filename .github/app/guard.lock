@@ -15,7 +15,7 @@ file crates/scooch-app/macos/Entitlements.plist 4fde578ae840738f21fc0ebd52f41703
 file crates/scooch-app/macos/Helper.plist 094baadbdf793c18991144633ece6f4e203acec43c9ab1c831390c2150f2128c
 file crates/scooch-app/ui/package-lock.json 8568b1394af4f1152c995d6f233182c364c8313ac9ce1903a498407b86f5b887
 file crates/scooch-app/windows/hooks.nsh 1e776c26a0ac87a6bc9d454efc33a5bb18102712d0f45d67cbc25931b4bd49e4
-file crates/scooch-app/windows/hooks.ps1 abd7ed83b2d20dbdddd22997d8296732b60c3c2de1a63adc31a97386a3580cf1
+file crates/scooch-app/windows/hooks.ps1 bdebe93cb64d430f2d82b6891a30bee888f2545eb38a6c08e537c406b91a5a5b
 file crates/scooch-app/windows/sign.ps1 016ece1445f1833127d2891f2c9a1ad22d1979f7a337a7e3b912c879f5ae41f7
 action actions/checkout 11d5960a326750d5838078e36cf38b85af677262 v4.4.0
 action actions/download-artifact d3f86a106a0bac45b974a628896c90dbdf5c8093 v4.3.0
