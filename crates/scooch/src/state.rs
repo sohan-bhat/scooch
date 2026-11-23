@@ -39,29 +39,8 @@ pub struct State {
     pub stuck: Vec<PathBuf>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub scales: BTreeMap<String, f32>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub starts: BTreeMap<String, Start>,
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
     pub origin: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Start {
-    pub ready: u32,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub colds: Vec<u32>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub canvases: Vec<u32>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub windows: Vec<u32>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub draws: Vec<u32>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub reveals: Vec<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub missed: Option<u32>,
-    pub at: u64,
 }
 
 pub fn fresh_options() -> Options {
@@ -99,7 +78,7 @@ impl Tally {
 
 impl Default for State {
     fn default() -> Self {
-        Self { version: VERSION, on: false, options: Options::default(), glide: true, predict: true, screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new(), scales: BTreeMap::new(), starts: BTreeMap::new(), origin: None }
+        Self { version: VERSION, on: false, options: Options::default(), glide: true, predict: true, screens: BTreeMap::new(), problem: None, daemon: None, restoring: false, picture: None, tally: Tally::default(), kept: Vec::new(), stuck: Vec::new(), scales: BTreeMap::new(), origin: None }
     }
 }
 
@@ -264,9 +243,18 @@ impl Store {
         self.tables().join(format!("{}.{key:016x}.canvas", file_safe(screen)))
     }
 
+    pub fn still_for(&self, output: &Path) -> PathBuf {
+        let name = output.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        self.tables().join(format!("{name}.still"))
+    }
+
     pub fn tables_for(&self, output: &Path, key: u64) -> PathBuf {
         let name = output.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         self.tables().join(format!("{name}.{key:016x}.tables"))
+    }
+
+    pub fn log_file(&self) -> PathBuf {
+        self.root.join("watch.log")
     }
 
     pub fn aside_file(&self) -> PathBuf {
@@ -425,6 +413,10 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 pub fn write_parts(path: &Path, parts: &[&[u8]]) -> Result<()> {
     write_with(path, parts, true)
+}
+
+pub fn write_parts_unsynced(path: &Path, parts: &[&[u8]]) -> Result<()> {
+    write_with(path, parts, false)
 }
 
 pub fn write_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
