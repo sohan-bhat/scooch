@@ -1607,9 +1607,12 @@ mod running {
             }
 
             fn decode(path: &Path) -> Result<RgbImage> {
+                DECODED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(path.to_path_buf());
                 Ok(scooch_core::open(path)?)
             }
         }
+
+        static DECODED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
         struct Made {
             picture: PathBuf,
@@ -1990,6 +1993,14 @@ mod running {
             helper.event(Event::Command(Command::Open { id: 2, screen: screen().0, rect: screen().1, scale: 1.0, stills: Stills { raw: None, ..stills } }));
             let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 2, .. })));
             assert!(replies.iter().any(|reply| matches!(reply, Reply::Drawn { id: 2, still: Some(still), .. } if still == "kept")), "the still drawn for the first open was not kept {replies:?}");
+            helper.event(Event::Command(Command::Close { id: 2 }));
+            let _ = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Closed { id: 2 })));
+            let other = folder.join("other.png");
+            std::fs::write(&other, scooch_core::encode_png(&RgbImage::from_fn(64, 48, |x, _| [x as u8, 30, 200].into())).unwrap()).unwrap();
+            helper.event(Event::Command(Command::Open { id: 3, screen: screen().0, rect: screen().1, scale: 1.0, stills: Stills { still: Some(other.clone()), raw: None, tables: None } }));
+            let replies = pump(&mut helper, &inbox, &out, |replies| replies.iter().any(|reply| matches!(reply, Reply::Shown { id: 3, .. })));
+            assert!(replies.iter().any(|reply| matches!(reply, Reply::Drawn { id: 3, still: Some(still), .. } if still == "decoded")), "{replies:?}");
+            assert!(DECODED.lock().unwrap().contains(&other), "a still with no raw copy was not decoded the way the system decodes it");
             let _ = std::fs::remove_dir_all(&folder);
         }
 
