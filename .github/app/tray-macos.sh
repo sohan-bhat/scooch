@@ -5,7 +5,8 @@ icon_count() { pgrep -f "/Contents/MacOS/scooch-app" | wc -l | tr -d ' '; }
 app_alive() { [ -n "$(icon_pid)" ]; }
 app_gone() { [ -z "$(icon_pid)" ]; }
 window_gone() { [ -z "$(window_id)" ]; }
-in_dock() { limited 15 osascript -e 'tell application "System Events" to tell process "Dock" to get name of every UI element of list 1' 2>/dev/null | tr ',' '\n' | sed 's/^ *//' | grep -qx Scooch; }
+dock_item() { limited 15 osascript -e 'tell application "System Events" to tell process "Dock"' -e 'set told to "absent"' -e 'repeat with item_ in (every UI element of list 1)' -e 'if name of item_ is "Scooch" then set told to "running " & (value of attribute "AXIsApplicationRunning" of item_ as text)' -e 'end repeat' -e 'return told' -e 'end tell' 2>/dev/null; }
+in_dock() { [ "$(dock_item)" = "running true" ]; }
 not_in_dock() { ! in_dock; }
 kind() { lsappinfo info -only ApplicationType -app me.sohanbhat.scooch.window 2>/dev/null | sed 's/.*=//' | tr -d '"'; }
 
@@ -81,6 +82,10 @@ mouse_at() {
 
 menu_open() { [ "$(status open)" = true ]; }
 
+mouse_move() {
+  limited 15 osascript -l JavaScript -e "ObjC.import('CoreGraphics'); \$.CGEventPost(\$.kCGHIDEventTap, \$.CGEventCreateMouseEvent(null, \$.kCGEventMouseMoved, \$.CGPointMake($1, $2), \$.kCGMouseButtonLeft)); 'moved';" >/dev/null 2>&1
+}
+
 open_menu() {
   local where x y w h
   status ax >/dev/null
@@ -129,6 +134,8 @@ PY
 
 quiet_minute() {
   local pid before after
+  mouse_move 300 300
+  sleep 3
   pid=$(icon_pid)
   before=$(rusage "$pid")
   sleep 60
@@ -139,23 +146,22 @@ quiet_minute() {
   quiet_int=$((int1 - int0))
   quiet_read=no
   if [ -n "$before" ] && [ -n "$after" ]; then quiet_read=yes; else line "- the usage of the icon process $pid could not be read"; fi
-  line "- over a quiet minute with no window the icon process $pid woke $quiet_idle times from idle and $quiet_int times by interrupt, used $(awk -v a="$cpu0" -v b="$cpu1" 'BEGIN { printf "%.1f", b - a }') ms of CPU, and holds a footprint of $(awk -v f="$foot1" 'BEGIN { printf "%.1f", f / 1048576 }') MB with $(awk -v r="$res1" 'BEGIN { printf "%.1f", r / 1048576 }') MB resident"
+  line "- over a quiet minute, $1, the icon process $pid woke $quiet_idle times from idle and $quiet_int times by interrupt, used $(awk -v a="$cpu0" -v b="$cpu1" 'BEGIN { printf "%.1f", b - a }') ms of CPU, and holds a footprint of $(awk -v f="$foot1" 'BEGIN { printf "%.1f", f / 1048576 }') MB with $(awk -v r="$res1" 'BEGIN { printf "%.1f", r / 1048576 }') MB resident"
 }
 
 line "- before closing, window $(has_window && echo open || echo closed), app processes $(icon_count), the app is $(kind)"
 expect "while the window is open Scooch shows in the Dock" in_dock
 close_window
 sleep 3
-line "- closed the window, window $(has_window && echo open || echo closed), app processes $(icon_count), the app is $(kind), the icon $(status where)"
+line "- closed the window, window $(has_window && echo open || echo closed), app processes $(icon_count), the app is $(kind), the Dock item $(dock_item), the icon $(status where)"
 expect "closing the window while Scooch is on leaves the app process" app_alive
 expect "closing the window removes the window" window_gone
 expect "the icon sits in the menu bar after the window closed" grep -q '^at ' <<<"$(status where)"
 expect "with only the menu bar icon Scooch is not in the Dock" not_in_dock
 expect "with only the menu bar icon the app runs as a UI element" [ "$(kind)" = UIElement ]
 limited 20 screencapture -x -R 0,0,3000,40 "$out/menu-bar.png" && line "- the menu bar kept as menu-bar.png"
-quiet_minute
+quiet_minute "after the window closed"
 quiet_enough() { [ "$quiet_read" = yes ] && [ "$quiet_idle" -le 6 ]; }
-expect "the icon process woke at most 6 times from idle in a quiet minute" quiet_enough
 
 line
 line "#### Open Scooch from the menu"
@@ -259,6 +265,8 @@ line "- after the login, window $(has_window && echo open || echo closed), the i
 expect "after a login with Scooch on the icon is there" grep -q '^at ' <<<"$(status where)"
 expect "after a login with Scooch on no window opens" window_gone
 expect "after a login the app is not in the Dock" not_in_dock
+quiet_minute "started at the login with no window ever"
+expect "the icon started at the login woke at most 6 times from idle in a quiet minute" quiet_enough
 not_child() { [ -n "$icon" ] && [ -n "$watcher" ] && [ "$(ps -o ppid= -p "$icon" | tr -d ' ')" != "$watcher" ]; }
 no_zombie() { [ -n "$watcher" ] && kill -0 "$watcher" 2>/dev/null && ! ps -axo ppid=,stat= | awk -v d="$watcher" '$1 == d && $2 ~ /Z/' | grep -q .; }
 expect "the icon process is no child of the daemon" not_child
