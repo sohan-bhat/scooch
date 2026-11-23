@@ -5355,6 +5355,16 @@ pub mod tests {
     }
 
     #[test]
+    fn a_glide_the_helper_could_not_start_is_a_skip_and_not_a_slide() {
+        let (daemon, fake, script, _) = glide_rig("glide-could-not-start", true);
+        script.lock().unwrap().glide_fails = true;
+        assert_eq!(first_and_moved(&daemon, &fake), (Outcome::Rendered, Outcome::Rendered));
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.starts_with("skipped, helper failed, the helper failed before the first moving frame")), "{said:?}");
+        assert!(!said.iter().any(|line| line.starts_with("slid")), "{said:?}");
+    }
+
+    #[test]
     fn a_settle_given_up_writes_its_own_words_and_not_the_settled_words() {
         let (daemon, fake, script, _) = glide_rig("glide-settle-given-up", true);
         script.lock().unwrap().settle_never = true;

@@ -1230,7 +1230,12 @@ impl Glider {
                 Ok(Heard::Failed(Some(id), why)) if self.flights.iter().any(|flight| flight.id == id) => {
                     if let Some(flight) = self.flights.iter_mut().find(|flight| flight.id == id) {
                         flight.settled = true;
-                        flight.trail.also(&format!("then the helper failed, {why}"));
+                        if flight.trail.first.is_none() {
+                            flight.trail.verdict = None;
+                            flight.trail.skip("helper failed", &format!("the helper failed before the first moving frame, {why}"));
+                        } else {
+                            flight.trail.also(&format!("then the helper failed, {why}"));
+                        }
                     }
                     keep(&mut self.said, format!("skipped, helper failed, {why}"));
                 }
@@ -1496,6 +1501,7 @@ pub mod tests {
         pub settle_after: Duration,
         pub glided_after: Duration,
         pub quiet: Duration,
+        pub glide_fails: bool,
         pub slow_hello: Duration,
         pub shown_after: Duration,
         pub ready_after: Duration,
@@ -1677,6 +1683,10 @@ pub mod tests {
             if script.settle_never || script.held.as_ref().is_some_and(|held| held.load(std::sync::atomic::Ordering::SeqCst)) {
                 std::thread::sleep(timeout.min(Duration::from_millis(5)));
                 return Ok(Heard::Nothing);
+            }
+            if script.glide_fails && !self.glides.is_empty() {
+                let (id, _) = self.glides.remove(0);
+                return Ok(Heard::Failed(Some(id), "glide needs a warm with a picture first".into()));
             }
             if let (Some((frames, slow)), Some(index)) = (script.glided, self.glides.iter().position(|(_, due)| *due <= Instant::now())) {
                 let (id, _) = self.glides.remove(index);
