@@ -16,7 +16,8 @@ const BUSY: f64 = 0.35;
 const CROPPED: f64 = 1.5;
 const ZOOMED: f64 = 0.6;
 const OFF_CENTER: f64 = 0.15;
-const MIRRORED: f64 = 0.25;
+pub const FLIP_FLOOR: f64 = 0.09;
+pub const FLIP_SHARE: f64 = 0.05;
 const BORDER: f64 = 2.0;
 const DISTORTION: f64 = 1.5;
 const PEAK_RANK: f64 = 0.97;
@@ -135,7 +136,7 @@ impl Frame {
     }
 
     fn settled(&self, center: [f64; 2]) -> f64 {
-        ZOOMED * (self.z - 1.0).max(0.0) + OFF_CENTER * self.off(center) + if self.mirrored { MIRRORED } else { 0.0 }
+        ZOOMED * (self.z - 1.0).max(0.0) + OFF_CENTER * self.off(center)
     }
 }
 
@@ -395,9 +396,6 @@ fn better(a: &Candidate, b: &Candidate) -> bool {
     if (a.off - b.off).abs() > TIE {
         return a.off < b.off;
     }
-    if a.frame.mirrored != b.frame.mirrored {
-        return !a.frame.mirrored;
-    }
     (a.xi, a.yi) < (b.xi, b.yi)
 }
 
@@ -496,9 +494,9 @@ fn stage_one(field: &Field, boxes: &Boxes, settings: &Settings) -> Option<Vec<Fr
                 .collect()
         })
         .collect();
-    let mut best: Vec<Option<Candidate>> = vec![None; zooms];
+    let mut best: Vec<Option<Candidate>> = vec![None; 2 * zooms];
     for candidate in scored.iter().flatten() {
-        let slot = &mut best[candidate.zi];
+        let slot = &mut best[2 * candidate.zi + candidate.frame.mirrored as usize];
         if slot.as_ref().is_none_or(|b| better(candidate, b)) {
             *slot = Some(*candidate);
         }
@@ -730,12 +728,74 @@ fn usable<'a>(field: &'a Field, boxes: &'a Boxes<'a>, fallback: &Placement, most
     }
 }
 
-fn fresh(field: &Field, boxes: &Boxes, settings: &Settings, fallback: &Placement, most_lost: Option<f64>) -> Placement {
-    let Some(frames) = stage_one(field, boxes, settings) else { return fallback.clone() };
+fn sides(field: &Field, boxes: &Boxes, settings: &Settings, fallback: &Placement, most_lost: Option<f64>) -> [Option<Choice>; 2] {
+    let Some(frames) = stage_one(field, boxes, settings) else { return [None, None] };
     let mut all: Vec<Choice> = frames.par_iter().flat_map(|frame| choices(field, boxes, frame, settings)).collect();
     all.sort_by(ranks_before);
     let ok = usable(field, boxes, fallback, most_lost);
-    all.into_iter().find(|c| ok(c)).map_or_else(|| fallback.clone(), |c| c.placement)
+    let mut best: [Option<Choice>; 2] = [None, None];
+    for choice in all {
+        let side = choice.placement.mirrored as usize;
+        if best[side].is_none() && ok(&choice) {
+            best[side] = Some(choice);
+        }
+    }
+    best
+}
+
+fn clears(other: &Choice, stay: &Choice) -> bool {
+    other.cost < stay.cost - (FLIP_FLOOR + FLIP_SHARE * stay.cost)
+}
+
+fn pick(field: &Field, boxes: &Boxes, fallback: &Placement, [plain, flipped]: [Option<Choice>; 2], current: bool) -> Placement {
+    let Some(flipped) = flipped else { return plain.map_or_else(|| fallback.clone(), |c| c.placement) };
+    let plain = plain.unwrap_or_else(|| Choice { cost: score(field, boxes, fallback, None), placement: fallback.clone() });
+    let flip = if current { !clears(&plain, &flipped) } else { clears(&flipped, &plain) };
+    if flip {
+        flipped.placement
+    } else {
+        plain.placement
+    }
+}
+
+struct Ground {
+    field: Field,
+    fallback: Placement,
+    bare: Vec<Footprint>,
+    cover: Vec<Footprint>,
+    settings: Settings,
+}
+
+impl Ground {
+    fn new(analysis: &Analysis, scene: &Scene, options: &Options) -> Result<Self, Placement> {
+        let (sw, sh) = source_size(analysis);
+        let Some(field) = Field::new(analysis, scene) else { return Err(table::fill(sw, sh, scene.width, scene.height)) };
+        let fallback = field.rest((sw, sh), scene);
+        let bare = footprints(scene);
+        if bare.is_empty() {
+            return Err(fallback);
+        }
+        let cover = if scenery::active(scene, options) { cover_boxes(scene) } else { Vec::new() };
+        Ok(Self { field, fallback, bare, cover, settings: settings(options) })
+    }
+
+    fn boxes(&self) -> Boxes<'_> {
+        Boxes { icons: &self.bare, cover: &self.cover }
+    }
+
+    fn previous<'a>(&self, previous: Option<&'a Placement>) -> Option<&'a Placement> {
+        previous.filter(|p| fits(&self.field, p, &self.settings))
+    }
+
+    fn sides(&self, current: bool) -> [Option<Choice>; 2] {
+        if self.cover.is_empty() {
+            return sides(&self.field, &self.boxes(), &self.settings, &self.fallback, None);
+        }
+        let bare = Boxes::bare(&self.bare);
+        let plain = pick(&self.field, &bare, &self.fallback, sides(&self.field, &bare, &self.settings, &self.fallback, None), current);
+        let lost = Frame::of(&plain).map(|f| self.field.crop_loss(&f));
+        sides(&self.field, &self.boxes(), &self.settings, &self.fallback, lost)
+    }
 }
 
 fn cover_boxes(scene: &Scene) -> Vec<Footprint> {
@@ -799,32 +859,36 @@ pub fn home(analysis: &Analysis, scene: &Scene) -> Placement {
 }
 
 pub fn solve(analysis: &Analysis, scene: &Scene, options: &Options, previous: Option<&Placement>) -> Placement {
-    let (sw, sh) = source_size(analysis);
-    let Some(field) = Field::new(analysis, scene) else { return table::fill(sw, sh, scene.width, scene.height) };
-    let fallback = field.rest((sw, sh), scene);
-    let bare = footprints(scene);
-    if bare.is_empty() {
-        return fallback;
-    }
-    let cover = if scenery::active(scene, options) { cover_boxes(scene) } else { Vec::new() };
-    let boxes = Boxes { icons: &bare, cover: &cover };
-    let settings = settings(options);
-    let new = if cover.is_empty() {
-        fresh(&field, &boxes, &settings, &fallback, None)
-    } else {
-        let plain = fresh(&field, &Boxes::bare(&bare), &settings, &fallback, None);
-        let lost = Frame::of(&plain).map(|f| field.crop_loss(&f));
-        fresh(&field, &boxes, &settings, &fallback, lost)
+    let ground = match Ground::new(analysis, scene, options) {
+        Ok(ground) => ground,
+        Err(early) => return early,
     };
-    let Some(old) = previous.filter(|p| fits(&field, p, &settings)) else { return new };
+    let boxes = ground.boxes();
+    let old = ground.previous(previous);
+    let current = old.is_some_and(|p| p.mirrored);
+    let new = pick(&ground.field, &boxes, &ground.fallback, ground.sides(current), current);
+    let Some(old) = old else { return new };
     if *old == new {
         return new;
     }
-    let (cost_new, cost_old) = (score(&field, &boxes, &new, None), score(&field, &boxes, old, None));
+    let (cost_new, cost_old) = (score(&ground.field, &boxes, &new, None), score(&ground.field, &boxes, old, None));
     if cost_new < cost_old - (KEEP_FLOOR + KEEP_SHARE * cost_old) {
         new
     } else {
         old.clone()
+    }
+}
+
+pub fn flip_sides(analysis: &Analysis, scene: &Scene, options: &Options, previous: Option<&Placement>) -> [Option<(Placement, f64)>; 2] {
+    let Ok(ground) = Ground::new(analysis, scene, options) else { return [None, None] };
+    let current = ground.previous(previous).is_some_and(|p| p.mirrored);
+    ground.sides(current).map(|side| side.map(|c| (c.placement, c.cost)))
+}
+
+pub fn placement_cost(analysis: &Analysis, scene: &Scene, options: &Options, placement: &Placement) -> f64 {
+    match Ground::new(analysis, scene, options) {
+        Ok(ground) => score(&ground.field, &ground.boxes(), placement, None),
+        Err(_) => f64::NAN,
     }
 }
 
