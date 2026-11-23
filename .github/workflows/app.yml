@@ -437,6 +437,10 @@ jobs:
           dnf install -y "$rpm" > appprobe/install.log 2>&1
           echo "- dnf install exit $?, pulled $(grep -c '^ ' appprobe/install.log) lines of packages" >> "$report"
           echo "- scooch --version answers $(scooch --version 2>&1)" >> "$report"
+          needs=$(rpm -qpR "$rpm" | grep -i appindicator | tr '\n' ' ')
+          echo "- the rpm requires ${needs:-no app indicator library}, and dnf installed $(rpm -q --whatprovides 'libayatana-appindicator3.so.1()(64bit)' 'libayatana-appindicator3.so.1' 2>/dev/null | grep -v 'no package' | head -1)" >> "$report"
+          loads=$(ls /usr/lib64/libayatana-appindicator3.so.1 /usr/lib/libayatana-appindicator3.so.1 2>/dev/null | head -1)
+          echo "- the library the tray loads is at ${loads:-no place}" >> "$report"
           missing=$(ldd /usr/bin/scooch-app | grep 'not found' || true)
           echo "- ldd on scooch-app misses ${missing:-nothing}" >> "$report"
           dnf remove -y "$name" > appprobe/remove.log 2>&1
@@ -444,7 +448,7 @@ jobs:
           echo "- dnf remove exit $removed, files left $(rpm -q "$name" >/dev/null 2>&1 && echo yes || echo no)" >> "$report"
           cat "$report"
           scooch_left=$(command -v scooch || true)
-          if [ -n "$missing" ] || [ "$removed" != 0 ] || [ -n "$scooch_left" ]; then exit 1; fi
+          if [ -n "$missing" ] || [ "$removed" != 0 ] || [ -n "$scooch_left" ] || [ -z "$needs" ] || [ -z "$loads" ]; then exit 1; fi
       - name: Upload
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

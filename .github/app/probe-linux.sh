@@ -117,6 +117,9 @@ login() { grep '^Exec=' "$autostart" 2>/dev/null; }
 line "## App probe on $(. /etc/os-release && echo "$PRETTY_NAME") with ${XDG_CURRENT_DESKTOP:-no desktop}"
 line
 line "- installed packages $(dpkg -l | awk '$2 == "scooch" { print $2, $3 }')"
+depends=$(dpkg-deb -f "$(ls "$PWD"/built/*.deb | head -1)" Depends)
+line "- the deb depends on $depends, the library the tray loads is installed $(dpkg -l libayatana-appindicator3-1 2>/dev/null | awk '/^ii/ { print $3 }')"
+expect "the deb names the app indicator library as a dependency" grep -q 'libayatana-appindicator3-1' <<<"$depends"
 line "- programs $(ls -la /usr/bin/scooch /usr/bin/scooch-app 2>&1 | awk '{ print $NF, $5 }' | tr '\n' ' ')"
 set_wallpaper "$photo"
 line "- wallpaper before the app $(wallpaper)"
