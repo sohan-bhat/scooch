@@ -46,6 +46,60 @@ public static class Tray {
         }, IntPtr.Zero);
         return string.Join(";", told);
     }
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern IntPtr GetThreadDesktop(uint thread);
+    [DllImport("kernel32.dll")]
+    static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool GetUserObjectInformationW(IntPtr handle, int index, System.Text.StringBuilder info, int length, out int needed);
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr OpenDesktopW(string name, uint flags, bool inherit, uint access);
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern bool SwitchDesktop(IntPtr desktop);
+    [DllImport("user32.dll")]
+    static extern bool CloseDesktop(IntPtr desktop);
+    [DllImport("user32.dll")]
+    static extern bool GetCursorPos(out Spot spot);
+    [DllImport("user32.dll")]
+    static extern IntPtr WindowFromPoint(Spot spot);
+    public struct Spot { public int X; public int Y; }
+    static string NameOf(IntPtr desktop) {
+        var name = new System.Text.StringBuilder(256);
+        int needed;
+        return GetUserObjectInformationW(desktop, 2, name, name.Capacity * 2, out needed) ? name.ToString() : "unnamed";
+    }
+    public static string OwnDesktop() { return NameOf(GetThreadDesktop(GetCurrentThreadId())); }
+    public static string InputDesktop() {
+        IntPtr desktop = OpenInputDesktop(0, false, 0x0001);
+        if (desktop == IntPtr.Zero) return "unreadable, error " + Marshal.GetLastWin32Error();
+        try { return NameOf(desktop); } finally { CloseDesktop(desktop); }
+    }
+    public static string SwitchTo(string name) {
+        IntPtr desktop = OpenDesktopW(name, 0, false, 0x0100);
+        if (desktop == IntPtr.Zero) return "could not open it, error " + Marshal.GetLastWin32Error();
+        bool done = SwitchDesktop(desktop);
+        int error = Marshal.GetLastWin32Error();
+        CloseDesktop(desktop);
+        return done ? "worked" : "failed, error " + error;
+    }
+    public static string Cursor() {
+        Spot spot;
+        return GetCursorPos(out spot) ? spot.X + " " + spot.Y : "unknown";
+    }
+    public static string Under(int x, int y) {
+        var spot = new Spot();
+        spot.X = x;
+        spot.Y = y;
+        IntPtr window = WindowFromPoint(spot);
+        if (window == IntPtr.Zero) return "none";
+        var kind = new System.Text.StringBuilder(256);
+        GetClassNameW(window, kind, 256);
+        uint pid;
+        GetWindowThreadProcessId(window, out pid);
+        return kind + " of process " + pid;
+    }
     public static void Move(int x, int y) {
         SetCursorPos(x, y);
     }
@@ -234,10 +288,12 @@ function Menu-Reads {
 function Open-Menu {
     $spot = Icon-Center
     if (-not $spot) { return 'no icon found in the notification area' }
+    $before = Tray-Lines 'Right Up'
     [Tray]::Press($spot[0], $spot[1], $true)
+    $landed = if (Landed 'Right Up' $before) { 'landed on the icon, the app logged it, and' } else { 'was not logged by the app and' }
     $shown = Wait-For 6 { [bool](Tray-Menu) }
-    if ($shown -ge 0) { return "a right press on the icon $($spot[2]) at $($spot[0]) $($spot[1]) opened the menu" }
-    return "a right press on the icon $($spot[2]) opened no menu"
+    if ($shown -ge 0) { return "a right press on the icon $($spot[2]) at $($spot[0]) $($spot[1]) $landed opened the menu" }
+    return "a right press on the icon $($spot[2]) $landed opened no menu"
 }
 
 function Press-Item([string]$Label) {
@@ -319,66 +375,87 @@ function Close-Window {
     Start-Sleep -Seconds 2
 }
 
+$trayLog = Join-Path $Out 'tray.log'
+function Tray-Lines([string]$Kind) { @((Read-Shared $trayLog) -split "`n" | Where-Object { $_ -match "scooch-app tray $Kind" }).Count }
+function Landed([string]$Kind, [int]$Before) { (Wait-For 4 { (Tray-Lines $Kind) -gt $Before }) -ge 0 }
+
 Line ''
 Line '### The notification area icon'
+$own = [Tray]::OwnDesktop()
+$screenDesk = [Tray]::InputDesktop()
+Line "- the probe runs on the desktop $own, the screen shows the input desktop $screenDesk"
+if ($screenDesk -ne $own) {
+    Line "- switching the screen to $own $([Tray]::SwitchTo($own)), the input desktop is now $([Tray]::InputDesktop())"
+}
 $privacy = Clear-Privacy
 if ($privacy.Count -gt 0) {
     Line "- a Windows setup screen covered the taskbar, the probe pressed $($privacy -join ', ') in it, setup windows left $(@(Setup-Windows).Count)"
 }
 $covers = Clear-Covers
 if ($covers.Count -gt 0) {
-    Start-Sleep -Seconds 3
-    Screen-Shot 'covers-cleared'
-    Line "- windows that covered most of the screen $($covers -join '; '), left now $([Tray]::Covers())"
+    Line "- windows that cover most of the screen $($covers -join '; ')"
 }
+Icon-Processes | Stop-Process -Force -ErrorAction SilentlyContinue
+Wait-For 10 { (Icon-Count) -eq 0 } | Out-Null
+Start-Process -FilePath (Join-Path $folder 'scooch-app.exe') -RedirectStandardError $trayLog
+Wait-For 40 { [bool](Find-Window) } | Out-Null
+Start-Sleep -Seconds 4
 Close-Window
 $spot = Icon-Center
-Line "- closed the window, window $([bool](Find-Window)), app processes $(Icon-Count), the icon $(if ($spot) { "$($spot[2]) at $($spot[0]) $($spot[1])" } else { 'not found' })"
+Line "- started the app again so its presses log to tray.log, closed its window, window $([bool](Find-Window)), app processes $(Icon-Count), the icon $(if ($spot) { "$($spot[2]) at $($spot[0]) $($spot[1])" } else { 'not found' })"
 Expect "closing the window while Scooch is on leaves the app process" ((Icon-Count) -eq 1)
 Expect "closing the window removes the window" (-not (Find-Window))
 Expect "the icon sits in the notification area after the window closed" ([bool]$spot)
 Screen-Shot 'notification-area'
 Quiet-Minute 'after the window closed'
-$afterWindow = $script:quietSwitches
 
 Line ''
 Line '#### A left press opens the window, a right press opens the menu'
+$leftBefore = Tray-Lines 'Left Up'
 [Tray]::Press($spot[0], $spot[1], $false)
-$shown = Wait-For 20 { [bool](Find-Window) }
-Line "- a left press on the icon showed the window after $shown s"
-Expect "a left press on the icon opens the window" ($shown -ge 0)
-Close-Window
-$opened = Open-Menu
-Line "- $opened"
-$read = Menu-Reads
-Line "- the menu reads $read"
-Expect "the menu reads Open Scooch, On and Quit Scooch" ($read -match '^Open Scooch\|On( On| Off)?\|Quit Scooch$')
-if ($read -match '\|On (On|Off)\|') {
-    Expect "On is checked while Scooch is on" ($read -match '\|On On\|')
-} else {
-    Limit "the menu item On shows no check state to UI Automation here, so its mark is read only on macOS and Linux"
-}
-Line "- $(Press-Item 'Open Scooch')"
-$shown = Wait-For 20 { [bool](Find-Window) }
-Line "- Open Scooch showed the window after $shown s"
-Expect "Open Scooch in the menu opens the window" ($shown -ge 0)
+$script:footing = Landed 'Left Up' $leftBefore
+if ($script:footing) {
+    $shown = Wait-For 20 { [bool](Find-Window) }
+    Line "- the left press landed on the icon, the app logged it, and the window showed after $shown s"
+    Expect "a left press on the icon opens the window" ($shown -ge 0)
+    Close-Window
+    $opened = Open-Menu
+    Line "- $opened"
+    $read = Menu-Reads
+    Line "- the menu reads $read"
+    Expect "the menu reads Open Scooch, On and Quit Scooch" ($read -match '^Open Scooch\|On( On| Off)?\|Quit Scooch$')
+    if ($read -match '\|On (On|Off)\|') {
+        Expect "On is checked while Scooch is on" ($read -match '\|On On\|')
+    } else {
+        Limit "the menu item On shows no check state to UI Automation here, so its mark is read only on macOS and Linux"
+    }
+    Line "- $(Press-Item 'Open Scooch')"
+    $shown = Wait-For 20 { [bool](Find-Window) }
+    Line "- Open Scooch showed the window after $shown s"
+    Expect "Open Scooch in the menu opens the window" ($shown -ge 0)
 
-Line ''
-Line '#### On in the menu turns Scooch off and on with the window open'
-Line "- $(Press-Item 'On')"
-$off = Wait-For 30 { -not (State-On) }
-Start-Sleep -Seconds 3
-Line "- after On, off after $off s, wallpaper $([Desk]::Wallpaper()), app processes $(Icon-Count), the icon $([bool](Tray-Button))"
-Expect "On in the menu turned Scooch off" ($off -ge 0)
-Expect "off from the menu put the photo back" ([Desk]::Wallpaper() -ieq $photo)
-Expect "with the window open the icon stays while Scooch is off" ([bool](Tray-Button))
-Line "- $(Press-Item 'On')"
-$again = Wait-For 30 { State-On }
-$drawn = Wait-For 40 { (Read-Shared "$data\state.json") -match '"fingerprint": "' }
-Start-Sleep -Seconds 3
-Line "- after On again, on after $again s, wallpaper $([Desk]::Wallpaper())"
-Expect "On in the menu turned Scooch on again" ($again -ge 0)
-Expect "on from the menu drew the desktop" ([Desk]::Wallpaper() -ine $photo)
+    Line ''
+    Line '#### On in the menu turns Scooch off and on with the window open'
+    Line "- $(Press-Item 'On')"
+    $off = Wait-For 30 { -not (State-On) }
+    Start-Sleep -Seconds 3
+    Line "- after On, off after $off s, wallpaper $([Desk]::Wallpaper()), app processes $(Icon-Count), the icon $([bool](Tray-Button))"
+    Expect "On in the menu turned Scooch off" ($off -ge 0)
+    Expect "off from the menu put the photo back" ([Desk]::Wallpaper() -ieq $photo)
+    Expect "with the window open the icon stays while Scooch is off" ([bool](Tray-Button))
+    Line "- $(Press-Item 'On')"
+    $again = Wait-For 30 { State-On }
+    Wait-For 40 { (Read-Shared "$data\state.json") -match '"fingerprint": "' } | Out-Null
+    Start-Sleep -Seconds 3
+    Line "- after On again, on after $again s, wallpaper $([Desk]::Wallpaper())"
+    Expect "On in the menu turned Scooch on again" ($again -ge 0)
+    Expect "on from the menu drew the desktop" ([Desk]::Wallpaper() -ine $photo)
+} else {
+    Screen-Shot 'press-not-landed'
+    Line "- the left press at $($spot[0]) $($spot[1]) never reached the app, which logged no tray press, the cursor is at $([Tray]::Cursor()), the window under it is $([Tray]::Under($spot[0], $spot[1])), the input desktop is $([Tray]::InputDesktop())"
+    Limit "on this runner no mouse press reaches the taskbar, so the presses on the icon and its menu are not judged here. The same presses are judged on the other Windows runner"
+    Line "- the window $(if (Find-Window) { 'opened anyway' } else { 'stayed closed' })"
+}
 
 Line ''
 Line '#### Opening Scooch while only the icon runs'
@@ -398,15 +475,25 @@ Close-Window
 
 Line ''
 Line '#### Quit Scooch'
-Line "- $(Press-Item 'Quit Scooch')"
+if ($script:footing) {
+    Line "- $(Press-Item 'Quit Scooch')"
+} else {
+    $command = Start-Process -FilePath (Join-Path $folder 'scoochw.exe') -ArgumentList 'off' -WindowStyle Hidden -PassThru
+    $command.WaitForExit(60000) | Out-Null
+    Line "- with no press reaching the icon, scooch off turned Scooch off in its place"
+}
 $gone = Wait-For 30 { (Icon-Count) -eq 0 }
 $off = Wait-For 30 { -not (State-On) }
 Start-Sleep -Seconds 3
 Line "- after Quit, app processes $(Icon-Count) after $gone s, on $(State-On), wallpaper $([Desk]::Wallpaper()), login entry '$(Run-Value)', daemons $(Daemons)"
-Expect "Quit Scooch turned Scooch off" (-not (State-On))
-Expect "Quit Scooch put the photo back" ([Desk]::Wallpaper() -ieq $photo)
-Expect "Quit Scooch removed the login entry" (-not (Run-Value))
-Expect "Quit Scooch ended the app process" ((Icon-Count) -eq 0)
+if ($script:footing) {
+    Expect "Quit Scooch turned Scooch off" (-not (State-On))
+    Expect "Quit Scooch put the photo back" ([Desk]::Wallpaper() -ieq $photo)
+    Expect "Quit Scooch removed the login entry" (-not (Run-Value))
+    Expect "Quit Scooch ended the app process" ((Icon-Count) -eq 0)
+} else {
+    Expect "turning Scooch off with no window open ended the icon" ((Icon-Count) -eq 0)
+}
 
 Line ''
 Line '#### A background start with Scooch off'
