@@ -299,17 +299,19 @@ Runner numbers come from GitHub's hosted virtual machines. Their GPUs are virtua
 |---|---|---|
 | Helper launch to ready and to hello, median of ten | Ready 186 ms, hello 25 ms | Owner's Mac, Intel UHD Graphics 630, one minute load 32, a873bd2 |
 | An early launch quit unused | 72 ms of helper CPU after 70 ms, 100 ms after 300 ms | Owner's Mac, a873bd2 |
-| Ten cold drags, each after 35 s of rest, the helper started at the drag start | 10 of 10 glided, first moving frame median 178 ms after the drop, wallpaper set median 255 ms against 172 ms with the glide off | GitHub's virtual Mac, arm64, a1d617c |
-| Ten cold drags, each after 35 s of rest, the helper started at the drag start | 10 of 10 glided, first moving frame median 278 ms after the drop, wallpaper set median 309 ms against 290 ms with the glide off | GitHub's virtual Mac, Intel, a1d617c |
-| Ten drags with a helper that sends hello 1 s late | All plain at once, drop to set median 18 ms over the glide off drags on arm64 and 34 ms on Intel | macOS arm64 and Intel runners, 8b2666c |
-| Drags where the daemon waited the full 150 ms and then swapped plainly | 0 | Every runner, 8b2666c |
-| A drag whose tables on screen come from another version | Plain at once with no layer, and the next drag glides | macOS arm64 and Intel runners, 8b2666c |
-| A move while a window covers the whole desktop | Glide skipped as hidden, plain at once | macOS and Windows runners, 8b2666c |
-| A quiet minute 35 s after the last glide | 0 ms of CPU and 0 wakeups on macOS, 0 ms of CPU on Windows | Every runner, 8b2666c |
-| Thirty wakes with nothing moved, after the helper left | 1 early launch on each macOS runner and 2 on each Windows runner, each quit 1.5 s after launch, nothing left running | Every runner, 8b2666c |
-| Change outside the dropped icon between the settled layer and one second after close | 0 of 255 | macOS arm64 and Intel runners, 8b2666c |
-| The drag after the helper is killed mid glide | Glides | macOS and Windows runners, 8b2666c |
-| The first drag after the helper left | Plain at once, since no cold start is remembered there | Windows Server 2022 and 2025 runners, 8b2666c |
+| The parked helper's footprint | 7.9 MB parked, 40.6 MB with one 2867 by 1613 canvas, 15.9 MB 32 s after its last command, 32.2 MB in a quiet minute after real glides | GitHub's virtual Mac, arm64, 46d425b |
+| The parked helper's footprint | 5.0 MB parked, 52.1 MB with one canvas, 28.3 MB 32 s after its last command, 28.1 MB in a quiet minute after real glides | GitHub's virtual Mac, Intel, 3aaf15e |
+| The parked helper on the forced software renderer in a quiet minute | 55 to 61 MB working set, 282 to 286 MB private, 0 ms of CPU | Windows Server 2022 and 2025 runners, 5fa4754 |
+| A quiet minute 35 s after the last glide | Daemon and parked helper 0 ms of CPU, 0 idle and 0 interrupt wakeups on macOS, 0 ms of CPU on Windows | Every runner, 46d425b and 5fa4754 |
+| Five quiet minutes with the helper parked | 0 wakes and 0 ticks, then the next drag slides | GitHub's virtual Mac, arm64, 46d425b |
+| The first move after a start, then moves 10 s and 40 s apart | 5 of 5 slid, shown median 34 ms and first moving frame median 69 ms after the drop, wallpaper set median 108 ms | GitHub's virtual Mac, arm64, 46d425b |
+| Ten drags with a helper that sends hello 5 s late | All plain at once as helper cold | macOS arm64 and Intel runners, 46d425b |
+| A drag whose tables on screen come from another version | Plain at once with no layer, and the next drag glides | macOS arm64 runner, 46d425b |
+| A move while a window covers the whole desktop | Glide skipped as hidden, plain at once | macOS and Windows runners, 46d425b and 5fa4754 |
+| Thirty wakes with nothing moved | 1 prime, no command past it, the same parked helper before and after | macOS arm64 runner, 46d425b |
+| Change outside the dropped icon between the settled layer and one second after close | 0 of 255 | macOS arm64 runner, 46d425b |
+| The drag after the helper is killed mid glide | Glides | macOS and Windows runners, 46d425b and 5fa4754 |
+| The drag after a quiet minute with the helper parked | Slides, the picture sent again at the drag start | Windows Server 2022 and 2025 runners, 5fa4754 |
 
 The steps of a glide timed offscreen with no window, on the owner's Mac with an Intel UHD Graphics 630 at 2880 by 1800 and the Sequoia Sunrise picture. `cargo run --release -p scooch --example glidetime [picture] [high]` prints this table again.
 
