@@ -4253,6 +4253,23 @@ pub mod tests {
     }
 
     #[test]
+    fn the_tidy_spares_a_file_being_written_and_clears_one_left_by_a_crash() {
+        let (daemon, fake, _, _) = glide_rig("glide-tidy", true);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let (fresh, stale, stray) = (daemon.store.tables().join(".main-9.jpg.still.1.2.part"), daemon.store.tables().join(".main-8.jpg.still.1.1.part"), daemon.store.tables().join("main-7.jpg.still"));
+        for file in [&fresh, &stale, &stray] {
+            std::fs::write(file, b"part").unwrap();
+        }
+        std::fs::File::options().write(true).open(&stale).unwrap().set_modified(std::time::SystemTime::now() - Duration::from_secs(120)).unwrap();
+        assert_eq!(outcome(&daemon.tick()), Outcome::Unchanged);
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert!(fresh.is_file(), "a file being written was deleted");
+        assert!(!stale.exists() && !stray.exists(), "a file left by a crash or an old output was kept");
+    }
+
+    #[test]
     fn a_torn_tables_file_ends_in_a_plain_swap_and_a_fresh_file() {
         let (daemon, fake, _, _) = glide_rig("torn-tables", true);
         fake.place(vec![subject()]);
@@ -5490,6 +5507,7 @@ pub mod tests {
         assert!(daemon.glider.lock().unwrap().usable());
         glide((10, 7));
         assert!(!daemon.glider.lock().unwrap().usable());
+        assert!(!daemon.glider.lock().unwrap().running(), "a helper that can no longer glide stayed parked");
         assert_eq!(opens(&fake), 4);
         glide((10, 0));
         assert_eq!(opens(&fake), 4);
