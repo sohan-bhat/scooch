@@ -76,10 +76,14 @@ pub fn make<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     let builder = builder.icon_as_template(true).show_menu_on_left_click(true);
     #[cfg(windows)]
-    let builder = builder.show_menu_on_left_click(false).on_tray_icon_event(|tray, event| {
+    let builder = builder.show_menu_on_left_click(false);
+    let builder = builder.on_tray_icon_event(|tray, event| {
         use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
-        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
-            crate::show_window(tray.app_handle());
+        if let TrayIconEvent::Click { button, button_state, .. } = event {
+            eprintln!("scooch-app tray {button:?} {button_state:?}");
+            if cfg!(windows) && button == MouseButton::Left && button_state == MouseButtonState::Up {
+                crate::show_window(tray.app_handle());
+            }
         }
     });
     let icon = builder.build(app)?;
