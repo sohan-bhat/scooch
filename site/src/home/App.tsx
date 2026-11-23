@@ -22,7 +22,7 @@ export function App() {
   const beats = useRef<HTMLElement[]>([]);
   const section = useRef<HTMLElement>(null);
   const canvas = useRef<HTMLDivElement>(null);
-  const action = useRef<HTMLAnchorElement>(null);
+  const action = useRef<HTMLSpanElement>(null);
   const skip = useRef<HTMLAnchorElement>(null);
   const still = useRef<HTMLPictureElement>(null);
   const header = useRef<HTMLElement>(null);

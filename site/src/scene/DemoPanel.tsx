@@ -1,8 +1,8 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { ToggleGroup } from 'radix-ui';
-import { Button } from '@/components/ui/button';
 import content from '@/content.json';
+import { Download } from '@/home/Download';
 import { asset } from '@/lib/base';
 import './demo.css';
 import words from './demo.json';
@@ -129,11 +129,7 @@ export default function DemoPanel() {
             })}
           </ToggleGroup.Root>
           <div className="flex items-center gap-6">
-            <Button asChild size="md">
-              <a href="#install" onClick={() => closeDemo()}>
-                {content.nav.install}
-              </a>
-            </Button>
+            <Download size="md" onPick={() => closeDemo()} />
             <button type="button" className="link-quiet cursor-pointer text-[0.9375rem] font-medium" onClick={() => closeDemo()}>
               {words.back}
             </button>

@@ -1,13 +1,13 @@
 import { GithubLogo, SpeakerHigh, SpeakerSlash } from '@phosphor-icons/react/dist/ssr';
 import { Toggle } from 'radix-ui';
 import { useEffect, useState } from 'react';
-import { Button } from '@/components/ui/button';
 import content from '@/content.json';
 import { onSound, setSound, sound } from '@/lib/sound';
+import { Download } from './Download';
 
 type Refs = {
   header: React.Ref<HTMLElement>;
-  action: React.Ref<HTMLAnchorElement>;
+  action: React.Ref<HTMLSpanElement>;
   skip: React.Ref<HTMLAnchorElement>;
 };
 
@@ -44,11 +44,9 @@ export function Nav({ header, action, skip }: Refs) {
           <GithubLogo weight="bold" aria-hidden className="size-[1.15em]" />
           <span className="tall:sr-only">{content.nav.github}</span>
         </a>
-        <Button asChild size="sm" className="story-only invisible opacity-0 tall:hidden">
-          <a ref={action} href="#install">
-            {content.nav.install}
-          </a>
-        </Button>
+        <span ref={action} className="story-only invisible inline-flex opacity-0 tall:hidden">
+          <Download size="sm" />
+        </span>
       </nav>
     </header>
   );

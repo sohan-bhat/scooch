@@ -11,7 +11,7 @@ type Refs = {
   beats: React.RefObject<HTMLElement[]>;
   section: React.RefObject<HTMLElement | null>;
   canvas: React.RefObject<HTMLDivElement | null>;
-  action: React.RefObject<HTMLAnchorElement | null>;
+  action: React.RefObject<HTMLSpanElement | null>;
   skip: React.RefObject<HTMLAnchorElement | null>;
   still: React.RefObject<HTMLPictureElement | null>;
 };

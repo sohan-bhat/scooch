@@ -7,7 +7,6 @@
   "nav": {
     "skip": "Skip the story",
     "github": "GitHub",
-    "install": "Install",
     "home": "Scooch home",
     "sound": "Sound"
   },
@@ -52,7 +51,8 @@
     }
   ],
   "install": {
-    "title": "Install Scooch",
+    "title": "Download Scooch",
+    "action": "Download",
     "release": "https://github.com/sohan-bhat/scooch/releases/latest/download/",
     "others": "Other files",
     "processors": {
@@ -174,7 +174,7 @@
       "The picture flies to the laptop, which shows a red canoe on a turquoise lake with islands, and on to a large old television showing the moon in a sky with clouds.",
       "A slow low pass along the desk over the tape player, the clock and the light from the blinds.",
       "The lamp is off and the screens are the only light. The alarm clock dial reads No CPU at rest.",
-      "A high wide shot of every screen on the desk with the line Mac, Windows and Linux and an install button."
+      "A high wide shot of every screen on the desk with the line Mac, Windows and Linux and a download button."
     ]
   },
   "missing": {
@@ -186,7 +186,6 @@
   "story": {
     "title": "Wallpaper that scooches.",
     "end": "Mac, Windows and Linux",
-    "action": "Install",
     "hint": "Press the laptop",
     "label": "Scooch in eleven steps",
     "desk": {

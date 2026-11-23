@@ -1,5 +1,5 @@
-import { Button } from '@/components/ui/button';
 import content from '@/content.json';
+import { Download } from './Download';
 
 export const captions = content.beats.filter((beat): beat is { id: string; caption: string } => 'caption' in beat && typeof beat.caption === 'string');
 
@@ -13,9 +13,7 @@ export function Hero({ live }: { live: boolean }) {
       <Heading {...role} className="text-(length:--text-hero) text-paper">
         {content.story.title}
       </Heading>
-      <Button asChild className="pointer-events-auto mt-2">
-        <a href="#install">{content.story.action}</a>
-      </Button>
+      <Download className="pointer-events-auto mt-2" />
     </>
   );
 }
@@ -24,9 +22,7 @@ export function Closing() {
   return (
     <>
       <h2 className="text-(length:--text-beat) text-paper">{content.story.end}</h2>
-      <Button asChild className="pointer-events-auto mt-2">
-        <a href="#install">{content.story.action}</a>
-      </Button>
+      <Download className="pointer-events-auto mt-2" />
     </>
   );
 }

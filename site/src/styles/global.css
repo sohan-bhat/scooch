@@ -163,6 +163,18 @@ html.js:not(.stills-mode) .stills {
   display: none;
 }
 
+[data-get] {
+  display: none;
+}
+
+html:not([data-system]) [data-get="any"],
+html[data-system="any"] [data-get="any"],
+html[data-system="macos"] [data-get="macos"],
+html[data-system="windows"] [data-get="windows"],
+html[data-system="linux"] [data-get="linux"] {
+  display: inline-flex;
+}
+
 html.js .js-only {
   display: revert-layer;
 }
