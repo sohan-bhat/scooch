@@ -64,36 +64,34 @@ expect "a background start with Scooch on opens no window" window_gone
 spot=$(comm -13 <(tr ';' '\n' <<<"$without" | sort) <(tr ';' '\n' <<<"$with" | sort) | head -1 | awk '{ split($1, b, ","); printf "%d %d", b[1] + b[3] / 2, b[2] + b[4] / 2 }')
 line "- the icon's button in the panel sits at ${spot:-no place the probe could find}"
 
+popups() { xdotool search --onlyvisible --class xfce4-panel 2>/dev/null | sort; }
 panel_menu() {
   [ -n "$spot" ] || return 1
+  local before after
+  before=$(popups)
   xdotool mousemove $spot click 1
-  sleep 2
-  panel menu | grep -q 'Open Scooch' && return 0
+  sleep 1.5
+  after=$(popups)
   shots=$((shots + 1))
-  import -window root -crop 700x400+1220+0 "$out/panel-left-$shots.png" 2>/dev/null
-  xdotool key Escape
-  sleep 1
-  xdotool mousemove $spot click 3
-  sleep 2
-  panel menu | grep -q 'Open Scooch' && return 0
-  import -window root -crop 700x400+1220+0 "$out/panel-right-$shots.png" 2>/dev/null
-  env NO_AT_BRIDGE=0 python3 "$PWD/.github/app/panel.py" dump >"$out/panel-tree-$shots.txt" 2>&1
-  return 1
+  import -window root -crop 700x400+1220+0 "$out/panel-menu-$shots.png" 2>/dev/null
+  [ -n "$(comm -13 <(echo "$before") <(echo "$after"))" ]
 }
 shots=0
+fallbacks=0
 
 press_item() {
-  local how
-  if panel_menu; then
-    line "- a press on the icon opened the panel's menu, it reads $(panel menu)"
-    how=$(panel press "$1")
-    line "- $how"
-    if grep -q '^pressed' <<<"$how"; then sleep 2; return 0; fi
-    xdotool key Escape
-  else
-    line "- a press on the icon opened no menu the probe could read through AT-SPI, it reads $(panel menu)"
+  local steps
+  steps=$(tray menu "$(app_pid)" | tr '|' '\n' | grep -v '^separator$' | grep -v ' dim$' | sed -E 's/ (un)?checked$//' | grep -nxF "$1" | cut -d: -f1)
+  if [ -n "$steps" ] && panel_menu; then
+    line "- a press on the icon opened the panel's menu, a new popup of the panel kept as panel-menu-$shots.png, whose items over DBusMenu read $(tray menu "$(app_pid)")"
+    xdotool key --delay 200 $(for step in $(seq 1 "$steps"); do printf 'Down '; done) Return
+    line "- pressed $1 in the panel's menu with the keyboard, $steps times Down and Enter"
+    sleep 2
+    return 0
   fi
-  line "- $(tray press "$(app_pid)" "$1"), the menu the panel shows"
+  xdotool key Escape
+  fallbacks=$((fallbacks + 1))
+  line "- a press on the icon opened no popup of the panel, so the probe pressed $1 over DBusMenu, $(tray press "$(app_pid)" "$1")"
   sleep 2
 }
 
@@ -168,6 +166,7 @@ expect "Quit Scooch turned Scooch off" state_off
 expect "Quit Scooch put the photo back" [ "$(wallpaper)" = "$photo" ]
 expect "Quit Scooch removed the login item" [ ! -f "$autostart" ]
 expect "Quit Scooch ended the app process" gone_app
+expect "every press on the icon opened the panel's own menu" [ "$fallbacks" = 0 ]
 
 line
 line "#### A background start with Scooch off"
