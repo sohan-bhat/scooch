@@ -144,7 +144,8 @@ APPLESCRIPT
   fi
 }
 press_switch() { press "$1" >/dev/null; sleep 1; }
-close_window() { limited 30 osascript -e 'tell application "System Events" to tell (first process whose bundle identifier is "me.sohanbhat.scooch.window") to click (first button of window 1 whose subrole is "AXCloseButton")' >/dev/null 2>&1; wait_for 15 no_window_app >/dev/null; }
+close_window() { limited 30 osascript -e 'tell application "System Events" to tell (first process whose bundle identifier is "me.sohanbhat.scooch.window") to click (first button of window 1 whose subrole is "AXCloseButton")' >/dev/null 2>&1; wait_for 15 window_gone >/dev/null; if state_off; then wait_for 15 no_window_app >/dev/null; fi; }
+window_gone() { [ -z "$(window_id)" ]; }
 open_window() { limited 20 open "$app" >/dev/null 2>&1; wait_for 40 has_window >/dev/null; sleep 4; }
 
 close_window

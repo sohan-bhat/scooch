@@ -378,10 +378,8 @@ sleep 3
 . "$(dirname "$0")/presses-macos.sh"
 line "- wallpaper before the Trash $(wallpaper)"
 line "- daemon log $(grep 'program watched' "$out/watch.log" | tail -1)"
-line "- closing the window $(limited 30 osascript -e 'tell application "System Events" to tell (first process whose bundle identifier is "me.sohanbhat.scooch.window") to click (first button of window 1 whose subrole is "AXCloseButton")' 2>&1)"
-if wait_for 15 sh -c '! pgrep -f "Scooch.app/Contents/MacOS/scooch-app" >/dev/null' >/dev/null; then line "- closing the window ended the app process"; else line "- the app process outlived its window"; fi
-expect "closing the window ended the app process" no_window_app
-line "- daemons after close $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')"
+. "$(dirname "$0")/tray-macos.sh"
+line "- daemons with only the icon $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')"
 
 moved=/Applications/Tools/Scooch.app
 mkdir -p /Applications/Tools
@@ -398,6 +396,8 @@ else
   line "- 25 s after the Trash the wallpaper is $(wallpaper), login item $([ -f "$plist" ] && echo present || echo gone), link $(readlink "$HOME/.local/bin/scooch" || echo gone), daemons $(pgrep -f 'MacOS/scooch watch' | wc -l | tr -d ' ')"
   expect "the Trash put the photo back, removed the login item and the link and ended the daemon" false
 fi
+if took=$(wait_for 15 no_window_app); then line "- the icon process ended $took s after the Trash had turned Scooch off"; else line "- the icon process still runs after the Trash, $(pgrep -fl 'MacOS/scooch-app' | tr '\n' ';')"; fi
+expect "the Trash ended the icon process" no_window_app
 line "- daemon log after the Trash $(grep -i -E 'program|trash|moved|off' "$out/watch.log" | tail -4 | tr '\n' ' ')"
 pkill -f "Scooch.app/Contents/MacOS/scooch" >/dev/null 2>&1
 launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1
