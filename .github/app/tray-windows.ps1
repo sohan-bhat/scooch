@@ -411,6 +411,15 @@ Quiet-Minute 'after the window closed'
 
 Line ''
 Line '#### A left press opens the window, a right press opens the menu'
+$under = [Tray]::Under($spot[0], $spot[1])
+$owner = if ($under -match 'of process (\d+)$') { Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue } else { $null }
+if ($owner -and $owner.ProcessName -ne 'explorer') {
+    Screen-Shot 'icon-covered'
+    Stop-Process -Id $owner.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+    $spot = Icon-Center
+    Line "- the window at the icon was $under, which is $($owner.ProcessName), the probe ended it, and the window there is now $([Tray]::Under($spot[0], $spot[1]))"
+}
 $leftBefore = Tray-Lines 'Left Up'
 [Tray]::Press($spot[0], $spot[1], $false)
 $script:footing = Landed 'Left Up' $leftBefore
@@ -452,7 +461,8 @@ if ($script:footing) {
     Expect "on from the menu drew the desktop" ([Desk]::Wallpaper() -ine $photo)
 } else {
     Screen-Shot 'press-not-landed'
-    Line "- the left press at $($spot[0]) $($spot[1]) never reached the app, which logged no tray press, the cursor is at $([Tray]::Cursor()), the window under it is $([Tray]::Under($spot[0], $spot[1])), the input desktop is $([Tray]::InputDesktop())"
+    $blocker = if ([Tray]::Under($spot[0], $spot[1]) -match 'of process (\d+)$') { (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue).ProcessName } else { 'none' }
+    Line "- the left press at $($spot[0]) $($spot[1]) never reached the app, which logged no tray press, the cursor is at $([Tray]::Cursor()), the window under it is $([Tray]::Under($spot[0], $spot[1])) from $blocker, the input desktop is $([Tray]::InputDesktop())"
     Limit "on this runner no mouse press reaches the taskbar, so the presses on the icon and its menu are not judged here. The same presses are judged on the other Windows runner"
     Line "- the window $(if (Find-Window) { 'opened anyway' } else { 'stayed closed' })"
 }

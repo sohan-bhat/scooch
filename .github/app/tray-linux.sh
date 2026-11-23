@@ -64,7 +64,7 @@ expect "a background start with Scooch on opens no window" window_gone
 spot=$(comm -13 <(tr ';' '\n' <<<"$without" | sort) <(tr ';' '\n' <<<"$with" | sort) | head -1 | awk '{ split($1, b, ","); printf "%d %d", b[1] + b[3] / 2, b[2] + b[4] / 2 }')
 line "- the icon's button in the panel sits at ${spot:-no place the probe could find}"
 
-popups() { xdotool search --onlyvisible --class xfce4-panel 2>/dev/null | sort; }
+popups() { xwininfo -root -children 2>/dev/null | awk '/^ +0x/ { print $1 }' | while read -r window; do xwininfo -id "$window" 2>/dev/null | grep -q 'Map State: IsViewable' && echo "$window"; done | sort; }
 panel_menu() {
   [ -n "$spot" ] || return 1
   local before after
