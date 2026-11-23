@@ -383,6 +383,7 @@ pub struct Daemon {
     pub store: Store,
     pub grace: Duration,
     recent: Mutex<HashMap<String, Instant>>,
+    last_wake: Mutex<Option<Instant>>,
     ledger: Mutex<Ledger>,
     pub glider: Arc<Mutex<Glider>>,
     woke: Mutex<Option<Instant>>,
@@ -493,7 +494,7 @@ impl Daemon {
     pub fn new(desktop: Arc<dyn Desktop>, store: Store) -> Self {
         let grace = desktop.read_lag();
         let glider = Arc::new(Mutex::new(Glider::new(Box::new(Program(crate::glide::program())))));
-        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), ledger: Mutex::new(Ledger::default()), glider, woke: Mutex::new(None), reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()), stills: Mutex::new(HashMap::new()), saves: Mutex::new(None), #[cfg(test)] marks: Mutex::new(None) }
+        Self { desktop, store, grace, recent: Mutex::new(HashMap::new()), last_wake: Mutex::new(None), ledger: Mutex::new(Ledger::default()), glider, woke: Mutex::new(None), reaping: Arc::new(std::sync::atomic::AtomicBool::new(false)), motion: std::sync::atomic::AtomicU8::new(0), sessions: Arc::new(Mutex::new(HashMap::new())), used: Arc::new(Mutex::new(Instant::now())), seen: Mutex::new(None), prints: Mutex::new(HashMap::new()), moved: Mutex::new(Vec::new()), handed: Mutex::new(None), icons: Mutex::new(None), quick_hold: Mutex::new(None), mapped: Mutex::new(HashMap::new()), last_screens: Mutex::new(Vec::new()), stills: Mutex::new(HashMap::new()), saves: Mutex::new(None), #[cfg(test)] marks: Mutex::new(None) }
     }
 
     #[cfg(test)]
@@ -595,8 +596,13 @@ impl Daemon {
     }
 
     pub fn wake_early(&self) -> bool {
+        let before = self.last_wake.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).replace(Instant::now());
         let screens = self.last_screens.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let Some(screen) = self.desktop.pointer().and_then(|point| crate::glide::under(&screens, point).cloned()) else { return false };
+        let set = self.recent.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&screen.id).copied();
+        if set.is_some_and(|set| before.is_none_or(|before| set > before)) {
+            return false;
+        }
         self.prime_on(&screen, false)
     }
 
@@ -4442,6 +4448,7 @@ pub mod tests {
         *fake.pointer.lock().unwrap() = Some(center(subject()));
         fake.events.lock().unwrap().clear();
         let primes = |fake: &Fake| events(fake).iter().filter(|event| event.starts_with("prime ")).count();
+        assert!(!daemon.wake_early(), "the wake that echoes Scooch's own set primed");
         assert!(daemon.wake_early());
         assert!(!daemon.wake_early(), "a second prime inside ten seconds");
         daemon.tick();
@@ -4453,6 +4460,7 @@ pub mod tests {
         fake.place(vec![moved_subject()]);
         assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
         daemon.glider.lock().unwrap().forget_wake_for_test();
+        assert!(!daemon.wake_early(), "the wake that echoes the move's own set primed");
         assert!(daemon.wake_early(), "a real move lets the next wake prime again");
         assert_eq!(primes(&fake), 3, "{:?}", events(&fake));
         assert_eq!(*spawned.lock().unwrap(), 1, "a wake launched a helper");
@@ -4465,6 +4473,7 @@ pub mod tests {
         daemon.glider = Arc::new(Mutex::new(Glider::new(Box::new(crate::glide::tests::FakeSpawner::new(fake.events.clone())))));
         fake.place(vec![subject(), Rect { x: subject().x + 160.0, ..subject() }]);
         daemon.tick();
+        daemon.wake_early();
         for (pointer, wanted) in [((200.0, 50.0), Some("prime right")), ((500.0, 50.0), None)] {
             daemon.glider.lock().unwrap().forget_wake_for_test();
             fake.events.lock().unwrap().clear();
