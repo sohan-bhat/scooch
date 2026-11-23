@@ -3739,6 +3739,10 @@ mod probe {
     }
 
     fn restart_daemon(p: &mut Probe, slow: bool) -> Result<bool> {
+        restart_daemon_with(p, slow, None)
+    }
+
+    fn restart_daemon_with(p: &mut Probe, slow: bool, lag: Option<u64>) -> Result<bool> {
         let Some(mut child) = p.stand.take() else { return Ok(false) };
         let _ = child.kill();
         let _ = child.wait();
@@ -3753,6 +3757,10 @@ mod probe {
         } else {
             command.env_remove(scooch::live::SLOW_HELLO);
         }
+        match lag {
+            Some(ms) => command.env(scooch::live::READ_LAG, ms.to_string()),
+            None => command.env_remove(scooch::live::READ_LAG),
+        };
         p.stand = Some(command.spawn()?);
         let home = p.home.clone();
         wait_until(Duration::from_secs(15), || fs::read_to_string(home.join("watch.pid")).ok().and_then(|text| text.trim().parse::<i32>().ok()).is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)).context("the restarted daemon wrote no pid file")?;
@@ -3924,6 +3932,8 @@ mod probe {
             }
         }
         old_tables(p, &screen, name, places);
+        back_to_back(p, &screen, name, places)?;
+        system_pick(p, &screen);
         if restart_daemon(p, true)? {
             p.line(format!("- the daemon restarted with {}={SLOW_HELLO_MS}, so each helper it starts says hello {} s late and has not parked, then {PAIRS} pairs, each a drag right after the helper started followed by the same drag with the glide off", scooch::live::SLOW_HELLO, SLOW_HELLO_MS / 1000));
             let home = p.home.clone();
@@ -4033,6 +4043,112 @@ mod probe {
         }
     }
 
+    struct Windows {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        handle: std::thread::JoinHandle<Vec<(f64, usize)>>,
+    }
+
+    fn watch_windows() -> Windows {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = stop.clone();
+        let handle = std::thread::spawn(move || {
+            let mut samples = Vec::new();
+            let mut pids: Vec<i32> = Vec::new();
+            let mut asked = Instant::now() - Duration::from_secs(1);
+            while !stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                if asked.elapsed() > Duration::from_millis(100) {
+                    pids = Command::new("/usr/bin/pgrep").args(["-f", "live-helper"]).output().map(|out| String::from_utf8_lossy(&out.stdout).lines().filter_map(|line| line.trim().parse().ok()).collect()).unwrap_or_default();
+                    asked = Instant::now();
+                }
+                let shown = objc2::rc::autoreleasepool(|_| layer::every_window().into_iter().filter(|window| window.on_screen && pids.contains(&(window.pid as i32))).count());
+                samples.push((epoch(), shown));
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            samples
+        });
+        Windows { stop, handle }
+    }
+
+    fn stop_windows(windows: Windows) -> Vec<(f64, usize)> {
+        windows.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        windows.handle.join().unwrap_or_default()
+    }
+
+    fn left_at_sets(samples: &[(f64, usize)], log: &[String]) -> Vec<(String, usize)> {
+        let mut found = Vec::new();
+        for (index, line) in log.iter().enumerate() {
+            if !(line.contains(" glide skipped, ") && line.contains(" times from the ")) {
+                continue;
+            }
+            let Some(set) = log[..index].iter().rev().find(|line| line.split_whitespace().nth(1) == Some("set")).and_then(|line| stamp_of(line)) else { continue };
+            let left = samples.iter().filter(|(at, _)| *at >= set && *at <= set + 0.15).map(|(_, shown)| *shown).max().unwrap_or(0);
+            let reason = line.split(" glide skipped, ").nth(1).and_then(|rest| rest.split(',').next()).unwrap_or_default().to_string();
+            found.push((reason, left));
+        }
+        found
+    }
+
+    const PROBE_LAG_MS: u64 = 8000;
+
+    fn back_to_back(p: &mut Probe, screen: &Screen, name: &str, places: ((f32, f32), (f32, f32))) -> Result<()> {
+        let since = daemon_log(p).lines().count();
+        if !restart_daemon_with(p, false, Some(PROBE_LAG_MS))? {
+            p.line("- the daemon here is the login item, so the read lag hint could not be set and the drag inside the lag was skipped".to_string());
+            return Ok(());
+        }
+        let parked = wait_parked(p, since, Duration::from_secs(60));
+        let lines = daemon_log(p).lines().count();
+        let windows = watch_windows();
+        let first = cold_drag(p, screen, name, places);
+        let second = cold_drag(p, screen, name, places);
+        let samples = stop_windows(windows);
+        let log = new_lines(&daemon_log(p), lines);
+        let primed = log.iter().filter(|line| line.contains(" glide primed ") && line.ends_with("at the drag start")).count();
+        let checked = left_at_sets(&samples, &log);
+        p.line(format!("- with the daemon told the read lag is {PROBE_LAG_MS} ms, as on Windows, the helper parked {parked:?} ms after its launch, then two drags back to back: the first glided {}, the second glided {} with skip {:?}, primes at the drag start {primed}, helper windows on screen within 150 ms of each plain set {checked:?}, over {} window samples", first.glided, second.glided, second.skip, samples.len()));
+        restart_daemon(p, false)?;
+        if parked.is_none() || !first.glided || second.glided || primed < 2 {
+            p.fail("the second drag inside the read lag was not a primed move that did not slide, so the window rule was not judged, which is the footing failing and not a pass");
+        } else if checked.is_empty() || checked.iter().any(|(_, left)| *left > 0) {
+            p.fail("a window primed inside the read lag was still on screen when the plain swap set its picture");
+        }
+        Ok(())
+    }
+
+    fn system_pick(p: &mut Probe, screen: &Screen) {
+        let Some(desktop) = platform::current().ok() else { return };
+        let before = desktop.wallpaper(screen).ok().flatten();
+        let source = state(p)["screens"].as_object().and_then(|screens| screens.values().next().and_then(|entry| entry["source"].as_str().map(PathBuf::from)));
+        let picked = p.home.join("probe-system-pick.jpg");
+        let made = source.as_deref().and_then(|source| fs::copy(source, &picked).ok());
+        let home = p.home.clone();
+        let parked = wait_until(Duration::from_secs(60), || crate::parked_in(&watch_log(&home.join("watch.log"))).is_some()).is_some() && !helper_pids(p).is_empty();
+        let _ = quiet_log(p, Duration::from_millis(1500), Duration::from_secs(15));
+        if made.is_none() || !parked {
+            p.fail(format!("the picture picked in the system's settings was not judged, picked {:?}, a parked helper {parked}, which is the footing failing and not a pass", made));
+            return;
+        }
+        let lines = daemon_log(p).lines().count();
+        let windows = watch_windows();
+        let set = desktop.set_wallpaper(screen, &picked);
+        std::thread::sleep(Duration::from_secs(3));
+        let samples = stop_windows(windows);
+        let log = new_lines(&daemon_log(p), lines);
+        let woke = log.iter().any(|line| line.contains(" wake ") || line.contains(" tick "));
+        let primed: Vec<&String> = log.iter().filter(|line| primed(line)).collect();
+        let shown = samples.iter().map(|(_, shown)| *shown).max().unwrap_or(0);
+        p.line(format!("- a picture picked in the system's settings, set {:?}: the daemon woke {woke}, primes after it {}, helper windows on screen at most {shown} over {} samples in 3 s, before it the screen showed {before:?}", set.as_ref().map_err(|error| error.to_string()), primed.len(), samples.len()));
+        if set.is_err() || !woke {
+            p.fail("the picture picked in the system's settings did not wake the daemon, so it was not judged, which is the footing failing and not a pass");
+        } else if !primed.is_empty() || shown > 0 {
+            p.fail("a picture picked in the system's settings was covered by a helper window with Scooch's old picture");
+        }
+        if let Some(source) = source {
+            let _ = desktop.set_wallpaper(screen, &source);
+            std::thread::sleep(Duration::from_secs(3));
+        }
+    }
+
     fn old_tables(p: &mut Probe, screen: &Screen, name: &str, places: ((f32, f32), (f32, f32))) {
         let output = state(p)["screens"].as_object().and_then(|screens| screens.values().next().and_then(|entry| entry["output"].as_str().map(PathBuf::from)));
         let prefix = output.as_ref().and_then(|output| output.file_name()).map(|name| format!("{}.", name.to_string_lossy()));
@@ -4048,10 +4164,20 @@ mod probe {
             fs::write(file, &bytes).ok()
         });
         let lines = daemon_log(p).lines().count();
+        let windows = watch_windows();
         let first = cold_drag(p, screen, name, places);
+        let samples = stop_windows(windows);
         let log = new_lines(&daemon_log(p), lines);
         let named = log.iter().any(|line| line.contains("the tables come from another version"));
         let opened = log.iter().any(|line| line.contains(" glide open"));
+        let primed_at_drag = log.iter().any(|line| line.contains(" glide primed ") && line.ends_with("at the drag start"));
+        let checked = left_at_sets(&samples, &log);
+        p.line(format!("- the drag over tables from another version primed at its drag start {primed_at_drag}, helper windows on screen within 150 ms of its plain set {checked:?}"));
+        if !primed_at_drag {
+            p.fail("the drag over tables from another version did not prime at its drag start, so the window rule was not judged, which is the footing failing and not a pass");
+        } else if checked.is_empty() || checked.iter().any(|(_, left)| *left > 0) {
+            p.fail("a primed window was still on screen when the drag over tables from another version set its picture");
+        }
         let mut again = Vec::new();
         for _ in 0..2 {
             std::thread::sleep(Duration::from_millis(1500));
