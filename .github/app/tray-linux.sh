@@ -195,8 +195,11 @@ sleep 2
 
 line
 line "#### Quit Scooch"
-sentences=$(python3 -c 'import json, sys; print("\n".join(json.load(open(sys.argv[1]))["failure"].values()))' crates/scooch-app/ui/src/copy/en.json)
-said_first() { tray menu "$(app_pid)" | cut -d'|' -f1 | sed 's/ dim$//' | grep -qxF -f <(printf '%s\n' "$sentences"); }
+sentences=$(python3 -c 'import json, sys; copy = json.load(open(sys.argv[1])); print("\n".join(list(copy["failure"].values()) + [copy["problem"]["stopped"]["line"]]))' crates/scooch-app/ui/src/copy/en.json)
+stopped_line=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["problem"]["stopped"]["line"])' crates/scooch-app/ui/src/copy/en.json)
+first_item() { tray menu "$(app_pid)" | cut -d'|' -f1 | sed 's/ dim$//'; }
+said_first() { first_item | grep -qxF -f <(printf '%s\n' "$sentences"); }
+true_to_what_runs() { if no_daemon; then [ "$(first_item)" = "$stopped_line" ]; else [ "$(first_item)" != "$stopped_line" ]; fi; }
 chmod a-w "$data"
 press_item 'Quit Scooch'
 sleep 4
@@ -205,6 +208,8 @@ chmod u+w "$data"
 expect "a Quit whose off fails keeps the icon" app_alive
 expect "a Quit whose off fails keeps Scooch on" state_on
 expect "a Quit whose off fails shows a sentence of the window's copy in the menu" said_first
+line "- after the failed off the daemons are $(daemons), and the menu's first line is $(first_item)"
+expect "the sentence after a failed off is true about whether the daemon runs" true_to_what_runs
 press_item 'Quit Scooch'
 wait_for 30 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
 wait_for 30 state_off >/dev/null
