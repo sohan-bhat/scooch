@@ -315,6 +315,10 @@ wait_for 30 sh -c 'pgrep -x scooch >/dev/null' >/dev/null
 sleep 3
 line "- Scooch on again after the control, daemons $(daemons), login item $(login)"
 cp /usr/bin/scooch "$HOME/.stale-scooch"
+wait_for 30 app_alive >/dev/null
+icon_before=$(app_pid)
+line "- the icon process before the package removal ${icon_before:-none}"
+expect "the icon runs before the package removal" [ -n "$icon_before" ]
 sudo apt-get remove -y scooch >"$out/remove.log" 2>&1
 removed=$?
 line "- package removal exit $removed"
@@ -326,6 +330,8 @@ line "- login item after removal $([ -f "$autostart" ] && echo present || echo g
 expect "removal put the photo back and parked no screen that was connected" put_back
 expect "removal left no login item" [ ! -f "$autostart" ]
 expect "removal left no daemon" no_daemon
+wait_for 15 sh -c "! kill -0 ${icon_before:-0} 2>/dev/null" >/dev/null
+expect "the package removal ended the icon, which ended by itself when Scooch went off" eval '[ -n "$icon_before" ] && ! kill -0 "$icon_before" 2>/dev/null'
 cp "$data/state.json" "$out/state.json" 2>/dev/null
 expect "the final off kept the record of the screen nobody shows" grep -q '"probe-absent"' "$data/state.json"
 clear_absent
@@ -345,6 +351,10 @@ absent_on rpm
 line "- the saved state holds probe-absent $(grep -c '"probe-absent"' "$data/state.json") and the connected screens $(others), daemons $(daemons), login item $(login)"
 expect "the saved state holds a connected screen before the rpm removal" [ -n "$(others)" ]
 expect "the daemon from the rpm runs with XAUTHORITY at the cookie file" cookie_daemon
+wait_for 30 app_alive >/dev/null
+icon_before=$(app_pid)
+line "- the icon process before the rpm removal ${icon_before:-none}"
+expect "the icon runs before the rpm removal" [ -n "$icon_before" ]
 sudo rpm -e "${rpm_name:-scooch}" >"$out/rpm-remove.log" 2>&1
 removed=$?
 line "- rpm removal exit $removed"
@@ -354,6 +364,8 @@ line "- wallpaper after the rpm removal $(wallpaper), back to the photo $([ "$(w
 expect "the rpm removal put the photo back and parked no screen that was connected" put_back
 expect "the rpm removal left no login item" [ ! -f "$autostart" ]
 expect "the rpm removal left no daemon" no_daemon
+wait_for 15 sh -c "! kill -0 ${icon_before:-0} 2>/dev/null" >/dev/null
+expect "the rpm removal ended the icon, which ended by itself when Scooch went off" eval '[ -n "$icon_before" ] && ! kill -0 "$icon_before" 2>/dev/null'
 expect "the rpm final off kept the record of the screen nobody shows" grep -q '"probe-absent"' "$data/state.json"
 clear_absent
 line "- cleared the parked record of probe-absent so the AppImage passes start with no screen that cannot be reached"
