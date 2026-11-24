@@ -2933,7 +2933,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         std::thread::sleep(Duration::from_secs(3));
         let (now, showing) = (held(&home), linux.wallpaper(screen).ok().flatten());
         let window: Vec<String> = fs::read_to_string(&log).unwrap_or_default().lines().skip(seen).filter(|line| line.contains(" tick ") || line.contains(" set ")).map(|line| line.chars().take(200).collect()).collect();
-        let sets = window.iter().filter(|line| line.contains(" set ")).count();
+        let sets = window.iter().filter(|line| line.split_whitespace().nth(1) == Some("set")).count();
         let back = toggle();
         std::thread::sleep(Duration::from_secs(3));
         let same = !kept.is_empty() && kept == now;

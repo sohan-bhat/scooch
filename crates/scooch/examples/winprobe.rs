@@ -3885,12 +3885,13 @@ mod probe {
         let second = watch_change(&log, screen, || drag_icon(name, folder, centre), false);
         let samples = stop_shown(shown);
         let all = log_lines(&log);
-        let primed = all.iter().filter(|line| line.contains(" glide primed ") && line.ends_with("at the drag start")).count();
         let slid = |watched: &Watched| watched.log.iter().any(|line| line.contains(" glide slid, ") && !line.contains("then the helper"));
+        let primed = second.log.iter().any(|line| line.contains(" glide primed ") && line.ends_with("at the drag start"));
+        let lagged = second.log.iter().any(|line| line.contains(" glide skipped, output not shown"));
         let checked = left_at_sets(&samples, &all);
-        p.line(format!("- with the daemon told the read lag is {PROBE_LAG_MS} ms, the helper parked {}, two drags back to back: the first slid {}, the second slid {}, primes at the drag start {primed}, visible layer windows within 150 ms of each plain set {checked:?}, over {} samples", parked.is_some(), slid(&first), slid(&second), samples.len()));
+        p.line(format!("- with the daemon told the read lag is {PROBE_LAG_MS} ms, the helper parked {}, two drags back to back: the first slid {}, the second slid {}, the second skipped inside the lag {lagged}, the second primed at its drag start {primed}, visible layer windows within 150 ms of each plain set {checked:?}, over {} samples", parked.is_some(), slid(&first), slid(&second), samples.len()));
         decisions(p, &second);
-        if parked.is_none() || !slid(&first) || slid(&second) || primed < 2 {
+        if parked.is_none() || !slid(&first) || slid(&second) || !lagged || !primed {
             p.failed.push("the second drag inside the read lag was not a primed move that did not slide, so the window rule was not judged, which is the footing failing and not a pass".into());
         } else if checked.is_empty() || checked.iter().any(|(_, left)| *left > 0) {
             p.failed.push("a window primed inside the read lag was still visible when the plain swap set its picture".into());
@@ -3903,15 +3904,19 @@ mod probe {
         let start = log_lines(&log).len();
         let shown = watch_shown();
         let set = made.map(|_| desktop.set_wallpaper(screen, &picked));
+        pump(Duration::from_millis(1500));
+        let dragged = drag_icon(name, folder, aside);
         pump(Duration::from_secs(3));
         let samples = stop_shown(shown);
         let after: Vec<String> = log_lines(&log).into_iter().skip(start).collect();
-        let woke = after.iter().any(|line| line.contains(" wake ") || line.contains(" tick "));
-        let primes = after.iter().filter(|line| line.contains(" glide primed ")).count();
-        let most = samples.iter().map(|(_, shown)| *shown).max().unwrap_or(0);
-        p.line(format!("- a picture picked in the system's settings, set {:?}: the daemon woke {woke}, primes after it {primes}, visible layer windows at most {most} over {} samples in 3 s", set.as_ref().map(|set| set.as_ref().map_err(|error| error.to_string())), samples.len()));
-        if !set.as_ref().is_some_and(Result::is_ok) || !woke {
-            p.failed.push("the picture picked in the system's settings did not wake the daemon, so it was not judged, which is the footing failing and not a pass".into());
+        let woke = after.iter().any(|line| line.contains(" tick ") && !line.contains("Unchanged)]"));
+        let own = after.iter().find(|line| line.split_whitespace().nth(1) == Some("set")).and_then(|line| stamp_of(line));
+        let before_own: Vec<&String> = after.iter().filter(|line| own.is_none_or(|own| stamp_of(line).is_some_and(|at| at < own))).collect();
+        let primes = before_own.iter().filter(|line| line.contains(" glide primed ")).count();
+        let most = samples.iter().filter(|(at, _)| own.is_none_or(|own| *at < own)).map(|(_, shown)| *shown).max().unwrap_or(0);
+        p.line(format!("- a picture picked in the system's settings, set {:?}, then a drag {dragged}: the daemon ticked {woke}, primes before Scooch set its own picture {primes}, visible layer windows before that at most {most} over {} samples", set.as_ref().map(|set| set.as_ref().map_err(|error| error.to_string())), samples.len()));
+        if !set.as_ref().is_some_and(Result::is_ok) || !dragged || !woke {
+            p.failed.push("the picture picked in the system's settings and the drag after it did not wake the daemon, so it was not judged, which is the footing failing and not a pass".into());
         } else if primes > 0 || most > 0 {
             p.failed.push("a picture picked in the system's settings was covered by a layer with Scooch's old picture".into());
         }
@@ -4366,7 +4371,7 @@ mod probe {
         quiet_log(trace, Duration::from_millis(1500), Duration::from_secs(10));
         let (now, showing) = (held(&p.home), desktop.wallpaper(screen).ok().flatten());
         let window: Vec<String> = new_lines(trace, read).into_iter().filter(|line| line.contains(" tick ") || line.contains(" set ")).map(|line| line.chars().take(200).collect()).collect();
-        let sets = window.iter().filter(|line| line.contains(" set ")).count();
+        let sets = window.iter().filter(|line| line.split_whitespace().nth(1) == Some("set")).count();
         let back = toggle(&p.home);
         quiet_log(trace, Duration::from_millis(1500), Duration::from_secs(10));
         let _ = new_lines(trace, read);

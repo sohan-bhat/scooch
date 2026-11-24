@@ -1452,7 +1452,7 @@ mod probe {
         let _ = p.scooch(&["scenery"], LIMIT);
         quiet_log(p, Duration::from_millis(1500), Duration::from_secs(10));
         let (now, later) = (held(p), grab(display));
-        let sets = new_lines(&daemon_log(p), seen).iter().filter(|line| line.contains(" set ")).count();
+        let sets = new_lines(&daemon_log(p), seen).iter().filter(|line| line.split_whitespace().nth(1) == Some("set")).count();
         let moved = shot.as_ref().zip(later.as_ref()).zip(icon_rect(name)).map(|((a, b), icon)| ring(a, b, &icon, screen));
         let _ = p.scooch(&["scenery"], LIMIT);
         quiet_log(p, Duration::from_millis(1500), Duration::from_secs(10));
@@ -4116,11 +4116,14 @@ mod probe {
         let second = cold_drag(p, screen, name, places);
         let samples = stop_windows(windows);
         let log = new_lines(&daemon_log(p), lines);
-        let primed = log.iter().filter(|line| line.contains(" glide primed ") && line.ends_with("at the drag start")).count();
+        let slid_at = log.iter().position(|line| line.contains(" glide slid, "));
+        let primed = slid_at.is_some_and(|slid_at| log[slid_at..].iter().any(|line| line.contains(" glide primed ") && line.ends_with("at the drag start")));
         let checked = left_at_sets(&samples, &log);
-        p.line(format!("- with the daemon told the read lag is {PROBE_LAG_MS} ms, as on Windows, the helper parked {parked:?} ms after its launch, then two drags back to back: the first glided {}, the second glided {} with skip {:?}, primes at the drag start {primed}, helper windows on screen within 150 ms of each plain set {checked:?}, over {} window samples", first.glided, second.glided, second.skip, samples.len()));
+        p.line(format!("- with the daemon told the read lag is {PROBE_LAG_MS} ms, as on Windows, the helper parked {parked:?} ms after its launch, then two drags back to back: the first glided {}, the second glided {} with skip {:?}, the second primed at its drag start {primed}, helper windows on screen within 150 ms of each plain set {checked:?}, over {} window samples", first.glided, second.glided, second.skip, samples.len()));
+        let since = daemon_log(p).lines().count();
         restart_daemon(p, false)?;
-        if parked.is_none() || !first.glided || second.glided || primed < 2 {
+        let _ = wait_parked(p, since, Duration::from_secs(60));
+        if parked.is_none() || !first.glided || second.glided || second.skip.as_deref() != Some("output not shown") || !primed {
             p.fail("the second drag inside the read lag was not a primed move that did not slide, so the window rule was not judged, which is the footing failing and not a pass");
         } else if checked.is_empty() || checked.iter().any(|(_, left)| *left > 0) {
             p.fail("a window primed inside the read lag was still on screen when the plain swap set its picture");
