@@ -67,6 +67,12 @@ fn none_glided(tries: &[Try]) -> Option<String> {
 const GATHER: [&str; 3] = ["wake", "prime", "look"];
 
 #[cfg(any(target_os = "macos", test))]
+const WOKE_SLACK: f64 = 10.0;
+
+#[cfg(any(target_os = "macos", test))]
+const GLIDE_PIECES: [&str; 9] = ["prime", "early", "cold", "map", "read", "ask", "bundle", "open", "clear"];
+
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Drag {
     began: Option<f64>,
@@ -111,8 +117,17 @@ impl Drag {
         Some(self.laps[..=set].iter().map(|(_, value)| value).sum())
     }
 
+    fn glide(&self) -> Option<f64> {
+        let set = self.laps.iter().position(|(name, _)| name == "set")?;
+        Some(self.laps[..=set].iter().filter(|(name, _)| GLIDE_PIECES.contains(&name.as_str())).map(|(_, value)| value).sum())
+    }
+
+    fn woke(&self) -> Option<f64> {
+        Some(self.began? - self.laps.iter().filter(|(name, _)| GATHER.contains(&name.as_str())).map(|(_, value)| value).sum::<f64>())
+    }
+
     fn quiet(&self) -> bool {
-        self.began.is_some_and(|began| began >= 0.0) && self.writers == Some((0, 0)) && self.daemon.is_some() && self.to_set().is_some()
+        self.woke().is_some_and(|woke| woke >= -WOKE_SLACK) && self.writers == Some((0, 0)) && self.daemon.is_some() && self.to_set().is_some()
     }
 }
 
@@ -122,12 +137,13 @@ struct Paired {
     footing: Option<String>,
     wall: Option<f64>,
     cpu: Option<f64>,
+    glide: Option<f64>,
 }
 
 #[cfg(any(target_os = "macos", test))]
 fn pair_of(slow: &Drag, off: &Drag) -> Paired {
     let footing = if !slow.quiet() || !off.quiet() {
-        Some(format!("a tick began before its drop or had a writer beside it, slow began {:?} writers {:?}, off began {:?} writers {:?}", slow.began, slow.writers, off.began, off.writers))
+        Some(format!("the daemon woke before its drop or had a writer beside it, slow woke {:?} writers {:?}, off woke {:?} writers {:?}", slow.woke(), slow.writers, off.woke(), off.writers))
     } else if slow.skip.as_deref() != Some("helper cold") || slow.parked || slow.glided {
         Some(format!("the slow drag did not meet a cold helper, skip {:?} parked {}", slow.skip, slow.parked))
     } else if off.skip.as_deref() != Some("setting off") {
@@ -137,7 +153,8 @@ fn pair_of(slow: &Drag, off: &Drag) -> Paired {
     };
     let wall = slow.to_set().zip(off.to_set()).map(|(slow, off)| slow - off);
     let cpu = slow.daemon.zip(off.daemon).map(|(slow, off)| slow - off);
-    Paired { footing, wall, cpu }
+    let glide = slow.glide().zip(off.glide()).map(|(slow, off)| slow - off);
+    Paired { footing, wall, cpu, glide }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -148,6 +165,72 @@ fn median(values: &[f64]) -> Option<f64> {
         0 => None,
         count if count % 2 == 1 => Some(sorted[count / 2]),
         count => Some((sorted[count / 2 - 1] + sorted[count / 2]) / 2.0),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+const SLOW_LIMIT: f64 = 60.0;
+
+#[cfg(any(target_os = "macos", test))]
+const FOOTED_PAIRS: usize = 5;
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq)]
+enum Slow {
+    Judged { cpu: f64, glide: f64, wall: Option<f64>, footed: usize },
+    Unfooted(String),
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn judge_pairs(slow: &[String], off: &[String]) -> (Vec<Paired>, Slow) {
+    let (slow, off): (Vec<Drag>, Vec<Drag>) = (slow.iter().map(|line| drag_of(line)).collect(), off.iter().map(|line| drag_of(line)).collect());
+    let paired: Vec<Paired> = slow.iter().zip(&off).map(|(slow, off)| pair_of(slow, off)).collect();
+    let footed: Vec<&Paired> = paired.iter().filter(|pair| pair.footing.is_none() && pair.cpu.is_some() && pair.glide.is_some()).collect();
+    let cpus: Vec<f64> = footed.iter().filter_map(|pair| pair.cpu).collect();
+    let glides: Vec<f64> = footed.iter().filter_map(|pair| pair.glide).collect();
+    let walls: Vec<f64> = footed.iter().filter_map(|pair| pair.wall).collect();
+    let judged = match (median(&cpus), median(&glides)) {
+        (Some(cpu), Some(glide)) if footed.len() >= FOOTED_PAIRS => Slow::Judged { cpu, glide, wall: median(&walls), footed: footed.len() },
+        _ => Slow::Unfooted(format!("{} of {} pairs had footing where {FOOTED_PAIRS} are needed, the first miss {}", footed.len(), paired.len(), paired.iter().find_map(|pair| pair.footing.clone()).unwrap_or_else(|| "had no cpu or pieces to the set".to_string()))),
+    };
+    (paired, judged)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn chosen_pairs(text: &str, tries: usize) -> (Vec<String>, Vec<String>) {
+    let mut found: Vec<(usize, usize, String, String)> = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.split("- try ").nth(1) else { continue };
+        let Some((attempt, rest)) = rest.split_once(' ') else { continue };
+        let Some((arm, rest)) = rest.split_once(' ') else { continue };
+        let (Ok(attempt), Some(Ok(index))) = (attempt.parse::<usize>(), rest.split(':').next().map(str::parse::<usize>)) else { continue };
+        if arm == "slow" {
+            found.push((index, attempt, line.to_string(), String::new()));
+        } else if let Some(pair) = found.iter_mut().rev().find(|(at, tried, _, off)| *at == index && *tried == attempt && off.is_empty() && arm == "off") {
+            pair.3 = line.to_string();
+        }
+    }
+    let mut indexes: Vec<usize> = found.iter().map(|(index, _, _, _)| *index).collect();
+    indexes.dedup();
+    let mut chosen = (Vec::new(), Vec::new());
+    for index in indexes {
+        let tried: Vec<&(usize, usize, String, String)> = found.iter().filter(|(at, attempt, _, off)| *at == index && *attempt <= tries && !off.is_empty()).collect();
+        let pick = tried.iter().find(|(_, _, slow, off)| pair_of(&drag_of(slow), &drag_of(off)).footing.is_none()).or(tried.last());
+        if let Some((_, _, slow, off)) = pick {
+            chosen.0.push(slow.clone());
+            chosen.1.push(off.clone());
+        }
+    }
+    chosen
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Slow {
+    fn held_back(&self) -> Option<bool> {
+        match self {
+            Slow::Judged { cpu, glide, .. } => Some(*cpu > SLOW_LIMIT || *glide > SLOW_LIMIT),
+            Slow::Unfooted(_) => None,
+        }
     }
 }
 
@@ -200,7 +283,7 @@ mod tests {
 
     fn drag_line(label: &str, skip: &str, began: f64, laps: &str, cpu: (u32, u32), writers: (u32, u32), parked: bool) -> String {
         format!(
-            "  - {label} 1: 3 s after the move before it, waited 1200 ms for a quiet daemon, quiet true, glided false, skip Some(\"{skip}\"), waited none, set Some(186) ms by the probe, launch took 0 ms, helper 812 age 2400 ms at the drop, helper cpu 0 ms from the drop to the set, 1 helpers at the drop, writer threads at the drop [], tick laps Some(\"began Some({began}) ms after the drop, took 72 ms, {laps}, sessions hold 11 MB, cpu to the set {} ms on the tick thread and {} ms in the daemon, writers {} at the wake and {} at the set\"), the daemon's line Some(\"skipped, {skip}, on main, times from the drop, {}, hello none\")",
+            "  - {label} 1: 3 s after the move before it, the daemon quiet after 1200 ms true, glided false, skip Some(\"{skip}\"), waited none, set Some(186) ms by the probe, launch took 0 ms, helper 812 age 2400 ms at the drop, helper cpu 0 ms from the drop to the set, 1 helpers at the drop, writer threads at the drop [], tick laps Some(\"began Some({began}) ms after the drop, took 72 ms, {laps}, sessions hold 11 MB, cpu to the set {} ms on the tick thread and {} ms in the daemon, writers {} at the wake and {} at the set\"), the daemon's line Some(\"skipped, {skip}, on main, times from the drop, {}, hello none\")",
             cpu.0,
             cpu.1,
             writers.0,
@@ -227,11 +310,65 @@ mod tests {
         assert!(super::pair_of(&slow, &writing).footing.is_some());
         let early = super::drag_of(&drag_line("quiet off", "setting off", -700.0, "snapshot 730, set 8", (35, 50), (0, 0), false));
         assert!(super::pair_of(&slow, &early).footing.is_some());
+        let settled = super::drag_of(&drag_line("quiet off", "setting off", 269.0, "wake 0, prime 2, look 289, snapshot 27, set 8", (35, 50), (0, 0), false));
+        assert_eq!(settled.woke(), Some(-22.0));
+        assert!(super::pair_of(&slow, &settled).footing.is_some());
         let parked = super::drag_of(&drag_line("quiet slow", "helper cold", 30.0, "look 28, set 8", (35, 50), (0, 0), true));
         assert!(super::pair_of(&parked, &off).footing.is_some());
         assert_eq!(super::median(&[5.0, 1.0, 3.0]), Some(3.0));
         assert_eq!(super::median(&[4.0, 1.0, 3.0, 2.0]), Some(2.5));
         assert_eq!(super::median(&[]), None);
+    }
+
+    fn pair_lines(pairs: &[(u32, u32, f64)], footing: &[bool]) -> (Vec<String>, Vec<String>) {
+        let slow = pairs.iter().zip(footing).map(|((cpu, _, glide), footed)| drag_line("try 1 slow", "helper cold", 900.0, &format!("wake 0, prime {glide}, look 30, state 1, render 400, set 2"), (40, *cpu), (if *footed { 0 } else { 1 }, 0), false)).collect();
+        let off = pairs.iter().map(|(_, cpu, _)| drag_line("try 1 off", "setting off", 30.0, "wake 0, prime 0, look 30, state 1, render 200, set 2", (38, *cpu), (0, 0), false)).collect();
+        (slow, off)
+    }
+
+    #[test]
+    fn the_slow_pairs_are_judged_by_the_median_cpu_and_glide_pieces_of_the_pairs_with_footing_and_fail_only_past_the_limit() {
+        let (slow, off) = pair_lines(&[(600, 560, 4.0), (900, 560, 2.0), (570, 560, 8.0), (580, 560, 1.0), (560, 590, 300.0), (500, 560, 3.0), (565, 560, 2.0)], &[true; 7]);
+        let (paired, judged) = super::judge_pairs(&slow, &off);
+        assert_eq!(paired.len(), 7);
+        assert_eq!(judged, super::Slow::Judged { cpu: 10.0, glide: 3.0, wall: Some(1070.0), footed: 7 });
+        assert_eq!(judged.held_back(), Some(false), "the wall clock is reported and never judged");
+        let (slow, off) = pair_lines(&[(700, 560, 4.0), (650, 560, 2.0), (690, 560, 8.0), (580, 560, 1.0), (660, 590, 3.0), (500, 560, 3.0), (565, 560, 2.0)], &[true; 7]);
+        assert_eq!(super::judge_pairs(&slow, &off).1.held_back(), Some(true));
+        let (slow, off) = pair_lines(&[(560, 560, 70.0), (560, 560, 90.0), (560, 560, 61.0), (560, 560, 1.0), (560, 560, 80.0), (560, 560, 3.0), (560, 560, 2.0)], &[true; 7]);
+        assert_eq!(super::judge_pairs(&slow, &off).1.held_back(), Some(true));
+        let (slow, off) = pair_lines(&[(621, 560, 61.0), (621, 560, 61.0), (621, 560, 61.0), (620, 560, 60.0), (620, 560, 60.0), (620, 560, 60.0), (620, 560, 60.0)], &[true; 7]);
+        assert_eq!(super::judge_pairs(&slow, &off).1.held_back(), Some(false));
+        let (slow, off) = pair_lines(&[(700, 560, 4.0), (650, 560, 2.0), (690, 560, 8.0), (580, 560, 1.0), (660, 590, 3.0), (500, 560, 3.0), (565, 560, 2.0)], &[true, false, true, false, false, true, true]);
+        let (_, judged) = super::judge_pairs(&slow, &off);
+        assert!(matches!(&judged, super::Slow::Unfooted(why) if why.starts_with("4 of 7 pairs had footing where 5 are needed")), "{judged:?}");
+        assert_eq!(judged.held_back(), None);
+    }
+
+    #[test]
+    fn each_pair_counts_its_first_try_with_footing_or_else_its_last() {
+        let line = |label: &str, index: usize, skip: &str, began: f64, writers: u32| drag_line(label, skip, began, &format!("look {began}, state 1, set 0"), (40, 60), (writers, 0), false).replacen(" 1: ", &format!(" {index}: "), 1);
+        let text = [
+            line("try 1 slow", 1, "helper cold", 50.0, 1),
+            line("try 1 off", 1, "setting off", 20.0, 0),
+            "  - pair 1 try 1 had no footing, so it is dragged again".to_string(),
+            line("try 2 slow", 1, "helper cold", 45.0, 0),
+            line("try 2 off", 1, "setting off", 25.0, 0),
+            line("try 1 slow", 2, "helper cold", 30.0, 0),
+            line("try 1 off", 2, "setting off", 31.0, 1),
+            line("try 2 slow", 2, "helper cold", 32.0, 0),
+            line("try 2 off", 2, "setting off", 33.0, 1),
+            line("try 1 slow", 3, "helper cold", 30.0, 0),
+            line("try 1 off", 3, "setting off", 28.0, 0),
+        ]
+        .join("\n");
+        let (slow, off) = super::chosen_pairs(&text, 3);
+        assert_eq!((slow.len(), off.len()), (3, 3));
+        let walls: Vec<Option<f64>> = slow.iter().zip(&off).map(|(slow, off)| super::pair_of(&super::drag_of(slow), &super::drag_of(off)).wall).collect();
+        assert_eq!(walls, vec![Some(20.0), Some(-1.0), Some(2.0)]);
+        assert!(super::pair_of(&super::drag_of(&slow[1]), &super::drag_of(&off[1])).footing.is_some());
+        assert_eq!(super::chosen_pairs(&text, 1).0.len(), 3);
+        assert_eq!(super::drag_of(&super::chosen_pairs(&text, 1).0[0]).began, Some(50.0));
     }
 
     #[test]
@@ -3737,7 +3874,7 @@ mod probe {
         let home = p.home.clone();
         let _ = wait_until(Duration::from_secs(5), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" tick ")));
         std::thread::sleep(Duration::from_millis(600));
-        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(if line.contains(" tick ") { 260 } else { 180 }).collect()).collect();
+        let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).map(|line| line.chars().take(if line.contains(" tick ") { 2000 } else { 180 }).collect()).collect();
         (changed, log)
     }
 
@@ -3833,7 +3970,7 @@ mod probe {
                 count = now;
                 since = Instant::now();
             }
-            let idle = since.elapsed() >= Duration::from_millis(1000) && scooch_pid(p).is_some_and(|pid| writer_threads(pid).is_empty()) && helpers_now().len() == helpers;
+            let idle = since.elapsed() >= Duration::from_millis(1500) && scooch_pid(p).is_some_and(|pid| writer_threads(pid).is_empty()) && helpers_now().len() == helpers;
             if idle || started.elapsed() >= limit {
                 return (started.elapsed().as_millis(), idle);
             }
@@ -3945,68 +4082,14 @@ mod probe {
         Ok(true)
     }
 
-    const SLOW_LIMIT: f64 = 60.0;
     const SLOW_HELLO_MS: u64 = 10000;
-    const PAIRS: usize = 5;
-
-    struct Slowness {
-        direct: Vec<Option<f64>>,
-        glided: usize,
-        pairs: Vec<f64>,
-        clock: Option<f64>,
-        bundles: Vec<Option<f64>>,
-    }
-
-    impl Slowness {
-        fn largest(&self) -> Option<f64> {
-            self.direct.iter().flatten().copied().reduce(f64::max)
-        }
-
-        fn direct_ok(&self) -> bool {
-            self.direct.len() == PAIRS && self.glided == 0 && self.direct.iter().all(|value| value.is_some_and(|value| value <= SLOW_LIMIT))
-        }
-
-        fn clock_ok(&self) -> bool {
-            self.pairs.len() == PAIRS && self.clock.is_some_and(|clock| clock <= SLOW_LIMIT)
-        }
-
-        fn said(&self) -> String {
-            let round = |values: &[Option<f64>]| values.iter().map(|value| value.map_or("none".to_string(), |value| format!("{value:.0}"))).collect::<Vec<_>>().join(", ");
-            let pairs: Vec<Option<f64>> = self.pairs.iter().map(|pair| Some(*pair)).collect();
-            format!(
-                "by the daemon's own time waited plus the early and open laps plus the launch per slow drag [{}] ms, largest {} ms, glided {}, by the daemon clock each slow drag against its off drag [{}] ms, mean without the largest and the smallest {} ms, limit {SLOW_LIMIT} ms, glide tables built before the plain swap per slow drag [{}] ms",
-                round(&self.direct),
-                rounded(self.largest()),
-                self.glided,
-                round(&pairs),
-                rounded(self.clock),
-                round(&self.bundles)
-            )
-        }
-
-        fn verdicts(&self, p: &mut Probe) {
-            if !self.direct_ok() {
-                p.fail("a slow helper held the plain swap back by more than 60 ms of the daemon's own time");
-            }
-            if !self.clock_ok() {
-                p.fail("a slow helper held the plain swap back by more than 60 ms by the daemon clock");
-            }
-            let built = self.bundles.iter().flatten().count();
-            if built > 0 {
-                p.fail(format!("{built} of {} slow drags built glide tables before the plain swap", self.bundles.len()));
-            }
-        }
-    }
+    const TRIES: usize = 3;
 
     fn laps_of(line: &str) -> Option<(f64, Vec<(String, f64)>)> {
         let rest = line.split("began Some(").nth(1)?;
         let began = rest.split(')').next()?.parse::<f64>().ok()?;
         let laps = rest.split(" ms after the drop, took ").nth(1)?.split(", sessions hold").next()?;
         Some((began, laps.split(", ").skip(1).filter_map(|lap| lap.rsplit_once(' ').and_then(|(name, value)| Some((name.to_string(), value.parse::<f64>().ok()?)))).collect()))
-    }
-
-    fn daemon_clock(line: &str) -> Option<f64> {
-        laps_of(line).map(|(began, laps)| began + laps.iter().filter(|(name, _)| name != "later" && !crate::GATHER.contains(&name.as_str())).map(|(_, value)| value).sum::<f64>())
     }
 
     fn own_time(line: &str) -> Option<f64> {
@@ -4016,14 +4099,54 @@ mod probe {
         Some(number_after(line, "waited ").unwrap_or(0.0) + lap("early") + lap("open") + launched.unwrap_or(0.0))
     }
 
-    fn judge_slow(slow: &[String], off: &[String]) -> Slowness {
-        let pairs: Vec<f64> = slow.iter().zip(off).filter_map(|(slow, off)| daemon_clock(slow).zip(daemon_clock(off)).map(|(a, b)| a - b)).collect();
-        let mut sorted = pairs.clone();
-        sorted.sort_by(f64::total_cmp);
-        let inner = sorted.get(1..sorted.len().saturating_sub(1)).filter(|inner| !inner.is_empty());
-        let clock = inner.map(|inner| inner.iter().sum::<f64>() / inner.len() as f64);
-        let bundles = slow.iter().map(|line| laps_of(line).and_then(|(_, laps)| laps.iter().find(|(name, _)| name == "bundle").map(|(_, value)| *value))).collect();
-        Slowness { direct: slow.iter().map(|line| own_time(line)).collect(), glided: slow.iter().filter(|line| line.contains(", glided true,")).count(), pairs, clock, bundles }
+    fn slow_said(slow: &[String], off: &[String]) -> (String, Vec<String>) {
+        let (paired, judged) = crate::judge_pairs(slow, off);
+        let footed: Vec<&String> = slow.iter().zip(&paired).filter(|(_, pair)| pair.footing.is_none()).map(|(line, _)| line).collect();
+        let direct: Vec<Option<f64>> = footed.iter().map(|line| own_time(line)).collect();
+        let bundles = footed.iter().filter(|line| laps_of(line).is_some_and(|(_, laps)| laps.iter().any(|(name, _)| name == "bundle"))).count();
+        let round_of = |values: &[Option<f64>]| values.iter().map(|value| value.map_or("none".to_string(), |value| format!("{value:.0}"))).collect::<Vec<_>>().join(", ");
+        let mut failures = Vec::new();
+        let said = match &judged {
+            crate::Slow::Judged { cpu, glide, wall, footed: count } => {
+                if *cpu > crate::SLOW_LIMIT {
+                    failures.push(format!("a slow helper made the daemon spend {cpu:.0} ms more CPU from the wake to the plain swap than the glide off, the median of {count} quiet pairs dragged the same way, more than {} ms", crate::SLOW_LIMIT));
+                }
+                if *glide > crate::SLOW_LIMIT {
+                    failures.push(format!("a slow helper held the plain swap back by {glide:.0} ms of glide pieces against the glide off, the median of {count} quiet pairs dragged the same way, more than {} ms", crate::SLOW_LIMIT));
+                }
+                if direct.iter().any(|value| value.is_none_or(|value| value > crate::SLOW_LIMIT)) {
+                    failures.push("a slow helper held the plain swap back by more than 60 ms of the daemon's own time".to_string());
+                }
+                if bundles > 0 {
+                    failures.push(format!("{bundles} of {} slow drags built glide tables before the plain swap", footed.len()));
+                }
+                format!(
+                    "the slow pairs have footing in {count} of {}, each slow drag against its off drag by daemon CPU from the wake to the set [{}] ms, median {cpu:.0} ms, by the glide pieces before the set [{}] ms, median {glide:.0} ms, limit {} ms for both, by the wall clock from the drop to the set [{}] ms, median {} ms, not judged, by the daemon's own time waited plus the early and open laps plus the launch per slow drag with footing [{}] ms, glide tables built before the plain swap by {bundles} of them",
+                    paired.len(),
+                    round_of(&paired.iter().map(|pair| pair.cpu).collect::<Vec<_>>()),
+                    round_of(&paired.iter().map(|pair| pair.glide).collect::<Vec<_>>()),
+                    crate::SLOW_LIMIT,
+                    round_of(&paired.iter().map(|pair| pair.wall).collect::<Vec<_>>()),
+                    rounded(*wall),
+                    round_of(&direct)
+                )
+            }
+            crate::Slow::Unfooted(why) => format!("the slow pairs have no footing, {why}"),
+        };
+        (said, failures)
+    }
+
+    fn slow_rounds(p: &mut Probe, screen: &Screen, name: &str, places: ((f32, f32), (f32, f32))) {
+        let (slow, off) = quiet_round(p, screen, name, places);
+        quiet_report(p, &slow, &off);
+        let (said, failures) = slow_said(&slow, &off);
+        p.line(format!("- {said}"));
+        if crate::judge_pairs(&slow, &off).1.held_back().is_none() {
+            p.fail(format!("the slow helper pairs had no footing after {TRIES} tries of each pair, so the plain swap was never judged, which is the footing failing and not a pass"));
+        }
+        for failure in failures {
+            p.fail(failure);
+        }
     }
 
     fn slow_check(paths: Vec<String>) -> ExitCode {
@@ -4034,12 +4157,14 @@ mod probe {
                 failed = true;
                 continue;
             };
-            let pick = |arm: &str| text.lines().filter(|line| line.split(&format!("- {arm} ")).nth(1).is_some_and(|rest| rest.split(':').next().is_some_and(|index| index.parse::<u32>().is_ok()))).map(str::to_string).collect::<Vec<String>>();
-            let judged = judge_slow(&pick("slow"), &pick("off"));
             println!("{path}");
-            println!("  {}", judged.said());
-            println!("  direct {}, daemon clock {}", if judged.direct_ok() { "passes" } else { "fails" }, if judged.clock_ok() { "passes" } else { "fails" });
-            failed |= !judged.direct_ok() || !judged.clock_ok();
+            let (slow, off) = crate::chosen_pairs(&text, TRIES);
+            let (said, failures) = slow_said(&slow, &off);
+            println!("  {said}");
+            for failure in &failures {
+                println!("  fails, {failure}");
+            }
+            failed |= !failures.is_empty() || crate::judge_pairs(&slow, &off).1.held_back().is_none();
         }
         if failed {
             ExitCode::FAILURE
@@ -4051,22 +4176,30 @@ mod probe {
     const QUIET_PAIRS: usize = 7;
 
     fn quiet_round(p: &mut Probe, screen: &Screen, name: &str, places: ((f32, f32), (f32, f32))) -> (Vec<String>, Vec<String>) {
-        p.line(format!("- then {QUIET_PAIRS} pairs where each timed drag goes from aside onto the subject after an untimed Apple Event move back aside, and waits for a quiet daemon first, its log quiet for 1 s, no thread of it writing a file and only the helper the drag expects alive, at most 4 s"));
+        p.line(format!("- {QUIET_PAIRS} pairs where each timed drag goes from aside onto the subject after an untimed Apple Event move back aside, and waits for a quiet daemon first, its log quiet for 1.5 s, no thread of it writing a file and only the helper the drag expects alive, at most 4 s, and a pair without footing is dragged again up to {TRIES} tries"));
         let mut last = Instant::now();
         let (mut slow, mut off) = (Vec::new(), Vec::new());
         for index in 0..QUIET_PAIRS {
-            let _ = place(p, name, places.1);
-            poke(p);
-            let (waited, idle) = quiet_daemon(p, 1, Duration::from_secs(4));
-            slow.push(cold_noted(p, screen, name, places, ("quiet slow", index), &mut last, &format!("waited {waited} ms for a quiet daemon, quiet {idle}, ")).line);
-            let _ = p.scooch(&["glide"], LIMIT);
-            let _ = place(p, name, places.1);
-            poke(p);
-            let (waited, idle) = quiet_daemon(p, 0, Duration::from_secs(4));
-            off.push(cold_noted(p, screen, name, places, ("quiet off", index), &mut last, &format!("waited {waited} ms for a quiet daemon, quiet {idle}, ")).line);
-            let _ = p.scooch(&["glide"], LIMIT);
+            for attempt in 1..=TRIES {
+                let _ = place(p, name, places.1);
+                poke(p);
+                let (waited, idle) = quiet_daemon(p, 1, Duration::from_secs(4));
+                let slow_line = cold_noted(p, screen, name, places, (&format!("try {attempt} slow"), index), &mut last, &format!("the daemon quiet after {waited} ms {idle}, ")).line;
+                let _ = p.scooch(&["glide"], LIMIT);
+                let _ = place(p, name, places.1);
+                poke(p);
+                let (waited, idle) = quiet_daemon(p, 0, Duration::from_secs(4));
+                let off_line = cold_noted(p, screen, name, places, (&format!("try {attempt} off"), index), &mut last, &format!("the daemon quiet after {waited} ms {idle}, ")).line;
+                let _ = p.scooch(&["glide"], LIMIT);
+                let footing = crate::pair_of(&crate::drag_of(&slow_line), &crate::drag_of(&off_line)).footing;
+                if footing.is_none() || attempt == TRIES {
+                    slow.push(slow_line);
+                    off.push(off_line);
+                    break;
+                }
+                p.line(format!("  - pair {} try {attempt} had no footing, {}, so it is dragged again", index + 1, footing.unwrap_or_default()));
+            }
         }
-        p.line(format!("- the glide setting after the quiet pairs is {}", state(p)["glide"]));
         (slow, off)
     }
 
@@ -4104,12 +4237,6 @@ mod probe {
             format!("{name} {} against {}", rounded(median_of(&slow)), rounded(median_of(&off)))
         }).collect();
         p.line(format!("- quiet pairs, median of each piece slow against off in ms, {}", pieces.join(", ")));
-    }
-
-    fn middle(values: &[u128]) -> Option<u128> {
-        let mut sorted = values.to_vec();
-        sorted.sort_unstable();
-        sorted.get(sorted.len() / 2).copied()
     }
 
     fn cold_drags_check(p: &mut Probe) -> Result<()> {
@@ -4171,28 +4298,12 @@ mod probe {
         back_to_back(p, &screen, name, places)?;
         system_pick(p, &screen);
         if restart_daemon(p, true)? {
-            p.line(format!("- the daemon restarted with {}={SLOW_HELLO_MS}, so each helper it starts says hello {} s late and has not parked, then {PAIRS} pairs, each a drag right after the helper started followed by the same drag with the glide off", scooch::live::SLOW_HELLO, SLOW_HELLO_MS / 1000));
+            p.line(format!("- the daemon restarted with {}={SLOW_HELLO_MS}, so each helper it starts says hello {} s late and has not parked, then {QUIET_PAIRS} pairs, each a drag soon after a helper started followed by the same drag with the glide off", scooch::live::SLOW_HELLO, SLOW_HELLO_MS / 1000));
             let home = p.home.clone();
             let _ = wait_until(Duration::from_secs(10), || fs::read_to_string(home.join("watch.log")).unwrap_or_default().lines().rev().take(40).any(|line| line.contains(" tick ")));
-            let mut last = Instant::now();
-            let (mut slow, mut off) = (Vec::new(), Vec::new());
-            for index in 0..PAIRS {
-                slow.push(cold_one(p, &screen, name, places, ("slow", index), &mut last));
-                let _ = p.scooch(&["glide"], LIMIT);
-                off.push(cold_one(p, &screen, name, places, ("off", index), &mut last));
-                let _ = p.scooch(&["glide"], LIMIT);
-                std::thread::sleep(Duration::from_millis(600));
-            }
+            slow_rounds(p, &screen, name, places);
             p.line(format!("- the glide setting after the pairs is {}", state(p)["glide"]));
-            let (quiet_slow, quiet_off) = quiet_round(p, &screen, name, places);
             restart_daemon(p, false)?;
-            let sets = |round: &[Cold]| round.iter().filter_map(|cold| cold.set).collect::<Vec<u128>>();
-            let (slow_set, off_set) = (middle(&sets(&slow)), middle(&sets(&off)));
-            let lines = |round: &[Cold]| round.iter().map(|cold| cold.line.clone()).collect::<Vec<String>>();
-            let judged = judge_slow(&lines(&slow), &lines(&off));
-            p.line(format!("- drags before the helper parked glided {} of {PAIRS}, skip reasons {:?}, drop to set median {slow_set:?} ms against {off_set:?} ms with the glide off, {}", slow.iter().filter(|cold| cold.glided).count(), slow.iter().filter_map(|cold| cold.skip.clone()).collect::<Vec<_>>(), judged.said()));
-            judged.verdicts(p);
-            quiet_report(p, &quiet_slow, &quiet_off);
         } else {
             p.line("- the daemon here is the login item, so the slow helper hint could not be set and the drags before a park were skipped".to_string());
         }
