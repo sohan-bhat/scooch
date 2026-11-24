@@ -46,7 +46,7 @@ irm https://sohanbhat.me/scooch/install.ps1 | iex
 
 The app window has the same switches, named Slide, Clouds, Flip and Quick drop. Slide shows on macOS and Windows, and Quick drop on Xfce and on Plasma 5 under X11. A picture pressed or picked in the window while Scooch is off is only selected, and turning Scooch on then uses it.
 
-While Scooch is on, its icon sits in the menu bar, the notification area or the tray, also after a login, and closing the window leaves it there. Its menu opens the window, turns Scooch off and on, or quits, which puts the wallpaper back.
+While Scooch is on, the Scooch icon sits in the menu bar, the notification area or the tray, also after a login, and closing the window leaves the icon there. The icon's menu opens the window, turns Scooch off and on, or quits Scooch, which puts the wallpaper back.
 
 ## How it works
 
