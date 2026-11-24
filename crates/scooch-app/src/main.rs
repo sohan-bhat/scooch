@@ -38,6 +38,7 @@ struct Kept(Mutex<Option<watch::Watch>>);
 
 struct Icon(Mutex<Option<lock::Held>>);
 
+#[cfg(any(target_os = "macos", test))]
 const IDENTIFIER: &str = "me.sohanbhat.scooch.window";
 
 fn let_go<R: Runtime>(app: &AppHandle<R>) {

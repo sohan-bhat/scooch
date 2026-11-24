@@ -83,6 +83,7 @@ impl Gate {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub enum Change {
     Same,
     Moved,
