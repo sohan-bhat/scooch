@@ -105,6 +105,18 @@ impl Platform for Host {
         std::mem::take(&mut self.revealed)
     }
 
+    fn hide(&mut self, layer: &layer::Layer) {
+        objc2::rc::autoreleasepool(|_| layer.hide());
+    }
+
+    fn room(&mut self, screen: &Screen, layer: &layer::Layer) -> Result<bool> {
+        objc2::rc::autoreleasepool(|_| layer::room(screen, layer))
+    }
+
+    fn screen_gpu(&self, layer: &layer::Layer) -> Option<String> {
+        objc2::rc::autoreleasepool(|_| layer::display_gpu(layer.display))
+    }
+
     fn committer(&self) -> Option<Commit> {
         (self.reveal == Reveal::Transaction).then(|| Box::new(layer::commit) as Commit)
     }
@@ -131,6 +143,10 @@ impl Platform for Host {
 
     fn prepare(&mut self) {
         self.busy = Some(super::busy());
+    }
+
+    fn rest(&mut self) {
+        self.busy = None;
     }
 
     fn decode(path: &Path) -> Result<RgbImage> {

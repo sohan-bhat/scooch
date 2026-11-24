@@ -54,7 +54,7 @@ mod table;
 mod warp;
 
 pub use bundle::{Bundle, Constants, RAMP};
-pub use pack::{half_bits, Canvas, TablesError, TABLES_VERSION};
+pub use pack::{fingerprint, half_bits, Canvas, TablesError, TABLES_VERSION};
 pub use session::{Map, Session};
 #[doc(hidden)]
 pub use puffs::SITES_MOST;
@@ -289,6 +289,19 @@ pub fn fill(image_width: u32, image_height: u32, scene: &Scene) -> Placement {
 
 pub fn hidden_share(analysis: &Analysis, scene: &Scene, placement: &Placement) -> f32 {
     solver::hidden_share(analysis, scene, placement)
+}
+
+#[doc(hidden)]
+pub use solver::{FLIP_FLOOR, FLIP_SHARE};
+
+#[doc(hidden)]
+pub fn flip_sides(analysis: &Analysis, scene: &Scene, options: &Options, previous: Option<&Placement>) -> [Option<(Placement, f64)>; 2] {
+    solver::flip_sides(analysis, scene, options, previous)
+}
+
+#[doc(hidden)]
+pub fn placement_cost(analysis: &Analysis, scene: &Scene, options: &Options, placement: &Placement) -> f64 {
+    solver::placement_cost(analysis, scene, options, placement)
 }
 
 pub fn saliency_image(analysis: &Analysis) -> GrayImage {

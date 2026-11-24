@@ -2,7 +2,7 @@
 
 mod glide;
 
-pub use glide::{choose, half, heavy, levels, rgba, scaled_size, step, Glide, Look, Picture, Screen, Still, OUTPUT, SCALES};
+pub use glide::{choose, half, heavy, levels, rgba, scaled_size, step, Glide, Look, Picture, Screen, Side, Still, OUTPUT, SCALES};
 use std::num::NonZeroIsize;
 use std::sync::{Arc, Mutex};
 
@@ -79,6 +79,10 @@ fn composition(target: &Target) -> bool {
 
 impl Gpu {
     pub fn new(composition: bool) -> Result<Self, String> {
+        Self::new_with(composition, false)
+    }
+
+    pub fn new_with(composition: bool, high: bool) -> Result<Self, String> {
         let started = std::time::Instant::now();
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
         descriptor.backends = if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::METAL };
@@ -87,7 +91,7 @@ impl Gpu {
             descriptor.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
         }
         let instance = wgpu::Instance::new(descriptor);
-        let mut options = wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::LowPower, ..Default::default() };
+        let mut options = wgpu::RequestAdapterOptions { power_preference: if high { wgpu::PowerPreference::HighPerformance } else { wgpu::PowerPreference::LowPower }, ..Default::default() };
         let adapter = match pollster::block_on(instance.request_adapter(&options)) {
             Ok(adapter) => adapter,
             Err(_) => {

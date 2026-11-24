@@ -10,25 +10,16 @@ pub const HEAD: usize = 36;
 const TABLES_PRINT: usize = 40;
 
 pub fn fingerprint(width: u32, height: u32, bytes: &[u8]) -> u64 {
-    let mix = |mut h: u64| {
-        h ^= h >> 33;
-        h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
-        h ^= h >> 33;
-        h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-        h ^ (h >> 33)
-    };
-    let mut h = mix((((width as u64) << 32) | height as u64) ^ bytes.len() as u64);
-    let (words, rest) = bytes.as_chunks::<8>();
-    for word in words {
-        h = mix(h ^ u64::from_le_bytes(*word)).wrapping_add(0x9e37_79b9_7f4a_7c15);
-    }
-    let mut tail = [0u8; 8];
-    tail[..rest.len()].copy_from_slice(rest);
-    mix(h ^ u64::from_le_bytes(tail) ^ rest.len() as u64)
+    scooch_core::fingerprint(width, height, bytes)
 }
 
 pub fn tables_print(tables: &[u8]) -> Option<u64> {
     tables.get(TABLES_PRINT..TABLES_PRINT + 8).and_then(|bytes| bytes.try_into().ok()).map(u64::from_le_bytes)
+}
+
+pub fn tables_canvas(tables: &[u8]) -> Option<(u32, u32, u64)> {
+    let word = |at: usize| tables.get(at..at + 4).and_then(|bytes| bytes.try_into().ok()).map(u32::from_le_bytes);
+    Some((word(16)?, word(20)?, tables_print(tables)?))
 }
 
 pub fn count(width: u32, height: u32) -> u32 {
@@ -85,6 +76,10 @@ impl Cached {
                 level
             })
             .collect()
+    }
+
+    pub fn print(&self) -> u64 {
+        self.print
     }
 
     pub fn canvas(&self) -> Result<Canvas> {

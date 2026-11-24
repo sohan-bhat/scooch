@@ -92,6 +92,13 @@ extern "C" {
     fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> Ref;
     fn CGWindowLevelForKey(key: i32) -> i32;
     fn CGMainDisplayID() -> u32;
+    fn CGDirectDisplayCopyCurrentMetalDevice(display: u32) -> *mut AnyObject;
+}
+
+pub fn display_gpu(display: u32) -> Option<String> {
+    let device = unsafe { Retained::from_raw(CGDirectDisplayCopyCurrentMetalDevice(display)) }?;
+    let name: Option<Retained<objc2_foundation::NSString>> = unsafe { msg_send![&*device, name] };
+    name.map(|name| name.to_string())
 }
 
 pub fn main_display() -> u32 {
@@ -366,6 +373,15 @@ impl Layer {
         CATransaction::flush();
     }
 
+    pub fn hide(&self) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.metal.setHidden(true);
+        CATransaction::commit();
+        CATransaction::flush();
+        self.window.orderOut(None);
+    }
+
     pub fn watched(&self) -> bool {
         self.metal.delegate().is_some_and(|delegate| AsRef::<AnyObject>::as_ref(&*delegate).class().name() == c"ScoochLayerWatch")
     }
@@ -456,6 +472,17 @@ pub enum Making {
     Start,
     Screen(Retained<NSScreen>, u32),
     Level(Retained<NSScreen>, u32, i64),
+}
+
+pub fn room(screen: &Screen, layer: &Layer) -> Result<bool> {
+    let (desktop, _) = levels();
+    let seen = listing();
+    let ours = std::process::id() as i64;
+    if covered(&seen, &screen.frame, ours) {
+        anyhow::bail!(COVERED);
+    }
+    let level = choose(&seen, &screen.frame, desktop, ours).context(NO_ROOM)?;
+    Ok(level == layer.level)
 }
 
 pub fn step(marker: MainThreadMarker, screen: &Screen, making: Making) -> Result<Build<Making, Layer>> {
