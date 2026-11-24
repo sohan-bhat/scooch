@@ -67,7 +67,7 @@ fn none_glided(tries: &[Try]) -> Option<String> {
 const GATHER: [&str; 3] = ["wake", "prime", "look"];
 
 #[cfg(any(target_os = "macos", test))]
-const WOKE_SLACK: f64 = 10.0;
+const WOKE_SLACK: f64 = 500.0;
 
 #[cfg(any(target_os = "macos", test))]
 const GLIDE_PIECES: [&str; 9] = ["prime", "early", "cold", "map", "read", "ask", "bundle", "open", "clear"];
@@ -143,7 +143,7 @@ struct Paired {
 #[cfg(any(target_os = "macos", test))]
 fn pair_of(slow: &Drag, off: &Drag) -> Paired {
     let footing = if !slow.quiet() || !off.quiet() {
-        Some(format!("the daemon woke before its drop or had a writer beside it, slow woke {:?} writers {:?}, off woke {:?} writers {:?}", slow.woke(), slow.writers, off.woke(), off.writers))
+        Some(format!("the daemon woke more than {WOKE_SLACK} ms before its drop or had a writer beside it, slow woke {:?} writers {:?}, off woke {:?} writers {:?}", slow.woke(), slow.writers, off.woke(), off.writers))
     } else if slow.skip.as_deref() != Some("helper cold") || slow.parked || slow.glided {
         Some(format!("the slow drag did not meet a cold helper, skip {:?} parked {}", slow.skip, slow.parked))
     } else if off.skip.as_deref() != Some("setting off") {
@@ -310,9 +310,12 @@ mod tests {
         assert!(super::pair_of(&slow, &writing).footing.is_some());
         let early = super::drag_of(&drag_line("quiet off", "setting off", -700.0, "snapshot 730, set 8", (35, 50), (0, 0), false));
         assert!(super::pair_of(&slow, &early).footing.is_some());
-        let settled = super::drag_of(&drag_line("quiet off", "setting off", 269.0, "wake 0, prime 2, look 289, snapshot 27, set 8", (35, 50), (0, 0), false));
-        assert_eq!(settled.woke(), Some(-22.0));
-        assert!(super::pair_of(&slow, &settled).footing.is_some());
+        let settled = super::drag_of(&drag_line("quiet off", "setting off", -61.0, "wake 0, prime 0, look 293, snapshot 79, set 8", (35, 50), (0, 0), false));
+        assert_eq!(settled.woke(), Some(-354.0));
+        assert!(super::pair_of(&slow, &settled).footing.is_none(), "a Desktop wake inside the drag leaves the cpu from the wake to the set fair");
+        let woken = super::drag_of(&drag_line("quiet off", "setting off", 100.0, "wake 0, prime 0, look 650, set 8", (35, 50), (0, 0), false));
+        assert_eq!(woken.woke(), Some(-550.0));
+        assert!(super::pair_of(&slow, &woken).footing.is_some());
         let parked = super::drag_of(&drag_line("quiet slow", "helper cold", 30.0, "look 28, set 8", (35, 50), (0, 0), true));
         assert!(super::pair_of(&parked, &off).footing.is_some());
         assert_eq!(super::median(&[5.0, 1.0, 3.0]), Some(3.0));
