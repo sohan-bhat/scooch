@@ -4633,6 +4633,11 @@ pub mod tests {
         let set = Spent { thread: Duration::from_millis(25), process: Duration::from_millis(70), writers: 0 };
         assert_eq!(spent_words(Some(woke), Some(set)), ", cpu to the set 15 ms on the tick thread and 40 ms in the daemon, writers 1 at the wake and 0 at the set");
         assert_eq!(spent_words(Some(woke), None), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_cpu_of_a_tick_counts_its_own_thread_and_not_its_sleep() {
         let (before, began) = (spent(), Instant::now());
         std::thread::sleep(Duration::from_millis(60));
         let busy = Instant::now();
