@@ -1,6 +1,7 @@
-use crate::state::{self, State};
+use crate::state::{self, State, Store};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const BACKGROUND: &str = "--background";
 
@@ -60,7 +61,19 @@ pub fn found(program: &Path, origin: Option<&Path>, layout: Layout) -> Option<Pa
     places(program, origin, layout).into_iter().find(|place| place.is_file())
 }
 
-pub fn show(state: &State) {
+static STARTED: AtomicBool = AtomicBool::new(false);
+
+fn once(flag: &AtomicBool) -> bool {
+    !flag.swap(true, Ordering::SeqCst)
+}
+
+pub fn after_first_tick(store: &Store) {
+    if once(&STARTED) {
+        show(&store.load(), &store.log_file());
+    }
+}
+
+pub fn show(state: &State, log: &Path) {
     if !wanted(state, std::env::var_os("SCOOCH_HOME").is_some_and(|value| !value.is_empty())) {
         return;
     }
@@ -70,9 +83,37 @@ pub fn show(state: &State) {
     let Some(app) = found(&program, state.origin.as_deref(), layout()) else { return };
     let started = launch(&app);
     let took = began.elapsed().as_secs_f64() * 1000.0;
-    match started {
-        Ok(()) => eprintln!("{} icon started {} in {took:.1} ms", crate::daemon::stamp(), app.display()),
-        Err(error) => eprintln!("{} icon not started from {} in {took:.1} ms, {error}", crate::daemon::stamp(), app.display()),
+    let line = match started {
+        Ok(()) => format!("{} icon started {} in {took:.1} ms", crate::daemon::stamp(), app.display()),
+        Err(error) => format!("{} icon not started from {} in {took:.1} ms, {error}", crate::daemon::stamp(), app.display()),
+    };
+    say(&line, log);
+}
+
+fn say(line: &str, log: &Path) {
+    eprintln!("{line}");
+    #[cfg(target_os = "linux")]
+    if !stderr_is(log) {
+        append(log, line);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = log;
+}
+
+#[cfg(target_os = "linux")]
+fn stderr_is(log: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata("/proc/self/fd/2"), std::fs::metadata(log)) {
+        (Ok(stderr), Ok(file)) => stderr.dev() == file.dev() && stderr.ino() == file.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(any(target_os = "linux", all(unix, test)))]
+fn append(log: &Path, line: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+        let _ = writeln!(file, "{line}");
     }
 }
 
@@ -124,6 +165,24 @@ mod tests {
         state.on = on;
         state.restoring = restoring;
         state
+    }
+
+    #[test]
+    fn the_icon_starts_once_for_the_life_of_the_daemon() {
+        let flag = AtomicBool::new(false);
+        assert!(once(&flag));
+        assert!(!once(&flag));
+        assert!(!once(&flag));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_icon_line_is_added_to_the_end_of_the_log() {
+        let folder = crate::state::scratch("icon-log");
+        let log = folder.join("watch.log");
+        std::fs::write(&log, "1.000 set out\n").unwrap();
+        append(&log, "2.000 icon started /usr/bin/scooch-app in 1.0 ms");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "1.000 set out\n2.000 icon started /usr/bin/scooch-app in 1.0 ms\n");
     }
 
     #[test]
