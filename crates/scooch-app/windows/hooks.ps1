@@ -100,6 +100,12 @@ if (Test-Path $daemon) {
         Stop-Process -Id $off.Id -Force -ErrorAction SilentlyContinue
     }
 }
+function Icons { @(Get-Process -Name scooch-app -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith("$Folder\", [StringComparison]::OrdinalIgnoreCase) }) }
+if ($on) {
+    for ($round = 0; $round -lt 40 -and (Icons).Count -gt 0; $round++) {
+        Start-Sleep -Milliseconds 250
+    }
+}
 $calm = 0
 for ($round = 0; $round -lt 40 -and $calm -lt 3; $round++) {
     $left = @(Get-Process -Name scooch-app, scoochw -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith("$Folder\", [StringComparison]::OrdinalIgnoreCase) })
