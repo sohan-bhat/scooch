@@ -64,12 +64,15 @@ pub fn show(state: &State) {
     if !wanted(state, std::env::var_os("SCOOCH_HOME").is_some_and(|value| !value.is_empty())) {
         return;
     }
+    let began = std::time::Instant::now();
     let Ok(exe) = std::env::current_exe() else { return };
     let program = state::canonical(&exe).unwrap_or(exe);
     let Some(app) = found(&program, state.origin.as_deref(), layout()) else { return };
-    match launch(&app) {
-        Ok(()) => eprintln!("{} icon started {}", crate::daemon::stamp(), app.display()),
-        Err(error) => eprintln!("{} icon not started from {}, {error}", crate::daemon::stamp(), app.display()),
+    let started = launch(&app);
+    let took = began.elapsed().as_secs_f64() * 1000.0;
+    match started {
+        Ok(()) => eprintln!("{} icon started {} in {took:.1} ms", crate::daemon::stamp(), app.display()),
+        Err(error) => eprintln!("{} icon not started from {} in {took:.1} ms, {error}", crate::daemon::stamp(), app.display()),
     }
 }
 
