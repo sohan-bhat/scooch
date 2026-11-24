@@ -137,6 +137,7 @@ struct Paired {
     footing: Option<String>,
     wall: Option<f64>,
     cpu: Option<f64>,
+    daemon: Option<f64>,
     glide: Option<f64>,
 }
 
@@ -152,9 +153,10 @@ fn pair_of(slow: &Drag, off: &Drag) -> Paired {
         None
     };
     let wall = slow.to_set().zip(off.to_set()).map(|(slow, off)| slow - off);
-    let cpu = slow.daemon.zip(off.daemon).map(|(slow, off)| slow - off);
+    let cpu = slow.thread.zip(off.thread).map(|(slow, off)| slow - off);
+    let daemon = slow.daemon.zip(off.daemon).map(|(slow, off)| slow - off);
     let glide = slow.glide().zip(off.glide()).map(|(slow, off)| slow - off);
-    Paired { footing, wall, cpu, glide }
+    Paired { footing, wall, cpu, daemon, glide }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -177,7 +179,7 @@ const FOOTED_PAIRS: usize = 5;
 #[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Debug, PartialEq)]
 enum Slow {
-    Judged { cpu: f64, glide: f64, wall: Option<f64>, footed: usize },
+    Judged { cpu: f64, glide: f64, daemon: Option<f64>, wall: Option<f64>, footed: usize },
     Unfooted(String),
 }
 
@@ -189,8 +191,9 @@ fn judge_pairs(slow: &[String], off: &[String]) -> (Vec<Paired>, Slow) {
     let cpus: Vec<f64> = footed.iter().filter_map(|pair| pair.cpu).collect();
     let glides: Vec<f64> = footed.iter().filter_map(|pair| pair.glide).collect();
     let walls: Vec<f64> = footed.iter().filter_map(|pair| pair.wall).collect();
+    let daemons: Vec<f64> = footed.iter().filter_map(|pair| pair.daemon).collect();
     let judged = match (median(&cpus), median(&glides)) {
-        (Some(cpu), Some(glide)) if footed.len() >= FOOTED_PAIRS => Slow::Judged { cpu, glide, wall: median(&walls), footed: footed.len() },
+        (Some(cpu), Some(glide)) if footed.len() >= FOOTED_PAIRS => Slow::Judged { cpu, glide, daemon: median(&daemons), wall: median(&walls), footed: footed.len() },
         _ => Slow::Unfooted(format!("{} of {} pairs had footing where {FOOTED_PAIRS} are needed, the first miss {}", footed.len(), paired.len(), paired.iter().find_map(|pair| pair.footing.clone()).unwrap_or_else(|| "had no cpu or pieces to the set".to_string()))),
     };
     (paired, judged)
@@ -304,7 +307,7 @@ mod tests {
         let off = super::drag_of(&drag_line("quiet off", "setting off", 28.0, "wake 0, prime 0, look 28, state 1, block 0, snapshot 0, screens 0, wallpaper 1, analysis 1, solve 6, flip 0, decode 1, render 19, encode 6, same 1, write 2, check 3, set 8", (35, 50), (0, 0), false));
         let pair = super::pair_of(&slow, &off);
         assert_eq!(pair.footing, None);
-        assert_eq!(pair.cpu, Some(11.0));
+        assert_eq!((pair.cpu, pair.daemon), (Some(5.0), Some(11.0)));
         assert_eq!(pair.wall, Some(slow.to_set().unwrap() - off.to_set().unwrap()));
         let writing = super::drag_of(&drag_line("quiet off", "setting off", 28.0, "look 28, set 8", (35, 50), (1, 0), false));
         assert!(super::pair_of(&slow, &writing).footing.is_some());
@@ -324,18 +327,18 @@ mod tests {
     }
 
     fn pair_lines(pairs: &[(u32, u32, f64)], footing: &[bool]) -> (Vec<String>, Vec<String>) {
-        let slow = pairs.iter().zip(footing).map(|((cpu, _, glide), footed)| drag_line("try 1 slow", "helper cold", 900.0, &format!("wake 0, prime {glide}, look 30, state 1, render 400, set 2"), (40, *cpu), (if *footed { 0 } else { 1 }, 0), false)).collect();
-        let off = pairs.iter().map(|(_, cpu, _)| drag_line("try 1 off", "setting off", 30.0, "wake 0, prime 0, look 30, state 1, render 200, set 2", (38, *cpu), (0, 0), false)).collect();
+        let slow = pairs.iter().zip(footing).map(|((cpu, _, glide), footed)| drag_line("try 1 slow", "helper cold", 900.0, &format!("wake 0, prime {glide}, look 30, state 1, render 400, set 2"), (*cpu, 700), (if *footed { 0 } else { 1 }, 0), false)).collect();
+        let off = pairs.iter().map(|(_, cpu, _)| drag_line("try 1 off", "setting off", 30.0, "wake 0, prime 0, look 30, state 1, render 200, set 2", (*cpu, 500), (0, 0), false)).collect();
         (slow, off)
     }
 
     #[test]
-    fn the_slow_pairs_are_judged_by_the_median_cpu_and_glide_pieces_of_the_pairs_with_footing_and_fail_only_past_the_limit() {
+    fn the_slow_pairs_are_judged_by_the_median_tick_cpu_and_glide_pieces_of_the_pairs_with_footing_and_fail_only_past_the_limit() {
         let (slow, off) = pair_lines(&[(600, 560, 4.0), (900, 560, 2.0), (570, 560, 8.0), (580, 560, 1.0), (560, 590, 300.0), (500, 560, 3.0), (565, 560, 2.0)], &[true; 7]);
         let (paired, judged) = super::judge_pairs(&slow, &off);
         assert_eq!(paired.len(), 7);
-        assert_eq!(judged, super::Slow::Judged { cpu: 10.0, glide: 3.0, wall: Some(1070.0), footed: 7 });
-        assert_eq!(judged.held_back(), Some(false), "the wall clock is reported and never judged");
+        assert_eq!(judged, super::Slow::Judged { cpu: 10.0, glide: 3.0, daemon: Some(200.0), wall: Some(1070.0), footed: 7 });
+        assert_eq!(judged.held_back(), Some(false), "the whole daemon's cpu and the wall clock are reported and never judged");
         let (slow, off) = pair_lines(&[(700, 560, 4.0), (650, 560, 2.0), (690, 560, 8.0), (580, 560, 1.0), (660, 590, 3.0), (500, 560, 3.0), (565, 560, 2.0)], &[true; 7]);
         assert_eq!(super::judge_pairs(&slow, &off).1.held_back(), Some(true));
         let (slow, off) = pair_lines(&[(560, 560, 70.0), (560, 560, 90.0), (560, 560, 61.0), (560, 560, 1.0), (560, 560, 80.0), (560, 560, 3.0), (560, 560, 2.0)], &[true; 7]);
@@ -4110,9 +4113,9 @@ mod probe {
         let round_of = |values: &[Option<f64>]| values.iter().map(|value| value.map_or("none".to_string(), |value| format!("{value:.0}"))).collect::<Vec<_>>().join(", ");
         let mut failures = Vec::new();
         let said = match &judged {
-            crate::Slow::Judged { cpu, glide, wall, footed: count } => {
+            crate::Slow::Judged { cpu, glide, daemon, wall, footed: count } => {
                 if *cpu > crate::SLOW_LIMIT {
-                    failures.push(format!("a slow helper made the daemon spend {cpu:.0} ms more CPU from the wake to the plain swap than the glide off, the median of {count} quiet pairs dragged the same way, more than {} ms", crate::SLOW_LIMIT));
+                    failures.push(format!("a slow helper made the tick thread spend {cpu:.0} ms more CPU from the wake to the plain swap than the glide off, the median of {count} quiet pairs dragged the same way, more than {} ms", crate::SLOW_LIMIT));
                 }
                 if *glide > crate::SLOW_LIMIT {
                     failures.push(format!("a slow helper held the plain swap back by {glide:.0} ms of glide pieces against the glide off, the median of {count} quiet pairs dragged the same way, more than {} ms", crate::SLOW_LIMIT));
@@ -4124,11 +4127,13 @@ mod probe {
                     failures.push(format!("{bundles} of {} slow drags built glide tables before the plain swap", footed.len()));
                 }
                 format!(
-                    "the slow pairs have footing in {count} of {}, each slow drag against its off drag by daemon CPU from the wake to the set [{}] ms, median {cpu:.0} ms, by the glide pieces before the set [{}] ms, median {glide:.0} ms, limit {} ms for both, by the wall clock from the drop to the set [{}] ms, median {} ms, not judged, by the daemon's own time waited plus the early and open laps plus the launch per slow drag with footing [{}] ms, glide tables built before the plain swap by {bundles} of them",
+                    "the slow pairs have footing in {count} of {}, each slow drag against its off drag by the tick thread's CPU from the wake to the set [{}] ms, median {cpu:.0} ms, by the glide pieces before the set [{}] ms, median {glide:.0} ms, limit {} ms for both, by the whole daemon's CPU [{}] ms, median {} ms, and by the wall clock from the drop to the set [{}] ms, median {} ms, neither judged, by the daemon's own time waited plus the early and open laps plus the launch per slow drag with footing [{}] ms, glide tables built before the plain swap by {bundles} of them",
                     paired.len(),
                     round_of(&paired.iter().map(|pair| pair.cpu).collect::<Vec<_>>()),
                     round_of(&paired.iter().map(|pair| pair.glide).collect::<Vec<_>>()),
                     crate::SLOW_LIMIT,
+                    round_of(&paired.iter().map(|pair| pair.daemon).collect::<Vec<_>>()),
+                    rounded(*daemon),
                     round_of(&paired.iter().map(|pair| pair.wall).collect::<Vec<_>>()),
                     rounded(*wall),
                     round_of(&direct)
