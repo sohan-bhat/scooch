@@ -1648,6 +1648,22 @@ mod probe {
         Some((counters.WorkingSetSize, counters.PrivateUsage))
     }
 
+    fn process_cpu(pid: u32) -> Option<Duration> {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION, false, pid) }.ok()?;
+        let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        let read = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) }.ok();
+        let _ = unsafe { CloseHandle(handle) };
+        read.map(|_| Duration::from_nanos((filetime(kernel) + filetime(user)) * 100))
+    }
+
+    fn process_memory(pid: u32) -> Option<(usize, usize)> {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) }.ok()?;
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+        let read = unsafe { GetProcessMemoryInfo(handle, &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS, counters.cb) }.ok();
+        let _ = unsafe { CloseHandle(handle) };
+        read.map(|_| (counters.WorkingSetSize, counters.PrivateUsage))
+    }
+
     fn threads(process: u32) -> Option<usize> {
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }.ok()?;
         let mut entry = THREADENTRY32 { dwSize: size_of::<THREADENTRY32>() as u32, ..Default::default() };
@@ -2602,7 +2618,7 @@ mod probe {
             }
         }
         let asked = Instant::now();
-        helper.ask_open(id, screen, &run.old.0)?;
+        helper.ask_open(id, screen, &scooch::live::Stills::of(&run.old.0))?;
         let mut opening: Vec<(u128, RgbImage)> = Vec::new();
         let mut shown: Option<(u64, u128)> = None;
         while asked.elapsed() < Duration::from_secs(4) {
@@ -3011,7 +3027,7 @@ mod probe {
         for _ in 0..5 {
             *id += 1;
             let asked = Instant::now();
-            helper.ask_open(*id, screen, &kit.stills[0].0)?;
+            helper.ask_open(*id, screen, &scooch::live::Stills::of(&kit.stills[0].0))?;
             told.push(u128::from(helper.shown(*id, ANSWER)?));
             shown.push(asked.elapsed().as_millis());
             pump(Duration::from_millis(100));
@@ -3025,7 +3041,7 @@ mod probe {
             pump(Duration::from_millis(200));
             *id += 1;
             let asked = Instant::now();
-            helper.ask_open(*id, screen, &kit.other.0)?;
+            helper.ask_open(*id, screen, &scooch::live::Stills::of(&kit.other.0))?;
             let seen = patch_until(kit.spot, &other_patch, true, Duration::from_secs(2));
             helper.shown(*id, ANSWER)?;
             visible.push(seen.map(|d| d.as_millis().min(asked.elapsed().as_millis())));
@@ -3516,7 +3532,7 @@ mod probe {
     }
 
     fn decisions(p: &mut Probe, watched: &Watched) {
-        for line in watched.log.iter().filter(|line| line.contains("glide decision at the set")) {
+        for line in watched.log.iter().filter(|line| line.contains(" glide slid") || (line.contains(" glide skipped, ") && line.contains(" times from the "))) {
             p.line(format!("  - {line}"));
         }
     }
@@ -3593,7 +3609,11 @@ mod probe {
     }
 
     fn commanded(line: &str) -> bool {
-        ["glide open", "glide warm", "glide helper started", "glide closed", "glide settle", "glide ready", "glide glided", "glide interrupted"].iter().any(|marker| line.contains(marker))
+        ["glide open", "glide closed", "glide settle", "glide glided", "glide interrupted", "glide slid"].iter().any(|marker| line.contains(marker))
+    }
+
+    fn primed(line: &str) -> bool {
+        line.contains(" glide primed ")
     }
 
     fn gliding_id(watched: &Watched) -> Option<String> {
@@ -3606,7 +3626,7 @@ mod probe {
 
     fn tables_file(home: &Path, output: &Path) -> Option<Vec<u8>> {
         let name = output.file_name()?.to_string_lossy().into_owned();
-        let found = fs::read_dir(home.join("cache").join("tables")).ok()?.flatten().find(|file| file.file_name().to_string_lossy().starts_with(&format!("{name}.")))?;
+        let found = fs::read_dir(home.join("cache").join("tables")).ok()?.flatten().find(|file| file.file_name().to_string_lossy().starts_with(&format!("{name}.")) && file.file_name().to_string_lossy().ends_with(".tables"))?;
         fs::read(found.path()).ok()
     }
 
@@ -3800,6 +3820,10 @@ mod probe {
     }
 
     fn start_glide_daemon(p: &mut Probe, log: &Path, forced: bool) -> Result<Child> {
+        start_glide_daemon_with(p, log, forced, None)
+    }
+
+    fn start_glide_daemon_with(p: &mut Probe, log: &Path, forced: bool, lag: Option<u64>) -> Result<Child> {
         let twin = twin()?;
         let file = fs::File::create(log)?;
         let mut command = Command::new(&twin);
@@ -3809,7 +3833,100 @@ mod probe {
         } else {
             command.env_remove("SCOOCH_GLIDE_ANYWAY");
         }
+        match lag {
+            Some(ms) => command.env(scooch::live::READ_LAG, ms.to_string()),
+            None => command.env_remove(scooch::live::READ_LAG),
+        };
         Ok(command.spawn()?)
+    }
+
+    const PROBE_LAG_MS: u64 = 8000;
+
+    fn watch_shown() -> (std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<Vec<(f64, usize)>>) {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = stop.clone();
+        let handle = std::thread::spawn(move || {
+            let mut samples = Vec::new();
+            while !stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                samples.push((epoch(), layer::shown_layers()));
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            samples
+        });
+        (stop, handle)
+    }
+
+    fn stop_shown((stop, handle): (std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<Vec<(f64, usize)>>)) -> Vec<(f64, usize)> {
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        handle.join().unwrap_or_default()
+    }
+
+    fn left_at_sets(samples: &[(f64, usize)], log: &[String]) -> Vec<(String, usize)> {
+        let mut found = Vec::new();
+        for (index, line) in log.iter().enumerate() {
+            if !(line.contains(" glide skipped, ") && line.contains(" times from the ")) {
+                continue;
+            }
+            let Some(set) = log[..index].iter().rev().find(|line| line.split_whitespace().nth(1) == Some("set")).and_then(|line| stamp_of(line)) else { continue };
+            let left = samples.iter().filter(|(at, _)| *at >= set && *at <= set + 0.15).map(|(_, shown)| *shown).max().unwrap_or(0);
+            let reason = line.split(" glide skipped, ").nth(1).and_then(|rest| rest.split(',').next()).unwrap_or_default().to_string();
+            found.push((reason, left));
+        }
+        found
+    }
+
+    fn unslid(p: &mut Probe, screen: &Screen, name: &str, folder: bool, (aside, centre): (POINT, POINT)) -> Result<()> {
+        let log = p.out.join("glide-daemon-lag.log");
+        let mut child = start_glide_daemon_with(p, &log, true, Some(PROBE_LAG_MS))?;
+        let parked = wait_until(Duration::from_secs(90), || log_lines(&log).iter().any(|line| line.contains(" glide helper parked on ")));
+        let _ = quiet_log(&log, Duration::from_millis(1500), Duration::from_secs(15));
+        let shown = watch_shown();
+        let first = watch_change(&log, screen, || drag_icon(name, folder, aside), false);
+        let second = watch_change(&log, screen, || drag_icon(name, folder, centre), false);
+        let samples = stop_shown(shown);
+        let all = log_lines(&log);
+        let slid = |watched: &Watched| watched.log.iter().any(|line| line.contains(" glide slid, ") && !line.contains("then the helper"));
+        let primed = second.log.iter().any(|line| line.contains(" glide primed ") && line.ends_with("at the drag start"));
+        let lagged = second.log.iter().any(|line| line.contains(" glide skipped, output not shown"));
+        let checked = left_at_sets(&samples, &all);
+        p.line(format!("- with the daemon told the read lag is {PROBE_LAG_MS} ms, the helper parked {}, two drags back to back: the first slid {}, the second slid {}, the second skipped inside the lag {lagged}, the second primed at its drag start {primed}, visible layer windows within 150 ms of each plain set {checked:?}, over {} samples", parked.is_some(), slid(&first), slid(&second), samples.len()));
+        decisions(p, &second);
+        if parked.is_none() || !slid(&first) || slid(&second) || !lagged || !primed {
+            p.failed.push("the second drag inside the read lag was not a primed move that did not slide, so the window rule was not judged, which is the footing failing and not a pass".into());
+        } else if checked.is_empty() || checked.iter().any(|(_, left)| *left > 0) {
+            p.failed.push("a window primed inside the read lag was still visible when the plain swap set its picture".into());
+        }
+        let desktop = platform::current()?;
+        let source = fs::read_to_string(p.home.join("state.json")).ok().and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok()).and_then(|state| state["screens"].as_object().and_then(|screens| screens.values().next().and_then(|entry| entry["source"].as_str().map(PathBuf::from))));
+        let picked = p.home.join("probe-system-pick.jpg");
+        let made = source.as_deref().and_then(|source| fs::copy(source, &picked).ok());
+        let _ = quiet_log(&log, Duration::from_millis(1500), Duration::from_secs(15));
+        let start = log_lines(&log).len();
+        let shown = watch_shown();
+        let set = made.map(|_| desktop.set_wallpaper(screen, &picked));
+        pump(Duration::from_millis(1500));
+        let dragged = drag_icon(name, folder, aside);
+        pump(Duration::from_secs(3));
+        let samples = stop_shown(shown);
+        let after: Vec<String> = log_lines(&log).into_iter().skip(start).collect();
+        let woke = after.iter().any(|line| line.contains(" tick ") && !line.contains("Unchanged)]"));
+        let own = after.iter().find(|line| line.split_whitespace().nth(1) == Some("set")).and_then(|line| stamp_of(line));
+        let before_own: Vec<&String> = after.iter().filter(|line| own.is_none_or(|own| stamp_of(line).is_some_and(|at| at < own))).collect();
+        let primes = before_own.iter().filter(|line| line.contains(" glide primed ")).count();
+        let most = samples.iter().filter(|(at, _)| own.is_none_or(|own| *at < own)).map(|(_, shown)| *shown).max().unwrap_or(0);
+        p.line(format!("- a picture picked in the system's settings, set {:?}, then a drag {dragged}: the daemon ticked {woke}, primes before Scooch set its own picture {primes}, visible layer windows before that at most {most} over {} samples", set.as_ref().map(|set| set.as_ref().map_err(|error| error.to_string())), samples.len()));
+        if !set.as_ref().is_some_and(Result::is_ok) || !dragged || !woke {
+            p.failed.push("the picture picked in the system's settings and the drag after it did not wake the daemon, so it was not judged, which is the footing failing and not a pass".into());
+        } else if primes > 0 || most > 0 {
+            p.failed.push("a picture picked in the system's settings was covered by a layer with Scooch's old picture".into());
+        }
+        if let Some(source) = source {
+            let _ = desktop.set_wallpaper(screen, &source);
+            pump(Duration::from_secs(3));
+        }
+        let stopped = stop_glide_daemon(&mut child);
+        p.line(format!("- the daemon with the read lag hint stopped {stopped:?}"));
+        Ok(())
     }
 
     fn quiet_log(log: &Path, quiet: Duration, limit: Duration) -> bool {
@@ -3998,6 +4115,13 @@ mod probe {
             stop_glide_daemon(&mut child);
             return Ok(());
         }
+        let parked = wait_until(Duration::from_secs(90), || log_lines(&log).iter().any(|line| line.contains(" glide helper parked on ")));
+        p.line(format!("- the helper parked {:?} ms after the first render, `{}`", parked.map(|time| time.as_millis()), log_lines(&log).iter().find(|line| line.contains(" glide helper parked on ")).cloned().unwrap_or_default()));
+        if parked.is_none() {
+            p.failed.push("the helper never parked within 90 s, so no glide was judged, which is the footing failing and not a pass".into());
+            stop_glide_daemon(&mut child);
+            return Ok(());
+        }
         let (name, folder) = PROBES[0];
         let centre = POINT { x: (screen.frame.x + screen.frame.w * 0.5) as i32, y: (screen.frame.y + screen.frame.h * 0.5) as i32 };
         let aside = POINT { x: (screen.frame.x + screen.frame.w * 0.62) as i32, y: (screen.frame.y + screen.frame.h * 0.32) as i32 };
@@ -4093,8 +4217,8 @@ mod probe {
         pump(Duration::from_millis(400));
         let shut_glided = shut.log.iter().any(|line| gliding(line));
         let hidden = shut.log.iter().any(|line| line.contains("glide skipped, hidden"));
-        let shut_waited = shut.log.iter().find_map(|line| line.split("glide decision at the set").nth(1).and_then(|rest| rest.split("waited ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<u64>().ok()));
-        let at_once = !shut_glided && shut_waited == Some(0);
+        let shut_waited = shut.log.iter().find_map(|line| line.split(" glide skipped, ").nth(1).and_then(|rest| rest.split("waited ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<u64>().ok()));
+        let at_once = !shut_glided && shut_waited.is_none_or(|waited| waited <= 20);
         p.line(format!("- the same move while a window covers the whole desktop, covered seen {covered_desktop}: new wallpaper {}, glided {shut_glided}, logged skipped hidden {hidden}, tick `{}`, log {:?}", shut.new != shut.old, tick_of(&shut), shut.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         p.line(format!("  - the decision waited {shut_waited:?} ms, a plain swap at once {at_once}"));
         if shut.new == shut.old || shut_glided || !(hidden || at_once) {
@@ -4158,45 +4282,29 @@ mod probe {
         let wakes = woken.iter().filter(|line| line.contains(" wake ")).count();
         let ticks = woken.iter().filter(|line| line.contains(" tick ")).count();
         let sent: Vec<String> = woken.iter().filter(|line| commanded(line)).map(|line| line.chars().take(160).collect()).collect();
-        p.line(format!("- thirty wakes with nothing moved over {} s after the last drag: wakes logged {wakes}, ticks {ticks}, helper commands {} {sent:?}", last.elapsed().as_secs(), sent.len()));
-        if !sent.is_empty() {
-            p.failed.push("a wake with nothing moved sent the helper a command".into());
+        let primes = woken.iter().filter(|line| primed(line)).count();
+        p.line(format!("- thirty wakes with nothing moved over {} s after the last drag: wakes logged {wakes}, ticks {ticks}, primes {primes}, helper commands past a prime {} {sent:?}", last.elapsed().as_secs(), sent.len()));
+        if !sent.is_empty() || primes > 2 {
+            p.failed.push("a wake with nothing moved opened a layer, or bare wakes primed more often than the rule allows".into());
         }
-        let gone = wait_until(Duration::from_secs(40).saturating_sub(last.elapsed()), || helper_children(daemon).is_empty());
+        let before = helper_children(daemon);
         pump(Duration::from_secs(35).saturating_sub(last.elapsed()));
-        let still = helper_children(daemon);
-        let checked = epoch();
-        let launch = log_lines(&log).into_iter().skip(before_wakes).rev().find(|line| line.contains("glide early launch") && stamp_of(line).is_some_and(|at| checked - at < 2.0));
-        let gone_soon = !still.is_empty() && launch.is_some() && wait_until(Duration::from_secs(3), || helper_children(daemon).is_empty()).is_some();
-        let launched_at = launch.as_deref().and_then(stamp_of);
-        let after: Vec<String> = log_lines(&log).into_iter().skip(before_wakes).filter(|line| launched_at.is_some_and(|at| stamp_of(line).is_some_and(|stamp| stamp >= at))).collect();
-        let quit = after.iter().find(|line| line.contains("glide early helper quit")).cloned();
-        let lived = quit.as_deref().and_then(|line| line.split("it lived ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<f64>().ok());
-        let worked = after.iter().any(|line| commanded(line));
-        let early = gone_soon && lived.is_some_and(|lived| lived <= 2000.0) && !worked;
+        let parked = helper_children(daemon);
+        p.line(format!("- 35 s after the last drag the parked helper {parked:?}, before the rest {before:?}"));
+        if parked.len() != 1 || parked != before {
+            p.failed.push("the parked helper was not one steady process through the rest".into());
+        }
+        let helper = parked.first().copied();
+        let helper_cpu = helper.and_then(process_cpu);
+        pump(Duration::from_secs(60));
+        let helper_after = helper.and_then(process_cpu);
         p.line(format!(
-            "- no helper {:?} s after the last drag, 35 s after it helper processes {still:?}{}",
-            gone.map(|_| last.elapsed().as_secs()),
-            if still.is_empty() { String::new() } else { format!(", judged by the launch line {launch:?} and the quit line {quit:?}, sent work {worked}, gone within 3 s {gone_soon}, so launched early by a wake {early}") }
+            "- the parked helper {helper:?} over a quiet minute: CPU used {:?} ms, memory {:?}",
+            helper_cpu.zip(helper_after).map(|(before, after)| after.saturating_sub(before).as_millis()),
+            helper.and_then(process_memory)
         ));
-        if !still.is_empty() && !early {
-            p.failed.push("a helper was still running 35 s after the last drag".into());
-        }
-        let before_bare = log_lines(&log).len();
-        for _ in 0..30 {
-            let _ = scooch::poke::send(daemon);
-            pump(Duration::from_millis(400));
-        }
-        pump(Duration::from_millis(2000));
-        let bare: Vec<String> = log_lines(&log).into_iter().skip(before_bare).collect();
-        let starts: Vec<usize> = bare.iter().enumerate().filter(|(_, line)| line.contains("glide early launch")).map(|(index, _)| index).collect();
-        let launches = starts.len();
-        let lived: Vec<f64> = starts.iter().filter_map(|start| bare.iter().skip(start + 1).find_map(|line| line.split("it lived ").nth(1).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse().ok()))).collect();
-        let sent: Vec<String> = bare.iter().filter(|line| commanded(line)).map(|line| line.chars().take(160).collect()).collect();
-        let left = helper_children(daemon);
-        p.line(format!("- thirty wakes with nothing moved after the helper was gone: early launches {launches}, each quit after living {lived:?} ms, helper commands or picture warms {sent:?}, helper processes two seconds after the last wake {left:?}"));
-        if launches > 2 || lived.len() != launches || lived.iter().any(|lived| *lived > 2000.0) || !sent.is_empty() || !left.is_empty() {
-            p.failed.push("thirty bare wakes launched more than two helpers, kept one past two seconds, or sent it work".into());
+        if helper_cpu.zip(helper_after).is_some_and(|(before, after)| after.saturating_sub(before) > Duration::from_millis(50)) {
+            p.failed.push("the parked helper used CPU at rest".into());
         }
         let (cpu_before, quiet_from) = (cpu(&child), epoch());
         pump(Duration::from_secs(60));
@@ -4212,25 +4320,25 @@ mod probe {
         let rest_target = if last_target.x == centre.x && last_target.y == centre.y { aside } else { centre };
         let rested = watch_change(&log, &screen, || drag_icon(name, folder, rest_target), false);
         let stamp = |word: &str| rested.log.iter().find(|line| line.contains(word)).and_then(|line| stamp_of(line));
-        let rest_glided = rested.log.iter().any(|line| lands(line));
+        let rest_glided = rested.log.iter().any(|line| lands(line)) && rested.log.iter().any(|line| line.contains(" glide slid, ") && !line.contains("then the helper"));
         let rest_skips: Vec<String> = rested.log.iter().filter(|line| line.contains("glide skipped")).map(|line| line.chars().take(200).collect()).collect();
-        let cold = stamp(" glide early launch").or_else(|| stamp(" glide helper launched")).zip(stamp(" glide ready")).map(|(started, ready)| ((ready - started) * 1000.0).round());
         let shown = stamp(" glide open after snapshot").zip(rested.log.iter().find(|line| gliding(line)).and_then(|line| stamp_of(line))).map(|(asked, shown)| ((shown - asked) * 1000.0).round());
-        let decided = rested.log.iter().find(|line| line.contains("glide decision at the set"));
-        let launched_early = rested.log.iter().any(|line| line.contains("glide early launch"));
-        let early_window = decided.and_then(|line| line.split("made it in ").nth(1)).and_then(|rest| rest.split(' ').next()).and_then(|ms| ms.parse::<u64>().ok()).filter(|_| launched_early);
-        let found_made = decided.and_then(|line| line.split("open found it made ").nth(1)).and_then(|rest| rest.split(',').next()).and_then(|word| word.trim().parse::<bool>().ok());
+        let decided = rested.log.iter().find(|line| line.contains(" glide slid") || (line.contains(" glide skipped, ") && line.contains(" times from the "))).cloned();
         p.line(format!(
-            "- the first drag after the helper went away, to {},{} and now at {:?}: glided {rest_glided}, skip reasons {rest_skips:?}, helper start to ready {cold:?} ms, open after the snapshot to shown {shown:?} ms, wallpaper set {:?} ms after the drop, the early window took {early_window:?} ms, open found it made {found_made:?}, log {:?}",
+            "- the first drag after a quiet minute with the helper parked, to {},{} and now at {:?}: glided {rest_glided}, skip reasons {rest_skips:?}, open after the snapshot to shown {shown:?} ms, wallpaper set {:?} ms after the drop, the daemon's line {decided:?}",
             rest_target.x,
             rest_target.y,
             icon_spot(name, folder),
             stamp(" set ").map(|set| ((set - rested.dropped) * 1000.0).round()),
-            rested.log.iter().filter(|line| line.contains(" glide ") || line.contains(" set ")).map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()
         ));
+        if !rest_glided {
+            p.failed.push("the first drag after a quiet minute did not slide with the helper parked".into());
+        }
         decisions(p, &rested);
         let stopped = stop_glide_daemon(&mut child);
         p.line(format!("- daemon stopped {stopped:?}"));
+        pump(Duration::from_millis(800));
+        unslid(p, &screen, name, folder, (aside, centre))?;
         pump(Duration::from_millis(800));
         let plain_log = p.out.join("glide-daemon-software.log");
         let mut plain = start_glide_daemon(p, &plain_log, false)?;
@@ -4263,7 +4371,7 @@ mod probe {
         quiet_log(trace, Duration::from_millis(1500), Duration::from_secs(10));
         let (now, showing) = (held(&p.home), desktop.wallpaper(screen).ok().flatten());
         let window: Vec<String> = new_lines(trace, read).into_iter().filter(|line| line.contains(" tick ") || line.contains(" set ")).map(|line| line.chars().take(200).collect()).collect();
-        let sets = window.iter().filter(|line| line.contains(" set ")).count();
+        let sets = window.iter().filter(|line| line.split_whitespace().nth(1) == Some("set")).count();
         let back = toggle(&p.home);
         quiet_log(trace, Duration::from_millis(1500), Duration::from_secs(10));
         let _ = new_lines(trace, read);
@@ -4482,8 +4590,7 @@ mod probe {
         p.line(format!("- the real data folder {} holds a record for a monitor that is not attached, {absent}, with its own picture and its output", real.display()));
         let command: Vec<u16> = layout::command_line(&twin).encode_utf16().chain(Some(0)).collect();
         let written = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, startup::RUN, startup::VALUE, REG_SZ.0, Some(command.as_ptr() as *const c_void), (command.len() * 2) as u32) };
-        let log = fs::File::create(p.out.join("final-off.log"))?;
-        let launched = Command::new(&twin).arg("watch").env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn().map(|child| child.id());
+        let launched = Command::new(&twin).arg("watch").env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map(|child| child.id());
         std::env::remove_var("SCOOCH_HOME");
         let installed = (written, launched.map_err(|error| error.to_string()));
         let id = screen.id.clone();
@@ -4509,6 +4616,13 @@ mod probe {
         std::env::set_var("SCOOCH_HOME", &p.home);
         if !off.as_ref().is_ok_and(|out| out.status.success()) || !gone || entry.is_some() || !parked || !parked_out.exists() {
             p.failed.push("the final off left a scoochw process or the Run entry, or did not keep the record of the monitor it could not reach".into());
+        }
+        let written = fs::read_to_string(real.join("watch.log")).unwrap_or_default();
+        let _ = fs::write(p.out.join("final-off.log"), &written);
+        let ticks = written.lines().filter(|line| line.contains(" tick ")).count();
+        p.line(format!("- the daemon started with no stderr to keep, as the login item starts it, wrote watch.log in its data folder with {} lines, {ticks} of them ticks, kept as final-off.log", written.lines().count()));
+        if ticks == 0 {
+            p.failed.push("a daemon with no stderr to keep wrote no watch.log, so a report from a real Windows machine would have no lines".into());
         }
         let _ = startup::remove();
         Ok(())

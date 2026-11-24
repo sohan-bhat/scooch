@@ -411,6 +411,10 @@ impl Platform for Host {
         ((client.right - client.left).max(1) as u32, (client.bottom - client.top).max(1) as u32)
     }
 
+    fn hide(&mut self, layer: &Window) {
+        let _ = unsafe { ShowWindow(layer.window, SW_HIDE) };
+    }
+
     fn show(&mut self, layer: &Window) -> Result<()> {
         if layer.method != Method::Bare {
             let _ = unsafe { ShowWindow(layer.window, SW_SHOWNA) };
@@ -525,6 +529,10 @@ pub fn layers() -> Vec<isize> {
 
 pub fn ours_left() -> usize {
     layers().len()
+}
+
+pub fn shown_layers() -> usize {
+    layers().into_iter().filter(|window| unsafe { IsWindowVisible(hwnd(*window)) }.as_bool()).count()
 }
 
 pub fn under_icons(window: isize) -> bool {

@@ -7,7 +7,7 @@ use objc2::runtime::AnyObject;
 use objc2::{msg_send, MainThreadMarker};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification, NSEvent, NSEventMask, NSEventType, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWorkspaceApplicationKey,
-    NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidMountNotification, NSWorkspaceDidUnmountNotification, NSWorkspaceDidWakeNotification,
+    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidMountNotification, NSWorkspaceDidUnmountNotification, NSWorkspaceDidWakeNotification,
 };
 use objc2_foundation::{NSArray, NSNotification, NSNotificationCenter, NSNotificationName, NSString};
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -67,16 +67,27 @@ pub fn run(wake: Wake) -> Result<()> {
     mouse(tag("drag"));
     let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
     unsafe {
-        observe(&workspace, NSWorkspaceActiveSpaceDidChangeNotification, tag("space"));
-        observe(&workspace, NSWorkspaceDidWakeNotification, tag("wake"));
-        observe(&workspace, NSWorkspaceDidMountNotification, tag("mount"));
-        observe(&workspace, NSWorkspaceDidUnmountNotification, tag("unmount"));
+        for (name, kind) in workspace_notes() {
+            observe(&workspace, name, tag(kind));
+        }
         on_finder_launch(&workspace, tag("finder"));
         observe(&NSNotificationCenter::defaultCenter(), NSApplicationDidChangeScreenParametersNotification, tag("screens"));
     }
     wallpaper_file(tag("wallpaper"), &home.join(INDEX));
     application.run();
     Ok(())
+}
+
+fn workspace_notes() -> [(&'static NSNotificationName, &'static str); 5] {
+    unsafe {
+        [
+            (NSWorkspaceActiveSpaceDidChangeNotification, "space"),
+            (NSWorkspaceDidWakeNotification, "wake"),
+            (NSWorkspaceDidMountNotification, "mount"),
+            (NSWorkspaceDidUnmountNotification, "unmount"),
+            (NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, "motion"),
+        ]
+    }
 }
 
 pub fn desktop_change(path: &Path, flags: u32, desktop: &Path) -> bool {
@@ -244,6 +255,18 @@ mod tests {
 
     fn desktop() -> PathBuf {
         PathBuf::from("/Users/someone/Desktop")
+    }
+
+    #[test]
+    fn a_change_of_reduce_motion_wakes_the_daemon() {
+        let center = NSNotificationCenter::new();
+        let heard: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for (name, kind) in workspace_notes() {
+            let heard = heard.clone();
+            unsafe { observe(&center, name, Arc::new(move || heard.lock().unwrap().push(kind))) };
+        }
+        unsafe { center.postNotificationName_object(NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, None) };
+        assert_eq!(*heard.lock().unwrap(), vec!["motion"]);
     }
 
     #[test]

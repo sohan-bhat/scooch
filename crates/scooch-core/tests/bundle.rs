@@ -180,6 +180,11 @@ fn tables_travel_without_the_canvas() {
         let mut touched = canvas.clone();
         touched.pixels[17] ^= 1;
         assert_eq!(Bundle::tables_from_bytes(&bytes, touched), Err(TablesError::Canvas));
+        let print = scooch_core::fingerprint(canvas.width, canvas.height, &canvas.pixels);
+        let bare = Bundle::tables_for(&bytes, canvas.width, canvas.height, print).expect("tables with no canvas");
+        assert!(bare.canvas.is_empty() && bare.xmap == back.xmap && bare.field == back.field && bare.paints == back.paints && bare.constants == back.constants);
+        assert_eq!(Bundle::tables_for(&bytes, canvas.width, canvas.height, print ^ 1), Err(TablesError::Canvas));
+        assert_eq!(Bundle::tables_for(&bytes, canvas.width + 1, canvas.height, print), Err(TablesError::Canvas));
         let other = photos().iter().find(|p| p.name != photo.name).expect("photo");
         assert!(Bundle::tables_from_bytes(&bytes, scooch_core::canvas(&other.image, w, h)).is_err());
         for cut in [0, 3, 4, 11, 40, 100, bytes.len() / 2, bytes.len() - 9, bytes.len() - 1] {

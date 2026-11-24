@@ -188,6 +188,14 @@ impl Shape {
     }
 }
 
+#[derive(Clone)]
+pub struct Side {
+    tables: Tables,
+    shape: Shape,
+    canvas: (u32, u32),
+    mirrored: bool,
+}
+
 pub struct Glide {
     compatible: bool,
     full: Set,
@@ -381,6 +389,12 @@ pub fn levels(canvas: &Canvas) -> Vec<Vec<u8>> {
     out
 }
 
+impl Glide {
+    pub fn compatible(&self) -> bool {
+        self.compatible
+    }
+}
+
 impl Gpu {
     fn texture(&self, label: &str, size: (u32, u32, u32), format: wgpu::TextureFormat, levels: u32) -> wgpu::Texture {
         self.device.create_texture(&wgpu::TextureDescriptor {
@@ -487,12 +501,18 @@ impl Gpu {
     }
 
     pub fn still(&self, image: &RgbImage) -> Result<Still, String> {
+        self.still_rgba(image.width(), image.height(), &rgba(image.as_raw()))
+    }
+
+    pub fn still_rgba(&self, width: u32, height: u32, pixels: &[u8]) -> Result<Still, String> {
         self.healthy()?;
         let pipes = self.pipes()?;
-        let (width, height) = (image.width().max(1), image.height().max(1));
+        if width == 0 || height == 0 || pixels.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+            return Err(format!("the still does not hold {width}x{height} pixels"));
+        }
         self.fits(width, height)?;
         let texture = self.texture("still", (width, height, 1), wgpu::TextureFormat::Rgba8UnormSrgb, 1);
-        self.write(&texture, 0, (width, height, 1), 4, &rgba(image.as_raw()));
+        self.write(&texture, 0, (width, height, 1), 4, pixels);
         let view = Self::view(&texture, wgpu::TextureViewDimension::D2);
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("still"), layout: &pipes.still_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }] });
         Ok(Still { bind, width, height })
@@ -588,25 +608,34 @@ impl Gpu {
         Pair { bind, uniform, values }
     }
 
+    pub fn side(&self, bundle: &Bundle) -> Result<Side, String> {
+        self.healthy()?;
+        self.pipes()?;
+        self.fits(bundle.width.max(bundle.height), 2)?;
+        Ok(Side { tables: self.tables(bundle), shape: Shape::of(bundle), canvas: (bundle.canvas_width, bundle.canvas_height), mirrored: bundle.mirrored() })
+    }
+
     pub fn glide(&self, picture: &Picture, a: &Bundle, b: &Bundle) -> Result<Glide, String> {
+        let (first, second) = (self.side(a)?, self.side(b)?);
+        self.glide_between(picture, &first, &second)
+    }
+
+    pub fn glide_between(&self, picture: &Picture, a: &Side, b: &Side) -> Result<Glide, String> {
         self.healthy()?;
         let pipes = self.pipes()?;
-        if a.canvas_width != picture.width || a.canvas_height != picture.height || b.canvas_width != picture.width || b.canvas_height != picture.height {
+        if a.canvas != (picture.width, picture.height) || b.canvas != (picture.width, picture.height) {
             return Err("the tables were made for another picture".into());
         }
-        if a.width != b.width || a.height != b.height {
+        if (a.shape.width, a.shape.height) != (b.shape.width, b.shape.height) {
             return Err("the two tables are for screens of different sizes".into());
         }
-        self.fits(a.width.max(a.height), 2)?;
-        let (first, second) = (self.tables(a), self.tables(b));
-        let shapes = (Shape::of(a), Shape::of(b));
-        let size = (shapes.0.width, shapes.0.height);
+        let size = (a.shape.width, a.shape.height);
         let full = Set {
-            ab: self.pair(pipes, picture, (&shapes.0, &first), &second, size),
-            aa: self.pair(pipes, picture, (&shapes.0, &first), &first, size),
-            bb: self.pair(pipes, picture, (&shapes.1, &second), &second, size),
+            ab: self.pair(pipes, picture, (&a.shape, &a.tables), &b.tables, size),
+            aa: self.pair(pipes, picture, (&a.shape, &a.tables), &a.tables, size),
+            bb: self.pair(pipes, picture, (&b.shape, &b.tables), &b.tables, size),
         };
-        Ok(Glide { compatible: scooch_core::compatible(a, b), full, picture: picture.clone(), tables: (first, second), shapes, scaled: Mutex::new(Vec::new()), width: a.width, height: a.height })
+        Ok(Glide { compatible: a.mirrored == b.mirrored, full, picture: picture.clone(), tables: (a.tables.clone(), b.tables.clone()), shapes: (a.shape.clone(), b.shape.clone()), scaled: Mutex::new(Vec::new()), width: size.0, height: size.1 })
     }
 
     fn set_at(&self, pipes: &Pipes, glide: &Glide, scale: f32) -> Set {
@@ -828,6 +857,29 @@ impl Gpu {
         let took = started.elapsed();
         self.healthy()?;
         Ok(took)
+    }
+
+    pub fn burst_at(&self, width: u32, height: u32, layers: &[(Look, f32)], scale: f32, count: usize) -> Result<(Vec<Duration>, Duration), String> {
+        self.healthy()?;
+        self.fits(width, height)?;
+        let target = self.target(width, height);
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        self.idle(PATIENCE)?;
+        let mut each = Vec::new();
+        for _ in 0..count {
+            let started = Instant::now();
+            let encoder = self.encode(&view, (width, height), layers, scale)?;
+            self.submit(encoder, None);
+            self.idle(PATIENCE)?;
+            each.push(started.elapsed());
+        }
+        let started = Instant::now();
+        for _ in 0..count {
+            let encoder = self.encode(&view, (width, height), layers, scale)?;
+            self.submit(encoder, None);
+        }
+        self.idle(PATIENCE)?;
+        Ok((each, started.elapsed() / count.max(1) as u32))
     }
 
     pub fn snapshot(&self, width: u32, height: u32, layers: &[(Look, f32)]) -> Result<RgbImage, String> {

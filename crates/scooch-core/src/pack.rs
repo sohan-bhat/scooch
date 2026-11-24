@@ -104,6 +104,18 @@ impl Bundle {
     }
 
     pub fn tables_from_bytes(bytes: &[u8], canvas: Canvas) -> Result<Bundle, TablesError> {
+        let fits = |width: u32, height: u32, print: u64| canvas.width == width && canvas.height == height && canvas.pixels.len() as u64 == width as u64 * height as u64 * 3 && fingerprint(canvas.width, canvas.height, &canvas.pixels) == print;
+        let mut bundle = Self::read_tables(bytes, fits)?;
+        bundle.canvas = canvas.pixels;
+        Ok(bundle)
+    }
+
+    /// Reads tables made for the canvas of this size and fingerprint without the canvas pixels, so a caller that holds the canvas elsewhere, such as on a GPU, checks it with no copy. The bundle's `canvas` is empty.
+    pub fn tables_for(bytes: &[u8], width: u32, height: u32, print: u64) -> Result<Bundle, TablesError> {
+        Self::read_tables(bytes, |w, h, p| (w, h, p) == (width, height, print))
+    }
+
+    fn read_tables(bytes: &[u8], fits: impl FnOnce(u32, u32, u64) -> bool) -> Result<Bundle, TablesError> {
         let body = bytes.len().checked_sub(8).ok_or(TablesError::Short)?;
         if bytes.len() < 4 || bytes[..4] != MAGIC {
             return Err(TablesError::Magic);
@@ -125,7 +137,7 @@ impl Bundle {
             return Err(TablesError::Shape);
         }
         let print = reader.u64()?;
-        if canvas.width != canvas_width || canvas.height != canvas_height || canvas.pixels.len() as u64 != canvas_width as u64 * canvas_height as u64 * 3 || fingerprint(canvas.width, canvas.height, &canvas.pixels) != print {
+        if !fits(canvas_width, canvas_height, print) {
             return Err(TablesError::Canvas);
         }
         let ratio = f64::from_le_bytes(reader.take(8)?.try_into().map_err(|_| TablesError::Short)?);
@@ -148,7 +160,7 @@ impl Bundle {
             height,
             canvas_width,
             canvas_height,
-            canvas: canvas.pixels,
+            canvas: Vec::new(),
             xmap,
             ymap,
             ratio,
