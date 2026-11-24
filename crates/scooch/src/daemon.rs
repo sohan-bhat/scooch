@@ -4628,6 +4628,23 @@ pub mod tests {
     }
 
     #[test]
+    fn the_tick_line_gives_the_cpu_from_the_wake_to_the_set_and_the_writers_beside_it() {
+        let woke = Spent { thread: Duration::from_millis(10), process: Duration::from_millis(30), writers: 1 };
+        let set = Spent { thread: Duration::from_millis(25), process: Duration::from_millis(70), writers: 0 };
+        assert_eq!(spent_words(Some(woke), Some(set)), ", cpu to the set 15 ms on the tick thread and 40 ms in the daemon, writers 1 at the wake and 0 at the set");
+        assert_eq!(spent_words(Some(woke), None), "");
+        let (before, began) = (spent(), Instant::now());
+        std::thread::sleep(Duration::from_millis(60));
+        let busy = Instant::now();
+        while spent().thread.saturating_sub(before.thread) < Duration::from_millis(25) && busy.elapsed() < Duration::from_secs(2) {
+            std::hint::black_box((0..1000u64).sum::<u64>());
+        }
+        let (after, wall) = (spent(), began.elapsed());
+        let (thread, process) = (after.thread.saturating_sub(before.thread), after.process.saturating_sub(before.process));
+        assert!(thread >= Duration::from_millis(20) && thread + Duration::from_millis(40) <= wall && process + Duration::from_millis(1) >= thread, "{before:?} {after:?} {wall:?}");
+    }
+
+    #[test]
     fn a_helper_that_has_not_parked_builds_no_tables_and_opens_no_layer_before_the_set() {
         let (_, _, _, events) = cold_skip("cold-skip-tables", true);
         assert!(!events.iter().any(|event| event.starts_with("tables ") || event.starts_with("open ") || event.starts_with("glide ")), "{events:?}");
