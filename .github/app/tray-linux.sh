@@ -259,7 +259,11 @@ logged=$(cat "$data/watch.log" 2>/dev/null)
 line "- the daemon's watch.log says $(grep ' icon ' <<<"$logged" | tail -1)"
 expect "the daemon's watch.log says when the icon started and how many ms that took" grep -q 'icon started .* in [0-9.]* ms' <<<"$logged"
 quiet_minutes "started at the login with no window ever"
-expect "the icon started at the login had a minute with no wake of its threads among five, so no timer of 60 s or less runs in it" [ "$quiet_least" = 0 ]
+if [ "$quiet_least" != 0 ]; then
+  line "- no minute of those five was free of wakes, so five more minutes are measured, and a timer of 60 s or less would wake every minute of both"
+  quiet_minutes "started at the login, a second time"
+fi
+expect "the icon started at the login had a minute with no wake of its threads, so no timer of 60 s or less runs in it" [ "$quiet_least" = 0 ]
 line "- a minute later the daemon's children are $(ps -o pid=,stat=,comm= --ppid "$watcher_pid" | tr '\n' ';' | tr -s ' ')"
 expect "a minute after the login the daemon runs with no defunct child" no_zombie
 pkill -x scooch >/dev/null 2>&1

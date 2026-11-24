@@ -353,7 +353,11 @@ after_tick() { awk '/ tick / { if (!t) t = NR } / icon started / { if (!i) i = N
 line "- in the traced daemon's log the first tick is line $(grep -n -m1 ' tick ' "$out/watch.log" | cut -d: -f1) and the first icon start is line $(grep -n -m1 ' icon started ' "$out/watch.log" | cut -d: -f1)"
 expect "the traced daemon started the icon after its first tick" after_tick
 quiet_minutes "started at the login with no window ever"
-expect "the icon started at the login had a minute with no wake from idle among five, so no timer of 60 s or less runs in it" [ "$quiet_least" = 0 ]
+if [ "$quiet_least" != 0 ]; then
+  line "- no minute of those five was free of wakes, so five more minutes are measured, and a timer of 60 s or less would wake every minute of both"
+  quiet_minutes "started at the login, a second time"
+fi
+expect "the icon started at the login had a minute with no wake from idle, so no timer of 60 s or less runs in it" [ "$quiet_least" = 0 ]
 not_child() { [ -n "$icon" ] && [ -n "$watcher" ] && [ "$(ps -o ppid= -p "$icon" | tr -d ' ')" != "$watcher" ]; }
 no_zombie() { [ -n "$watcher" ] && kill -0 "$watcher" 2>/dev/null && ! ps -axo ppid=,stat= | awk -v d="$watcher" '$1 == d && $2 ~ /Z/' | grep -q .; }
 expect "the icon process is no child of the daemon" not_child

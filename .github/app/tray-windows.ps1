@@ -349,6 +349,7 @@ function Quiet-Minutes([string]$Which) {
     }
     $process.Refresh()
     $script:quietLeast = ($counts | Measure-Object -Minimum).Minimum
+    $script:quietCounts = $counts -join ' '
     Line "- over five quiet minutes, $Which, the icon process $($process.Id) woke its threads $($counts -join ' ') times, one count a minute, over $($process.Threads.Count) threads, used $([int]($process.TotalProcessorTime.TotalMilliseconds - $cpu)) ms of CPU in all, and holds $([math]::Round($process.PrivateMemorySize64 / 1MB, 1)) MB private with a working set of $([math]::Round($process.WorkingSet64 / 1MB, 1)) MB"
 }
 
@@ -513,16 +514,25 @@ Start-Sleep -Seconds 2
 Line "- starting scooch-app.exe showed the window after $shown s, app processes $(Icon-Count), the same one $((Icon-Pid) -eq $before)"
 Expect "opening Scooch while the icon runs shows the window" ($shown -ge 0)
 Expect "opening Scooch while the icon runs keeps one app process" ((Icon-Count) -eq 1)
-$window = Find-Window
-if ($window) { try { $window.SetFocus() } catch { Line "- the window took no focus, $($_.Exception.Message)" } }
-Start-Sleep -Seconds 1
-$frontBefore = [Tray]::FrontPid()
-Start-Process -FilePath (Join-Path $folder 'scooch-app.exe') -ArgumentList '--background'
-Start-Sleep -Seconds 6
-$frontAfter = [Tray]::FrontPid()
-Line "- a start with the hidden argument while the app runs left $(Icon-Count) app process, window $([bool](Find-Window)), the process in front before $frontBefore and after $frontAfter, the app is $(Icon-Pid)"
+function Named([int]$Id) { $found = Get-Process -Id $Id -ErrorAction SilentlyContinue; if ($found) { "$Id $($found.ProcessName)" } else { "$Id gone" } }
+$judged = $null
+for ($try = 1; $try -le 3 -and $null -eq $judged; $try++) {
+    $window = Find-Window
+    if ($window) { try { $window.SetFocus() } catch { Line "- the window took no focus, $($_.Exception.Message)" } }
+    Start-Sleep -Seconds 1
+    $frontBefore = [Tray]::FrontPid()
+    $started = Start-Process -FilePath (Join-Path $folder 'scooch-app.exe') -ArgumentList '--background' -PassThru
+    Start-Sleep -Seconds 6
+    $frontAfter = [Tray]::FrontPid()
+    $app = Icon-Pid
+    Line "- try $try, a start with the hidden argument while the app runs left $(Icon-Count) app process, window $([bool](Find-Window)), in front before $(Named $frontBefore) and after $(Named $frontAfter), the app is $app, the start was $($started.Id)"
+    if ($frontBefore -ne $app) { Line "- the window was not in front before the start, so this try judges nothing"; continue }
+    if ($frontAfter -eq $app) { $judged = $true; continue }
+    if ($frontAfter -eq $started.Id) { $judged = $false; continue }
+    Line "- another program took the front during the start, so this try judges nothing"
+}
 Expect "a background start while the app runs leaves one app process" ((Icon-Count) -eq 1)
-Expect "a background start while the window is open leaves the window open and in front" ([bool](Find-Window) -and $frontAfter -eq (Icon-Pid) -and $frontBefore -eq $frontAfter)
+Expect "a background start while the window is open leaves the window open and in front, judged within three tries" ([bool](Find-Window) -and $judged -eq $true)
 Close-Window
 
 Line ''
@@ -589,7 +599,11 @@ $logged = Read-Shared "$data\watch.log"
 Line "- the daemon's log says $(@($logged -split "`n" | Where-Object { $_ -match ' icon ' }) | Select-Object -Last 1)"
 Expect "the daemon's watch.log says when the icon started and how many ms that took" ($logged -match 'icon started .* in [0-9.]+ ms')
 Quiet-Minutes 'started at the login with no window ever'
-Expect "the icon started at the login had a minute with no wake of its threads among five, so no timer of 60 s or less runs in it" ($script:quietLeast -eq 0)
+if ($script:quietLeast -ne 0) {
+    Line "- no minute of those five was free of wakes, so five more minutes are measured, and a timer of 60 s or less would wake every minute of both"
+    Quiet-Minutes 'started at the login, a second time'
+}
+Expect "the icon started at the login had a minute with no wake of its threads, so no timer of 60 s or less runs in it" ($script:quietLeast -eq 0)
 Get-Process -Name scoochw -ErrorAction SilentlyContinue | Stop-Process -Force
 Wait-For 15 { (Daemons) -eq 0 } | Out-Null
 Start-Sleep -Seconds 3
