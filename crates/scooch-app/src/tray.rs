@@ -1,5 +1,7 @@
+use crate::life::{self, Exit, Step};
 use scooch::facade::{self, Started};
 use serde_json::Value;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -36,6 +38,12 @@ pub fn offered(library: bool, watcher: impl FnOnce() -> bool) -> bool {
 
 pub fn keeps_running(on: bool, window: bool, tray: bool) -> bool {
     window || (on && tray)
+}
+
+static BUSY: AtomicUsize = AtomicUsize::new(0);
+
+pub fn follow_ends(on: bool, window: bool, busy: bool) -> bool {
+    !busy && !keeps_running(on, window, true)
 }
 
 fn copy() -> &'static Value {
@@ -115,9 +123,40 @@ pub fn follow<R: Runtime>(app: &AppHandle<R>) {
     if stale {
         tell(app, None);
     }
-    if !keeps_running(on, app.get_webview_window("main").is_some(), true) {
+    let busy = BUSY.load(Ordering::SeqCst) > 0;
+    let window = app.get_webview_window("main").is_some();
+    if follow_ends(on, window, busy) {
         eprintln!("scooch-app tray ends, Scooch is off and no window is open");
-        app.exit(0);
+        life::end(app, Exit::Off);
+        return;
+    }
+    if busy {
+        return;
+    }
+    let Some(program) = app.try_state::<life::Program>() else { return };
+    match life::step(program.change(), on, window) {
+        Step::Handover => {
+            handover(app, &program.path);
+        }
+        Step::End => {
+            eprintln!("scooch-app its program file is gone, so the icon ends");
+            life::end(app, Exit::Gone);
+        }
+        Step::Stay | Step::AtClose => {}
+    }
+}
+
+pub fn handover<R: Runtime>(app: &AppHandle<R>, program: &std::path::Path) -> bool {
+    match life::relaunch(program) {
+        Ok(()) => {
+            eprintln!("scooch-app its program file was replaced, so it starts {} and ends", program.display());
+            life::end(app, Exit::Replaced);
+            true
+        }
+        Err(error) => {
+            eprintln!("scooch-app could not start the new {}, {error}", program.display());
+            false
+        }
     }
 }
 
@@ -127,10 +166,12 @@ pub fn pressed<R: Runtime>(app: &AppHandle<R>, id: &str) {
         ON => {
             let wanted = app.try_state::<Tray<R>>().map(|tray| tray.on.is_checked().unwrap_or(!facade::is_on()));
             let app = app.clone();
+            BUSY.fetch_add(1, Ordering::SeqCst);
             std::thread::spawn(move || switch(&app, wanted.unwrap_or(!facade::is_on())));
         }
         QUIT => {
             let app = app.clone();
+            BUSY.fetch_add(1, Ordering::SeqCst);
             std::thread::spawn(move || quit(&app));
         }
         _ => {}
@@ -161,9 +202,24 @@ fn switch<R: Runtime>(app: &AppHandle<R>, wanted: bool) {
                 crate::show_window(app);
             }
         }
+        Err(code) if !wanted => tell(app, Some((failed_off(&code), facade::is_on()))),
         Err(code) => tell(app, Some((failure(&code), was))),
     }
+    BUSY.fetch_sub(1, Ordering::SeqCst);
     follow(app);
+}
+
+fn failed_off(code: &str) -> String {
+    if !facade::is_on() {
+        return failure(code);
+    }
+    match crate::restart_daemon() {
+        Ok(()) => failure(code),
+        Err(error) => {
+            eprintln!("scooch-app the daemon did not start again after the failed turn off, {error:#}");
+            words("problem.stopped.line")
+        }
+    }
 }
 
 pub fn quit<R: Runtime>(app: &AppHandle<R>) {
@@ -171,13 +227,14 @@ pub fn quit<R: Runtime>(app: &AppHandle<R>) {
     crate::appimage::seal();
     if facade::is_on() {
         if let Err(code) = crate::said("turn-off", crate::switch_off()) {
-            tell(app, Some((failure(&code), true)));
+            tell(app, Some((failed_off(&code), facade::is_on())));
+            BUSY.fetch_sub(1, Ordering::SeqCst);
             follow(app);
             return;
         }
     }
     eprintln!("scooch-app quit from the menu");
-    app.exit(0);
+    life::end(app, Exit::Quit);
 }
 
 #[cfg(test)]
@@ -218,6 +275,19 @@ mod tests {
         assert!(!keeps_running(true, false, false));
         assert!(keeps_running(false, true, true));
         assert!(keeps_running(false, true, false));
+    }
+
+    #[test]
+    fn the_watcher_ends_nothing_while_a_press_on_the_icon_runs() {
+        assert!(follow_ends(false, false, false));
+        assert!(!follow_ends(false, false, true));
+        assert!(!follow_ends(true, false, false));
+        assert!(!follow_ends(false, true, false));
+    }
+
+    #[test]
+    fn the_stopped_sentence_is_in_the_copy() {
+        assert_eq!(words("problem.stopped.line"), "Scooch stopped running.");
     }
 
     #[test]
