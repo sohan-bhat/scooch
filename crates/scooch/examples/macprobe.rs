@@ -4146,15 +4146,18 @@ mod probe {
         }
         let lines = daemon_log(p).lines().count();
         let windows = watch_windows();
+        let picked_at = epoch();
         let set = desktop.set_wallpaper(screen, &picked);
         std::thread::sleep(Duration::from_secs(3));
         let samples = stop_windows(windows);
         let log = new_lines(&daemon_log(p), lines);
         let woke = log.iter().any(|line| line.contains(" wake ") || line.contains(" tick "));
-        let primed: Vec<&String> = log.iter().filter(|line| primed(line)).collect();
-        let shown = samples.iter().map(|(_, shown)| *shown).max().unwrap_or(0);
-        p.line(format!("- a picture picked in the system's settings, set {:?}: the daemon woke {woke}, primes after it {}, helper windows on screen at most {shown} over {} samples in 3 s, before it the screen showed {before:?}", set.as_ref().map_err(|error| error.to_string()), primed.len(), samples.len()));
-        if set.is_err() || !woke {
+        let own = log.iter().find(|line| line.split_whitespace().nth(1) == Some("set")).and_then(|line| stamp_of(line));
+        let primed: Vec<&String> = log.iter().filter(|line| primed(line) && own.is_none_or(|own| stamp_of(line).is_some_and(|at| at < own))).collect();
+        let shown = samples.iter().filter(|(at, _)| own.is_some_and(|own| *at >= own)).map(|(_, shown)| *shown).max().unwrap_or(0);
+        let earlier = samples.iter().filter(|(at, _)| own.is_none_or(|own| *at < own)).map(|(_, shown)| *shown).max().unwrap_or(0);
+        p.line(format!("- a picture picked in the system's settings, set {:?}: the daemon woke {woke} and set its own picture {:?} s after the pick, primes before that {}, helper windows on screen from that set on at most {shown}, before it at most {earlier} from a prime made over Scooch's own picture before the pick, over {} samples in 3 s, before the pick the screen showed {before:?}", set.as_ref().map_err(|error| error.to_string()), own.map(|own| own - picked_at), primed.len(), samples.len()));
+        if set.is_err() || !woke || own.is_none() {
             p.fail("the picture picked in the system's settings did not wake the daemon, so it was not judged, which is the footing failing and not a pass");
         } else if !primed.is_empty() || shown > 0 {
             p.fail("a picture picked in the system's settings was covered by a helper window with Scooch's old picture");
