@@ -755,12 +755,16 @@ impl Daemon {
             return false;
         }
         let Some(entry) = state.screens.get(&screen.id) else { return false };
+        let scene = scene::scene(screen, &[]);
+        if self.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cannot(&screen.id, [scene.width, scene.height]).is_some() {
+            return false;
+        }
+        self.mark("prime look", &screen.id);
         let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { return false };
         if !self.desktop.wallpaper(screen).ok().flatten().is_some_and(|shown| same(&shown, output)) {
             return false;
         }
         let Ok(key) = tables_key(&entry.source, &state.options) else { return false };
-        let scene = scene::scene(screen, &[]);
         let canvas = Some(self.store.canvas_for(&screen.id, key)).filter(|canvas| canvas.is_file());
         let warm = Warmup { picture: entry.source.clone(), size: [scene.width, scene.height], canvas, key };
         let stills = self.stills_of(output, key);
@@ -1084,13 +1088,17 @@ impl Daemon {
         if !self.moved.lock().map(|moved| moved.contains(&screen.id)).unwrap_or(false) {
             return;
         }
+        let scene = scene::scene(screen, &[]);
+        if glider.cannot(&screen.id, [scene.width, scene.height]).is_some() {
+            return;
+        }
+        self.mark("read tables", &screen.id);
         let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { return };
         let Ok(key) = tables_key(&entry.source, options) else { return };
         let tables = self.store.tables_for(output, key);
         if !tables.is_file() || !current.is_some_and(|shown| same(shown, output)) || stale_tables(&tables).is_some() {
             return;
         }
-        let scene = scene::scene(screen, &[]);
         let canvas = Some(self.store.canvas_for(&screen.id, key)).filter(|canvas| canvas.is_file());
         glider.open_early(screen, (&entry.source, key), [scene.width, scene.height], &self.stills_of(output, key), canvas.as_deref());
     }
@@ -1332,14 +1340,26 @@ impl Daemon {
             })
         };
         let tables_key = if glider.is_some() { tables_key(&source, options).ok() } else { None };
+        let plain = glider.as_deref_mut().and_then(|glider| match shown {
+            None if current.is_some_and(|current| !self.store.owns(current)) => Some(("system picture", "the system's own picture is on screen, so this first set swaps plainly".to_string())),
+            None => Some(("output not shown", "the picture on screen is not the one Scooch set last".to_string())),
+            Some(_) => glider.cannot(&screen.id, [scene.width, scene.height]).map(|(reason, detail)| (reason, if changed { format!("{detail}, the picture changed") } else { detail.to_string() })),
+        });
+        lap("cold");
         let mut flight = None;
         let mut crossing = false;
         let mut made = None;
         let mut finished = None;
-        if let Some(glider) = glider.as_deref_mut() {
+        if let (Some(glider), Some((reason, detail))) = (glider.as_deref_mut(), plain.as_ref()) {
+            trail.skip(reason, detail);
+            glider.clear(&screen.id);
+            lap("clear");
+        }
+        if let (Some(glider), None) = (glider.as_deref_mut(), plain.as_ref()) {
             if self.adopt_kept(&screen.id, key) {
                 lap("map");
             }
+            self.mark("read tables", &screen.id);
             let from = tables_key.zip(shown.as_deref()).map(|(tables_key, output)| self.store.tables_for(output, tables_key)).filter(|from| from.is_file());
             let on_screen = from.as_deref().and_then(|from| std::fs::read(from).ok());
             let stale = from.as_deref().zip(on_screen.as_deref()).and_then(|(from, bytes)| stale_bytes(from, bytes));
@@ -1396,8 +1416,6 @@ impl Daemon {
                     }));
                     lap("open");
                 }
-                (_, _, None) if current.is_some_and(|current| !self.store.owns(current)) => trail.skip("system picture", "the system's own picture is on screen, so this first set swaps plainly"),
-                (_, _, None) => trail.skip("output not shown", "the picture on screen is not the one Scooch set last"),
                 _ => trail.skip("no tables", "the picture on screen has no tables"),
             }
             if flight.is_none() {
@@ -1407,34 +1425,32 @@ impl Daemon {
         }
         let Finished { bundle, encoded, same, picture } = match finished {
             Some(done) => done,
-            None if glider.is_some() => finish(),
+            None if glider.is_some() && plain.is_none() => finish(),
             None => {
                 trail.skip(blocked.unwrap_or("not live"), "");
                 let held = entry.placement.as_ref() == Some(&placement);
-                let picture = if wanted || held {
+                let (bundle, picture) = if wanted || held {
                     if self.adopt_kept(&screen.id, key) {
                         lap("map");
                     }
                     self.mark("drawing", &screen.id);
-                    let still = self.session_still(&screen.id, key, parts).1;
+                    let (bundle, still) = self.session_still(&screen.id, key, parts);
                     self.mark("drawn", &screen.id);
-                    still
+                    (Some(bundle), still)
                 } else {
                     self.forget_session(&screen.id);
                     self.mark("rendering", &screen.id);
-                    Arc::new(scooch_core::render_with(&decoded, &analysis, &placement, scene, options))
+                    (None, Arc::new(scooch_core::render_with(&decoded, &analysis, &placement, scene, options)))
                 };
                 lap("render");
                 let encoded = encode(&picture, format, self.desktop.profile().as_deref(), self.desktop.live());
-                drop(picture);
+                let lossless = format == Format::Png;
                 lap("encode");
                 let same = encoded.as_ref().is_ok_and(|bytes| shown.as_deref().is_some_and(|output| std::fs::read(output).is_ok_and(|old| old == *bytes)));
                 lap("same");
-                Finished { bundle: None, encoded, same, picture: None }
+                Finished { bundle, encoded, same, picture: lossless.then_some(picture) }
             }
         };
-        drop(decoded);
-        drop(analysis);
         let back = |glider: &mut Glider, why: &str| {
             if let (Some(id), Some(old)) = (flight, shown.as_deref()) {
                 glider.settle_back(id, old, why);
@@ -1495,6 +1511,14 @@ impl Daemon {
         }
         let set = Instant::now();
         trail.set = Some(set);
+        let bundle = bundle.or_else(|| {
+            tables_key?;
+            let tables = self.session_tables(&screen.id, key, parts);
+            self.mark("tables", &screen.id);
+            Some(tables)
+        });
+        drop(decoded);
+        drop(analysis);
         entry.placement = Some(placement);
         entry.placed = Some(placed);
         entry.drawn = Some(drawn);
@@ -4535,23 +4559,52 @@ pub mod tests {
         assert!(at(&events, "drawing main") < set, "{events:?}");
     }
 
-    #[test]
-    fn a_cold_helper_and_the_glide_off_make_the_same_engine_calls_with_scenery() {
-        let (_, _, _, cold) = cold_skip("cold-skip-same", true);
-        let off = glide_off_move("cold-skip-same-off", true);
-        assert_eq!(engine(&cold), engine(&off), "{cold:?} against {off:?}");
-        assert_eq!(engine(&cold), vec!["drawing main".to_string(), "drawn main".to_string()]);
+    fn before_set(events: &[String]) -> Vec<String> {
+        let set = at(events, "set ");
+        engine(&events[..set])
     }
 
     #[test]
-    fn without_scenery_a_changed_placement_draws_a_session_still_on_the_skip_path_for_the_next_tables() {
-        let off = glide_off_move("cold-skip-plain-off", false);
-        assert_eq!(engine(&off), vec!["rendering main".to_string()], "{off:?}");
-        let (daemon, fake, _, cold) = cold_skip("cold-skip-plain", false);
-        assert_eq!(engine(&cold), vec!["drawing main".to_string(), "drawn main".to_string()], "{cold:?}");
-        let name = name_of(&fake.showing("main"));
-        let tables: Vec<String> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
-        assert!(tables.iter().any(|file| file.starts_with(&format!("{name}.")) && file.ends_with(".tables")), "{tables:?}");
+    fn a_cold_helper_draws_like_the_glide_off_and_makes_the_next_tables_after_the_set() {
+        for scenery in [true, false] {
+            let (daemon, fake, _, cold) = cold_skip(&format!("cold-skip-same-{scenery}"), scenery);
+            let off = glide_off_move(&format!("cold-skip-same-off-{scenery}"), scenery);
+            assert_eq!(before_set(&cold), before_set(&off), "scenery {scenery} {cold:?} against {off:?}");
+            let drawn = if scenery { vec!["drawing main".to_string(), "drawn main".to_string()] } else { vec!["rendering main".to_string()] };
+            assert_eq!(before_set(&cold), drawn, "scenery {scenery} {cold:?}");
+            if !scenery {
+                assert!(at(&cold, "set ") < at(&cold, "tables main"), "{cold:?}");
+            }
+            let name = name_of(&fake.showing("main"));
+            let tables: Vec<String> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+            assert!(tables.iter().any(|file| file.starts_with(&format!("{name}.")) && file.ends_with(".tables")), "scenery {scenery} {tables:?}");
+        }
+    }
+
+    #[test]
+    fn a_cold_helper_reads_no_glide_file_before_the_set() {
+        let (daemon, fake, script, _) = marked_rig("cold-skip-reads");
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let state = daemon.store.load();
+        let entry = &state.screens["main"];
+        let on_screen = daemon.store.tables_for(entry.output.as_ref().unwrap(), tables_key(&entry.source, &state.options).unwrap());
+        std::fs::write(&on_screen, b"SCBT torn").unwrap();
+        script.lock().unwrap().slow_hello = Duration::from_secs(60);
+        daemon.glider.lock().unwrap().reset_for_test();
+        daemon.glider.lock().unwrap().keep_parked();
+        daemon.glider.lock().unwrap().forget_wake_for_test();
+        *fake.pointer.lock().unwrap() = Some(center(subject()));
+        fake.events.lock().unwrap().clear();
+        assert!(!daemon.wake_early(), "a wake primed a cold helper");
+        assert!(!daemon.launch_at_drag(center(subject())), "a drag start primed a cold helper");
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let events = events(&fake);
+        let set = at(&events, "set ");
+        assert!(!events[..set].iter().any(|event| event.starts_with("read tables") || event.starts_with("prime look")), "{events:?}");
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.starts_with("skipped, helper cold")), "{said:?}");
     }
 
     #[test]
@@ -4569,16 +4622,18 @@ pub mod tests {
 
     #[test]
     fn after_a_skip_the_new_picture_has_its_tables_and_the_next_move_glides_from_them() {
-        let (daemon, fake, script, _) = cold_skip("cold-skip-next", true);
-        let name = name_of(&fake.showing("main"));
-        let tables: Vec<String> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
-        assert!(tables.iter().any(|file| file.starts_with(&format!("{name}.")) && file.ends_with(".tables")), "{tables:?}");
-        script.lock().unwrap().slow_hello = Duration::ZERO;
-        fake.events.lock().unwrap().clear();
-        fake.place(vec![Rect { x: 66.0, y: 42.0, w: 28.0, h: 28.0 }]);
-        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
-        let events = events(&fake);
-        assert!(events.iter().any(|event| event.starts_with("glide ") && event.ends_with(" true true")), "{events:?}");
+        for scenery in [true, false] {
+            let (daemon, fake, script, _) = cold_skip(&format!("cold-skip-next-{scenery}"), scenery);
+            let name = name_of(&fake.showing("main"));
+            let tables: Vec<String> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+            assert!(tables.iter().any(|file| file.starts_with(&format!("{name}.")) && file.ends_with(".tables")), "scenery {scenery} {tables:?}");
+            script.lock().unwrap().slow_hello = Duration::ZERO;
+            fake.events.lock().unwrap().clear();
+            fake.place(vec![if scenery { Rect { x: 66.0, y: 42.0, w: 28.0, h: 28.0 } } else { Rect { x: 30.0, y: 20.0, w: 50.0, h: 60.0 } }]);
+            assert_eq!(outcome(&daemon.tick()), Outcome::Rendered, "scenery {scenery} {:?}", daemon.glider.lock().unwrap().said);
+            let events = events(&fake);
+            assert!(events.iter().any(|event| event.starts_with("glide ") && event.ends_with(" true true")), "scenery {scenery} {events:?}");
+        }
     }
 
     #[test]
