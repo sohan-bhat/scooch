@@ -3946,7 +3946,7 @@ mod probe {
     }
 
     const SLOW_LIMIT: f64 = 60.0;
-    const SLOW_HELLO_MS: u64 = 8000;
+    const SLOW_HELLO_MS: u64 = 10000;
     const PAIRS: usize = 5;
 
     struct Slowness {
@@ -4051,13 +4051,17 @@ mod probe {
     const QUIET_PAIRS: usize = 7;
 
     fn quiet_round(p: &mut Probe, screen: &Screen, name: &str, places: ((f32, f32), (f32, f32))) -> (Vec<String>, Vec<String>) {
-        p.line(format!("- then {QUIET_PAIRS} pairs where each drag waits for a quiet daemon first, its log quiet for 1 s, no thread of it writing a file and only the helper the drag expects alive, at most 4 s"));
+        p.line(format!("- then {QUIET_PAIRS} pairs where each timed drag goes from aside onto the subject after an untimed Apple Event move back aside, and waits for a quiet daemon first, its log quiet for 1 s, no thread of it writing a file and only the helper the drag expects alive, at most 4 s"));
         let mut last = Instant::now();
         let (mut slow, mut off) = (Vec::new(), Vec::new());
         for index in 0..QUIET_PAIRS {
+            let _ = place(p, name, places.1);
+            poke(p);
             let (waited, idle) = quiet_daemon(p, 1, Duration::from_secs(4));
             slow.push(cold_noted(p, screen, name, places, ("quiet slow", index), &mut last, &format!("waited {waited} ms for a quiet daemon, quiet {idle}, ")).line);
             let _ = p.scooch(&["glide"], LIMIT);
+            let _ = place(p, name, places.1);
+            poke(p);
             let (waited, idle) = quiet_daemon(p, 0, Duration::from_secs(4));
             off.push(cold_noted(p, screen, name, places, ("quiet off", index), &mut last, &format!("waited {waited} ms for a quiet daemon, quiet {idle}, ")).line);
             let _ = p.scooch(&["glide"], LIMIT);
