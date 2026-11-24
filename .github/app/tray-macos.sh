@@ -260,7 +260,7 @@ close_prompts
 sleep 4
 icon=$(icon_pid)
 watcher=$(pgrep -f 'MacOS/scooch watch' | head -1)
-line "- icon process $icon with parent $(ps -o ppid= -p "$icon" | tr -d ' '), daemon $watcher, the daemon says $(sed -n "$((from + 1)),\$p" "$data/watch.log" 2>/dev/null | grep -m1 'icon ' )"
+line "- icon process $icon with parent $(ps -o ppid= -p "$icon" | tr -d ' '), daemon $watcher, the daemon says $(sed -n "$((from + 1)),\$p" "$data/watch.log" 2>/dev/null | grep -E ' icon | helper parked ' | head -3 | tr '\n' ' ')"
 line "- after the login, window $(has_window && echo open || echo closed), the icon $(status where), the app is $(kind)"
 expect "after a login with Scooch on the icon is there" grep -q '^at ' <<<"$(status where)"
 expect "after a login with Scooch on no window opens" window_gone
