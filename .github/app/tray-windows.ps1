@@ -178,11 +178,18 @@ public static class Tray {
                 } while (Process32NextW(snapshot, ref entry));
             }
             CloseHandle(snapshot);
-            System.Threading.Thread.Sleep(15);
+            System.Threading.Thread.Sleep(2);
         }
         var told = new List<string>();
         foreach (var pair in seen) told.Add(pair.Key + " " + pair.Value);
         return string.Join(";", told);
+    }
+    [DllImport("user32.dll")]
+    static extern IntPtr GetForegroundWindow();
+    public static int FrontPid() {
+        uint pid;
+        GetWindowThreadProcessId(GetForegroundWindow(), out pid);
+        return (int)pid;
     }
     [DllImport("kernel32.dll")]
     static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
@@ -290,7 +297,8 @@ function Open-Menu {
     if (-not $spot) { return 'no icon found in the notification area' }
     $before = Tray-Lines 'Right Up'
     [Tray]::Press($spot[0], $spot[1], $true)
-    $landed = if (Landed 'Right Up' $before) { 'landed on the icon, the app logged it, and' } else { 'was not logged by the app and' }
+    $script:rightLanded = Landed 'Right Up' $before
+    $landed = if ($script:rightLanded) { 'landed on the icon, the app logged it, and' } else { 'was not logged by the app and' }
     $shown = Wait-For 6 { [bool](Tray-Menu) }
     if ($shown -ge 0) { return "a right press on the icon $($spot[2]) at $($spot[0]) $($spot[1]) $landed opened the menu" }
     return "a right press on the icon $($spot[2]) $landed opened no menu"
@@ -324,6 +332,24 @@ function Quiet-Minute([string]$Which) {
     $script:quietSwitches = [Tray]::Woke($before, [Tray]::Snap($process.Id))
     $used = [int]($process.TotalProcessorTime.TotalMilliseconds - $cpu)
     Line "- over a quiet minute, $Which, the icon process $($process.Id) woke its threads $($script:quietSwitches) times over $($process.Threads.Count) threads, used $used ms of CPU, and holds $([math]::Round($process.PrivateMemorySize64 / 1MB, 1)) MB private with a working set of $([math]::Round($process.WorkingSet64 / 1MB, 1)) MB"
+}
+
+function Quiet-Minutes([string]$Which) {
+    [Tray]::Move(300, 200)
+    Start-Sleep -Seconds 3
+    $process = Icon-Processes | Select-Object -First 1
+    $cpu = $process.TotalProcessorTime.TotalMilliseconds
+    $before = [Tray]::Snap($process.Id)
+    $counts = @()
+    for ($minute = 1; $minute -le 5; $minute++) {
+        Start-Sleep -Seconds 60
+        $after = [Tray]::Snap($process.Id)
+        $counts += [Tray]::Woke($before, $after)
+        $before = $after
+    }
+    $process.Refresh()
+    $script:quietLeast = ($counts | Measure-Object -Minimum).Minimum
+    Line "- over five quiet minutes, $Which, the icon process $($process.Id) woke its threads $($counts -join ' ') times, one count a minute, over $($process.Threads.Count) threads, used $([int]($process.TotalProcessorTime.TotalMilliseconds - $cpu)) ms of CPU in all, and holds $([math]::Round($process.PrivateMemorySize64 / 1MB, 1)) MB private with a working set of $([math]::Round($process.WorkingSet64 / 1MB, 1)) MB"
 }
 
 function Clear-Covers {
@@ -420,9 +446,19 @@ if ($owner -and $owner.ProcessName -ne 'explorer') {
     $spot = Icon-Center
     Line "- the window at the icon was $under, which is $($owner.ProcessName), the probe ended it, and the window there is now $([Tray]::Under($spot[0], $spot[1]))"
 }
-$leftBefore = Tray-Lines 'Left Up'
-[Tray]::Press($spot[0], $spot[1], $false)
-$script:footing = Landed 'Left Up' $leftBefore
+$script:footing = $false
+for ($try = 1; $try -le 3 -and -not $script:footing; $try++) {
+    if ($try -gt 1) {
+        Start-Sleep -Seconds 2
+        $again = Icon-Center
+        if ($again) { $spot = $again }
+    }
+    $leftBefore = Tray-Lines 'Left Up'
+    [Tray]::Press($spot[0], $spot[1], $false)
+    $script:footing = Landed 'Left Up' $leftBefore
+    Line "- left press $try at $($spot[0]) $($spot[1]) $(if ($script:footing) { 'landed and the app logged it' } else { 'was not logged by the app' })"
+}
+Expect "a left press on the icon reached the app within three tries" $script:footing
 if ($script:footing) {
     $shown = Wait-For 20 { [bool](Find-Window) }
     Line "- the left press landed on the icon, the app logged it, and the window showed after $shown s"
@@ -430,6 +466,7 @@ if ($script:footing) {
     Close-Window
     $opened = Open-Menu
     Line "- $opened"
+    Expect "a right press on the icon reached the app" $script:rightLanded
     $read = Menu-Reads
     Line "- the menu reads $read"
     Expect "the menu reads Open Scooch, On and Quit Scooch" ($read -match '^Open Scooch\|On( On| Off)?\|Quit Scooch$')
@@ -463,7 +500,6 @@ if ($script:footing) {
     Screen-Shot 'press-not-landed'
     $blocker = if ([Tray]::Under($spot[0], $spot[1]) -match 'of process (\d+)$') { (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue).ProcessName } else { 'none' }
     Line "- the left press at $($spot[0]) $($spot[1]) never reached the app, which logged no tray press, the cursor is at $([Tray]::Cursor()), the window under it is $([Tray]::Under($spot[0], $spot[1])) from $blocker, the input desktop is $([Tray]::InputDesktop())"
-    Limit "on this runner no mouse press reaches the taskbar, so the presses on the icon and its menu are not judged here. The same presses are judged on the other Windows runner"
     Line "- the window $(if (Find-Window) { 'opened anyway' } else { 'stayed closed' })"
 }
 
@@ -477,10 +513,16 @@ Start-Sleep -Seconds 2
 Line "- starting scooch-app.exe showed the window after $shown s, app processes $(Icon-Count), the same one $((Icon-Pid) -eq $before)"
 Expect "opening Scooch while the icon runs shows the window" ($shown -ge 0)
 Expect "opening Scooch while the icon runs keeps one app process" ((Icon-Count) -eq 1)
+$window = Find-Window
+if ($window) { try { $window.SetFocus() } catch { Line "- the window took no focus, $($_.Exception.Message)" } }
+Start-Sleep -Seconds 1
+$frontBefore = [Tray]::FrontPid()
 Start-Process -FilePath (Join-Path $folder 'scooch-app.exe') -ArgumentList '--background'
 Start-Sleep -Seconds 6
-Line "- a start with the hidden argument while the app runs left $(Icon-Count) app process"
+$frontAfter = [Tray]::FrontPid()
+Line "- a start with the hidden argument while the app runs left $(Icon-Count) app process, window $([bool](Find-Window)), the process in front before $frontBefore and after $frontAfter, the app is $(Icon-Pid)"
 Expect "a background start while the app runs leaves one app process" ((Icon-Count) -eq 1)
+Expect "a background start while the window is open leaves the window open and in front" ([bool](Find-Window) -and $frontAfter -eq (Icon-Pid) -and $frontBefore -eq $frontAfter)
 Close-Window
 
 Line ''
@@ -512,6 +554,13 @@ $ended = $hidden.WaitForExit(10000)
 Line "- the hidden start with Scooch off ended $ended, app processes $(Icon-Count)"
 Expect "a background start with Scooch off ends at once" $ended
 Expect "a background start with Scooch off leaves no app process" ((Icon-Count) -eq 0)
+Start-Process -FilePath (Join-Path $folder 'scooch-app.exe')
+$shown = Wait-For 40 { [bool](Find-Window) }
+Start-Sleep -Seconds 3
+Close-Window
+$ended = Wait-For 15 { (Icon-Count) -eq 0 }
+Line "- with Scooch off a plain start showed its window after $shown s, and the process ended $ended s after the window closed"
+Expect "closing the window while Scooch is off ends the process" ($ended -ge 0)
 
 Line ''
 Line '#### Login with Scooch on'
@@ -536,8 +585,11 @@ Line "- the icon process $icon came up $up s after the login entry ran, made by 
 $spot = Icon-Center
 Expect "after a login with Scooch on the icon is there" ([bool]$spot)
 Expect "after a login with Scooch on no window opens" (-not (Find-Window))
-Quiet-Minute 'started at the login with no window ever'
-Expect "the icon started at the login woke its threads at most 6 times in a quiet minute" ($script:quietSwitches -ge 0 -and $script:quietSwitches -le 6)
+$logged = Read-Shared "$data\watch.log"
+Line "- the daemon's log says $(@($logged -split "`n" | Where-Object { $_ -match ' icon ' }) | Select-Object -Last 1)"
+Expect "the daemon's watch.log says when the icon started and how many ms that took" ($logged -match 'icon started .* in [0-9.]+ ms')
+Quiet-Minutes 'started at the login with no window ever'
+Expect "the icon started at the login had a minute with no wake of its threads among five, so no timer of 60 s or less runs in it" ($script:quietLeast -eq 0)
 Get-Process -Name scoochw -ErrorAction SilentlyContinue | Stop-Process -Force
 Wait-For 15 { (Daemons) -eq 0 } | Out-Null
 Start-Sleep -Seconds 3
@@ -558,3 +610,44 @@ Line "- a minute later the short lived app process $short is $kept, the daemon $
 Expect "a minute later no ended child of the daemon is kept by a handle" ($kept -eq 'gone')
 Wait-For 40 { (Read-Shared "$data\state.json") -match '"fingerprint": "' } | Out-Null
 Line "- Scooch is on with only the icon for the rest of the probe, app processes $(Icon-Count)"
+
+Line ''
+Line '#### An install over a running icon'
+$before = Icon-Pid
+(Start-Process -FilePath $setup.FullName -ArgumentList '/S' -PassThru).WaitForExit(300000) | Out-Null
+$back = Wait-For 60 { (Icon-Count) -eq 1 -and (Icon-Pid) -ne $before }
+Start-Sleep -Seconds 3
+$spot = Icon-Center
+Line "- the installer ran over the icon $before, the new icon process $(Icon-Pid) came after $back s, the icon $(if ($spot) { "at $($spot[0]) $($spot[1])" } else { 'not found' }), daemons $(Daemons), Scooch on $(State-On)"
+Expect "an install over a running icon brings the icon back" ($back -ge 0 -and [bool]$spot)
+
+Line ''
+Line '#### The icon lock'
+Icon-Processes | Stop-Process -Force -ErrorAction SilentlyContinue
+Wait-For 10 { (Icon-Count) -eq 0 } | Out-Null
+$lockFile = [System.IO.File]::Open("$data\icon.lock", 'OpenOrCreate', 'ReadWrite', 'ReadWrite')
+$lockFile.Lock(0, 1)
+$lockedLog = Join-Path $Out 'background-locked.log'
+$hidden = Start-Process -FilePath (Join-Path $folder 'scooch-app.exe') -ArgumentList '--background' -RedirectStandardError $lockedLog -PassThru
+$ended = $hidden.WaitForExit(10000)
+Line "- with another process holding the lock, a background start ended $ended and says $((Read-Shared $lockedLog) -replace "`r?`n", ' ')"
+Expect "a background start without the lock ends at once" $ended
+Expect "a background start without the lock leaves no app process" ((Icon-Count) -eq 0)
+$windowLog = Join-Path $Out 'window-locked.log'
+Start-Process -FilePath (Join-Path $folder 'scooch-app.exe') -RedirectStandardError $windowLog
+$shown = Wait-For 40 { [bool](Find-Window) }
+Start-Sleep -Seconds 3
+$said = Read-Shared $windowLog
+Line "- a plain start without the lock showed its window after $shown s and says $($said -replace "`r?`n", ' ')"
+Expect "a plain start without the lock shows its window" ($shown -ge 0)
+Expect "a plain start without the lock makes no icon" ($said -notmatch 'tray made')
+Close-Window
+$gone = Wait-For 15 { (Icon-Count) -eq 0 }
+Expect "the window without the lock ends its process when it closes" ($gone -ge 0)
+$lockFile.Unlock(0, 1)
+$lockFile.Close()
+$freeLog = Join-Path $Out 'background-free.log'
+Start-Process -FilePath (Join-Path $folder 'scooch-app.exe') -ArgumentList '--background' -RedirectStandardError $freeLog
+$made = Wait-For 30 { (Read-Shared $freeLog) -match 'tray made' }
+Line "- with the lock free again a background start made the icon after $made s"
+Expect "with the lock free a background start makes the icon" ($made -ge 0)

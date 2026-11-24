@@ -464,6 +464,10 @@ Line "- the saved state holds a record for a screen probe-absent that no desktop
 Expect "the saved state holds a record for a screen nobody shows before the removal" ((Read-Shared "$data\state.json") -match 'probe-absent')
 function Uninstall-Entry { @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DisplayName -eq 'Scooch' }).Count }
 Line "- uninstall entries for Scooch before removal $(Uninstall-Entry)"
+$iconBefore = @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue) | Select-Object -First 1
+if ($iconBefore) { $null = $iconBefore.Handle }
+Line "- the icon process before the removal $(if ($iconBefore) { $iconBefore.Id } else { 'none' })"
+Expect "the icon runs before the removal" ([bool]$iconBefore)
 $uninstaller = Join-Path $folder 'uninstall.exe'
 $took = Measure-Command {
     (Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru).WaitForExit(300000) | Out-Null
@@ -484,6 +488,9 @@ Expect "removal put the photo back" ([Desk]::Wallpaper() -ieq $photo)
 Expect "removal left no login entry" (-not (Run-Value))
 Expect "removal left no daemon" ((Daemons) -eq 0)
 Expect "removal ended the icon process" (@(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count -eq 0)
+$selfEnded = $iconBefore -and $iconBefore.WaitForExit(1000) -and $iconBefore.ExitCode -eq 0
+Line "- the icon process $(if ($iconBefore) { "$($iconBefore.Id) ended with code $($iconBefore.ExitCode)" } else { 'was never there' }), where 0 is its own exit and -1 a forced end"
+Expect "the icon ended by itself when the removal turned Scooch off, before the uninstaller ended what was left" $selfEnded
 Expect "removal left the install folder empty" (@(Get-ChildItem $folder -ErrorAction SilentlyContinue).Count -eq 0)
 Expect "removal kept the Path entry the older command install had made" ([bool]($userPath -split ';' | Where-Object { $_.TrimEnd('\') -ieq $folder }))
 Copy-Item "$data\state.json" (Join-Path $Out 'state.json') -ErrorAction SilentlyContinue
