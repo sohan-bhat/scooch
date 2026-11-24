@@ -81,6 +81,10 @@ mouse_at() {
 }
 
 menu_open() { [ "$(status open)" = true ]; }
+icon_shown() { grep -q '^at .* of 2 menu bars' <<<"$(status where)"; }
+front() { limited 15 osascript -e 'tell application "System Events" to get bundle identifier of first process whose frontmost is true' 2>/dev/null; }
+to_front() { limited 15 osascript -e 'tell application "System Events" to set frontmost of (first process whose bundle identifier is "me.sohanbhat.scooch.window") to true' >/dev/null 2>&1; sleep 1; }
+ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 
 mouse_move() {
   limited 15 osascript -l JavaScript -e "ObjC.import('CoreGraphics'); \$.CGEventPost(\$.kCGHIDEventTap, \$.CGEventCreateMouseEvent(null, \$.kCGEventMouseMoved, \$.CGPointMake($1, $2), \$.kCGMouseButtonLeft)); 'moved';" >/dev/null 2>&1
@@ -130,6 +134,30 @@ if system.proc_pid_rusage(int(sys.argv[1]), 2, ctypes.byref(usage)) != 0:
 cpu = (usage.user + usage.system) * base.numer / base.denom / 1e6
 print(usage.idle, usage.interrupt, usage.footprint, usage.resident, round(cpu, 1))
 PY
+}
+
+quiet_minutes() {
+  local pid before after first counts="" least="" woke idle0 idle1 cpu0 cpu1 foot1 res1
+  mouse_move 300 300
+  sleep 3
+  pid=$(icon_pid)
+  first=$(rusage "$pid")
+  before=$first
+  for minute in 1 2 3 4 5; do
+    sleep 60
+    after=$(rusage "$pid")
+    read -r idle0 _ _ _ _ <<<"${before:-0 0 0 0 0}"
+    read -r idle1 _ _ _ _ <<<"${after:-0 0 0 0 0}"
+    woke=$((idle1 - idle0))
+    counts="$counts $woke"
+    if [ -z "$least" ] || [ "$woke" -lt "$least" ]; then least=$woke; fi
+    before=$after
+  done
+  read -r _ _ _ _ cpu0 <<<"${first:-0 0 0 0 0}"
+  read -r _ _ foot1 res1 cpu1 <<<"${after:-0 0 0 0 0}"
+  quiet_least=$least
+  if [ -z "$first" ] || [ -z "$after" ]; then quiet_least=unread; line "- the usage of the icon process $pid could not be read"; fi
+  line "- over five quiet minutes, $1, the icon process $pid woke from idle$counts times, one count a minute, used $(awk -v a="$cpu0" -v b="$cpu1" 'BEGIN { printf "%.1f", b - a }') ms of CPU in all, and holds a footprint of $(awk -v f="$foot1" 'BEGIN { printf "%.1f", f / 1048576 }') MB with $(awk -v r="$res1" 'BEGIN { printf "%.1f", r / 1048576 }') MB resident"
 }
 
 quiet_minute() {
@@ -210,13 +238,67 @@ sleep 2
 line "- app processes $(icon_count), the same one $([ "$(icon_pid)" = "$before" ] && echo yes || echo no)"
 expect "opening Scooch while the icon runs shows the window" has_window
 expect "opening Scooch while the icon runs keeps one app process" [ "$(icon_count)" = 1 ]
+to_front
+before_front=$(front)
 "$app/Contents/MacOS/scooch-app" --background >/dev/null 2>&1 &
 sleep 6
-line "- a second start with the hidden argument while the app runs left $(icon_count) app process, window $(has_window && echo open || echo closed)"
+after_front=$(front)
+line "- a second start with the hidden argument while the app runs left $(icon_count) app process, window $(has_window && echo open || echo closed), in front before $before_front and after $after_front"
 expect "a background start while the app runs leaves one app process" [ "$(icon_count)" = 1 ]
+expect "a background start while the window is open leaves the window open and in front" eval 'has_window && [ "$after_front" = me.sohanbhat.scooch.window ] && [ "$before_front" = "$after_front" ]'
 close_window
 sleep 2
 expect "the window closed again and the icon stays" app_alive
+
+on_again() {
+  "$daemon" use "$photo" >>"$out/tray-on.txt" 2>&1
+  wait_for 30 state_on >/dev/null
+  stand_in "$1"
+  wait_for 40 rendered >/dev/null
+  wait_for 30 app_alive >/dev/null
+  sleep 3
+  line "- Scooch on again $1, saved on $(grep -c '"on": true' "$data/state.json"), app processes $(icon_count), the icon $(status where)"
+}
+
+line
+line "#### Cmd+Q turns Scooch off"
+limited 20 open "$app" >/dev/null 2>&1
+wait_for 20 has_window >/dev/null
+to_front
+line "- the window $(has_window && echo open || echo closed), in front $(front)"
+limited 15 osascript -e 'tell application "System Events" to keystroke "q" using command down' >/dev/null 2>&1
+wait_for 30 app_gone >/dev/null
+wait_for 30 state_off >/dev/null
+sleep 3
+line "- after Cmd+Q, app processes $(icon_count), saved on $(grep -c '"on": true' "$data/state.json"), wallpaper $(wallpaper), login item $([ -f "$plist" ] && echo present || echo gone)"
+expect "Cmd+Q turned Scooch off" state_off
+expect "Cmd+Q put the photo back" wallpaper_is_photo
+expect "Cmd+Q ended the app process" app_gone
+on_again "after Cmd+Q"
+
+line
+line "#### The app menu's Quit Scooch turns Scooch off"
+limited 20 open "$app" >/dev/null 2>&1
+wait_for 20 has_window >/dev/null
+to_front
+line "- the app menu $(limited 30 osascript -e 'tell application "System Events" to tell (first process whose bundle identifier is "me.sohanbhat.scooch.window") to click menu item "Quit Scooch" of menu 1 of menu bar item 2 of menu bar 1' 2>&1 | head -c 200)"
+wait_for 30 app_gone >/dev/null
+wait_for 30 state_off >/dev/null
+sleep 3
+line "- after the app menu's Quit Scooch, app processes $(icon_count), saved on $(grep -c '"on": true' "$data/state.json"), wallpaper $(wallpaper)"
+expect "the app menu's Quit Scooch turned Scooch off" state_off
+expect "the app menu's Quit Scooch put the photo back" wallpaper_is_photo
+expect "the app menu's Quit Scooch ended the app process" app_gone
+on_again "after the app menu's Quit Scooch"
+
+line
+line "#### A quit the system sends with Scooch on brings the icon back"
+old_icon=$(icon_pid)
+line "- the system's quit $(limited 20 osascript -e 'tell application id "me.sohanbhat.scooch.window" to quit' 2>&1 | head -c 200)"
+back_from_quit() { [ -n "$(icon_pid)" ] && [ "$(icon_pid)" != "$old_icon" ] && icon_shown; }
+if took=$(wait_for 20 back_from_quit); then line "- the quit ended $old_icon and the new icon process $(icon_pid) was in the menu bar after $took s"; else line "- after the quit, app processes $(pgrep -fl 'MacOS/scooch-app' | tr '\n' ';'), the icon $(status where)"; fi
+expect "a quit the system sends ends the process and the icon comes back" back_from_quit
+expect "a quit the system sends leaves Scooch on" state_on
 
 line
 line "#### Quit Scooch"
@@ -265,8 +347,13 @@ line "- after the login, window $(has_window && echo open || echo closed), the i
 expect "after a login with Scooch on the icon is there" grep -q '^at ' <<<"$(status where)"
 expect "after a login with Scooch on no window opens" window_gone
 expect "after a login the app is not in the Dock" not_in_dock
-quiet_minute "started at the login with no window ever"
-expect "the icon started at the login woke at most 6 times from idle in a quiet minute" quiet_enough
+logged=$(sed -n "$((from + 1)),\$p" "$data/watch.log" 2>/dev/null)
+expect "the daemon's watch.log says when the icon started and how many ms that took" grep -q 'icon started .* in [0-9.]* ms' <<<"$logged"
+after_tick() { awk '/ tick / { if (!t) t = NR } / icon started / { if (!i) i = NR } END { exit !(t && i && t < i) }' "$out/watch.log"; }
+line "- in the traced daemon's log the first tick is line $(grep -n -m1 ' tick ' "$out/watch.log" | cut -d: -f1) and the first icon start is line $(grep -n -m1 ' icon started ' "$out/watch.log" | cut -d: -f1)"
+expect "the traced daemon started the icon after its first tick" after_tick
+quiet_minutes "started at the login with no window ever"
+expect "the icon started at the login had a minute with no wake from idle among five, so no timer of 60 s or less runs in it" [ "$quiet_least" = 0 ]
 not_child() { [ -n "$icon" ] && [ -n "$watcher" ] && [ "$(ps -o ppid= -p "$icon" | tr -d ' ')" != "$watcher" ]; }
 no_zombie() { [ -n "$watcher" ] && kill -0 "$watcher" 2>/dev/null && ! ps -axo ppid=,stat= | awk -v d="$watcher" '$1 == d && $2 ~ /Z/' | grep -q .; }
 expect "the icon process is no child of the daemon" not_child
@@ -287,3 +374,50 @@ stand_in "the login, through the login item"
 wait_for 40 rendered >/dev/null
 sleep 3
 line "- Scooch is on with only the icon for the rest of the probe, app processes $(icon_count), window $(has_window && echo open || echo closed)"
+
+line
+line "#### A replaced app file hands the icon to the new one"
+old_icon=$(icon_pid)
+program="$app/Contents/MacOS/scooch-app"
+cp -p "$program" "$program.new" && mv -f "$program.new" "$program"
+started=$(ms)
+touch "$data/probe-nudge" && rm -f "$data/probe-nudge"
+gone_at=""
+back_at=""
+for step in $(seq 1 150); do
+  if [ -z "$gone_at" ] && ! kill -0 "$old_icon" 2>/dev/null; then gone_at=$(ms); fi
+  if [ -n "$gone_at" ] && [ -n "$(icon_pid)" ] && [ "$(icon_pid)" != "$old_icon" ] && icon_shown; then back_at=$(ms); break; fi
+  sleep 0.1
+done
+line "- after the program file was replaced and the data folder changed, the old process $old_icon ended after $([ -n "$gone_at" ] && echo "$((gone_at - started)) ms" || echo never), the new one $(icon_pid) showed its icon $([ -n "$back_at" ] && echo "$((back_at - gone_at)) ms after the old one ended" || echo never), Scooch on $(state_on && echo yes || echo no)"
+expect "a replaced program file with Scooch on ends the old icon process" [ -n "$gone_at" ]
+expect "the new program takes over the icon" [ -n "$back_at" ]
+
+line
+line "#### The icon lock"
+pkill -f "/Contents/MacOS/scooch-app" >/dev/null 2>&1
+wait_for 15 app_gone >/dev/null
+python3 -c 'import fcntl, sys, time; f = open(sys.argv[1], "a"); fcntl.flock(f, fcntl.LOCK_EX); print("held", flush=True); time.sleep(90)' "$data/icon.lock" >"$out/lock-holder.txt" 2>&1 &
+holder=$!
+wait_for 10 grep -q held "$out/lock-holder.txt" >/dev/null
+started=$(date +%s)
+"$app/Contents/MacOS/scooch-app" --background >"$out/background-locked.log" 2>&1
+ended=$(( $(date +%s) - started ))
+line "- with another process holding the lock, a background start ended after $ended s and says $(tr '\n' ' ' <"$out/background-locked.log")"
+expect "a background start without the lock ends at once" [ "$ended" -le 5 ]
+expect "a background start without the lock leaves no app process" app_gone
+"$app/Contents/MacOS/scooch-app" >"$out/window-locked.log" 2>&1 &
+wait_for 40 has_window >/dev/null
+sleep 3
+line "- a plain start without the lock, window $(has_window && echo open || echo closed), menu bars $(status where), it says $(tr '\n' ' ' <"$out/window-locked.log" | head -c 300)"
+expect "a plain start without the lock shows its window" has_window
+expect "a plain start without the lock makes no icon" eval '! icon_shown'
+close_window
+wait_for 15 app_gone >/dev/null
+expect "the window without the lock ends its process when it closes" app_gone
+kill "$holder" >/dev/null 2>&1
+wait "$holder" 2>/dev/null
+"$app/Contents/MacOS/scooch-app" --background >"$out/background-free.log" 2>&1 &
+wait_for 20 icon_shown >/dev/null
+line "- with the lock free again a background start made the icon $(status where)"
+expect "with the lock free a background start makes the icon" icon_shown

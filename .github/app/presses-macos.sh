@@ -321,6 +321,7 @@ expect "pressed while off no login item is written" no_plist
 expect "pressed while off no daemon runs" no_watch
 expect "pressed while off Scooch's saved state is untouched" [ "$(md5 -q "$data/state.json")" = "$state_sum" ]
 close_window
+expect "closing the window while Scooch is off ends the process" no_window_app
 open_window
 line "- after closing and opening the window the row reads $(states 'probe canoe,seagull sky')"
 expect "the selection survives closing and opening the window" chosen "probe canoe"
