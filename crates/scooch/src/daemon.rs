@@ -4551,6 +4551,82 @@ pub mod tests {
         events(&fake)
     }
 
+    fn timed_tick(daemon: &Daemon) -> (Outcome, String) {
+        begin_laps(Instant::now());
+        let report = daemon.tick();
+        let laps = laps();
+        (outcome(&report), format!("{laps}{}", spent_line()))
+    }
+
+    fn writers_done() {
+        let started = Instant::now();
+        while WRITERS.load(std::sync::atomic::Ordering::SeqCst) > 0 && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    #[test]
+    #[ignore]
+    fn the_pieces_of_a_cold_move_and_an_off_move_timed() {
+        for (width, height, scenery) in [(1024u32, 768u32, scooch_core::Scenery::Off), (1920, 1080, scooch_core::Scenery::Off), (1024, 768, scooch_core::Scenery::Auto), (1920, 1080, scooch_core::Scenery::Auto)] {
+            let name = format!("pieces-{width}-{scenery:?}");
+            let (mut daemon, fake, _) = rig(&name, vec![Screen { id: "main".into(), frame: Rect { x: 0.0, y: 0.0, w: width as f32, h: height as f32 }, scale: 1.0 }]);
+            daemon.grace = Duration::ZERO;
+            *fake.live.lock().unwrap() = true;
+            let spawner = crate::glide::tests::FakeSpawner::new(fake.events.clone());
+            let script = spawner.script.clone();
+            daemon.glider = Arc::new(Mutex::new(Glider::new(Box::new(spawner))));
+            let mut state = daemon.store.load();
+            state.options = Options { scenery, ..Options::default() };
+            daemon.store.save(&state).unwrap();
+            let folder = scratch(&format!("{name}-picture"));
+            let (cx, cy, radius) = (width as f32 / 2.0, height as f32 / 2.0, height as f32 / 7.0);
+            let disc = RgbImage::from_fn(width, height, |x, y| if ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt() < radius { [245, 196, 92].into() } else { scooch_core::ISLAND_WATER.into() });
+            let path = folder.join("disc.jpg");
+            std::fs::write(&path, scooch_core::encode_jpeg(&disc, 92).unwrap()).unwrap();
+            fake.show("main", &path);
+            let icon = |x: f32, y: f32| Rect { x: x - 52.0, y: y - 56.0, w: 104.0, h: 112.0 };
+            let column: Vec<Rect> = (1..4).map(|index| icon(width as f32 * 0.85, height as f32 * 0.25 + 110.0 * index as f32)).collect();
+            let at = |x: f32| [vec![icon(x, height as f32 * 0.5)], column.clone()].concat();
+            let (subject, aside) = (width as f32 * 0.5, width as f32 * 0.38);
+            fake.place(at(subject));
+            println!("{width}x{height} {scenery:?} first {:?}", timed_tick(&daemon));
+            writers_done();
+            fake.place(at(aside));
+            println!("{width}x{height} {scenery:?} second {:?}", timed_tick(&daemon));
+            writers_done();
+            let glide = |on: bool| {
+                let mut state = daemon.store.load();
+                state.glide = on;
+                daemon.store.save(&state).unwrap();
+            };
+            for pair in 0..7 {
+                script.lock().unwrap().slow_hello = Duration::from_secs(60);
+                daemon.glider.lock().unwrap().reset_for_test();
+                daemon.glider.lock().unwrap().keep_parked();
+                println!("{width}x{height} {scenery:?} pair {pair} toggle on {:?}", timed_tick(&daemon));
+                writers_done();
+                fake.place(at(aside));
+                println!("{width}x{height} {scenery:?} pair {pair} back {:?}", timed_tick(&daemon));
+                writers_done();
+                fake.place(at(subject));
+                println!("{width}x{height} {scenery:?} pair {pair} slow {:?}", timed_tick(&daemon));
+                writers_done();
+                glide(false);
+                println!("{width}x{height} {scenery:?} pair {pair} toggle off {:?}", timed_tick(&daemon));
+                writers_done();
+                fake.place(at(aside));
+                println!("{width}x{height} {scenery:?} pair {pair} back {:?}", timed_tick(&daemon));
+                writers_done();
+                fake.place(at(subject));
+                println!("{width}x{height} {scenery:?} pair {pair} off {:?}", timed_tick(&daemon));
+                writers_done();
+                glide(true);
+            }
+        }
+    }
+
     #[test]
     fn a_helper_that_has_not_parked_builds_no_tables_and_opens_no_layer_before_the_set() {
         let (_, _, _, events) = cold_skip("cold-skip-tables", true);
