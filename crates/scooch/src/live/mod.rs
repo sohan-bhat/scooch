@@ -143,6 +143,7 @@ pub enum Reply {
     Canvas { #[serde(default)] warm_id: Option<u32>, ms: u64 },
     Glided { id: u32, frames: u32, slow_frames: u32, first_frame_ms: u64, #[serde(default)] uploads: u32, #[serde(default = "one")] scale: f32 },
     Settled { id: u32 },
+    Drew { id: u32, frames: String },
     Closed { id: u32 },
     Unprimed { screen: String },
     Failed { #[serde(default)] id: Option<u32>, why: String },
@@ -571,6 +572,7 @@ mod tests {
             Reply::Primed { screen: "one".into(), window: 20, first: 30, still: "kept".into() },
             Reply::Glided { id: 3, frames: 24, slow_frames: 1, first_frame_ms: 30, uploads: 1, scale: 0.75 },
             Reply::Settled { id: 3 },
+            Reply::Drew { id: 3, frames: "1795551562.312 move S@1 G0.01@0.20".into() },
             Reply::Closed { id: 3 },
             Reply::Failed { id: None, why: "no".into() },
         ];

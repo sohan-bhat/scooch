@@ -183,6 +183,11 @@ impl Real {
                 self.drawn.push((id, Split { window: part(window), first: part(first), reveal: part(reveal), make: part(make), present: part(present), found, steps, revealing, still, screen_gpu }));
             }
             Reply::Settled { id } => self.heard.push(Heard::Settled(id)),
+            Reply::Drew { id, frames } => {
+                if crate::daemon::trace() {
+                    eprintln!("{} glide drew {id} {frames}", crate::daemon::stamp());
+                }
+            }
             Reply::Glided { id, frames, slow_frames, scale, first_frame_ms, .. } => self.heard.push(Heard::Glided { id, frames, slow: slow_frames, scale, first: first_frame_ms }),
             Reply::Failed { id: Some(id), .. } if self.gone.contains(&id) => {}
             Reply::Failed { id, why } => self.failed.push((id, why)),
