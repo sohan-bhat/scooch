@@ -528,6 +528,7 @@ mod probe {
         fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> *const c_void;
         fn CGDisplayCreateImage(display: u32) -> *const c_void;
         fn CGWindowListCreateImage(bounds: Frame, option: u32, window: u32, image: u32) -> *const c_void;
+        fn CGDisplayCreateImageForRect(display: u32, rect: Frame) -> *const c_void;
         fn CGImageGetWidth(image: *const c_void) -> usize;
         fn CGImageGetHeight(image: *const c_void) -> usize;
         fn CGImageGetBytesPerRow(image: *const c_void) -> usize;
@@ -840,6 +841,9 @@ mod probe {
         }
         if std::env::args().nth(1).as_deref() == Some("slow-check") {
             return slow_check(std::env::args().skip(2).collect());
+        }
+        if std::env::args().nth(1).as_deref() == Some("black-frames") {
+            return black_frames(PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "macblack".into())));
         }
         if std::env::args().nth(1).as_deref() == Some("gpu-bench") {
             return gpu_bench(PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "macbench".into())));
@@ -3304,6 +3308,286 @@ mod probe {
         if found.max > 2 {
             p.fail(format!("the layer did not show the still exactly as the system does at {label}"));
         }
+        Ok(())
+    }
+
+    struct Hunt {
+        name: &'static str,
+        trials: u32,
+        layer: bool,
+        under: bool,
+        hold: Duration,
+        through: Option<&'static str>,
+    }
+
+    const HUNTS: [Hunt; 6] = [
+        Hunt { name: "opaque layer, picture set under it, close 600 ms after the set", trials: 25, layer: true, under: true, hold: Duration::from_millis(600), through: None },
+        Hunt { name: "see through layer, picture set under it, close 600 ms after the set", trials: 25, layer: true, under: true, hold: Duration::from_millis(600), through: Some("layer") },
+        Hunt { name: "faint window, picture set under it, close 600 ms after the set", trials: 15, layer: true, under: true, hold: Duration::from_millis(600), through: Some("alpha") },
+        Hunt { name: "opaque layer, picture set under it, close 3 s after the set", trials: 10, layer: true, under: true, hold: Duration::from_millis(3000), through: None },
+        Hunt { name: "opaque layer, nothing set under it", trials: 10, layer: true, under: false, hold: Duration::from_millis(600), through: None },
+        Hunt { name: "plain set with no layer", trials: 10, layer: false, under: true, hold: Duration::from_millis(1200), through: None },
+    ];
+    const HUNT_AFTER: Duration = Duration::from_millis(500);
+    const HUNT_REGION: (f32, f32, f32, f32) = (0.1, 0.3, 0.9, 0.6);
+
+    fn tone(width: u32, height: u32, from: [u8; 3], to: [u8; 3]) -> RgbImage {
+        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+        for _ in 0..height {
+            for x in 0..width {
+                let t = x as f32 / width.max(1) as f32;
+                for channel in 0..3 {
+                    rgb.push((f32::from(from[channel]) + (f32::from(to[channel]) - f32::from(from[channel])) * t).round() as u8);
+                }
+            }
+        }
+        RgbImage::from_raw(width, height, rgb).unwrap_or_default()
+    }
+
+    fn band(display: u32, screen: &Screen) -> Option<Shot> {
+        let rect = Frame { x: f64::from(screen.frame.w * HUNT_REGION.0), y: f64::from(screen.frame.h * HUNT_REGION.1), w: f64::from(screen.frame.w * (HUNT_REGION.2 - HUNT_REGION.0)), h: f64::from(screen.frame.h * (HUNT_REGION.3 - HUNT_REGION.1)) };
+        unpack(unsafe { CGDisplayCreateImageForRect(display, rect) })
+    }
+
+    fn tone_of(rgb: impl Iterator<Item = [u8; 3]>) -> (f32, [f32; 3]) {
+        let (mut dark, mut count, mut sum) = (0usize, 0usize, [0f64; 3]);
+        for pixel in rgb {
+            count += 1;
+            if pixel.iter().all(|channel| *channel <= 12) {
+                dark += 1;
+            }
+            for channel in 0..3 {
+                sum[channel] += f64::from(pixel[channel]);
+            }
+        }
+        let count = count.max(1);
+        (dark as f32 / count as f32, sum.map(|total| (total / count as f64) as f32))
+    }
+
+    fn region_tone(shot: &Shot, region: (f32, f32, f32, f32)) -> (f32, [f32; 3]) {
+        let (left, top) = ((shot.width as f32 * region.0) as usize, (shot.height as f32 * region.1) as usize);
+        let (right, bottom) = ((shot.width as f32 * region.2) as usize, (shot.height as f32 * region.3) as usize);
+        tone_of((top..bottom.max(top + 1)).step_by(6).flat_map(|y| (left..right.max(left + 1)).step_by(6).map(move |x| (x, y))).map(|(x, y)| shot.at(x, y)))
+    }
+
+    fn sort_of(found: (f32, [f32; 3]), a: [f32; 3], b: [f32; 3]) -> char {
+        let (dark, mean) = found;
+        let apart = |want: [f32; 3]| (0..3).map(|channel| (mean[channel] - want[channel]).abs()).sum::<f32>() / 3.0;
+        if dark >= 0.9 {
+            'K'
+        } else if dark < 0.02 && apart(a) < 20.0 {
+            'A'
+        } else if dark < 0.02 && apart(b) < 20.0 {
+            'B'
+        } else {
+            '~'
+        }
+    }
+
+    fn below_desktop() -> Vec<String> {
+        let (desktop, _) = layer::levels();
+        layer::listing().into_iter().filter(|window| window.layer <= desktop).map(|window| format!("{} {} '{}' at {} alpha {:.3}", window.number, window.owner, window.name, window.layer, window.alpha)).collect()
+    }
+
+    struct Caught {
+        at: f64,
+        took: f64,
+        sort: char,
+        ours: bool,
+        tone: (f32, [f32; 3]),
+    }
+
+    struct Tried {
+        caught: Vec<Caught>,
+        before: Vec<String>,
+        armed: Vec<String>,
+        after: Vec<String>,
+        under: Option<char>,
+        under_black: Option<char>,
+        ours_black: Option<char>,
+        held: f64,
+    }
+
+    fn shows(display: u32, screen: &Screen, want: char, a: [f32; 3], b: [f32; 3], limit: Duration) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            if band(display, screen).is_some_and(|shot| sort_of(region_tone(&shot, (0.0, 0.0, 1.0, 1.0)), a, b) == want) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        false
+    }
+
+    fn whole(window: Option<i64>, a: [f32; 3], b: [f32; 3]) -> Option<char> {
+        window.and_then(grab_window).map(|shot| sort_of(region_tone(&shot, HUNT_REGION), a, b))
+    }
+
+    fn watch_close(display: u32, screen: &Screen, pid: Option<u32>, after: Duration, tones: ([f32; 3], [f32; 3]), out: &Path, saved: &mut usize) -> (Vec<Caught>, Option<char>, Option<char>) {
+        let (a, b) = tones;
+        let started = Instant::now();
+        let mut caught = Vec::new();
+        let (mut under_black, mut ours_black) = (None, None);
+        while started.elapsed() < after {
+            let mine = pid.and_then(|pid| layer::listing().into_iter().find(|window| window.pid == i64::from(pid)).map(|window| window.number));
+            let at = started.elapsed().as_secs_f64() * 1000.0;
+            let Some(shot) = band(display, screen) else { continue };
+            let took = started.elapsed().as_secs_f64() * 1000.0 - at;
+            let tone = region_tone(&shot, (0.0, 0.0, 1.0, 1.0));
+            let sort = sort_of(tone, a, b);
+            if sort == 'K' && under_black.is_none() {
+                under_black = whole(picture_window(screen).map(|window| window.number), a, b).or(Some('?'));
+                ours_black = mine.and_then(|number| whole(Some(number), a, b));
+                if *saved < 8 {
+                    *saved += 1;
+                    let _ = scooch_core::encode_jpeg(&shot.image(), 80).map(|bytes| fs::write(out.join(format!("black-{saved}.jpg")), bytes));
+                }
+            }
+            caught.push(Caught { at, took, sort, ours: mine.is_some(), tone });
+        }
+        (caught, under_black, ours_black)
+    }
+
+    fn hunt_trial(helper: Option<&mut scooch::live::Helper>, hunt: &Hunt, id: u32, files: (&Path, &Path), (display, screen): (u32, &Screen), tones: ([f32; 3], [f32; 3]), (out, saved): (&Path, &mut usize)) -> Result<Tried> {
+        let desktop = platform::current()?;
+        let (a, b) = tones;
+        let (first, second) = if hunt.under { files } else { (files.1, files.1) };
+        desktop.set_wallpaper(screen, first)?;
+        let start = if hunt.under { 'A' } else { 'B' };
+        if !shows(display, screen, start, a, b, Duration::from_secs(4)) {
+            anyhow::bail!("the first picture did not show within 4 s");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        let before = below_desktop();
+        let Some(helper) = helper.filter(|_| hunt.layer) else {
+            let set = Instant::now();
+            desktop.set_wallpaper(screen, second)?;
+            let (caught, under_black, _) = watch_close(display, screen, None, hunt.hold, tones, out, saved);
+            return Ok(Tried { caught, before, armed: Vec::new(), after: below_desktop(), under: None, under_black, ours_black: None, held: set.elapsed().as_secs_f64() * 1000.0 });
+        };
+        helper.open(id, screen, first, Duration::from_secs(5))?;
+        std::thread::sleep(Duration::from_millis(150));
+        let set = Instant::now();
+        if hunt.under {
+            desktop.set_wallpaper(screen, second)?;
+        }
+        helper.ask_settle(id, second, None)?;
+        helper.settled(id, Duration::from_secs(3))?;
+        while set.elapsed() < hunt.hold {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let armed = below_desktop();
+        let under = if id.is_multiple_of(2) { whole(picture_window(screen).map(|window| window.number), a, b) } else { None };
+        let held = set.elapsed().as_secs_f64() * 1000.0;
+        helper.send(&scooch::live::Command::Close { id })?;
+        let (caught, under_black, ours_black) = watch_close(display, screen, Some(helper.pid), HUNT_AFTER, tones, out, saved);
+        helper.expect(Duration::from_secs(3), |reply| match reply {
+            scooch::live::Reply::Closed { id: closed } if *closed == id => Some(Ok(())),
+            scooch::live::Reply::Failed { id: Some(failed), why } if *failed == id => Some(Err(anyhow::anyhow!("{why}"))),
+            _ => None,
+        })?;
+        Ok(Tried { caught, before, armed, after: below_desktop(), under, under_black, ours_black, held })
+    }
+
+    fn black_frames(out: PathBuf) -> ExitCode {
+        let _ = fs::create_dir_all(&out);
+        let mut lines = vec!["# Black frames at the close of the layer".to_string(), String::new()];
+        if !std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+            lines.push(format!("- {RUNNER_ONLY}"));
+            let _ = fs::write(out.join("report.md"), lines.join("\n") + "\n");
+            return ExitCode::SUCCESS;
+        }
+        let icon = dirs::desktop_dir().unwrap_or_default().join("scooch-black-probe.txt");
+        let _ = fs::write(&icon, "probe");
+        std::thread::sleep(Duration::from_secs(3));
+        let result = hunt(&out, &mut lines);
+        let _ = fs::remove_file(&icon);
+        if let Err(error) = result {
+            lines.push(format!("- **stopped** {error:#}"));
+        }
+        let _ = fs::write(out.join("report.md"), lines.join("\n") + "\n");
+        ExitCode::SUCCESS
+    }
+
+    fn hunt(out: &Path, lines: &mut Vec<String>) -> Result<()> {
+        let say = |lines: &mut Vec<String>, text: String| {
+            println!("{text}");
+            lines.push(text);
+            let _ = fs::write(out.join("report.md"), lines.join("\n") + "\n");
+        };
+        let marker = MainThreadMarker::new().context("not on the main thread")?;
+        let desktop = platform::current()?;
+        let screen = desktop.screens()?.into_iter().next().context("no screen")?;
+        let original = desktop.wallpaper(&screen).ok().flatten();
+        let (_, display) = picture::screen_for(marker, &screen.id)?;
+        let (width, height) = pixels(&screen);
+        let home = std::env::temp_dir().join(format!("scooch-black-{}", std::process::id()));
+        fs::create_dir_all(&home)?;
+        let bin = std::env::current_exe()?.parent().and_then(Path::parent).map(|folder| folder.join("scooch")).context("no folder for the scooch program")?;
+        let (one, two) = (tone(width, height, [60, 120, 210], [140, 190, 240]), tone(width, height, [235, 150, 70], [250, 215, 140]));
+        let mean = |image: &RgbImage| {
+            let shot = Shot { width: image.width() as usize, height: image.height() as usize, rgb: image.as_raw().clone() };
+            region_tone(&shot, HUNT_REGION).1
+        };
+        let tones = (mean(&one), mean(&two));
+        let (bytes_a, bytes_b) = (scooch_core::encode_jpeg(&one, 92)?, scooch_core::encode_jpeg(&two, 92)?);
+        say(lines, format!("- screen `{}` {} at scale {}, display {display}, pictures {width}x{height}, A mean {:?}, B mean {:?}, original {:?}", screen.id, show(&screen.frame), screen.scale, tones.0, tones.1, original));
+        say(lines, "- each capture is a band of the display from 10 to 90 percent across and 30 to 60 percent down, K black, A the first picture, B the second, ~ neither, captured from the close for 500 ms, times in ms from the close. Even trials capture the picture window alone before the close, odd trials do not, so the odd ones keep the timing of a slide".to_string());
+        let mut saved = 0usize;
+        let mut file = 0u32;
+        for hunt in HUNTS.iter() {
+            say(lines, String::new());
+            say(lines, format!("## {}", hunt.name));
+            say(lines, String::new());
+            let env: Vec<(&str, &str)> = hunt.through.map(|through| (scooch::live::SEE_THROUGH, through)).into_iter().collect();
+            let mut helper = if hunt.layer {
+                let mut helper = scooch::live::Helper::spawn_with(&bin, Duration::from_secs(5), &env)?;
+                let ready = helper.warm(scooch::live::Hints::default(), None, None, Duration::from_secs(30))?;
+                say(lines, format!("- helper {} on {}", helper.pid, ready.adapter));
+                Some(helper)
+            } else {
+                None
+            };
+            let (mut black_trials, mut black_captures, mut captures, mut ours_during) = (0, 0, 0, 0);
+            let mut intervals = Vec::new();
+            for trial in 1..=hunt.trials {
+                file += 1;
+                let (a, b) = (home.join(format!("a-{file}.jpg")), home.join(format!("b-{file}.jpg")));
+                fs::write(&a, &bytes_a)?;
+                fs::write(&b, &bytes_b)?;
+                match hunt_trial(helper.as_mut(), hunt, trial, (&a, &b), (display, &screen), tones, (out, &mut saved)) {
+                    Ok(tried) => {
+                        let blacks: Vec<&Caught> = tried.caught.iter().filter(|caught| caught.sort == 'K').collect();
+                        captures += tried.caught.len();
+                        black_captures += blacks.len();
+                        ours_during += blacks.iter().filter(|caught| caught.ours).count();
+                        if !blacks.is_empty() {
+                            black_trials += 1;
+                        }
+                        intervals.extend(tried.caught.iter().map(|caught| caught.took));
+                        let sorts: String = tried.caught.iter().map(|caught| caught.sort).collect();
+                        let marks: Vec<String> = tried.caught.iter().filter(|caught| caught.sort != 'B').map(|caught| format!("{} at {:.0}+{:.0} ms ours listed {} dark {:.2} mean {:?}", caught.sort, caught.at, caught.took, caught.ours, caught.tone.0, caught.tone.1.map(|value| value.round()))).collect();
+                        say(lines, format!("- trial {trial}: close {:.0} ms after the set, picture window before the close {:?}, captures {sorts}, not B {marks:?}, at the first black the picture window alone {:?} and the layer alone {:?}", tried.held, tried.under, tried.under_black, tried.ours_black));
+                        if trial == 1 || !blacks.is_empty() {
+                            say(lines, format!("  - windows at or below the desktop before {:?}", tried.before));
+                            say(lines, format!("  - before the close {:?}", tried.armed));
+                            say(lines, format!("  - after {:?}", tried.after));
+                        }
+                    }
+                    Err(error) => say(lines, format!("- trial {trial}: stopped {error:#}")),
+                }
+                let _ = fs::remove_file(&a);
+                let _ = fs::remove_file(&b);
+            }
+            drop(helper.take());
+            intervals.sort_by(f64::total_cmp);
+            let middle = intervals.get(intervals.len() / 2).copied().unwrap_or(0.0);
+            say(lines, format!("- summary: {black_trials} of {} trials had a black capture, {black_captures} black of {captures} captures, {ours_during} of the black captures began with the layer window still listed, median capture took {middle:.1} ms", hunt.trials));
+        }
+        if let Some(original) = original.filter(|path| path.is_file()) {
+            let _ = desktop.set_wallpaper(&screen, &original);
+        }
+        let _ = fs::remove_dir_all(&home);
         Ok(())
     }
 
