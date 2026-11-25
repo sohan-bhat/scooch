@@ -152,38 +152,6 @@ public static class Tray {
         }
         return total;
     }
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    struct Entry {
-        public uint Size; public uint Usage; public uint Id; public IntPtr Heap; public uint Module; public uint Threads; public uint Parent; public int Base; public uint Flags;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Name;
-    }
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-    static extern bool Process32FirstW(IntPtr snapshot, ref Entry entry);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-    static extern bool Process32NextW(IntPtr snapshot, ref Entry entry);
-    [DllImport("kernel32.dll")]
-    static extern bool CloseHandle(IntPtr handle);
-    public static string Starts(string name, int milliseconds, int[] known) {
-        var seen = new Dictionary<uint, uint>();
-        var watch = Stopwatch.StartNew();
-        while (watch.ElapsedMilliseconds < milliseconds) {
-            IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
-            var entry = new Entry();
-            entry.Size = (uint)Marshal.SizeOf(typeof(Entry));
-            if (Process32FirstW(snapshot, ref entry)) {
-                do {
-                    if (string.Equals(entry.Name, name, StringComparison.OrdinalIgnoreCase) && Array.IndexOf(known, (int)entry.Id) < 0) seen[entry.Id] = entry.Parent;
-                } while (Process32NextW(snapshot, ref entry));
-            }
-            CloseHandle(snapshot);
-            System.Threading.Thread.Sleep(2);
-        }
-        var told = new List<string>();
-        foreach (var pair in seen) told.Add(pair.Key + " " + pair.Value);
-        return string.Join(";", told);
-    }
     [DllImport("user32.dll")]
     static extern IntPtr GetForegroundWindow();
     public static int FrontPid() {
@@ -195,6 +163,8 @@ public static class Tray {
     static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
     [DllImport("kernel32.dll")]
     static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
     public static string Object(int pid) {
         IntPtr process = OpenProcess(0x1000, false, pid);
         if (process == IntPtr.Zero) return "gone";
@@ -202,6 +172,48 @@ public static class Tray {
         GetExitCodeProcess(process, out code);
         CloseHandle(process);
         return code == 259 ? "running" : "kept after it ended";
+    }
+    public static string Holders(int pid) {
+        try { Process.EnterDebugMode(); } catch { }
+        IntPtr mine = OpenProcess(0x1000, false, pid);
+        if (mine == IntPtr.Zero) return "nobody, it is gone";
+        try {
+            long self = Process.GetCurrentProcess().Id;
+            int size = IntPtr.Size * 3 + 16;
+            int length = 1 << 22;
+            while (true) {
+                IntPtr buffer = Marshal.AllocHGlobal(length);
+                try {
+                    int needed;
+                    int status = NtQuerySystemInformation(64, buffer, length, out needed);
+                    if (status == unchecked((int)0xC0000004)) { length = Math.Max(length * 2, needed + (1 << 16)); continue; }
+                    if (status != 0) return "unknown, the handle list gave status " + status;
+                    long count = Marshal.ReadIntPtr(buffer, 0).ToInt64();
+                    IntPtr first = IntPtr.Add(buffer, IntPtr.Size * 2);
+                    long target = -1;
+                    for (long index = 0; index < count; index++) {
+                        IntPtr entry = IntPtr.Add(first, (int)(index * size));
+                        if (Marshal.ReadIntPtr(entry, IntPtr.Size).ToInt64() == self && Marshal.ReadIntPtr(entry, IntPtr.Size * 2) == mine) { target = Marshal.ReadIntPtr(entry, 0).ToInt64(); break; }
+                    }
+                    if (target == -1) return "unknown, the probe's own handle is not in the list";
+                    if (target == 0) return "unknown, the system hides object addresses";
+                    var told = new List<string>();
+                    for (long index = 0; index < count; index++) {
+                        IntPtr entry = IntPtr.Add(first, (int)(index * size));
+                        if (Marshal.ReadIntPtr(entry, 0).ToInt64() != target) continue;
+                        long owner = Marshal.ReadIntPtr(entry, IntPtr.Size).ToInt64();
+                        if (owner == self) continue;
+                        string name;
+                        try { name = Process.GetProcessById((int)owner).ProcessName; } catch { name = "gone"; }
+                        told.Add(owner + " " + name);
+                    }
+                    return told.Count == 0 ? "no process but the probe" : string.Join(", ", told);
+                } finally { Marshal.FreeHGlobal(buffer); }
+            }
+        } finally {
+            CloseHandle(mine);
+            try { Process.LeaveDebugMode(); } catch { }
+        }
     }
 }
 '@
@@ -403,6 +415,20 @@ function Close-Window {
 }
 
 $trayLog = Join-Path $Out 'tray.log'
+$daemonLog = "$data\watch.log"
+function Log-Length([string]$Path) { $item = Get-Item $Path -ErrorAction SilentlyContinue; if ($item) { [long]$item.Length } else { [long]0 } }
+function Read-After([string]$Path, [long]$From) {
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]'ReadWrite, Delete')
+        try {
+            if ($From -gt $stream.Length) { $From = 0 }
+            $stream.Seek($From, [System.IO.SeekOrigin]::Begin) | Out-Null
+            return (New-Object System.IO.StreamReader($stream)).ReadToEnd()
+        } finally { $stream.Dispose() }
+    } catch { return '' }
+}
+function Daemon-Lines([long]$From) { (@((Read-After $daemonLog $From) -split "`r?`n" | Where-Object { $_ }) -join ' | ') }
+function Save-Daemon-Log { [System.IO.File]::WriteAllText((Join-Path $Out 'daemon-watch.log'), (Read-Shared $daemonLog)) }
 function Tray-Lines([string]$Kind) { @((Read-Shared $trayLog) -split "`n" | Where-Object { $_ -match "scooch-app tray $Kind" }).Count }
 function Landed([string]$Kind, [int]$Before) { (Wait-For 4 { (Tray-Lines $Kind) -gt $Before }) -ge 0 }
 
@@ -604,24 +630,67 @@ if ($script:quietLeast -ne 0) {
     Quiet-Minutes 'started at the login, a second time'
 }
 Expect "the icon started at the login had a minute with no wake of its threads, so no timer of 60 s or less runs in it" ($script:quietLeast -eq 0)
-Get-Process -Name scoochw -ErrorAction SilentlyContinue | Stop-Process -Force
-Wait-For 15 { (Daemons) -eq 0 } | Out-Null
-Start-Sleep -Seconds 3
-Line "- stopped the daemon, the icon process $icon $(if (Get-Process -Id $icon -ErrorAction SilentlyContinue) { 'still runs' } else { 'ended' })"
-Expect "the icon does not die with the daemon" ([bool](Get-Process -Id $icon -ErrorAction SilentlyContinue))
-$known = @(Icon-Processes | ForEach-Object Id)
-Start-Process -FilePath $program -ArgumentList $rest -WindowStyle Hidden
-$starts = [Tray]::Starts('scooch-app.exe', 8000, [int[]]$known)
-$watcher = (Get-Process -Name scoochw -ErrorAction SilentlyContinue | Select-Object -First 1).Id
-Line "- the login entry started the daemon $watcher again while the icon ran, new app processes as id and maker $starts, app processes now $(Icon-Count)"
-$maker = if ($starts -match '^\d+ (\d+)$') { [int]$Matches[1] } else { 0 }
-Expect "a daemon that starts again while the icon runs leaves one app process" ((Icon-Count) -eq 1)
-Expect "the daemon started one short lived app process that the first one took over" ($maker -eq $watcher)
+$traceSaid = 'open'
+try {
+    Register-CimIndicationEvent -Namespace 'root/cimv2' -Query "SELECT * FROM Win32_ProcessStartTrace WHERE ProcessName = 'scooch-app.exe'" -SourceIdentifier 'AppStarts' -ErrorAction Stop
+} catch { $traceSaid = $_.Exception.Message }
+function Made-By([int]$Maker) { @(Get-Event -SourceIdentifier 'AppStarts' -ErrorAction SilentlyContinue | ForEach-Object { $_.SourceEventArgs.NewEvent } | Where-Object { [int]$_.ParentProcessID -eq $Maker } | ForEach-Object { [int]$_.ProcessID }) }
+function Icon-Said([long]$From) { @((Read-After $daemonLog $From) -split "`r?`n" | Where-Object { $_ -match ' icon (not )?started ' }) | Select-Object -First 1 }
+Line "- the system's trace of process starts, which names every app process and the process that made it however briefly it lives, $(if ($traceSaid -eq 'open') { 'is open' } else { "could not open, $traceSaid" })"
+Expect "the trace of process starts opened, which the restart check stands on" ($traceSaid -eq 'open')
+Line "- the processes other than the probe that hold a handle to the running icon process $icon, as the handle check names them, $([Tray]::Holders($icon))"
+$restarts = 20
+$footed = 0
+$alone = 0
+$made = 0
+$released = 0
+$daemon = $null
+$child = 0
+for ($round = 1; $round -le $restarts; $round++) {
+    if ($child) {
+        $state = [Tray]::Object($child)
+        if ($state -eq 'gone') {
+            $released++
+        } else {
+            $holders = [Tray]::Holders($child)
+            $freed = Wait-For 15 { [Tray]::Object($child) -eq 'gone' }
+            if ($freed -ge 0) { $released++ }
+            Line "- before restart $round the child $child of the daemon $($daemon.Id) was $state, held by $holders, $(if ($freed -ge 0) { "and gone $freed s later" } else { "and still $([Tray]::Object($child)) 15 s later, held by $([Tray]::Holders($child))" }), the daemon $(if (Get-Process -Id $daemon.Id -ErrorAction SilentlyContinue) { 'runs' } else { 'is gone' })"
+        }
+    }
+    Get-Process -Name scoochw -ErrorAction SilentlyContinue | Stop-Process -Force
+    Wait-For 15 { (Daemons) -eq 0 } | Out-Null
+    Start-Sleep -Seconds 3
+    if ($round -eq 1) {
+        Line "- stopped the daemon, the icon process $icon $(if (Get-Process -Id $icon -ErrorAction SilentlyContinue) { 'still runs' } else { 'ended' })"
+        Expect "the icon does not die with the daemon" ([bool](Get-Process -Id $icon -ErrorAction SilentlyContinue))
+    }
+    Get-Event -SourceIdentifier 'AppStarts' -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
+    $from = Log-Length $daemonLog
+    $daemon = Start-Process -FilePath $program -ArgumentList $rest -WindowStyle Hidden -PassThru
+    $heard = Wait-For 60 { [bool](Icon-Said $from) }
+    if ($heard -ge 0 -and (Wait-For 10 { (Made-By $daemon.Id).Count -ge 1 }) -ge 0) { Start-Sleep -Seconds 1 }
+    Wait-For 10 { (Icon-Count) -eq 1 } | Out-Null
+    $children = @(Made-By $daemon.Id)
+    $child = if ($children.Count -eq 1) { $children[0] } else { 0 }
+    $state = if ($child) { [Tray]::Object($child) } else { 'not one' }
+    if ($heard -ge 0) { $footed++ }
+    if ((Icon-Count) -eq 1) { $alone++ }
+    if ($child -and $state -ne 'running' -and (Icon-Pid) -eq $icon) { $made++ }
+    Line "- restart $round, the login entry started the daemon $($daemon.Id), which $(if ($daemon.HasExited) { "ended with code $($daemon.ExitCode)" } else { 'runs' }), while the icon $icon ran, its line $(if ($heard -ge 0) { "'$(Icon-Said $from)' came within $heard s" } else { 'on the icon did not come within 60 s' }), the trace shows app processes made by it $(if ($children.Count) { $children -join ' ' } else { 'none' }), that child is $state$(if ($state -eq 'kept after it ended') { ", held by $([Tray]::Holders($child))" }), app processes now $(Icon-Count), the icon process $(Icon-Pid)"
+    if ($heard -lt 0 -or -not $child) { Line "- the daemon's lines since restart $round $(Daemon-Lines $from)" }
+}
 Start-Sleep -Seconds 60
-$short = if ($starts -match '^(\d+) ') { [int]$Matches[1] } else { 0 }
-$kept = if ($short) { [Tray]::Object($short) } else { 'unknown' }
-Line "- a minute later the short lived app process $short is $kept, the daemon $watcher $(if (Get-Process -Id $watcher -ErrorAction SilentlyContinue) { 'runs' } else { 'is gone' })"
-Expect "a minute later no ended child of the daemon is kept by a handle" ($kept -eq 'gone')
+$state = if ($child) { [Tray]::Object($child) } else { 'not one' }
+if ($state -eq 'gone') { $released++ }
+Line "- a minute after the last restart its child $child is $state$(if ($state -eq 'kept after it ended') { ", held by $([Tray]::Holders($child))" }), the daemon $($daemon.Id) $(if (Get-Process -Id $daemon.Id -ErrorAction SilentlyContinue) { 'runs' } else { 'is gone' })"
+Get-Event -SourceIdentifier 'AppStarts' -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
+Unregister-Event -SourceIdentifier 'AppStarts' -ErrorAction SilentlyContinue
+Line "- over $restarts restarts the daemon wrote its icon line $footed times, one app process was left $alone times, the trace showed one ended child of the daemon with the first icon kept $made times, and that child was gone with no handle kept $released times, judged within 15 s before the next restart while its daemon ran and a minute after the last"
+Expect "every restarted daemon wrote its icon line within 60 s, which the restart check stands on" ($footed -eq $restarts)
+Expect "a daemon that starts again while the icon runs leaves one app process" ($alone -eq $restarts)
+Expect "the daemon started one short lived app process that the first one took over" ($made -eq $restarts)
+Expect "no ended child of a restarted daemon is kept by a handle for 15 s while it runs, nor a minute later for the last one" ($released -eq $restarts)
 Wait-For 40 { (Read-Shared "$data\state.json") -match '"fingerprint": "' } | Out-Null
 Line "- Scooch is on with only the icon for the rest of the probe, app processes $(Icon-Count)"
 
@@ -665,3 +734,4 @@ Start-Process -FilePath (Join-Path $folder 'scooch-app.exe') -ArgumentList '--ba
 $made = Wait-For 30 { (Read-Shared $freeLog) -match 'tray made' }
 Line "- with the lock free again a background start made the icon after $made s"
 Expect "with the lock free a background start makes the icon" ($made -ge 0)
+Save-Daemon-Log
