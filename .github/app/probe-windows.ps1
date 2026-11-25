@@ -446,14 +446,7 @@ Expect "Turn on turned Scooch on again" ($again -ge 0)
 Start-Sleep -Seconds 5
 
 . (Join-Path $PSScriptRoot 'presses-windows.ps1')
-
-$window = Find-Window
-if ($window) {
-    $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close()
-}
-$closed = Wait-For 15 { @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count -eq 0 }
-Line "- closing the window ended the app process after $closed s, daemons still running $(Daemons)"
-Expect "closing the window ended the app process" ($closed -ge 0)
+. (Join-Path $PSScriptRoot 'tray-windows.ps1')
 
 Get-CimInstance Win32_Process -Filter "Name = 'scoochw.exe'" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 2
@@ -471,6 +464,10 @@ Line "- the saved state holds a record for a screen probe-absent that no desktop
 Expect "the saved state holds a record for a screen nobody shows before the removal" ((Read-Shared "$data\state.json") -match 'probe-absent')
 function Uninstall-Entry { @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DisplayName -eq 'Scooch' }).Count }
 Line "- uninstall entries for Scooch before removal $(Uninstall-Entry)"
+$iconBefore = @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue) | Select-Object -First 1
+if ($iconBefore) { $null = $iconBefore.Handle }
+Line "- the icon process before the removal $(if ($iconBefore) { $iconBefore.Id } else { 'none' })"
+Expect "the icon runs before the removal" ([bool]$iconBefore)
 $uninstaller = Join-Path $folder 'uninstall.exe'
 $took = Measure-Command {
     (Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru).WaitForExit(300000) | Out-Null
@@ -490,6 +487,10 @@ Line "- user PATH still holds the folder $([bool]($userPath -split ';' | Where-O
 Expect "removal put the photo back" ([Desk]::Wallpaper() -ieq $photo)
 Expect "removal left no login entry" (-not (Run-Value))
 Expect "removal left no daemon" ((Daemons) -eq 0)
+Expect "removal ended the icon process" (@(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count -eq 0)
+$selfEnded = $iconBefore -and $iconBefore.WaitForExit(1000) -and $iconBefore.ExitCode -eq 0
+Line "- the icon process $(if ($iconBefore) { "$($iconBefore.Id) ended with code $($iconBefore.ExitCode)" } else { 'was never there' }), where 0 is its own exit and -1 a forced end"
+Expect "the icon ended by itself when the removal turned Scooch off, before the uninstaller ended what was left" $selfEnded
 Expect "removal left the install folder empty" (@(Get-ChildItem $folder -ErrorAction SilentlyContinue).Count -eq 0)
 Expect "removal kept the Path entry the older command install had made" ([bool]($userPath -split ';' | Where-Object { $_.TrimEnd('\') -ieq $folder }))
 Copy-Item "$data\state.json" (Join-Path $Out 'state.json') -ErrorAction SilentlyContinue
@@ -608,6 +609,10 @@ if ($script:dialog) {
     $button = $script:dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $byName) | Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button } | Select-Object -First 1
     $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     $gone = Wait-For 120 { -not (Test-Path (Join-Path $folder 'scooch-app.exe')) }
+    if ($gone -lt 0) {
+        Screen-Shot 'uninstall-stuck'
+        Line "- the removal did not finish, windows $(Top-Windows), Scooch processes $(@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'scooch*' } | ForEach-Object { "$($_.Name) $($_.ProcessId) $($_.ExecutablePath)" }) -join '; ')"
+    }
     foreach ($label in 'Finish', 'Close') {
         $byLabel = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $label)
         $end = $script:dialog.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $byLabel)

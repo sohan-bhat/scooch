@@ -17,10 +17,12 @@ pub fn fetch<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
-pub fn install<R: Runtime>(app: &AppHandle<R>) {
-    let Some(ready) = app.try_state::<Ready>() else { return };
+pub fn waiting<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.try_state::<Ready>().is_some_and(|ready| ready.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_some())
+}
+
+pub fn install<R: Runtime>(app: &AppHandle<R>) -> bool {
+    let Some(ready) = app.try_state::<Ready>() else { return false };
     let taken = ready.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
-    if let Some((update, bytes)) = taken {
-        let _ = update.install(bytes);
-    }
+    taken.is_some_and(|(update, bytes)| update.install(bytes).is_ok())
 }

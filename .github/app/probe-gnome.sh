@@ -25,6 +25,7 @@ if [ "$PASS" = missing ]; then
   line "- the extension $(gnome-extensions info ding@rastersoft.com 2>&1 | head -1)"
   said=$(problem_with missing)
   expect "with Desktop Icons NG not installed the window says it is missing" grep -q '"icons":"missing"' <<<"$said"
+  . "$(dirname "$0")/tray-gnome.sh"
 else
   gnome-extensions disable ding@rastersoft.com >/dev/null 2>&1
   sleep 4

@@ -4295,16 +4295,27 @@ mod probe {
             p.failed.push("the parked helper was not one steady process through the rest".into());
         }
         let helper = parked.first().copied();
-        let helper_cpu = helper.and_then(process_cpu);
-        pump(Duration::from_secs(60));
-        let helper_after = helper.and_then(process_cpu);
-        p.line(format!(
-            "- the parked helper {helper:?} over a quiet minute: CPU used {:?} ms, memory {:?}",
-            helper_cpu.zip(helper_after).map(|(before, after)| after.saturating_sub(before).as_millis()),
-            helper.and_then(process_memory)
-        ));
-        if helper_cpu.zip(helper_after).is_some_and(|(before, after)| after.saturating_sub(before) > Duration::from_millis(50)) {
-            p.failed.push("the parked helper used CPU at rest".into());
+        let mut minutes = Vec::new();
+        let mut judged = None;
+        for _ in 0..3 {
+            let lines = log_lines(&log).len();
+            let helper_cpu = helper.and_then(process_cpu);
+            pump(Duration::from_secs(60));
+            let helper_after = helper.and_then(process_cpu);
+            let woke = log_lines(&log).into_iter().skip(lines).filter(|line| line.contains(" wake ")).count();
+            let used = helper_cpu.zip(helper_after).map(|(before, after)| after.saturating_sub(before));
+            minutes.push((used.map(|used| used.as_millis()), woke));
+            if woke == 0 {
+                judged = used;
+                break;
+            }
+            pump(Duration::from_secs(35));
+        }
+        p.line(format!("- the parked helper {helper:?} over quiet minutes, CPU used in ms and the daemon's wakes from the runner in each {minutes:?}, the minute judged is the first with no wake, memory {:?}", helper.and_then(process_memory)));
+        match judged {
+            None => p.failed.push("the runner woke the daemon in each of three minutes, so the parked helper's rest was not judged, which is the footing failing and not a pass".into()),
+            Some(used) if used > Duration::from_millis(50) => p.failed.push("the parked helper used CPU at rest".into()),
+            Some(_) => {}
         }
         let (cpu_before, quiet_from) = (cpu(&child), epoch());
         pump(Duration::from_secs(60));

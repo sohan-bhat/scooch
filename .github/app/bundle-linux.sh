@@ -14,7 +14,7 @@ esac
 take scooch-app "$app/target/$target/release/scooch-app"
 take scooch "$app/binaries/scooch-$target"
 sudo apt-get update >/dev/null
-sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf file >/dev/null
+sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf file libayatana-appindicator3-dev >/dev/null
 bundler
 bundle --target "$target" --bundles deb,rpm,appimage
 

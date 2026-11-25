@@ -92,6 +92,14 @@ shot() {
   fi
 }
 
+close_app() {
+  press_pill alt+F4
+  wait_for 15 sh -c '! xdotool search --name "^Scooch$" >/dev/null 2>&1' >/dev/null
+  wait_for 5 gone_app >/dev/null
+  pkill -x scooch-app >/dev/null 2>&1
+  wait_for 10 gone_app >/dev/null
+}
+
 press_pill() {
   local id
   id=$(window)
@@ -109,6 +117,9 @@ login() { grep '^Exec=' "$autostart" 2>/dev/null; }
 line "## App probe on $(. /etc/os-release && echo "$PRETTY_NAME") with ${XDG_CURRENT_DESKTOP:-no desktop}"
 line
 line "- installed packages $(dpkg -l | awk '$2 == "scooch" { print $2, $3 }')"
+depends=$(dpkg-deb -f "$(ls "$PWD"/built/*.deb | head -1)" Depends)
+line "- the deb depends on $depends, the library the tray loads is installed $(dpkg -l libayatana-appindicator3-1 2>/dev/null | awk '/^ii/ { print $3 }')"
+expect "the deb names the app indicator library as a dependency" grep -q 'libayatana-appindicator3-1' <<<"$depends"
 line "- programs $(ls -la /usr/bin/scooch /usr/bin/scooch-app 2>&1 | awk '{ print $NF, $5 }' | tr '\n' ' ')"
 set_wallpaper "$photo"
 line "- wallpaper before the app $(wallpaper)"
@@ -182,9 +193,7 @@ press_pill Return
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 wait_for 30 rendered >/dev/null
 press_pill alt+F4
-if wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null; then line "- closing the window ended the app process"; else line "- the app process outlived its window"; fi
-expect "closing the window ended the app process" gone_app
-line "- daemons running $(daemons)"
+. "$PWD/.github/app/tray-linux.sh"
 
 line
 line "### Large text"
@@ -220,8 +229,7 @@ for scale in 1.0 1.5 2.0; do
   done
 done
 gsettings reset org.gnome.desktop.interface text-scaling-factor
-press_pill alt+F4
-wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+close_app
 line
 
 . "$PWD/.github/app/presses-linux.sh"
@@ -234,8 +242,7 @@ wait_for 40 has_window >/dev/null
 replaced() { now=$(pgrep -x scooch | head -1); [ -n "$now" ] && [ "$now" != "$before" ]; }
 if took=$(wait_for 30 replaced); then line "- reopening the app replaced the daemon after $took s, now $(pgrep -x scooch | head -1), saved $(grep -o '"daemon": "[^"]*"' "$data/state.json")"; else line "- reopening the app left daemon $(pgrep -x scooch | tr '\n' ' '), saved $(grep -o '"daemon": "[^"]*"' "$data/state.json")"; fi
 expect "reopening the app replaced a daemon of an older version" replaced
-press_pill alt+F4
-wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+close_app
 
 others() {
   python3 - "$data/state.json" <<'PY'
@@ -308,6 +315,10 @@ wait_for 30 sh -c 'pgrep -x scooch >/dev/null' >/dev/null
 sleep 3
 line "- Scooch on again after the control, daemons $(daemons), login item $(login)"
 cp /usr/bin/scooch "$HOME/.stale-scooch"
+wait_for 30 app_alive >/dev/null
+icon_before=$(app_pid)
+line "- the icon process before the package removal ${icon_before:-none}"
+expect "the icon runs before the package removal" [ -n "$icon_before" ]
 sudo apt-get remove -y scooch >"$out/remove.log" 2>&1
 removed=$?
 line "- package removal exit $removed"
@@ -319,6 +330,8 @@ line "- login item after removal $([ -f "$autostart" ] && echo present || echo g
 expect "removal put the photo back and parked no screen that was connected" put_back
 expect "removal left no login item" [ ! -f "$autostart" ]
 expect "removal left no daemon" no_daemon
+wait_for 15 sh -c "! kill -0 ${icon_before:-0} 2>/dev/null" >/dev/null
+expect "the package removal ended the icon, which ended by itself when Scooch went off" eval '[ -n "$icon_before" ] && ! kill -0 "$icon_before" 2>/dev/null'
 cp "$data/state.json" "$out/state.json" 2>/dev/null
 expect "the final off kept the record of the screen nobody shows" grep -q '"probe-absent"' "$data/state.json"
 clear_absent
@@ -338,6 +351,10 @@ absent_on rpm
 line "- the saved state holds probe-absent $(grep -c '"probe-absent"' "$data/state.json") and the connected screens $(others), daemons $(daemons), login item $(login)"
 expect "the saved state holds a connected screen before the rpm removal" [ -n "$(others)" ]
 expect "the daemon from the rpm runs with XAUTHORITY at the cookie file" cookie_daemon
+wait_for 30 app_alive >/dev/null
+icon_before=$(app_pid)
+line "- the icon process before the rpm removal ${icon_before:-none}"
+expect "the icon runs before the rpm removal" [ -n "$icon_before" ]
 sudo rpm -e "${rpm_name:-scooch}" >"$out/rpm-remove.log" 2>&1
 removed=$?
 line "- rpm removal exit $removed"
@@ -347,12 +364,16 @@ line "- wallpaper after the rpm removal $(wallpaper), back to the photo $([ "$(w
 expect "the rpm removal put the photo back and parked no screen that was connected" put_back
 expect "the rpm removal left no login item" [ ! -f "$autostart" ]
 expect "the rpm removal left no daemon" no_daemon
+wait_for 15 sh -c "! kill -0 ${icon_before:-0} 2>/dev/null" >/dev/null
+expect "the rpm removal ended the icon, which ended by itself when Scooch went off" eval '[ -n "$icon_before" ] && ! kill -0 "$icon_before" 2>/dev/null'
 expect "the rpm final off kept the record of the screen nobody shows" grep -q '"probe-absent"' "$data/state.json"
 clear_absent
 line "- cleared the parked record of probe-absent so the AppImage passes start with no screen that cannot be reached"
 
 line
 line "### AppImage"
+sudo apt-get remove -y libayatana-appindicator3-1 >"$out/indicator-remove.log" 2>&1
+line "- removed the system's libayatana-appindicator3-1 with exit $?, the system still lists $(ldconfig -p | grep -c 'libayatana-appindicator3.so') copies of the library"
 mkdir -p "$HOME/bin"
 mv "$HOME/.stale-scooch" "$HOME/bin/scooch"
 line "- an older command install sits at ~/bin/scooch, $(file -b "$HOME/bin/scooch" | cut -c1-30), answering $("$HOME/bin/scooch" --version 2>&1)"
@@ -373,6 +394,10 @@ else
 fi
 sleep 4
 line "- the AppImage says $(grep 'scooch-app' "$out/appimage.log" | tr '\n' ' ')"
+mkdir -p "$out/carried"
+(cd "$out/carried" && "$appimage" --appimage-extract 'usr/lib/libayatana*' >/dev/null 2>&1; "$appimage" --appimage-extract 'usr/lib/libdbusmenu*' >/dev/null 2>&1)
+line "- the AppImage carries $(ls "$out/carried/squashfs-root/usr/lib" 2>/dev/null | tr '\n' ' ')"
+expect "with the system library removed the AppImage made its tray from the library it carries" grep -q 'scooch-app tray made' "$out/appimage.log"
 pid=$(pgrep -x scooch-app | head -1)
 if [ -n "$pid" ]; then
   tr '\0' '\n' <"/proc/$pid/environ" | cut -d= -f1 | sort >"$out/appimage-env.txt"
@@ -388,8 +413,7 @@ if [ -n "$pid" ]; then
 fi
 expect "the AppImage opened its window" has_window
 line "- opened with Scooch off, ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo absent), ~/bin/scooch $(if [ -L "$HOME/bin/scooch" ]; then echo a link; else file -b "$HOME/bin/scooch" | cut -c1-20; fi), login item $(login)"
-press_pill alt+F4
-wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+close_app
 sleep 2
 expect "opening the AppImage with Scooch off wrote no ~/.local/bin/scooch" [ ! -e "$HOME/.local/bin/scooch" ]
 expect "opening the AppImage with Scooch off left ~/bin/scooch a plain file" test -f "$HOME/bin/scooch" -a ! -L "$HOME/bin/scooch"
@@ -422,8 +446,7 @@ line "- the link opener got $(wc -l <"$out/link-env.txt" 2>/dev/null || echo 0) 
 expect "the link opened from the AppImage got no value inside the mount" none_inside "$out/link-env.txt"
 expect "the link opened from the AppImage got none of the runtime's names" no_runtime_name "$out/link-env.txt"
 expect "the link opened from the AppImage got GDK_BACKEND as the session has it, unset" session_backend "$out/link-env.txt"
-press_pill alt+F4
-wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+close_app
 sleep 2
 mkdir -p "$out/apprun"
 (cd "$out/apprun" && "$appimage" --appimage-extract AppRun >/dev/null 2>&1; "$appimage" --appimage-extract 'apprun-hooks/*' >/dev/null 2>&1)
@@ -463,8 +486,11 @@ expect "turning off removed the copy" [ ! -e "$HOME/.local/bin/scooch" ]
 press_pill Return
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 press_pill alt+F4
-if wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null; then line "- closing the window ended the app, left running $(pgrep -fa 'AppImage|scooch' | grep -v probe | cut -c1-120 | tr '\n' ';')"; else line "- the app outlived its window"; fi
-expect "closing the AppImage window ended the app" gone_app
+wait_for 15 sh -c '! xdotool search --name "^Scooch$" >/dev/null 2>&1' >/dev/null
+sleep 3
+line "- closed the AppImage window while on, app processes $(pgrep -xc scooch-app), left running $(pgrep -fa 'AppImage|scooch' | grep -v probe | cut -c1-120 | tr '\n' ';')"
+only_icon() { [ "$(pgrep -xc scooch-app)" = 1 ] && ! has_window; }
+expect "closing the AppImage window while on leaves only its icon" only_icon
 for daemon in $(pgrep -f '.local/bin/scooch watch'); do
   line "- the daemon holds $(ls -l "/proc/$daemon/fd" 2>/dev/null | grep -c '.mount_') files inside the AppImage $(ls -l "/proc/$daemon/fd" 2>/dev/null | grep '.mount_' | awk '{ print $NF }' | head -3 | tr '\n' ' ')"
 done
@@ -510,6 +536,8 @@ expect "the Trash removed the login item" [ -n "$item" ]
 expect "the Trash removed the copy" [ -n "$copy" ]
 expect "the Trash removed the ~/bin link" [ -n "$link" ]
 expect "the Trash ended the daemon" [ -n "$gone" ]
+if took=$(wait_for 15 gone_app); then line "- the AppImage's icon ended $took s after the Trash"; else line "- the AppImage's icon still runs after the Trash"; fi
+expect "the Trash ended the AppImage's icon" gone_app
 
 line
 line "### AppImage in the Trash while off"
@@ -519,8 +547,7 @@ chmod +x "$look"
 clean "$look" >"$out/appimage-look.log" 2>&1 &
 wait_for 40 has_window >/dev/null
 sleep 3
-press_pill alt+F4
-wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+close_app
 gio trash "$look" >>"$out/trash.log" 2>&1
 sleep 15
 line "- opened once with Scooch off, closed and put in the Trash, then ~/.local/bin/scooch $([ -e "$HOME/.local/bin/scooch" ] && echo present || echo absent), ~/bin/scooch $([ -e "$HOME/bin/scooch" ] || [ -L "$HOME/bin/scooch" ] && echo present || echo absent), login item $([ -f "$autostart" ] && echo present || echo absent), daemons $(daemons)"
@@ -549,7 +576,6 @@ expect "the copy went to Scooch's own folder" "$data/bin/scooch" --version
 expect "the login item points at Scooch's own copy" entry_names "$data/bin/scooch"
 press_pill Return
 wait_for 30 state_off >/dev/null
-press_pill alt+F4
-wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+close_app
 gio trash "$other" >>"$out/trash.log" 2>&1
 finish

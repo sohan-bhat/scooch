@@ -139,7 +139,7 @@ function Press-Switch([string]$Label) { Press $Label 0 | Out-Null; Start-Sleep -
 
 $window = Find-Window
 if ($window) { $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close() }
-Wait-For 15 { @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count -eq 0 } | Out-Null
+Wait-For 15 { -not (Find-Window) } | Out-Null
 Start-Process -FilePath $app.FullName -RedirectStandardError (Join-Path $Out 'app-controls.log')
 Wait-For 40 { [bool](Find-Window) } | Out-Null
 Start-Sleep -Seconds 4

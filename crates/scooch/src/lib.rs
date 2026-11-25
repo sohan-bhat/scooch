@@ -3,6 +3,7 @@ mod commands;
 mod daemon;
 pub mod facade;
 mod glide;
+mod icon;
 #[doc(hidden)]
 pub mod live;
 #[doc(hidden)]

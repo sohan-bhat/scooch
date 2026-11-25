@@ -2,7 +2,7 @@ name: app
 
 on:
   push:
-    branches: [main, app, app-controls]
+    branches: [main, app, app-controls, app-tray]
     paths:
       - "crates/**"
       - "Cargo.toml"
@@ -252,7 +252,7 @@ jobs:
       matrix:
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -262,7 +262,7 @@ jobs:
           name: app-macos
           path: built
       - name: Probe
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: bash .github/app/probe-macos.sh built appprobe
       - name: Upload
         if: always()
@@ -287,7 +287,7 @@ jobs:
           - name: windows-arm64
             runner: windows-11-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -301,7 +301,7 @@ jobs:
           name: compiled-${{ matrix.name }}
           path: programs
       - name: Probe
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: pwsh
         run: ./.github/app/probe-windows.ps1 -Built built -Out appprobe -Programs programs
       - name: Upload
@@ -328,7 +328,7 @@ jobs:
           - name: linux-arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -338,7 +338,7 @@ jobs:
           name: app-${{ matrix.name }}
           path: built
       - name: Probe
-        timeout-minutes: 20
+        timeout-minutes: 35
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb xauth x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11 libglib2.0-bin file gnome-themes-extra python3-pyatspi at-spi2-core dconf-gsettings-backend dconf-service rpm
@@ -368,7 +368,7 @@ jobs:
     needs: bundle-linux
     if: ${{ github.workflow == 'app' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -378,10 +378,10 @@ jobs:
           name: app-linux-x64
           path: built
       - name: Probe
-        timeout-minutes: 20
+        timeout-minutes: 35
         run: |
           sudo apt-get update
-          sudo apt-get install -y gnome-shell gvfs gvfs-daemons dconf-service libglib2.0-bin gnome-shell-extension-prefs fonts-cantarell adwaita-icon-theme dconf-cli xdg-user-dirs
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y gnome-shell gvfs gvfs-daemons dconf-service libglib2.0-bin gnome-shell-extension-prefs fonts-cantarell adwaita-icon-theme dconf-cli xdg-user-dirs python3-pyatspi at-spi2-core
           sudo apt-get install -y ./built/*.deb
           sudo apt-get remove -y gnome-shell-extension-desktop-icons-ng || true
           XDG_RUNTIME_DIR="$(mktemp -d)"
@@ -405,6 +405,42 @@ jobs:
       - name: Summary
         if: always()
         run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+  tray-watcher:
+    if: ${{ github.workflow == 'app' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - desktop: xfce
+            packages: xvfb x11-utils dbus-x11 xfwm4 xfce4-panel xfconf
+          - desktop: kde
+            packages: xvfb x11-utils dbus-x11 plasma-desktop plasma-workspace kwin-x11
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Measure
+        timeout-minutes: 30
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ${{ matrix.packages }}
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          dbus-run-session -- bash .github/app/watcher-time.sh ${{ matrix.desktop }} watcher
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tray-watcher-${{ matrix.desktop }}
+          path: watcher
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat watcher/report.md >> "$GITHUB_STEP_SUMMARY" || true
 
   rpm-fedora:
     needs: bundle-linux
@@ -437,6 +473,10 @@ jobs:
           dnf install -y "$rpm" > appprobe/install.log 2>&1
           echo "- dnf install exit $?, pulled $(grep -c '^ ' appprobe/install.log) lines of packages" >> "$report"
           echo "- scooch --version answers $(scooch --version 2>&1)" >> "$report"
+          needs=$(rpm -qpR "$rpm" | grep -i appindicator | tr '\n' ' ')
+          echo "- the rpm requires ${needs:-no app indicator library}, and dnf installed $(rpm -q --whatprovides 'libayatana-appindicator3.so.1()(64bit)' 'libayatana-appindicator3.so.1' 2>/dev/null | grep -v 'no package' | head -1)" >> "$report"
+          loads=$(ls /usr/lib64/libayatana-appindicator3.so.1 /usr/lib/libayatana-appindicator3.so.1 2>/dev/null | head -1)
+          echo "- the library the tray loads is at ${loads:-no place}" >> "$report"
           missing=$(ldd /usr/bin/scooch-app | grep 'not found' || true)
           echo "- ldd on scooch-app misses ${missing:-nothing}" >> "$report"
           dnf remove -y "$name" > appprobe/remove.log 2>&1
@@ -444,7 +484,7 @@ jobs:
           echo "- dnf remove exit $removed, files left $(rpm -q "$name" >/dev/null 2>&1 && echo yes || echo no)" >> "$report"
           cat "$report"
           scooch_left=$(command -v scooch || true)
-          if [ -n "$missing" ] || [ "$removed" != 0 ] || [ -n "$scooch_left" ]; then exit 1; fi
+          if [ -n "$missing" ] || [ "$removed" != 0 ] || [ -n "$scooch_left" ] || [ -z "$needs" ] || [ -z "$loads" ]; then exit 1; fi
       - name: Upload
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
