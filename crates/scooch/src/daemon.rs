@@ -2000,6 +2000,7 @@ fn finish(store: &Store, stop: &Stop) -> ! {
     std::process::exit(0)
 }
 
+pub static BEGAN: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
 pub const LOCK_PATIENCE: Duration = Duration::from_secs(7);
 const LOCK_POLL: Duration = Duration::from_millis(100);
 pub const ALREADY: &str = "Scooch is already running.";
@@ -2047,15 +2048,20 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             finish(&stopped, &stopper);
         },
     )?;
+    let listening = stamp();
     let Some(_lock) = hold(&store, LOCK_PATIENCE, LOCK_POLL)? else {
         return gave_up(&store.load());
     };
+    let held = stamp();
     if let Err(error) = store.mark(Some(crate::state::PROGRAM)) {
         eprintln!("{error}");
     }
     prime(desktop.as_ref(), &signal);
     log_to(store.log_file());
     trim_log();
+    if let Some((began, made)) = BEGAN.get() {
+        eprintln!("{} experiment watch began {began}, desktop made {made}, listening {listening}, lock held {held}", stamp());
+    }
     let daemon = Arc::new(Daemon::new(desktop.clone(), store.clone()));
     let nudged = signal.clone();
     daemon.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).nudge_with(Arc::new(move || nudged.wake()));
@@ -2070,11 +2076,14 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     let origin = crate::program::linux::Watcher::start(trashed.clone(), signal.clone());
     std::thread::Builder::new().name("scooch-tick".into()).spawn(move || {
         let mut said: Option<String> = None;
+        let mut first_tick = true;
         loop {
             begin_laps(worker.first());
+            let woke_at = stamp();
             let busy = daemon.desktop.busy();
             lap("wake");
             daemon.gather(&worker);
+            let gathered_at = stamp();
             if !stop.begin() {
                 return;
             }
@@ -2109,6 +2118,10 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             }
             if report.retry {
                 worker.wake();
+            }
+            if first_tick {
+                eprintln!("{} experiment first tick woke {woke_at}, gathered {gathered_at}, outcomes {:?}", stamp(), report.outcomes);
+                first_tick = false;
             }
             crate::icon::after_first_tick(&daemon.store);
         }

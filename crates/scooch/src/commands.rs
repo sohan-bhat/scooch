@@ -610,8 +610,10 @@ pub fn wait_gone(mut alive: impl FnMut() -> bool, patience: Duration, poll: Dura
 }
 
 pub fn watch() -> Result<()> {
+    let began = daemon::stamp();
     let store = Store::open();
     let desktop: Arc<dyn Desktop> = Arc::from(desktop()?);
+    let _ = daemon::BEGAN.set((began, daemon::stamp()));
     if idle(desktop.as_ref(), &store)? {
         return Ok(());
     }

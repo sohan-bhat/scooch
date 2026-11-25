@@ -184,6 +184,50 @@ public static class Tray {
         foreach (var pair in seen) told.Add(pair.Key + " " + pair.Value);
         return string.Join(";", told);
     }
+    static string ReadFrom(string path, long from) {
+        try {
+            using (var stream = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete)) {
+                if (from > stream.Length) from = 0;
+                stream.Seek(from, System.IO.SeekOrigin.Begin);
+                using (var reader = new System.IO.StreamReader(stream)) return reader.ReadToEnd();
+            }
+        } catch { return ""; }
+    }
+    public static string Watch(string[] names, int[] known, string log, long from, int cap, int after) {
+        var first = new Dictionary<uint, string>();
+        var last = new Dictionary<uint, long>();
+        var clock = Stopwatch.StartNew();
+        long heard = -1;
+        long read = 0;
+        int snaps = 0;
+        while (clock.ElapsedMilliseconds < cap && (heard < 0 || clock.ElapsedMilliseconds < heard + after)) {
+            long now = clock.ElapsedMilliseconds;
+            IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+            var entry = new Entry();
+            entry.Size = (uint)Marshal.SizeOf(typeof(Entry));
+            if (Process32FirstW(snapshot, ref entry)) {
+                do {
+                    if (Array.IndexOf(known, (int)entry.Id) >= 0) continue;
+                    foreach (var name in names) {
+                        if (!string.Equals(entry.Name, name, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (!first.ContainsKey(entry.Id)) first[entry.Id] = entry.Name + " " + entry.Id + " " + entry.Parent + " " + now;
+                        last[entry.Id] = now;
+                    }
+                } while (Process32NextW(snapshot, ref entry));
+            }
+            CloseHandle(snapshot);
+            snaps++;
+            if (heard < 0 && now >= read) {
+                read = now + 50;
+                string text = ReadFrom(log, from);
+                if (text.Contains(" icon started ") || text.Contains(" icon not started ")) heard = clock.ElapsedMilliseconds;
+            }
+            System.Threading.Thread.Sleep(2);
+        }
+        var told = new List<string>();
+        foreach (var pair in first) told.Add(pair.Value + " " + last[pair.Key]);
+        return heard + "|" + snaps + "|" + clock.ElapsedMilliseconds + "|" + string.Join(";", told);
+    }
     [DllImport("user32.dll")]
     static extern IntPtr GetForegroundWindow();
     public static int FrontPid() {
@@ -618,6 +662,7 @@ if ($script:quietLeast -ne 0) {
     Quiet-Minutes 'started at the login, a second time'
 }
 Expect "the icon started at the login had a minute with no wake of its threads, so no timer of 60 s or less runs in it" ($script:quietLeast -eq 0)
+. (Join-Path $PSScriptRoot 'restarts-windows.ps1')
 Get-Process -Name scoochw -ErrorAction SilentlyContinue | Stop-Process -Force
 Wait-For 15 { (Daemons) -eq 0 } | Out-Null
 Start-Sleep -Seconds 3
