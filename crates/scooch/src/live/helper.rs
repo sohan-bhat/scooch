@@ -140,6 +140,22 @@ mod running {
         t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
     }
 
+    pub fn begin_at(before: Option<Instant>, now: Instant, interval: Duration) -> Instant {
+        before.map_or(now, |before| now.max(before + interval))
+    }
+
+    const SPIN: Duration = Duration::from_millis(1);
+
+    fn wait_until(at: Instant) {
+        let left = at.saturating_duration_since(Instant::now());
+        if left > SPIN {
+            std::thread::sleep(left - SPIN);
+        }
+        while Instant::now() < at {
+            std::thread::yield_now();
+        }
+    }
+
     struct Surface(Target);
 
     unsafe impl Send for Surface {}
@@ -641,7 +657,9 @@ mod running {
         };
         let Start { id, gpu, surface, source, stills, size, period, commit } = start;
         let begun = Instant::now();
-        let made = source.finish(&gpu).and_then(|(first, from)| gpu.screen(surface.0, size.0, size.1).map(|screen| (first, from, screen)));
+        let (variant, latency, paced) = variant();
+        let interval = if paced { period } else { Duration::ZERO };
+        let made = source.finish(&gpu).and_then(|(first, from)| gpu.screen_with(surface.0, size.0, size.1, latency).map(|screen| (first, from, screen)));
         let (first, from, mut screen) = match made {
             Ok(made) => made,
             Err(why) => {
@@ -654,7 +672,9 @@ mod running {
             tell(Event::Kept { path, still: first.clone() });
         }
         let mut reel = Reel::new(first);
+        let head = layer_head(variant, &screen, period, interval);
         let started = Instant::now();
+        let mut began = Some(started);
         let result = P::frame(|| screen.show(&looks(&reel.shown)));
         let whole = started.elapsed();
         let ok = result.is_ok();
@@ -726,8 +746,13 @@ mod running {
                     None => {}
                 }
             }
+            if !reel.animating() {
+                continue;
+            }
+            wait_until(begin_at(began, Instant::now(), interval));
             let Some((layers, step)) = reel.next(Instant::now()) else { continue };
             let started = Instant::now();
+            began = Some(started);
             if let Err(why) = P::frame(|| screen.show(&looks(&layers))) {
                 tell(Event::Broke { id, why });
                 reel.halt();
@@ -745,7 +770,9 @@ mod running {
                 }
                 Step::Settled => {
                     for _ in 0..FLUSH {
+                        wait_until(begin_at(began, Instant::now(), interval));
                         let started = Instant::now();
+                        began = Some(started);
                         if let Err(why) = P::frame(|| screen.show(&looks(&layers))) {
                             tell(Event::Broke { id, why });
                             break;
@@ -755,7 +782,7 @@ mod running {
                     let _ = gpu.idle(COMPOSE_WAIT);
                     P::composed();
                     reel.presented(layers, step, now, slow_after);
-                    tell(Event::Drew { id, frames: std::mem::take(&mut drew).join(", ") });
+                    tell(Event::Drew { id, frames: headed(&head, std::mem::take(&mut drew)) });
                     tell(Event::Settled { id });
                 }
                 Step::Moving | Step::Fading => {
@@ -765,9 +792,28 @@ mod running {
         }
         drop(screen);
         if !drew.is_empty() {
-            tell(Event::Drew { id, frames: drew.join(", ") });
+            tell(Event::Drew { id, frames: headed(&head, drew) });
         }
         tell(Event::Stopped { id });
+    }
+
+    fn variant() -> (&'static str, u32, bool) {
+        let chosen = std::env::var_os("SCOOCH_HOME").and_then(|home| std::fs::read_to_string(PathBuf::from(home).join("pace-variant")).ok()).unwrap_or_default();
+        match chosen.trim() {
+            "latency" => ("latency", 1, false),
+            "pace" => ("pace", scooch_live::LATENCY, true),
+            "both" => ("both", 1, true),
+            _ => ("now", scooch_live::LATENCY, false),
+        }
+    }
+
+    fn layer_head(variant: &str, screen: &scooch_live::Screen, period: Duration, interval: Duration) -> String {
+        let drawables = screen.drawables.map_or("unknown".to_string(), |count| count.to_string());
+        format!("layer {variant} drawables {drawables} latency {} refresh {:.2} pace {:.2}", screen.latency, period.as_secs_f64() * 1000.0, interval.as_secs_f64() * 1000.0)
+    }
+
+    fn headed(head: &str, drew: Vec<String>) -> String {
+        std::iter::once(head.to_string()).chain(drew).collect::<Vec<_>>().join(", ")
     }
 
     impl<P: Platform> Helper<P> {
@@ -2403,6 +2449,26 @@ mod running {
             let line = described(&[], "move", took, ms(11.0));
             let words: Vec<&str> = line.split_whitespace().skip(2).collect();
             assert_eq!(words, ["a1.0", "d2.0", "p7.5", "l0.5", "s1.0", "v2.0", "q4.0", "f11.0"]);
+        }
+
+        #[test]
+        fn no_frame_begins_sooner_than_one_refresh_after_the_frame_before_began() {
+            let start = Instant::now();
+            let refresh = Duration::from_micros(16_667);
+            let at = |ms: u64| start + Duration::from_millis(ms);
+            assert_eq!(begin_at(None, at(0), refresh), at(0), "the first frame of a glide waited");
+            assert_eq!(begin_at(Some(at(0)), at(3), refresh), start + refresh, "a frame 3 ms after the one before began at once");
+            assert_eq!(begin_at(Some(at(0)), at(40), refresh), at(40), "a frame already a refresh late waited again");
+            assert_eq!(begin_at(Some(at(0)), at(3), Duration::ZERO), at(3));
+            let (mut began, mut now, mut begun) = (None, start, Vec::new());
+            for _ in 0..8 {
+                let next = begin_at(began, now, refresh);
+                begun.push(next);
+                began = Some(next);
+                now = next + Duration::from_millis(2);
+            }
+            assert!(begun.windows(2).all(|pair| pair[1] - pair[0] >= refresh), "frames drawn in 2 ms came closer than one refresh apart");
+            assert_eq!(begun[7] - begun[0], refresh * 7, "frames drawn in 2 ms were held longer than one refresh each");
         }
 
         #[test]
