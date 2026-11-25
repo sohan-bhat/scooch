@@ -37,6 +37,16 @@ jobs:
           cargo test --release -p scooch
           cargo test --release -p scooch-live --lib
 
+      - name: Pace
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        shell: bash
+        env:
+          SCOOCH_NEED_ADAPTER: "1"
+        run: |
+          mkdir -p macprobe
+          cargo test --release -p scooch-live --test pace -- --ignored --nocapture --test-threads 1 2>&1 | tee macprobe/pace.txt
+
       - name: Probe
         if: ${{ !cancelled() }}
         run: ./target/release/examples/macprobe macprobe
