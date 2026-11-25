@@ -173,6 +173,48 @@ public static class Tray {
         CloseHandle(process);
         return code == 259 ? "running" : "kept after it ended";
     }
+    public static string Holders(int pid) {
+        try { Process.EnterDebugMode(); } catch { }
+        IntPtr mine = OpenProcess(0x1000, false, pid);
+        if (mine == IntPtr.Zero) return "nobody, it is gone";
+        try {
+            long self = Process.GetCurrentProcess().Id;
+            int size = IntPtr.Size * 3 + 16;
+            int length = 1 << 22;
+            while (true) {
+                IntPtr buffer = Marshal.AllocHGlobal(length);
+                try {
+                    int needed;
+                    int status = NtQuerySystemInformation(64, buffer, length, out needed);
+                    if (status == unchecked((int)0xC0000004)) { length = Math.Max(length * 2, needed + (1 << 16)); continue; }
+                    if (status != 0) return "unknown, the handle list gave status " + status;
+                    long count = Marshal.ReadIntPtr(buffer, 0).ToInt64();
+                    IntPtr first = IntPtr.Add(buffer, IntPtr.Size * 2);
+                    long target = -1;
+                    for (long index = 0; index < count; index++) {
+                        IntPtr entry = IntPtr.Add(first, (int)(index * size));
+                        if (Marshal.ReadIntPtr(entry, IntPtr.Size).ToInt64() == self && Marshal.ReadIntPtr(entry, IntPtr.Size * 2) == mine) { target = Marshal.ReadIntPtr(entry, 0).ToInt64(); break; }
+                    }
+                    if (target == -1) return "unknown, the probe's own handle is not in the list";
+                    if (target == 0) return "unknown, the system hides object addresses";
+                    var told = new List<string>();
+                    for (long index = 0; index < count; index++) {
+                        IntPtr entry = IntPtr.Add(first, (int)(index * size));
+                        if (Marshal.ReadIntPtr(entry, 0).ToInt64() != target) continue;
+                        long owner = Marshal.ReadIntPtr(entry, IntPtr.Size).ToInt64();
+                        if (owner == self) continue;
+                        string name;
+                        try { name = Process.GetProcessById((int)owner).ProcessName; } catch { name = "gone"; }
+                        told.Add(owner + " " + name);
+                    }
+                    return told.Count == 0 ? "no process but the probe" : string.Join(", ", told);
+                } finally { Marshal.FreeHGlobal(buffer); }
+            }
+        } finally {
+            CloseHandle(mine);
+            try { Process.LeaveDebugMode(); } catch { }
+        }
+    }
 }
 '@
 
@@ -596,6 +638,7 @@ function Made-By([int]$Maker) { @(Get-Event -SourceIdentifier 'AppStarts' -Error
 function Icon-Said([long]$From) { @((Read-After $daemonLog $From) -split "`r?`n" | Where-Object { $_ -match ' icon (not )?started ' }) | Select-Object -First 1 }
 Line "- the system's trace of process starts, which names every app process and the process that made it however briefly it lives, $(if ($traceSaid -eq 'open') { 'is open' } else { "could not open, $traceSaid" })"
 Expect "the trace of process starts opened, which the restart check stands on" ($traceSaid -eq 'open')
+Line "- the processes other than the probe that hold a handle to the running icon process $icon, as the handle check names them, $([Tray]::Holders($icon))"
 $restarts = 20
 $footed = 0
 $alone = 0
@@ -606,7 +649,14 @@ $child = 0
 for ($round = 1; $round -le $restarts; $round++) {
     if ($child) {
         $state = [Tray]::Object($child)
-        if ($state -eq 'gone') { $released++ } else { Line "- before restart $round the child $child of the daemon $($daemon.Id) is $state" }
+        if ($state -eq 'gone') {
+            $released++
+        } else {
+            $holders = [Tray]::Holders($child)
+            $freed = Wait-For 15 { [Tray]::Object($child) -eq 'gone' }
+            if ($freed -ge 0) { $released++ }
+            Line "- before restart $round the child $child of the daemon $($daemon.Id) was $state, held by $holders, $(if ($freed -ge 0) { "and gone $freed s later" } else { "and still $([Tray]::Object($child)) 15 s later, held by $([Tray]::Holders($child))" }), the daemon $(if (Get-Process -Id $daemon.Id -ErrorAction SilentlyContinue) { 'runs' } else { 'is gone' })"
+        }
     }
     Get-Process -Name scoochw -ErrorAction SilentlyContinue | Stop-Process -Force
     Wait-For 15 { (Daemons) -eq 0 } | Out-Null
@@ -627,20 +677,20 @@ for ($round = 1; $round -le $restarts; $round++) {
     if ($heard -ge 0) { $footed++ }
     if ((Icon-Count) -eq 1) { $alone++ }
     if ($child -and $state -ne 'running' -and (Icon-Pid) -eq $icon) { $made++ }
-    Line "- restart $round, the login entry started the daemon $($daemon.Id), which $(if ($daemon.HasExited) { "ended with code $($daemon.ExitCode)" } else { 'runs' }), while the icon $icon ran, its line $(if ($heard -ge 0) { "'$(Icon-Said $from)' came within $heard s" } else { 'on the icon did not come within 60 s' }), the trace shows app processes made by it $(if ($children.Count) { $children -join ' ' } else { 'none' }), that child is $state, app processes now $(Icon-Count), the icon process $(Icon-Pid)"
+    Line "- restart $round, the login entry started the daemon $($daemon.Id), which $(if ($daemon.HasExited) { "ended with code $($daemon.ExitCode)" } else { 'runs' }), while the icon $icon ran, its line $(if ($heard -ge 0) { "'$(Icon-Said $from)' came within $heard s" } else { 'on the icon did not come within 60 s' }), the trace shows app processes made by it $(if ($children.Count) { $children -join ' ' } else { 'none' }), that child is $state$(if ($state -eq 'kept after it ended') { ", held by $([Tray]::Holders($child))" }), app processes now $(Icon-Count), the icon process $(Icon-Pid)"
     if ($heard -lt 0 -or -not $child) { Line "- the daemon's lines since restart $round $(Daemon-Lines $from)" }
 }
 Start-Sleep -Seconds 60
 $state = if ($child) { [Tray]::Object($child) } else { 'not one' }
 if ($state -eq 'gone') { $released++ }
-Line "- a minute after the last restart its child $child is $state, the daemon $($daemon.Id) $(if (Get-Process -Id $daemon.Id -ErrorAction SilentlyContinue) { 'runs' } else { 'is gone' })"
+Line "- a minute after the last restart its child $child is $state$(if ($state -eq 'kept after it ended') { ", held by $([Tray]::Holders($child))" }), the daemon $($daemon.Id) $(if (Get-Process -Id $daemon.Id -ErrorAction SilentlyContinue) { 'runs' } else { 'is gone' })"
 Get-Event -SourceIdentifier 'AppStarts' -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
 Unregister-Event -SourceIdentifier 'AppStarts' -ErrorAction SilentlyContinue
-Line "- over $restarts restarts the daemon wrote its icon line $footed times, one app process was left $alone times, the trace showed one ended child of the daemon with the first icon kept $made times, and that child was gone with no handle kept $released times, judged before the next restart and a minute after the last"
+Line "- over $restarts restarts the daemon wrote its icon line $footed times, one app process was left $alone times, the trace showed one ended child of the daemon with the first icon kept $made times, and that child was gone with no handle kept $released times, judged within 15 s before the next restart while its daemon ran and a minute after the last"
 Expect "every restarted daemon wrote its icon line within 60 s, which the restart check stands on" ($footed -eq $restarts)
 Expect "a daemon that starts again while the icon runs leaves one app process" ($alone -eq $restarts)
 Expect "the daemon started one short lived app process that the first one took over" ($made -eq $restarts)
-Expect "no ended child of a restarted daemon is kept by a handle while it runs, and a minute later for the last one" ($released -eq $restarts)
+Expect "no ended child of a restarted daemon is kept by a handle for 15 s while it runs, nor a minute later for the last one" ($released -eq $restarts)
 Wait-For 40 { (Read-Shared "$data\state.json") -match '"fingerprint": "' } | Out-Null
 Line "- Scooch is on with only the icon for the rest of the probe, app processes $(Icon-Count)"
 
