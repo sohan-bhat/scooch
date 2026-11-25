@@ -369,10 +369,12 @@ wait_for 15 sh -c '! pgrep -f "MacOS/scooch watch" >/dev/null' >/dev/null
 sleep 3
 line "- booted the daemon out, the icon process $icon $(kill -0 "$icon" 2>/dev/null && echo still runs || echo ended)"
 expect "the icon does not die with the daemon" kill -0 "$icon"
+from=$(wc -l <"$data/watch.log" 2>/dev/null || echo 0)
 launchctl bootstrap "gui/$(id -u)" "$plist" >/dev/null 2>&1
 wait_for 15 sh -c 'pgrep -f "MacOS/scooch watch" >/dev/null' >/dev/null
 sleep 8
 line "- the login item started the daemon again, app processes $(icon_count), the same icon $([ "$(icon_pid)" = "$icon" ] && echo yes || echo no)"
+line "- the daemon's lines since that start $(sed -n "$((from + 1)),\$p" "$data/watch.log" 2>/dev/null | sed '/^$/d' | paste -sd '|' - | sed 's/|/ | /g')"
 expect "a daemon that starts again while the icon runs leaves one app process" [ "$(icon_count)" = 1 ]
 stand_in "the login, through the login item"
 wait_for 40 rendered >/dev/null
@@ -425,3 +427,4 @@ wait "$holder" 2>/dev/null
 wait_for 20 icon_shown >/dev/null
 line "- with the lock free again a background start made the icon $(status where)"
 expect "with the lock free a background start makes the icon" icon_shown
+cp "$data/watch.log" "$out/daemon-watch.log" 2>/dev/null

@@ -271,10 +271,13 @@ wait_for 15 sh -c '! pgrep -x scooch >/dev/null' >/dev/null
 sleep 3
 line "- stopped the daemon, the icon process $icon $(kill -0 "$icon" 2>/dev/null && echo still runs || echo ended)"
 expect "the icon does not die with the daemon" kill -0 "$icon"
+from=$(wc -l <"$data/watch.log" 2>/dev/null || echo 0)
+said_from=$(wc -l <"$out/login.txt" 2>/dev/null || echo 0)
 clean gio launch "$autostart" >>"$out/login.txt" 2>&1
 wait_for 15 sh -c 'pgrep -x scooch >/dev/null' >/dev/null
 sleep 8
 line "- the login item started the daemon again, app processes $(app_count), the same icon $([ "$(app_pid)" = "$icon" ] && echo yes || echo no)"
+line "- the daemon's lines since that start $(sed -n "$((from + 1)),\$p" "$data/watch.log" 2>/dev/null | sed '/^$/d' | paste -sd '|' - | sed 's/|/ | /g'), its error output $(sed -n "$((said_from + 1)),\$p" "$out/login.txt" 2>/dev/null | sed '/^$/d' | paste -sd '|' - | sed 's/|/ | /g')"
 expect "a daemon that starts again while the icon runs leaves one app process" [ "$(app_count)" = 1 ]
 
 line
@@ -322,3 +325,4 @@ wait "$holder" 2>/dev/null
 pkill -x scooch-app >/dev/null 2>&1
 wait_for 10 gone_app >/dev/null
 line "- ended the icon so the next parts start their own window process, Scooch stays on with daemons $(daemons)"
+cp "$data/watch.log" "$out/daemon-watch.log" 2>/dev/null

@@ -403,6 +403,20 @@ function Close-Window {
 }
 
 $trayLog = Join-Path $Out 'tray.log'
+$daemonLog = "$data\watch.log"
+function Log-Length([string]$Path) { $item = Get-Item $Path -ErrorAction SilentlyContinue; if ($item) { [long]$item.Length } else { [long]0 } }
+function Read-After([string]$Path, [long]$From) {
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]'ReadWrite, Delete')
+        try {
+            if ($From -gt $stream.Length) { $From = 0 }
+            $stream.Seek($From, [System.IO.SeekOrigin]::Begin) | Out-Null
+            return (New-Object System.IO.StreamReader($stream)).ReadToEnd()
+        } finally { $stream.Dispose() }
+    } catch { return '' }
+}
+function Daemon-Lines([long]$From) { (@((Read-After $daemonLog $From) -split "`r?`n" | Where-Object { $_ }) -join ' | ') }
+function Save-Daemon-Log { [System.IO.File]::WriteAllText((Join-Path $Out 'daemon-watch.log'), (Read-Shared $daemonLog)) }
 function Tray-Lines([string]$Kind) { @((Read-Shared $trayLog) -split "`n" | Where-Object { $_ -match "scooch-app tray $Kind" }).Count }
 function Landed([string]$Kind, [int]$Before) { (Wait-For 4 { (Tray-Lines $Kind) -gt $Before }) -ge 0 }
 
@@ -610,10 +624,12 @@ Start-Sleep -Seconds 3
 Line "- stopped the daemon, the icon process $icon $(if (Get-Process -Id $icon -ErrorAction SilentlyContinue) { 'still runs' } else { 'ended' })"
 Expect "the icon does not die with the daemon" ([bool](Get-Process -Id $icon -ErrorAction SilentlyContinue))
 $known = @(Icon-Processes | ForEach-Object Id)
-Start-Process -FilePath $program -ArgumentList $rest -WindowStyle Hidden
+$from = Log-Length $daemonLog
+$restarted = Start-Process -FilePath $program -ArgumentList $rest -WindowStyle Hidden -PassThru
 $starts = [Tray]::Starts('scooch-app.exe', 8000, [int[]]$known)
 $watcher = (Get-Process -Name scoochw -ErrorAction SilentlyContinue | Select-Object -First 1).Id
 Line "- the login entry started the daemon $watcher again while the icon ran, new app processes as id and maker $starts, app processes now $(Icon-Count)"
+Line "- the started daemon $($restarted.Id) $(if ($restarted.HasExited) { "ended with code $($restarted.ExitCode)" } else { 'runs' }), its lines since that start $(Daemon-Lines $from)"
 $maker = if ($starts -match '^\d+ (\d+)$') { [int]$Matches[1] } else { 0 }
 Expect "a daemon that starts again while the icon runs leaves one app process" ((Icon-Count) -eq 1)
 Expect "the daemon started one short lived app process that the first one took over" ($maker -eq $watcher)
@@ -665,3 +681,4 @@ Start-Process -FilePath (Join-Path $folder 'scooch-app.exe') -ArgumentList '--ba
 $made = Wait-For 30 { (Read-Shared $freeLog) -match 'tray made' }
 Line "- with the lock free again a background start made the icon after $made s"
 Expect "with the lock free a background start makes the icon" ($made -ge 0)
+Save-Daemon-Log
