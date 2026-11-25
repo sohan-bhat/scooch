@@ -806,19 +806,24 @@ impl Gpu {
         }
     }
 
-    fn present_drawn(&self, encoder: wgpu::CommandEncoder, texture: wgpu::SurfaceTexture) -> Result<(), String> {
+    fn present_drawn(&self, encoder: wgpu::CommandEncoder, texture: wgpu::SurfaceTexture) -> Result<Presented, String> {
         self.present_if_drawn(encoder, texture, |texture| self.queue.present(texture))
     }
 
-    fn present_if_drawn(&self, encoder: wgpu::CommandEncoder, texture: wgpu::SurfaceTexture, present: impl FnOnce(wgpu::SurfaceTexture)) -> Result<(), String> {
+    fn present_if_drawn(&self, encoder: wgpu::CommandEncoder, texture: wgpu::SurfaceTexture, present: impl FnOnce(wgpu::SurfaceTexture)) -> Result<Presented, String> {
+        let started = Instant::now();
         let _turn = self.turn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let turned = started.elapsed();
         self.queue.submit([encoder.finish()]);
-        if let Some(error) = pollster::block_on(scope.pop()) {
+        let submitted = started.elapsed();
+        let popped = pollster::block_on(scope.pop());
+        let checked = started.elapsed();
+        if let Some(error) = popped {
             return Err(format!("a frame was not drawn, so it was not shown {error}"));
         }
         present(texture);
-        Ok(())
+        Ok(Presented { turn: turned, submit: submitted - turned, pop: checked - submitted, queue: started.elapsed() - checked })
     }
 
     pub(crate) fn configure(&self, surface: &wgpu::Surface<'static>, config: &wgpu::SurfaceConfiguration) -> Result<(), String> {
@@ -975,10 +980,19 @@ impl Gpu {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Presented {
+    pub turn: Duration,
+    pub submit: Duration,
+    pub pop: Duration,
+    pub queue: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Took {
     pub acquire: Duration,
     pub draw: Duration,
     pub present: Duration,
+    pub split: Presented,
 }
 
 pub fn alpha_for(target: &Target, offered: &[wgpu::CompositeAlphaMode]) -> Option<wgpu::CompositeAlphaMode> {
@@ -1015,7 +1029,7 @@ impl Screen {
         self.gpu.healthy()?;
         let encoder = self.gpu.encode(&view, (self.width, self.height), layers, self.scale)?;
         self.took.draw = started.elapsed() - self.took.acquire;
-        self.gpu.present_drawn(encoder, texture)?;
+        self.took.split = self.gpu.present_drawn(encoder, texture)?;
         self.took.present = started.elapsed() - self.took.acquire - self.took.draw;
         self.gpu.healthy()?;
         Ok(())
@@ -1034,7 +1048,7 @@ mod tests {
     use objc2::rc::Retained;
     use objc2_quartz_core::CAMetalLayer;
 
-    fn frame(gpu: &Gpu, screen: &super::Screen, broken: bool, presented: &mut u32) -> Result<(), String> {
+    fn frame(gpu: &Gpu, screen: &super::Screen, broken: bool, presented: &mut u32) -> Result<super::Presented, String> {
         let texture = match screen.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             _ => return Err("the layer gave no drawable".into()),
@@ -1068,13 +1082,13 @@ mod tests {
         };
         let screen = gpu.screen(Target::Layer(Retained::as_ptr(&metal) as *mut std::ffi::c_void), 64, 48).expect("a surface on the layer");
         let mut presented = 0;
-        assert_eq!(frame(&gpu, &screen, false, &mut presented), Ok(()));
+        assert_eq!(frame(&gpu, &screen, false, &mut presented).map(|_| ()), Ok(()));
         assert_eq!(presented, 1, "a frame that was drawn was not presented");
         let refused = frame(&gpu, &screen, true, &mut presented);
         assert!(refused.as_ref().is_err_and(|why| why.starts_with("a frame was not drawn, so it was not shown")), "{refused:?}");
         assert_eq!(presented, 1, "a frame whose commands failed validation reached the present");
         assert_eq!(gpu.fault(), None, "the failed frame was not caught by its own error scope");
-        assert_eq!(frame(&gpu, &screen, false, &mut presented), Ok(()));
+        assert_eq!(frame(&gpu, &screen, false, &mut presented).map(|_| ()), Ok(()));
         assert_eq!(presented, 2, "the frame after a refused one was not presented");
         drop(screen);
     }
