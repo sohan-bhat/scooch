@@ -1063,7 +1063,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     fn screenshot_bus() -> Result<zbus::blocking::Connection> {
         static SHOT: OnceLock<Option<zbus::blocking::Connection>> = OnceLock::new();
         SHOT.get_or_init(|| {
-            let connection = zbus::blocking::Connection::session().ok()?;
+            let connection = bus::connect(None).ok()?;
             connection.request_name("org.gnome.Screenshot").ok()?;
             Some(connection)
         })
@@ -1074,8 +1074,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     fn capture_gnome(area: &Rect) -> Result<RgbImage> {
         let connection = screenshot_bus()?;
         let file = std::env::temp_dir().join(format!("scooch-shot-{}-{}.png", std::process::id(), now()));
-        let reply = connection.call_method(Some("org.gnome.Shell.Screenshot"), "/org/gnome/Shell/Screenshot", Some("org.gnome.Shell.Screenshot"), "Screenshot", &(false, false, file.to_string_lossy().as_ref()))?;
-        let (done, used): (bool, String) = reply.body().deserialize()?;
+        let (done, used): (bool, String) = bus::call_on(&connection, "org.gnome.Shell.Screenshot", "/org/gnome/Shell/Screenshot", "org.gnome.Shell.Screenshot", "Screenshot", &(false, false, file.to_string_lossy().as_ref()))?;
         if !done {
             bail!("the shell refused the screenshot");
         }
@@ -1210,7 +1209,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         for (rule, name) in [(wakes::GVFS_RULE, "gvfs AttributeChanged"), (wakes::DCONF_RULE, "dconf Notify"), (wakes::XFCONF_RULE, "xfconf PropertyChanged"), (wakes::DING_RULE, "DING geometry Changed")] {
             let push = push.clone();
             std::thread::spawn(move || {
-                let Ok(connection) = zbus::blocking::Connection::session() else { return };
+                let Ok(connection) = bus::connect(None) else { return };
                 let Ok(messages) = zbus::blocking::MessageIterator::for_match_rule(rule, &connection, Some(256)) else { return };
                 for message in messages.flatten() {
                     let detail = describe(&message);
@@ -3053,6 +3052,29 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         state["screens"].as_object().is_some_and(|screens| !screens.is_empty() && screens.values().all(|screen| !screen["fingerprint"].is_null()))
     }
 
+    const RUN_LIMIT: Duration = Duration::from_secs(30);
+
+    #[track_caller]
+    fn finished(command: &mut Command, what: &str) -> Result<std::process::Output> {
+        let _step = doing(what, RUN_LIMIT);
+        match tool::within(command, RUN_LIMIT) {
+            Ok(Some(output)) => Ok(output),
+            Ok(None) => bail!("{what} did not finish within {} s, so the probe stopped it", RUN_LIMIT.as_secs()),
+            Err(error) => bail!("{what} could not run, {error}"),
+        }
+    }
+
+    #[track_caller]
+    fn status_within(command: &mut Command, what: &str) -> Result<std::process::ExitStatus> {
+        let mut child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().with_context(|| format!("{what} could not run"))?;
+        if wait_until(RUN_LIMIT, || matches!(child.try_wait(), Ok(Some(_)))).is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{what} did not finish within {} s, so the probe stopped it", RUN_LIMIT.as_secs());
+        }
+        Ok(child.wait()?)
+    }
+
     fn scooch_program() -> Result<PathBuf> {
         let exe = std::env::current_exe()?;
         exe.parent().and_then(Path::parent).map(|folder| folder.join("scooch")).filter(|path| path.is_file()).context("the scooch binary is missing, so build with --bins --examples")
@@ -3273,7 +3295,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         p.line(format!("- the navy picture taken in after {:?} ms, entries {sources:?}, the icon moved onto its subject, {detail}, new wallpaper after {:?} ms", adopted.map(|time| time.as_millis()), swapped.map(|time| time.as_millis())));
         let held = |home: &Path| state_entries(home).into_iter().map(|(id, entry)| (id, entry["placement"].clone(), entry["output"].clone())).collect::<Vec<_>>();
         let answers = |home: &Path| state_entries(home).into_iter().map(|(_, entry)| entry["belongs"]["answer"].clone()).collect::<Vec<_>>();
-        let toggle = || Command::new(program).arg("scenery").env("SCOOCH_HOME", &home).output().map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
+        let toggle = || finished(Command::new(program).arg("scenery").env("SCOOCH_HOME", &home), "scooch scenery").map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
         let log = p.out.join("watch.log");
         let seen = fs::read_to_string(&log).unwrap_or_default().lines().count();
         let (kept, belongs, shown) = (held(&home), answers(&home), linux.wallpaper(screen).ok().flatten());
@@ -3455,7 +3477,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             p.fail("two screens showed the same picture where each has its own");
         }
         let reaper = p.daemon.take().map(|mut child| std::thread::spawn(move || child.wait().ok()));
-        let off = Command::new(&program).arg("off").env("SCOOCH_HOME", &p.home).stdin(Stdio::null()).output();
+        let off = finished(Command::new(&program).arg("off").env("SCOOCH_HOME", &p.home), "scooch off");
         if !off.as_ref().is_ok_and(|result| result.status.success()) {
             p.fail("scooch off did not end cleanly");
         }
@@ -3631,7 +3653,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
 
     fn thrown_off(p: &mut Probe, run: &mut Thrown) -> Result<()> {
         let started = Instant::now();
-        let out = Command::new(&run.copy).arg("off").env_remove("SCOOCH_HOME").env("SCOOCH_LINK_PLACES", &run.places).stdin(Stdio::null()).output()?;
+        let out = finished(Command::new(&run.copy).arg("off").env_remove("SCOOCH_HOME").env("SCOOCH_LINK_PLACES", &run.places), "scooch off from the copy")?;
         let error = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let exited = wait_until(Duration::from_secs(10), || !still_running(&mut run.child)).map(|_| started.elapsed().as_millis());
         let copy_gone = !run.copy.exists();
@@ -3682,7 +3704,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let home = dirs::home_dir().context("no home folder")?;
         let mark = log_lines(&run.log).len();
         let started = Instant::now();
-        let gio = Command::new("gio").arg("trash").arg(&run.stand_in).output();
+        let gio = finished(Command::new("gio").arg("trash").arg(&run.stand_in), "gio trash");
         let used = match &gio {
             Ok(out) if out.status.success() => "gio trash".to_string(),
             other => {
@@ -3794,7 +3816,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn real_scooch(program: &Path, arguments: &[&str]) -> Result<std::process::Output> {
-        Ok(Command::new(program).args(arguments).env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").stdin(Stdio::null()).output()?)
+        finished(Command::new(program).args(arguments).env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1"), &format!("scooch {}", arguments.join(" ")))
     }
 
     fn real_state(real: &Path) -> serde_json::Value {
@@ -3811,9 +3833,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn launched_by_gio(entry: &Path) -> String {
-        match Command::new("gio").arg("launch").arg(entry).env_remove("SCOOCH_HOME").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status() {
+        match status_within(Command::new("gio").arg("launch").arg(entry).env_remove("SCOOCH_HOME"), "gio launch") {
             Ok(status) => format!("gio launch exit {:?}", status.code()),
-            Err(error) => format!("gio launch could not run, {error}"),
+            Err(error) => format!("{error:#}"),
         }
     }
 
