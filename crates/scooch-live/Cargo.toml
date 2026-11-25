@@ -12,3 +12,7 @@ wgpu = { version = "30", default-features = false, features = ["wgsl", "dx12", "
 raw-window-handle = "0.6"
 pollster = "0.4"
 scooch-core = { path = "../scooch-core" }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "0.6"
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }

@@ -31,7 +31,11 @@ jobs:
         run: cargo build --release -p scooch --bins --examples
 
       - name: Test
-        run: cargo test --release -p scooch
+        env:
+          SCOOCH_NEED_ADAPTER: "1"
+        run: |
+          cargo test --release -p scooch
+          cargo test --release -p scooch-live --lib
 
       - name: Probe
         if: ${{ !cancelled() }}

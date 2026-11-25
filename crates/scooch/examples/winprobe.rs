@@ -9,6 +9,10 @@ fn main() -> std::process::ExitCode {
 }
 
 #[cfg(windows)]
+#[path = "judge/slides.rs"]
+mod slides;
+
+#[cfg(windows)]
 mod probe {
     use anyhow::{anyhow, bail, Context, Result};
     use scooch::platform::windows::layout::{self, Cell, Label, SPACING};
@@ -3790,6 +3794,171 @@ mod probe {
         returned == 0 && steady && distinct >= 3 && hidden * 100 <= total(&mask).max(1) && hand_over.is_some_and(|d| d.1 <= 2) && in_order && landing
     }
 
+    const SLIDES: usize = 36;
+
+    fn watch_slide(log: &Path, screen: &Screen, act: impl FnOnce() -> bool) -> Watched {
+        let desktop = platform::current().ok();
+        let area = screen_rect(screen);
+        let old = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
+        let kept = old.as_ref().and_then(|path| {
+            let extension = path.extension().map_or("png".to_string(), |extension| extension.to_string_lossy().into_owned());
+            let kept = std::env::temp_dir().join(format!("scooch-slide-{}.{extension}", std::process::id()));
+            fs::copy(path, &kept).ok().map(|_| kept)
+        });
+        let start = log_lines(log).len();
+        let sent = act();
+        let dropped = DROPPED.lock().ok().and_then(|mut dropped| dropped.take()).unwrap_or_else(epoch);
+        let started = Instant::now();
+        let (mut shots, mut layered) = (Vec::new(), Vec::new());
+        let mut up_before = 0usize;
+        let mut end: Option<f64> = None;
+        let mut count = 0usize;
+        while started.elapsed() < Duration::from_secs(12) {
+            let mut up = layer::ours_left();
+            if up == 0 && up_before > 0 {
+                composed();
+                up = layer::ours_left();
+            }
+            up_before = up;
+            let began = epoch();
+            if let Ok(shot) = capture(area) {
+                shots.push((epoch(), shot));
+                layered.push((began, up));
+            }
+            count += 1;
+            if end.is_none() && count.is_multiple_of(3) {
+                let lines = log_lines(log);
+                let fresh = lines.iter().skip(start);
+                let closed = fresh.clone().find(|line| line.contains(" glide closed ")).and_then(|line| stamp_of(line));
+                let ticked = fresh.clone().find(|line| line.contains(" tick ") && !line.contains("Unchanged)]")).and_then(|line| stamp_of(line));
+                end = closed.or(ticked).map(|at| at + 1.0);
+            }
+            if end.is_some_and(|end| epoch() > end) {
+                break;
+            }
+            drain();
+        }
+        let log: Vec<String> = log_lines(log).into_iter().skip(start).filter(|line| line.contains(" glide ") || line.contains(" tick ") || line.contains(" wake ") || line.contains(" set ")).collect();
+        let set = log.iter().rev().find_map(|line| line.split_once(' ').and_then(|(_, rest)| rest.strip_prefix("set ")).map(|path| PathBuf::from(path.trim())));
+        let new = set.or_else(|| desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten()));
+        Watched { dropped, shots, layered, log, old, kept, new, sent }
+    }
+
+    fn dark_share(shot: &RgbImage, keep: &[usize]) -> f32 {
+        let raw = shot.as_raw();
+        keep.iter().filter(|index| raw.get(*index * 3..*index * 3 + 3).is_some_and(|pixel| pixel.iter().all(|channel| *channel <= 12))).count() as f32 / keep.len().max(1) as f32
+    }
+
+    type Fitted = Vec<((Vec<u8>, Vec<u8>), Vec<RgbImage>)>;
+
+    fn many_slides(p: &mut Probe, log: &Path, screen: &Screen, (name, folder): (&str, bool), places: (POINT, POINT), source: &Path) -> Result<()> {
+        let desktop = platform::current()?;
+        let (width, height) = (screen.frame.w as u32, screen.frame.h as u32);
+        let shown = shown_name(name, folder);
+        let still_icons = icons_except(screen, &shown);
+        let image = picture::decode(source)?;
+        let mut fitted: Fitted = Vec::new();
+        let (mut glided, mut captures, mut black, mut odd) = (0usize, 0usize, 0usize, 0usize);
+        let (mut skipped, mut faults, mut widest, mut unjudged) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        p.line(format!("- {SLIDES} slides of one icon between two places, each captured back to back from the drop to a second after the close, every capture judged against the old picture, the new one and 21 frames between them"));
+        for index in 0..SLIDES {
+            let slide = index + 1;
+            quiet_log(log, Duration::from_millis(800), Duration::from_secs(10));
+            park_cursor();
+            pump(Duration::from_millis(150));
+            let view = shell::view()?;
+            let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
+            let Some(from) = center_of(&automation, view.list, &shown) else {
+                skipped.push(format!("{slide}: the icon was not found"));
+                continue;
+            };
+            let to = if (from.x - places.0.x).abs() < 40 && (from.y - places.0.y).abs() < 60 { places.1 } else { places.0 };
+            let old_tables = desktop.wallpaper(screen).ok().flatten().and_then(|old| tables_file(&p.home, &old));
+            let watched = watch_slide(log, screen, || drag_to(from, to));
+            park_cursor();
+            captures += watched.shots.len();
+            if !watched.log.iter().any(|line| line.contains(" glide slid, ")) {
+                let reason = watched.log.iter().find_map(|line| line.split(" glide skipped, ").nth(1)).and_then(|rest| rest.split(',').next()).unwrap_or("no line").to_string();
+                skipped.push(format!("{slide}: {reason}"));
+                continue;
+            }
+            glided += 1;
+            let (Some(old_path), Some(new_path)) = (watched.kept.as_ref(), watched.new.as_ref()) else {
+                unjudged.push(format!("{slide}: the pictures before or after are unknown"));
+                continue;
+            };
+            let (Ok(old), Ok(new)) = (picture::decode(old_path), picture::decode(new_path)) else {
+                unjudged.push(format!("{slide}: the pictures before or after could not be read"));
+                continue;
+            };
+            let new_tables = tables_file(&p.home, new_path);
+            let key = old_tables.clone().zip(new_tables);
+            let frames: Vec<RgbImage> = match key {
+                Some(key) => match fitted.iter().find(|(seen, _)| *seen == key) {
+                    Some((_, frames)) => frames.clone(),
+                    None => {
+                        let canvas = scooch_core::canvas(&image, old.width(), old.height());
+                        let made: Vec<RgbImage> = match (scooch_core::Bundle::tables_from_bytes(&key.0, canvas.clone()), scooch_core::Bundle::tables_from_bytes(&key.1, canvas)) {
+                            (Ok(a), Ok(b)) => (0..=20).map(|step| scooch_core::frame(&a, &b, step as f32 / 20.0)).collect(),
+                            _ => Vec::new(),
+                        };
+                        if !made.is_empty() {
+                            fitted.push((key, made.clone()));
+                        }
+                        made
+                    }
+                },
+                None => Vec::new(),
+            };
+            if frames.is_empty() {
+                unjudged.push(format!("{slide}: no tables to draw the frames between"));
+            }
+            let mut avoid: Vec<Rect> = icon_rects().unwrap_or_default().into_iter().map(|rect| Rect { x: rect.x - screen.frame.x, y: rect.y - screen.frame.y, ..rect }).collect();
+            avoid.extend(still_icons.iter().copied());
+            let keep = outside(width.min(old.width()), height.min(old.height()), &avoid, 2);
+            let candidates: Vec<&RgbImage> = frames.iter().chain([&old, &new]).collect();
+            let seen: Vec<(f64, Option<f32>, f32)> = watched
+                .shots
+                .iter()
+                .zip(&watched.layered)
+                .map(|((_, shot), (began, _))| {
+                    let gap = candidates.iter().map(|candidate| difference(shot, candidate, &keep).0).fold(f32::MAX, f32::min);
+                    ((began - watched.dropped) * 1000.0, (!frames.is_empty()).then_some(gap), dark_share(shot, &keep))
+                })
+                .collect();
+            widest.push(seen.iter().filter_map(|(_, gap, _)| *gap).fold(0.0f32, f32::max).round());
+            let closed = logged(&watched, "glide closed").map(|closed| ((closed - watched.dropped) * 1000.0).round());
+            for fault in crate::slides::slide_faults(&seen) {
+                black += usize::from(fault.contains("black desktop"));
+                odd += usize::from(fault.contains("neither picture"));
+                let at = seen.iter().position(|(ms, _, _)| fault.contains(&format!(" at {ms:.0} ms "))).unwrap_or(0);
+                let mut saved = Vec::new();
+                for (offset, index) in [("before", at.checked_sub(1)), ("capture", Some(at)), ("after", Some(at + 1))] {
+                    if let Some((_, shot)) = index.and_then(|index| watched.shots.get(index)) {
+                        let file = format!("slide-{slide}-{offset}-{:.0}ms.png", seen.get(index.unwrap_or(0)).map_or(0.0, |(ms, _, _)| *ms));
+                        if save_png(&p.out.join(&file), shot).is_ok() {
+                            saved.push(file);
+                        }
+                    }
+                }
+                let up = watched.layered.get(at).map(|(_, up)| *up);
+                p.line(format!("  - slide {slide}: {fault}, layer windows of ours listed at that capture {up:?}, the close {closed:?} ms after the drop, saved {saved:?}, daemon log {:?}", watched.log.iter().filter(|line| line.contains(" glide ")).map(|line| line.chars().take(160).collect::<String>()).collect::<Vec<_>>()));
+                faults.push(format!("slide {slide} {fault}"));
+            }
+        }
+        p.line(format!("- {SLIDES} slides dragged, {glided} glided, {captures} captures in all from the drop to a second after the close, {black} black captures, {odd} captures no frame or picture explains, largest gap of a capture to its nearest picture or frame per slide {widest:?}, not judged {unjudged:?}, skips {skipped:?}"));
+        for fault in faults {
+            p.failed.push(fault);
+        }
+        if glided * 2 < SLIDES {
+            p.failed.push(format!("only {glided} of {SLIDES} slides glided, so the slides were not watched on footing"));
+        }
+        if !unjudged.is_empty() {
+            p.failed.push(format!("{} slides that glided could not be judged, so they were not watched on footing", unjudged.len()));
+        }
+        Ok(())
+    }
+
     fn icons_except(screen: &Screen, moving: &str) -> Vec<Rect> {
         let Ok(view) = shell::view() else { return Vec::new() };
         let automation: ::windows::core::Result<IUIAutomation> = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) };
@@ -4161,6 +4330,7 @@ mod probe {
         if !good || left > 0 {
             p.failed.push("the daemon's glide did not move steadily under the icons and hand over cleanly".into());
         }
+        many_slides(p, &log, &screen, (name, folder), (centre, aside), &source)?;
         let scooch = twin()?.with_file_name("scooch.exe");
         let toggle = |home: &Path| Command::new(&scooch).arg("glide").env("SCOOCH_HOME", home).output().map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
         p.line(format!("- scooch glide said {:?}", toggle(&p.home)));
