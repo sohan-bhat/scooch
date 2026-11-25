@@ -3130,13 +3130,17 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let started = Instant::now();
             if let Some(picture) = p.pictures.first().cloned() {
                 linux.set_wallpaper(&screen, &picture)?;
+                let _ = fs::remove_file(record::file(&p.home));
             }
-            let name = format!("watch-{run}.log");
-            let process = start_daemon(p, &program, &name)?;
-            let home = p.home.clone();
+            let home = p.home.join(format!("run-{run}"));
+            fs::create_dir_all(&home)?;
+            fs::write(home.join("state.json"), br#"{"version":1,"on":true}"#)?;
+            let log = p.out.join(format!("watch-{run}.log"));
+            let child = Command::new(&program).arg("watch").env("SCOOCH_HOME", &home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(fs::File::create(&log)?).spawn()?;
+            let process = child.id();
+            p.daemon = Some(child);
             let first = wait_until(Duration::from_secs(60), || rendered(&home));
             std::thread::sleep(Duration::from_secs(2));
-            let log = p.out.join(&name);
             let rounds = move_rounds(p, &linux, &screen, &log);
             unsafe { libc::kill(process as libc::pid_t, libc::SIGTERM) };
             if let Some(mut child) = p.daemon.take() {
