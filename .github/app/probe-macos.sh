@@ -134,6 +134,22 @@ light_shot() { awk -v v="$(luma "$1")" 'BEGIN { exit !(v > 0.6) }'; }
 dark_shot() { awk -v v="$(luma "$1")" 'BEGIN { exit !(v < 0.3) }'; }
 login_at() { [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null)" = "$1" ]; }
 no_window_app() { ! pgrep -f "MacOS/scooch-app" >/dev/null; }
+app_snapshot() {
+  local pids listed holders windows
+  pids=$(pgrep -f 'MacOS/scooch-app' | tr '\n' ' ')
+  listed=none
+  [ -n "${pids// /}" ] && listed=$(ps -o pid=,ppid=,lstart=,args= -p "$(echo $pids | tr ' ' ',')" 2>/dev/null | tr -s ' ' | tr '\n' ';')
+  holders=$(lsof -t "$data/icon.lock" 2>/dev/null | tr '\n' ' ')
+  windows=$(limited 15 osascript -l JavaScript -e '
+    function run(argv) {
+      ObjC.import("CoreGraphics");
+      const wanted = argv.map(Number);
+      const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionAll, 0))) || [];
+      const mine = list.filter((w) => wanted.includes(w.kCGWindowOwnerPID));
+      return mine.map((w) => `${w.kCGWindowOwnerPID} ${w.kCGWindowOwnerName} number ${w.kCGWindowNumber} layer ${w.kCGWindowLayer} ${w.kCGWindowIsOnscreen ? "shown" : "hidden"} at ${w.kCGWindowBounds.X} ${w.kCGWindowBounds.Y} ${w.kCGWindowBounds.Width}x${w.kCGWindowBounds.Height}`).join("; ") || "none";
+    }' $pids 2>&1)
+  echo "app processes $listed icon.lock open in ${holders:-no process}, which only its holder keeps open, their windows $windows"
+}
 no_staged() { ! ls -d /Applications/.Scooch.app.new.* "$HOME/Applications/.Scooch.app.new."* >/dev/null 2>&1; }
 
 close_prompts() {
@@ -265,15 +281,17 @@ limited 20 open --stderr "$out/app.log" "$app" >/dev/null 2>&1
 if took=$(wait_for 40 has_window); then
   line "- window showed after $took s"
 else
-  line "- no window after 40 s"
+  line "- no window after 40 s, $(app_snapshot)"
 fi
 expect "the app opened its window" has_window
 sleep 4
 shot first-open
-limited 20 open -n "$app" >/dev/null 2>&1
+limited 20 open -n --stderr "$out/app-second.log" "$app" >/dev/null 2>&1
 sleep 6
-line "- a second launch with open -n left $(pgrep -f 'MacOS/scooch-app' | wc -l | tr -d ' ') window process"
-expect "a second launch leaves one window process" [ "$(pgrep -f 'MacOS/scooch-app' | wc -l | tr -d ' ')" = 1 ]
+left=$(pgrep -f 'MacOS/scooch-app' | wc -l | tr -d ' ')
+line "- a second launch with open -n left $left window process, it says $(tr '\n' ' ' <"$out/app-second.log" 2>/dev/null)"
+[ "$left" = 1 ] || line "- after the second launch, $(app_snapshot)"
+expect "a second launch leaves one window process" [ "$left" = 1 ]
 if took=$(wait_for 30 state_on); then line "- first open turned Scooch on after $took s"; else line "- first open did not turn Scooch on within 30 s"; fi
 expect "first open turned Scooch on" state_on
 expect "the login item points at the helper's program" login_at "$daemon"
