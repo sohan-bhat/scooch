@@ -126,6 +126,65 @@ public static class Seen {
     [DllImport("dwmapi.dll")]
     static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out int value, int size);
     public struct Edge { public int Left; public int Top; public int Right; public int Bottom; }
+    [DllImport("user32.dll")]
+    static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr extra);
+    public static long Since(long stamp) { return (System.Diagnostics.Stopwatch.GetTimestamp() - stamp) * 1000 / System.Diagnostics.Stopwatch.Frequency; }
+    public static IntPtr Frame() {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((window, extra) => {
+            if (!IsWindowVisible(window)) return true;
+            var name = new System.Text.StringBuilder(64);
+            GetWindowTextW(window, name, 64);
+            if (name.ToString() != "Scooch") return true;
+            uint pid;
+            GetWindowThreadProcessId(window, out pid);
+            int cloaked = 0;
+            DwmGetWindowAttribute(window, 14, out cloaked, 4);
+            try { if (cloaked != 0 || System.Diagnostics.Process.GetProcessById((int)pid).ProcessName != "scooch-app") return true; } catch { return true; }
+            found = window;
+            return false;
+        }, IntPtr.Zero);
+        return found;
+    }
+    public static bool Filled(IntPtr window) {
+        bool any = false;
+        EnumChildWindows(window, (child, extra) => { any = true; return false; }, IntPtr.Zero);
+        return any;
+    }
+    public static string Box(IntPtr window) {
+        Edge rect;
+        return GetWindowRect(window, out rect) ? rect.Left + " " + rect.Top + " " + rect.Right + " " + rect.Bottom : "none";
+    }
+    public static string Open(long stamp, int cap, int settle) {
+        long frame = -1, filled = -1;
+        string first = "none", last = "none";
+        while (Since(stamp) < cap) {
+            IntPtr window = Frame();
+            if (window != IntPtr.Zero) {
+                if (frame < 0) { frame = Since(stamp); first = Box(window); }
+                if (Filled(window)) { filled = Since(stamp); break; }
+            }
+            System.Threading.Thread.Sleep(5);
+        }
+        if (filled >= 0) {
+            System.Threading.Thread.Sleep(settle);
+            IntPtr window = Frame();
+            if (window != IntPtr.Zero) last = Box(window);
+        }
+        return frame + "|" + filled + "|" + first + "|" + last;
+    }
+    public static IntPtr Blank(long stamp, int cap, int settle) {
+        while (Since(stamp) < cap) {
+            IntPtr window = Frame();
+            if (window != IntPtr.Zero) {
+                if (Filled(window)) return IntPtr.Zero;
+                System.Threading.Thread.Sleep(settle);
+                return Filled(window) ? IntPtr.Zero : window;
+            }
+            System.Threading.Thread.Sleep(2);
+        }
+        return IntPtr.Zero;
+    }
     public static string Windows(int[] pids) {
         var told = new List<string>();
         EnumWindows((window, extra) => {
@@ -387,24 +446,31 @@ Line "- animation effects after the probe turned them on $([Desk]::Animations())
 $app = Get-ChildItem $folder -Filter 'scooch-app.exe' | Select-Object -First 1
 $experiment = $env:SCOOCH_EXPERIMENT -eq 'launch'
 if ($experiment) { . (Join-Path $PSScriptRoot 'launches-windows.ps1') }
-$firstStart = Start-Process -FilePath $app.FullName -RedirectStandardError (Join-Path $Out 'app.log') -PassThru
-if ($experiment) { First-Launch $firstStart }
-$shown = Wait-For 40 { [bool](Find-Window) }
-Line "- window showed after $shown s"
-if ($shown -lt 0) { Line "- with no window found, $(App-Snapshot)" }
-Expect "the app opened its window" ($shown -ge 0)
+$firstLog = Join-Path $Out 'app.log'
+$stamp = [Diagnostics.Stopwatch]::GetTimestamp()
+$firstStart = Start-Process -FilePath $app.FullName -RedirectStandardError $firstLog -PassThru
+$opened = ([Seen]::Open($stamp, 120000, 1000)) -split '\|'
+$frameMs = [long]$opened[0]
+$filledMs = [long]$opened[1]
+Start-Sleep -Milliseconds 500
+$said = (Read-Shared $firstLog) -replace "`r?`n", ' '
+$madeHere = $said -match 'scooch-app window made in \d+ ms'
+$handed = ($said -match 'another process holds the icon') -and $firstStart.HasExited
+Line "- the first launch showed its frame after $frameMs ms and the filled window after $filledMs ms, the frame first at $($opened[2]) and the filled window at $($opened[3]), it says $said"
+if ($frameMs -lt 0 -or $filledMs -lt 0 -or -not ($madeHere -or $handed)) { Line "- after the first launch, $(App-Snapshot)" }
+Expect "the first launch said it made its window or handed it to the icon process, which the window checks stand on" ($madeHere -or $handed)
+Expect "the frame showed within 3 s of the launch" ($frameMs -ge 0 -and $frameMs -le 3000)
+Expect "the filled window showed within 120 s of the launch" ($filledMs -ge 0)
+Expect "with no saved size the frame at first show is where the filled window is, $($opened[2]) against $($opened[3])" ($filledMs -ge 0 -and $opened[2] -eq $opened[3])
 $secondLog = Join-Path $Out 'app-second.log'
-Start-Process -FilePath $app.FullName -RedirectStandardError $secondLog
-Start-Sleep -Seconds 6
+$second = Start-Process -FilePath $app.FullName -RedirectStandardError $secondLog -PassThru
+$secondSaid = Wait-For 60 { (Read-Shared $secondLog) -match 'scooch-app ' }
+$secondEnded = if ($secondSaid -ge 0) { Wait-For 30 { $second.HasExited } } else { -1 }
 $left = @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count
-Line "- a second launch left $left window process, it says $((Read-Shared $secondLog) -replace "`r?`n", ' ')"
-if ($left -ne 1) { Line "- after the second launch, $(App-Snapshot)" }
-Expect "a second launch leaves one window process" ($left -eq 1)
-if ($experiment) {
-    Run-Launches
-    Save-Launch-Daemon-Log
-    Finish
-}
+Line "- a second launch wrote its first line after $secondSaid s and ended $secondEnded s after it, leaving $left window process, it says $((Read-Shared $secondLog) -replace "`r?`n", ' ')"
+if ($secondSaid -lt 0 -or $secondEnded -lt 0 -or $left -ne 1) { Line "- after the second launch, $(App-Snapshot)" }
+Expect "the second launch wrote its first line within 60 s, which the second launch check stands on" ($secondSaid -ge 0)
+Expect "a second launch leaves one window process" ($secondEnded -ge 0 -and $left -eq 1)
 Start-Sleep -Seconds 3
 $on = Wait-For 40 { State-On }
 Line "- first open turned Scooch on after $on s"
@@ -429,6 +495,87 @@ Expect "the window is light in the light look while on" (Light-Shot 'look-light-
 Set-Look 0
 Shot 'look-dark-on'
 Expect "the window is dark in the dark look while on" (Dark-Shot 'look-dark-on')
+function Close-Frame {
+    $window = Find-Window
+    if ($window) { try { $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close() } catch { } }
+    Wait-For 15 { -not (Find-Window) } | Out-Null
+    Start-Sleep -Seconds 1
+}
+function Launch-Again([string]$Name) {
+    Close-Frame
+    $stamp = [Diagnostics.Stopwatch]::GetTimestamp()
+    Start-Process -FilePath $app.FullName -RedirectStandardError (Join-Path $Out "app-$Name.log")
+    return $stamp
+}
+function Center-Brightness([IntPtr]$Window) {
+    $client = [Desk]::Client($Window)
+    if (-not $client) { return -1 }
+    $bitmap = New-Object System.Drawing.Bitmap(16, 16)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.CopyFromScreen([int](($client[0] + $client[2]) / 2) - 8, [int](($client[1] + $client[3]) / 2) - 8, 0, 0, $bitmap.Size)
+    $sum = 0.0
+    for ($x = 0; $x -lt 16; $x++) { for ($y = 0; $y -lt 16; $y++) { $sum += $bitmap.GetPixel($x, $y).GetBrightness() } }
+    $graphics.Dispose()
+    $bitmap.Dispose()
+    return [math]::Round($sum / 256, 2)
+}
+function Blank-Look([int]$Light, [string]$Name) {
+    Set-Look $Light
+    for ($try = 1; $try -le 3; $try++) {
+        $stamp = Launch-Again "blank-$Name-$try"
+        $window = [Seen]::Blank($stamp, 10000, 40)
+        $bright = if ($window -ne [IntPtr]::Zero) { Center-Brightness $window } else { -1 }
+        $blank = $window -ne [IntPtr]::Zero -and -not [Seen]::Filled($window)
+        Wait-For 30 { [bool](Find-Window) } | Out-Null
+        if ($blank) {
+            Line "- a blank frame in the $Name look was caught on try $try, its middle has brightness $bright"
+            return $bright
+        }
+    }
+    Line "- no blank frame was caught in the $Name look in three tries"
+    return -1
+}
+function Rect-Case([string]$Name) {
+    $stamp = Launch-Again "rect-$($Name -replace '\W', '-')"
+    $seen = ([Seen]::Open($stamp, 120000, 1000)) -split '\|'
+    Line "- $Name, the frame showed after $($seen[0]) ms at $($seen[2]) and the filled window after $($seen[1]) ms at $($seen[3])"
+    Expect "$Name, a launch the icon process takes over shows its frame within 3 s" ([long]$seen[0] -ge 0 -and [long]$seen[0] -le 3000)
+    Expect "$Name, the frame at first show is where the filled window is, $($seen[2]) against $($seen[3])" ([long]$seen[1] -ge 0 -and $seen[2] -eq $seen[3])
+}
+function Frame-Handle { $found = Find-Window; if ($found) { [IntPtr]$found.Current.NativeWindowHandle } else { [IntPtr]::Zero } }
+Line ''
+Line '### The frame before the window fills'
+$darkBlank = Blank-Look 0 'dark'
+Expect "a blank frame was caught in the dark look within three tries, which its colour check stands on" ($darkBlank -ge 0)
+Expect "the blank frame is dark in the dark look" ($darkBlank -ge 0 -and $darkBlank -lt 0.3)
+$lightBlank = Blank-Look 1 'light'
+Expect "a blank frame was caught in the light look within three tries, which its colour check stands on" ($lightBlank -ge 0)
+Expect "the blank frame is light in the light look" ($lightBlank -gt 0.6)
+$plain = [Seen]::Box((Frame-Handle)) -split ' '
+[Desk]::SetWindowPos((Frame-Handle), [IntPtr]::Zero, 100, 80, 1100, 760, 0x0014) | Out-Null
+Start-Sleep -Seconds 1
+Rect-Case 'with a saved size'
+[Desk]::ShowWindow((Frame-Handle), 3) | Out-Null
+Start-Sleep -Seconds 1
+Rect-Case 'saved as maximized'
+[Desk]::ShowWindow((Frame-Handle), 9) | Out-Null
+$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+[Desk]::SetWindowPos((Frame-Handle), [IntPtr]::Zero, 0, 0, $bounds.Width + 300, $bounds.Height + 300, 0x0014) | Out-Null
+Start-Sleep -Seconds 1
+Rect-Case 'with a saved size larger than the screen'
+if ($plain.Count -eq 4) { [Desk]::SetWindowPos((Frame-Handle), [IntPtr]::Zero, [int]$plain[0], [int]$plain[1], [int]$plain[2] - [int]$plain[0], [int]$plain[3] - [int]$plain[1], 0x0014) | Out-Null }
+Start-Sleep -Seconds 1
+Launch-Again 'reset' | Out-Null
+Wait-For 30 { [bool](Find-Window) } | Out-Null
+Start-Sleep -Seconds 2
+Line "- the window is back at its first size, at $([Seen]::Box((Frame-Handle)))"
+Copy-Item (Join-Path $env:APPDATA 'me.sohanbhat.scooch.window\.window-state.json') (Join-Path $Out 'window-state.json') -ErrorAction SilentlyContinue
+Set-Look 0
+if ($experiment) {
+    Run-Launches
+    Save-Launch-Daemon-Log
+    Finish
+}
 Get-CimInstance Win32_Process -Filter "Name = 'scoochw.exe'" | Where-Object { $_.CommandLine -match ' watch' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 Start-Sleep -Seconds 2
 $front = Find-Window
