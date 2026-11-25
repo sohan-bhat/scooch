@@ -610,10 +610,6 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         probe.section("4 Move and events", events);
         probe.section("5 Wallpaper", wallpaper);
         probe.section("6 End to end", end_to_end);
-        if std::env::var_os("SCOOCH_PROBE_UNTIL_SIX").is_some() {
-            probe.save();
-            return ExitCode::from(if probe.failed.is_empty() { 0 } else { 1 });
-        }
         probe.section("7 Two monitors", monitors);
         probe.section("7b Desktop after the drop", after_drop);
         probe.section("7c The AppImage thrown away", thrown_away);
