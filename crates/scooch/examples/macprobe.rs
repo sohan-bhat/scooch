@@ -182,6 +182,65 @@ fn glide_progress(window: &[(f32, f32)]) -> bool {
 }
 
 #[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq)]
+struct Drawn {
+    at: f64,
+    step: String,
+    s: Option<f32>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn drew_frames(log: &[String]) -> Vec<Drawn> {
+    log.iter()
+        .filter_map(|line| line.split(" glide drew ").nth(1))
+        .filter_map(|record| record.split_once(' ').map(|(_, frames)| frames))
+        .flat_map(|frames| frames.split(", "))
+        .filter_map(|frame| {
+            let mut words = frame.split_whitespace();
+            let at = words.next()?.parse::<f64>().ok()?;
+            let step = words.next()?.to_string();
+            let s = words.filter_map(|layer| layer.strip_prefix('G')).filter_map(|layer| layer.split('@').next()?.parse::<f32>().ok()).next_back();
+            Some(Drawn { at, step, s })
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+const RECORD_REACH: (f64, f64) = (0.1, 0.02);
+
+#[cfg(any(target_os = "macos", test))]
+const RECORD_SLACK: f32 = 0.15;
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq)]
+struct Recorded {
+    steady: bool,
+    moving: usize,
+    agreed: usize,
+    disagreed: Vec<String>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn judge_record(frames: &[Drawn], captures: &[(f64, f64, f32)], dropped: f64) -> Recorded {
+    let moves: Vec<&Drawn> = frames.iter().filter(|frame| matches!(frame.step.as_str(), "move" | "glided") && frame.s.is_some()).collect();
+    let values: Vec<f32> = moves.iter().filter_map(|frame| frame.s).collect();
+    let moving = values.iter().filter(|s| **s > 0.04 && **s < 0.96).count();
+    let steady = !values.is_empty() && values.windows(2).all(|pair| pair[1] >= pair[0] - 0.001) && values.last().is_some_and(|s| *s >= 0.999) && moving >= 3;
+    let (mut agreed, mut disagreed) = (0, Vec::new());
+    for (start, end, fitted) in captures.iter().copied().filter(|(_, _, fitted)| *fitted > 0.04 && *fitted < 0.96) {
+        let near: Vec<f32> = moves.iter().filter(|frame| frame.at >= start - RECORD_REACH.0 && frame.at <= end + RECORD_REACH.1).filter_map(|frame| frame.s).collect();
+        let near = if near.is_empty() { moves.iter().rev().find(|frame| frame.at < start).and_then(|frame| frame.s).into_iter().collect() } else { near };
+        let (low, high) = near.iter().fold((f32::MAX, f32::MIN), |(low, high), s| (low.min(*s), high.max(*s)));
+        if !near.is_empty() && fitted >= low - RECORD_SLACK && fitted <= high + RECORD_SLACK {
+            agreed += 1;
+        } else {
+            disagreed.push(format!("a capture {:.0} ms after the drop fit progress {fitted:.2} where the helper presented {:?}", (start - dropped) * 1000.0, near));
+        }
+    }
+    Recorded { steady, moving, agreed, disagreed }
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn slide_faults(captures: &[(f64, Option<f32>, f32)]) -> Vec<String> {
     captures
         .iter()
@@ -415,6 +474,27 @@ mod tests {
     }
 
     #[test]
+    fn the_helper_record_judges_a_glide_that_captures_cannot_follow() {
+        let log = vec![
+            "1795551563.014 glide drew 3 1795551562.300 first S@1.00, 1795551562.320 move S@1.00 G0.000@0.25, 1795551562.400 move G0.030@1.00, 1795551562.500 move G0.300@1.00, 1795551562.600 move G0.700@1.00, 1795551562.700 move G0.900@1.00, 1795551562.760 glided G1.000@1.00, 1795551562.900 fade G1.000@1.00 S@0.40, 1795551563.000 settled S@1.00, 1795551563.010 flush S@1.00".to_string(),
+            "1795551563.020 glide settled after 700 ms".to_string(),
+        ];
+        let frames = super::drew_frames(&log);
+        assert_eq!(frames.len(), 10);
+        assert_eq!(frames[3], super::Drawn { at: 1795551562.5, step: "move".into(), s: Some(0.3) });
+        assert_eq!(frames[7].s, Some(1.0));
+        let dropped = 1795551562.0;
+        let agree = super::judge_record(&frames, &[(1795551562.45, 1795551562.55, 0.28), (1795551562.62, 1795551562.71, 0.80)], dropped);
+        assert_eq!(agree, super::Recorded { steady: true, moving: 3, agreed: 2, disagreed: Vec::new() });
+        let off = super::judge_record(&frames, &[(1795551562.45, 1795551562.55, 0.75)], dropped);
+        assert_eq!((off.agreed, off.disagreed.len()), (0, 1));
+        let back = super::drew_frames(&["1 glide drew 3 10.0 move G0.200@1.00, 10.1 move G0.500@1.00, 10.2 move G0.400@1.00, 10.3 move G0.600@1.00, 10.4 glided G1.000@1.00".to_string()]);
+        assert!(!super::judge_record(&back, &[], 9.0).steady);
+        let short = super::drew_frames(&["1 glide drew 3 10.0 move G0.500@1.00, 10.4 glided G1.000@1.00".to_string()]);
+        assert!(!super::judge_record(&short, &[], 9.0).steady);
+    }
+
+    #[test]
     fn the_glide_progress_counts_every_capture() {
         let fell = [(0.25, 7.8), (0.85, 7.61), (0.30, 7.7), (1.0, 7.39)];
         assert!(!super::glide_progress(&fell));
@@ -589,6 +669,28 @@ mod probe {
         static kCFTypeDictionaryValueCallBacks: c_void;
     }
 
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGDisplayStreamCreateWithDispatchQueue(display: u32, width: usize, height: usize, format: i32, properties: *const c_void, queue: *mut c_void, handler: &block2::Block<dyn Fn(i32, u64, *mut c_void, *const c_void)>) -> *mut c_void;
+        fn CGDisplayStreamStart(stream: *mut c_void) -> i32;
+        fn CGDisplayStreamStop(stream: *mut c_void) -> i32;
+    }
+
+    #[link(name = "IOSurface", kind = "framework")]
+    extern "C" {
+        fn IOSurfaceLock(surface: *mut c_void, options: u32, seed: *mut u32) -> i32;
+        fn IOSurfaceUnlock(surface: *mut c_void, options: u32, seed: *mut u32) -> i32;
+        fn IOSurfaceGetBaseAddress(surface: *mut c_void) -> *mut c_void;
+        fn IOSurfaceGetBytesPerRow(surface: *mut c_void) -> usize;
+        fn IOSurfaceGetWidth(surface: *mut c_void) -> usize;
+        fn IOSurfaceGetHeight(surface: *mut c_void) -> usize;
+    }
+
+    extern "C" {
+        fn dispatch_queue_create(label: *const std::ffi::c_char, attributes: *const c_void) -> *mut c_void;
+        fn dispatch_release(object: *mut c_void);
+    }
+
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
         static kCFRunLoopDefaultMode: *const c_void;
@@ -732,7 +834,7 @@ mod probe {
             "5 Move to new wallpaper" => 62_364,
             "5b Scenery" => 157_529,
             "5c Glide" => 292_101,
-            "5g Many slides" => 400_000,
+            "5g Many slides" => 900_000,
             "5d Cold drags" => 1_421_507,
             "5e Bare wakes" => 600_083,
             "5f Finder after the drop" => 60_000,
@@ -3887,6 +3989,7 @@ mod probe {
 
     struct Seen {
         at: f64,
+        took: f64,
         half: RgbImage,
         inked: f32,
         step: Spot,
@@ -4023,6 +4126,7 @@ mod probe {
             let bare = !layer::listing().iter().any(|window| window.owner == "scooch");
             let at = epoch();
             let Some(shot) = grab(display) else { continue };
+            let took = epoch() - at;
             if moment.is_none() && quick_dark(&shot) >= crate::BLACK_SHARE {
                 let windows = below_desktop();
                 let paper = picture_window(screen).and_then(|window| grab_window(window.number)).map(|shot| quick_dark(&shot));
@@ -4031,7 +4135,7 @@ mod probe {
             }
             let inked = masks.iter().map(|ink| ink.iter().filter(|(x, y)| !near(shot.at(*x, *y), baseline.at(*x, *y))).count() as f32 / ink.len().max(1) as f32).fold(0.0, f32::max);
             let step = previous.as_ref().map_or_else(Spot::default, |previous| spot_outside(previous, &shot, menu, skip));
-            seen.push(Seen { at, half: half_shot(&shot), inked, step, bare });
+            seen.push(Seen { at, took, half: half_shot(&shot), inked, step, bare });
             previous = Some(shot);
             checks += 1;
             if done.is_none() && checks % 3 == 0 && new_lines(&daemon_log(p), lines).iter().any(|line| line.contains(" tick ") && !line.contains("Unchanged")) {
@@ -4043,6 +4147,93 @@ mod probe {
         }
         let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).collect();
         Some(Dragged { dropped, skip, seen, moment, log, old, old_still, old_tables })
+    }
+
+    struct Frames {
+        stream: *mut c_void,
+        queue: *mut c_void,
+        seen: Arc<Mutex<Vec<(u64, f32)>>>,
+        idle: Arc<std::sync::atomic::AtomicUsize>,
+        offset: f64,
+    }
+
+    const BGRA: i32 = 0x4247_5241;
+    const READ_ONLY: u32 = 1;
+
+    fn surface_dark(surface: *mut c_void) -> Option<f32> {
+        if surface.is_null() || unsafe { IOSurfaceLock(surface, READ_ONLY, std::ptr::null_mut()) } != 0 {
+            return None;
+        }
+        let (width, height, row, base) = unsafe { (IOSurfaceGetWidth(surface), IOSurfaceGetHeight(surface), IOSurfaceGetBytesPerRow(surface), IOSurfaceGetBaseAddress(surface) as *const u8) };
+        let (mut dark, mut count) = (0usize, 0usize);
+        if !base.is_null() {
+            for y in (height / 10..height * 85 / 100).step_by(4) {
+                for x in (width / 20..width * 95 / 100).step_by(4) {
+                    let pixel = unsafe { std::slice::from_raw_parts(base.add(y * row + x * 4), 3) };
+                    count += 1;
+                    if pixel.iter().all(|channel| *channel <= 12) {
+                        dark += 1;
+                    }
+                }
+            }
+        }
+        unsafe { IOSurfaceUnlock(surface, READ_ONLY, std::ptr::null_mut()) };
+        (count > 0).then(|| dark as f32 / count as f32)
+    }
+
+    fn mach_seconds(ticks: u64) -> f64 {
+        let mut base = Timebase::default();
+        unsafe { mach_timebase_info(&mut base) };
+        if base.denom == 0 {
+            return ticks as f64 / 1e9;
+        }
+        ticks as f64 * f64::from(base.numer) / f64::from(base.denom) / 1e9
+    }
+
+    impl Frames {
+        fn start(display: u32, screen: &Screen) -> Option<Frames> {
+            let (width, height) = pixels(screen);
+            let seen: Arc<Mutex<Vec<(u64, f32)>>> = Arc::new(Mutex::new(Vec::new()));
+            let idle = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (kept, waited) = (seen.clone(), idle.clone());
+            let handler = block2::RcBlock::new(move |status: i32, time: u64, surface: *mut c_void, _update: *const c_void| {
+                if status == 1 {
+                    waited.fetch_add(1, Ordering::SeqCst);
+                }
+                if status != 0 {
+                    return;
+                }
+                if let (Some(dark), Ok(mut kept)) = (surface_dark(surface), kept.lock()) {
+                    kept.push((time, dark));
+                }
+            });
+            let queue = unsafe { dispatch_queue_create(c"scooch-probe-frames".as_ptr(), std::ptr::null()) };
+            let stream = unsafe { CGDisplayStreamCreateWithDispatchQueue(display, (width / 4).max(1) as usize, (height / 4).max(1) as usize, BGRA, std::ptr::null(), queue, &handler) };
+            if stream.is_null() {
+                unsafe { dispatch_release(queue) };
+                return None;
+            }
+            let offset = epoch() - mach_seconds(unsafe { mach_absolute_time() });
+            if unsafe { CGDisplayStreamStart(stream) } != 0 {
+                unsafe {
+                    CFRelease(stream);
+                    dispatch_release(queue);
+                }
+                return None;
+            }
+            Some(Frames { stream, queue, seen, idle, offset })
+        }
+
+        fn stop(self) -> (Vec<(f64, f32)>, usize) {
+            unsafe { CGDisplayStreamStop(self.stream) };
+            std::thread::sleep(Duration::from_millis(100));
+            unsafe {
+                CFRelease(self.stream);
+                dispatch_release(self.queue);
+            }
+            let seen = self.seen.lock().map(|seen| seen.clone()).unwrap_or_default();
+            (seen.into_iter().map(|(time, dark)| (self.offset + mach_seconds(time), dark)).collect(), self.idle.load(Ordering::SeqCst))
+        }
     }
 
     fn quick_dark(shot: &Shot) -> f32 {
@@ -4089,6 +4280,7 @@ mod probe {
         gap: Option<f64>,
         frames: Option<u32>,
         faults: Vec<String>,
+        recorded: crate::Recorded,
     }
 
     fn judge_glide(p: &mut Probe, dragged: &Dragged, screen: &Screen, label: &str, evidence: Option<&str>, quiet: bool) -> Judged {
@@ -4097,7 +4289,7 @@ mod probe {
         let decode = |path: &Option<PathBuf>| path.as_deref().and_then(|path| objc2::rc::autoreleasepool(|_| picture::decode(path)).ok()).map(|image| halved(&image));
         let (Some(old_still), Some(new_still)) = (dragged.old_still.clone(), decode(&new)) else {
             p.line(format!("- {label}: the two stills could not be read, old {:?} new {new:?}", dragged.old));
-            return Judged { rest: false, enough: false, moving: 0, rate: None, gap: None, frames: None, faults: Vec::new() };
+            return Judged { rest: false, enough: false, moving: 0, rate: None, gap: None, frames: None, faults: Vec::new(), recorded: crate::judge_record(&[], &[], dragged.dropped) };
         };
         let (width, height) = (old_still.width() as usize, old_still.height() as usize);
         let icons: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().map(|(_, rect)| rect).collect();
@@ -4141,6 +4333,9 @@ mod probe {
         let window: Vec<(f32, f32)> = inside.iter().filter_map(|index| fitted[*index]).collect();
         let steady = crate::glide_progress(&window);
         let mut said = Vec::new();
+        let drawn = crate::drew_frames(&dragged.log);
+        let followed: Vec<(f64, f64, f32)> = inside.iter().filter_map(|index| fitted[*index].filter(|(_, gap)| *gap <= crate::UNEXPLAINED_FIT).map(|(s, _)| (dragged.seen[*index].at, dragged.seen[*index].at + dragged.seen[*index].took, s))).collect();
+        let recorded = crate::judge_record(&drawn, &followed, dragged.dropped);
         let dark = |seen: &Seen| {
             let raw = seen.half.as_raw();
             keep.iter().filter(|index| raw.get(*index * 3..*index * 3 + 3).is_some_and(|pixel| pixel.iter().all(|channel| *channel <= 12))).count() as f32 / keep.len().max(1) as f32
@@ -4218,13 +4413,14 @@ mod probe {
             }
             said.push(format!("  - every capture saved in {name} with captures.md, nine frame strip {name}-strip.png"));
         }
+        said.push(format!("  - the helper's record of what it presented, {} frames, {} moving between the two places, steady and ending on the new place {}, captures inside the glide that agree with it {}, that do not {:?}", drawn.len(), recorded.moving, recorded.steady, recorded.agreed, recorded.disagreed));
         if !quiet {
             for line in said {
                 p.line(line);
             }
         }
         let landing = (settled.is_some() && hand_over.is_some_and(|value| value <= 2)) || gave_up_cleanly;
-        Judged { rest: returned == 0 && steady && inked <= 0.1 && landing && faults.is_empty(), enough: gap.is_some_and(|gap| gap <= SEEN_GAP), moving: moving.len(), rate, gap, frames: frames_drawn, faults }
+        Judged { rest: returned == 0 && steady && inked <= 0.1 && landing && faults.is_empty(), enough: gap.is_some_and(|gap| gap <= SEEN_GAP), moving: moving.len(), rate, gap, frames: frames_drawn, faults, recorded }
     }
 
     fn stuck(p: &mut Probe, pid: i32) {
@@ -5094,9 +5290,31 @@ mod probe {
     const SLIDES: usize = 36;
 
     fn slides_check(p: &mut Probe) -> Result<()> {
-        let result = many_slides(p);
+        let mut result = many_slides(p, "the layer as built", 0);
+        if result.is_ok() && std::env::var("SCOOCH_PROBE_FOCUS").is_ok_and(|focus| focus == "slides") {
+            let since = watch_log(&p.home.join("watch.log")).len();
+            result = restart_daemon_env(p, &[(scooch::live::SEE_THROUGH, "layer")]).and_then(|restarted| if restarted { many_slides(p, "a see through layer", since) } else { Ok(()) });
+            let _ = restart_daemon_env(p, &[]);
+        }
         put_motion_back(p);
         result
+    }
+
+    fn restart_daemon_env(p: &mut Probe, env: &[(&str, &str)]) -> Result<bool> {
+        let Some(mut child) = p.stand.take() else { return Ok(false) };
+        let _ = child.kill();
+        let _ = child.wait();
+        stutters(p);
+        p.struck = false;
+        let _ = fs::remove_file(p.home.join("watch.pid"));
+        let log = fs::OpenOptions::new().create(true).append(true).open(p.home.join("watch.log"))?;
+        let mut command = Command::new(&p.bin);
+        command.arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").env_remove(scooch::live::SLOW_HELLO).env_remove(scooch::live::READ_LAG).env_remove(scooch::live::SEE_THROUGH).envs(env.iter().copied()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
+        p.stand = Some(command.spawn()?);
+        let home = p.home.clone();
+        wait_until(Duration::from_secs(15), || fs::read_to_string(home.join("watch.pid")).ok().and_then(|text| text.trim().parse::<i32>().ok()).is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)).context("the restarted daemon wrote no pid file")?;
+        p.line(format!("- the daemon started again with {env:?}"));
+        Ok(true)
     }
 
     fn drew_near(log: &[String], at: f64, reach: f64) -> Vec<String> {
@@ -5107,7 +5325,7 @@ mod probe {
             .collect()
     }
 
-    fn many_slides(p: &mut Probe) -> Result<()> {
+    fn many_slides(p: &mut Probe, kind: &str, since: usize) -> Result<()> {
         let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
         accessory(marker);
         let screen = main_screen(p)?;
@@ -5123,22 +5341,35 @@ mod probe {
         }
         set_motion(p, false);
         poke(p);
-        let parked = wait_parked(p, 0, Duration::from_secs(60));
+        let parked = wait_parked(p, since, Duration::from_secs(60));
         if parked.is_none() {
             p.fail("the helper never parked within 60 s, so no slide was watched, which is the footing failing and not a pass");
             return Ok(());
         }
         let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
         let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
-        let (mut watched, mut glided, mut judged, mut captures, mut black) = (0, 0, 0, 0, 0);
+        let (mut watched, mut glided, mut judged, mut by_record, mut captures, mut black) = (0, 0, 0, 0, 0, 0);
+        let (mut streamed, mut displayed) = (0, 0);
         let mut faults = Vec::new();
         let mut skipped = Vec::new();
         for index in 0..SLIDES {
             quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
             let from = position(p, name).unwrap_or(subject);
             let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
-            let Some(dragged) = watch_drag(p, display, &screen, from, to, &[]) else { continue };
+            let frames = Frames::start(display, &screen);
+            let dragged = watch_drag(p, display, &screen, from, to, &[]);
+            let (shown, idle) = frames.map(Frames::stop).unwrap_or_default();
+            let Some(dragged) = dragged else { continue };
             watched += 1;
+            streamed += shown.len();
+            let dark: Vec<f64> = shown.iter().filter(|(_, dark)| *dark >= crate::BLACK_SHARE).map(|(at, _)| ((at - dragged.dropped) * 1000.0).round()).collect();
+            let longest = shown.windows(2).map(|pair| pair[1].0 - pair[0].0).fold(0.0f64, f64::max);
+            if !dark.is_empty() {
+                let closed = logged(&dragged, "after its wallpaper was set").map(|closed| ((closed - dragged.dropped) * 1000.0).round());
+                p.line(format!("  - slide {}: the display showed black in {} frames at {dark:?} ms after the drop, the close {closed:?} ms, {} frames and {idle} idle reports, longest gap {:.0} ms", index + 1, dark.len(), shown.len(), longest * 1000.0));
+                faults.push(format!("slide {} the display showed a black desktop at {dark:?} ms after the drop", index + 1));
+                displayed += dark.len();
+            }
             captures += dragged.seen.len();
             match crate::glide_try(&dragged.log, true) {
                 crate::Try::Glided => {}
@@ -5153,6 +5384,11 @@ mod probe {
             let seen = judge_glide(p, &dragged, &screen, &label, None, true);
             if seen.enough {
                 judged += 1;
+            } else if seen.recorded.agreed >= 1 && seen.recorded.steady {
+                by_record += 1;
+            }
+            for why in &seen.recorded.disagreed {
+                faults.push(format!("slide {} {why}, so the screen did not show what the helper drew", index + 1));
             }
             if !seen.faults.is_empty() {
                 let _ = judge_glide(p, &dragged, &screen, &label, Some(&evidence), false);
@@ -5166,7 +5402,9 @@ mod probe {
                 }
             }
         }
-        p.line(format!("- {SLIDES} slides dragged, {watched} watched, {glided} glided, {judged} with captures dense enough to judge the frames between, {captures} captures in all, {black} black captures, {} captures no frame or picture explains, skips {skipped:?}", faults.len() - black));
+        let odd = faults.iter().filter(|fault| fault.contains("neither picture")).count();
+        p.line(format!("- with {kind}, the display stream sent {streamed} frames over the slides, {displayed} of them black"));
+        p.line(format!("- with {kind}, {SLIDES} slides dragged, {watched} watched, {glided} glided, {judged} judged by dense captures and {by_record} by the helper's record checked against the captures, {captures} captures in all, {black} black captures, {odd} captures no frame or picture explains, skips {skipped:?}"));
         for fault in faults {
             p.fail(fault);
         }
@@ -5283,9 +5521,21 @@ mod probe {
                 verdict = Some(false);
                 break;
             }
+            if !judged.recorded.disagreed.is_empty() {
+                for why in &judged.recorded.disagreed {
+                    p.fail(format!("{why}, so the screen did not show what the helper drew"));
+                }
+                verdict = Some(false);
+                break;
+            }
             if judged.enough {
                 p.line(format!("  - captures between the old and the new picture judged, {} between, at least 2 needed", judged.moving));
                 verdict = Some(judged.moving >= 2);
+                break;
+            }
+            if judged.recorded.agreed >= 1 {
+                p.line(format!("  - the captures were too sparse to follow the glide, so it is judged by the helper's record of what it presented, {} frames moving between the two places, steady and ending on the new place {}, and {} captures inside the glide agree with it", judged.recorded.moving, judged.recorded.steady, judged.recorded.agreed));
+                verdict = Some(judged.recorded.steady);
                 break;
             }
             p.line(format!("  - captures between the old and the new picture not judged, {} captures a second, largest gap {:?} ms, two in-between captures are certain only with no gap over {} ms", judged.rate.map_or(0.0, f64::round), judged.gap.map(|gap| (gap * 1000.0).round()), (SEEN_GAP * 1000.0) as u32));
