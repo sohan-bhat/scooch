@@ -373,18 +373,6 @@ impl Layer {
         CATransaction::flush();
     }
 
-    pub fn see_through(&self) {
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        self.metal.setOpaque(false);
-        CATransaction::commit();
-        CATransaction::flush();
-    }
-
-    pub fn faint(&self) {
-        self.window.setAlphaValue(0.996);
-    }
-
     pub fn hide(&self) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
@@ -521,6 +509,13 @@ fn build_step(marker: MainThreadMarker, screen: &Screen, making: Making) -> Resu
     }
 }
 
+fn dress(metal: &CAMetalLayer, scale: f64) {
+    metal.setContentsScale(scale);
+    metal.setOpaque(false);
+    metal.setColorspace(CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).as_deref());
+    metal.setHidden(true);
+}
+
 fn hidden(marker: MainThreadMarker, display: &NSScreen, number: u32, level: i64) -> Layer {
     let frame = display.frame();
     let scale = display.backingScaleFactor();
@@ -538,10 +533,7 @@ fn hidden(marker: MainThreadMarker, display: &NSScreen, number: u32, level: i64)
     window.setAnimationBehavior(NSWindowAnimationBehavior::None);
     let view = NSView::initWithFrame(NSView::alloc(marker), NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
     let metal = CAMetalLayer::new();
-    metal.setContentsScale(scale);
-    metal.setOpaque(true);
-    metal.setColorspace(CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).as_deref());
-    metal.setHidden(true);
+    dress(&metal, scale);
     view.setLayer(Some(&**metal));
     view.setWantsLayer(true);
     window.setContentView(Some(&view));
@@ -676,6 +668,24 @@ mod tests {
         assert_eq!(choose(&[elsewhere, window("Finder", -2147483603, "")], &SCREEN, DESKTOP, 99), None);
         let mine = Seen { pid: 99, ..window("Dock", -2147483624, "") };
         assert_eq!(choose(&[mine, window("Finder", -2147483603, "")], &SCREEN, DESKTOP, 99), None);
+    }
+
+    #[test]
+    fn the_layer_never_hides_the_wallpaper_under_it_from_the_window_server() {
+        let metal = CAMetalLayer::new();
+        dress(&metal, 2.0);
+        assert!(!metal.isOpaque(), "the layer was made opaque");
+        let gpu = match scooch_live::Gpu::new(false) {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(std::env::var_os("SCOOCH_NEED_ADAPTER").is_none(), "no adapter, and this runner must have one");
+                println!("skipped: no adapter {why}");
+                return;
+            }
+        };
+        let screen = gpu.screen(scooch_live::Target::Layer(Retained::as_ptr(&metal) as *mut c_void), 64, 48).expect("a surface on the layer");
+        assert!(!metal.isOpaque(), "setting up the surface made the layer opaque, so the window server may leave the wallpaper under it undrawn");
+        drop(screen);
     }
 
     #[test]

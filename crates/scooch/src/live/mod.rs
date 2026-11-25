@@ -18,7 +18,6 @@ pub const VERSION: u32 = 5;
 pub const SLOW_HELLO: &str = "SCOOCH_HELPER_SLOW_HELLO_MS";
 pub const READ_LAG: &str = "SCOOCH_READ_LAG_MS";
 pub const SPIN: &str = "SCOOCH_HELPER_SPIN";
-pub const SEE_THROUGH: &str = "SCOOCH_HELPER_SEE_THROUGH";
 const QUIT_WAIT: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
