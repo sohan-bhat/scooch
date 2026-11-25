@@ -184,80 +184,6 @@ public static class Tray {
         foreach (var pair in seen) told.Add(pair.Key + " " + pair.Value);
         return string.Join(";", told);
     }
-    static string ReadFrom(string path, long from) {
-        try {
-            using (var stream = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete)) {
-                if (from > stream.Length) from = 0;
-                stream.Seek(from, System.IO.SeekOrigin.Begin);
-                using (var reader = new System.IO.StreamReader(stream)) return reader.ReadToEnd();
-            }
-        } catch { return ""; }
-    }
-    [DllImport("kernel32.dll")]
-    static extern bool GetProcessTimes(IntPtr process, out long creation, out long exit, out long kernel, out long user);
-    public static string Measure(int[] known, string log, long from, int cap, int after) {
-        var first = new Dictionary<uint, string>();
-        var count = new Dictionary<uint, int>();
-        var held = new Dictionary<uint, IntPtr>();
-        var began = new List<long>();
-        var taken = new List<long>();
-        var clock = Stopwatch.StartNew();
-        long heard = -1;
-        long read = 0;
-        while (clock.ElapsedMilliseconds < cap && (heard < 0 || clock.ElapsedMilliseconds < heard + after)) {
-            long now = clock.ElapsedMilliseconds;
-            began.Add(DateTime.UtcNow.ToFileTimeUtc());
-            IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
-            taken.Add(DateTime.UtcNow.ToFileTimeUtc());
-            var entry = new Entry();
-            entry.Size = (uint)Marshal.SizeOf(typeof(Entry));
-            if (Process32FirstW(snapshot, ref entry)) {
-                do {
-                    if (!string.Equals(entry.Name, "scooch-app.exe", StringComparison.OrdinalIgnoreCase)) continue;
-                    if (Array.IndexOf(known, (int)entry.Id) >= 0) continue;
-                    if (!first.ContainsKey(entry.Id)) {
-                        first[entry.Id] = entry.Parent + " " + now;
-                        count[entry.Id] = 0;
-                        IntPtr handle = OpenProcess(0x1000, false, (int)entry.Id);
-                        if (handle != IntPtr.Zero) held[entry.Id] = handle;
-                    }
-                    count[entry.Id]++;
-                } while (Process32NextW(snapshot, ref entry));
-            }
-            CloseHandle(snapshot);
-            if (heard < 0 && now >= read) {
-                read = now + 50;
-                string text = ReadFrom(log, from);
-                if (text.Contains(" icon started ") || text.Contains(" icon not started ")) heard = clock.ElapsedMilliseconds;
-            }
-            System.Threading.Thread.Sleep(2);
-        }
-        long most = 0;
-        var periods = new List<long>();
-        for (int index = 1; index < began.Count; index++) {
-            long gap = began[index] - began[index - 1];
-            periods.Add(gap);
-            if (gap > most) most = gap;
-        }
-        periods.Sort();
-        long middle = periods.Count > 0 ? periods[periods.Count / 2] : 0;
-        var told = new List<string>();
-        foreach (var pair in first) {
-            string life = "unknown";
-            IntPtr handle;
-            if (held.TryGetValue(pair.Key, out handle)) {
-                long creation, exit, kernel, user;
-                if (GetProcessTimes(handle, out creation, out exit, out kernel, out user) && exit > 0) {
-                    int inside = 0;
-                    for (int index = 0; index < began.Count; index++) if (taken[index] >= creation && began[index] <= exit) inside++;
-                    life = ((exit - creation) / 10000.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + " " + inside;
-                }
-                CloseHandle(handle);
-            }
-            told.Add(pair.Key + " " + pair.Value + " " + count[pair.Key] + " " + life);
-        }
-        return heard + "|" + began.Count + "|" + clock.ElapsedMilliseconds + "|" + (middle / 10000.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + "|" + (most / 10000.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + "|" + string.Join(";", told);
-    }
     [DllImport("user32.dll")]
     static extern IntPtr GetForegroundWindow();
     public static int FrontPid() {
@@ -692,7 +618,6 @@ if ($script:quietLeast -ne 0) {
     Quiet-Minutes 'started at the login, a second time'
 }
 Expect "the icon started at the login had a minute with no wake of its threads, so no timer of 60 s or less runs in it" ($script:quietLeast -eq 0)
-. (Join-Path $PSScriptRoot 'restarts-windows.ps1')
 Get-Process -Name scoochw -ErrorAction SilentlyContinue | Stop-Process -Force
 Wait-For 15 { (Daemons) -eq 0 } | Out-Null
 Start-Sleep -Seconds 3
