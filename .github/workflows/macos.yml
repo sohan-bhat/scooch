@@ -30,11 +30,22 @@ jobs:
       - name: Build
         run: cargo build --release -p scooch --bins --examples
 
-      - name: Slides
-        timeout-minutes: 45
-        env:
-          SCOOCH_PROBE_FOCUS: slides
+      - name: Test
+        run: cargo test --release -p scooch
+
+      - name: Probe
+        if: ${{ !cancelled() }}
         run: ./target/release/examples/macprobe macprobe
+
+      - name: GPU bench
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: ./target/release/examples/macprobe gpu-bench macprobe/bench
+
+      - name: Cold start
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: ./target/release/examples/macprobe cold-start macprobe/cold
 
       - name: Upload
         if: ${{ !cancelled() }}
@@ -49,4 +60,7 @@ jobs:
         run: |
           if [ -f macprobe/report.md ]; then
             cat macprobe/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f macprobe/cold/report.md ]; then
+            cat macprobe/cold/report.md >> "$GITHUB_STEP_SUMMARY"
           fi
