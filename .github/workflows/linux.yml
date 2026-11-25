@@ -16,16 +16,92 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        desktop: [gnome, gnome-dual]
-        copy: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         include:
-          - script: gnome
+          - desktop: gnome
             packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
-            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli gdb
-          - desktop: gnome-dual
+            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli
+          - desktop: kde
+            packages: xvfb x11-utils plasma-desktop plasma-workspace kwin-x11
+            extras: kde-cli-tools plasma-workspace-wallpapers breeze-icon-theme
+          - desktop: xfce
+            packages: xvfb x11-utils xfdesktop4 xfwm4 xfce4-panel xfconf
+            extras: xfce4-settings xfdesktop4-data gvfs gvfs-daemons
+          - desktop: xfce-scale2
+            script: xfce
+            scale: 2
+            packages: xvfb x11-utils xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings
+            extras: xfdesktop4-data gvfs gvfs-daemons
+          - desktop: cinnamon
+            packages: xvfb x11-utils cinnamon cinnamon-settings-daemon nemo gvfs gvfs-daemons libglib2.0-bin python3-gi
+            extras: cinnamon-desktop-data
+          - desktop: mate
+            packages: xvfb x11-utils caja marco mate-panel gvfs gvfs-daemons libglib2.0-bin
+            extras: mate-desktop-environment-core mate-backgrounds
+          - desktop: xfce-dual
+            script: xfce
             monitors: 2
+            packages: xvfb x11-utils x11-xserver-utils xfdesktop4 xfwm4 xfce4-panel xfconf
+            extras: xfce4-settings xfdesktop4-data gvfs gvfs-daemons
+          - desktop: kde-dual
+            script: kde
+            monitors: 2
+            packages: xvfb x11-utils x11-xserver-utils plasma-desktop plasma-workspace kwin-x11
+            extras: kde-cli-tools plasma-workspace-wallpapers breeze-icon-theme
+          - desktop: gnome-dual
+            script: gnome
+            monitors: 2
+            packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
+            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli
+          - desktop: mate-dual
+            script: mate
+            monitors: 2
+            packages: xvfb x11-utils x11-xserver-utils caja marco mate-panel gvfs gvfs-daemons libglib2.0-bin
+            extras: mate-desktop-environment-core mate-backgrounds
+          - desktop: kde-arch
+            script: kde-wayland
+            container: archlinux:latest
+            packages: plasma-desktop plasma-workspace kwin breeze-icons
+            extras: plasma-workspace-wallpapers
+          - desktop: kde-arch-dual
+            script: kde-wayland
+            container: archlinux:latest
+            monitors: 2
+            packages: plasma-desktop plasma-workspace kwin breeze-icons
+            extras: plasma-workspace-wallpapers
+          - desktop: kde-debian
+            script: kde
+            container: debian:testing
+            packages: plasma-desktop plasma-workspace kwin-x11 breeze-icon-theme
+            extras: plasma-workspace-wallpapers kio-extras
+          - desktop: kde-debian-dual
+            script: kde
+            container: debian:testing
+            monitors: 2
+            packages: plasma-desktop plasma-workspace kwin-x11 breeze-icon-theme
+            extras: plasma-workspace-wallpapers kio-extras
+          - desktop: xfce-arch
+            script: xfce
+            container: archlinux:latest
+            packages: xfdesktop xfwm4 xfce4-panel xfconf xfce4-settings
+            extras: adwaita-icon-theme
+          - desktop: xfce-arch-dual
+            script: xfce
+            container: archlinux:latest
+            monitors: 2
+            packages: xfdesktop xfwm4 xfce4-panel xfconf xfce4-settings
+            extras: adwaita-icon-theme
+          - desktop: cinnamon-arch
+            script: cinnamon
+            container: archlinux:latest
+            packages: cinnamon nemo python-gobject
+            extras: cinnamon-translations
+          - desktop: mate-arch
+            script: mate
+            container: archlinux:latest
+            packages: caja marco mate-panel mate-desktop
+            extras: mate-backgrounds mate-icon-theme
     runs-on: ubuntu-24.04
-    timeout-minutes: 130
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -95,22 +171,16 @@ jobs:
             docker rm packages
 
       - name: Build
-        env:
-          CARGO_PROFILE_RELEASE_STRIP: "false"
-          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
         run: cargo build --release -p scooch --bins --examples
 
       - name: Test
-        if: ${{ false }}
+        if: ${{ !matrix.container }}
         run: cargo test --release -p scooch
 
       - name: Probe
         if: ${{ !cancelled() && steps.apt.outcome != 'failure' && steps.image.outcome != 'failure' }}
-        timeout-minutes: 110
+        timeout-minutes: 15
         env:
-          SCOOCH_PROBE_UNTIL_SIX: 1
-          SCOOCH_PROBE_BUS: 1
-          REPEAT: 20
           SCOOCH_SCALE: ${{ matrix.scale || 1 }}
           SCOOCH_MONITORS: ${{ matrix.monitors || 1 }}
           PACKAGES: ${{ matrix.packages }}
@@ -118,28 +188,20 @@ jobs:
           IMAGE: ${{ matrix.container }}
           SCRIPT: ${{ matrix.script || matrix.desktop }}
         run: |
-          for i in $(seq 1 "$REPEAT"); do
-            run="linuxprobe/run-$i"
-            mkdir -p "$run"
-            home="$(mktemp -d)"
-            runtime="$(mktemp -d)"
-            chmod 700 "$runtime"
-            started=$(date +%s)
-            code=0
-            HOME="$home" XDG_RUNTIME_DIR="$runtime" dbus-run-session -- bash ".github/linux/$SCRIPT.sh" ./target/release/examples/linuxprobe "$run" > "$run/console.txt" 2>&1 || code=$?
-            echo "run $i exit $code after $(( $(date +%s) - started )) s" | tee -a linuxprobe/runs.txt
-            if [ "$code" = 0 ]; then
-              find "$run" -type f ! -name report.md ! -name readiness.txt -delete
-            fi
-            pkill -u "$(id -u)" -x scooch || true
-            rm -rf "$home" "$runtime"
-          done
+          if [ -n "$IMAGE" ]; then
+            docker run --rm --pull never --cap-add SYS_NICE -v "$PWD:/work" -w /work -e SCOOCH_SCALE -e SCOOCH_MONITORS -e PACKAGES -e EXTRAS -e HOST_UID="$(id -u)" scooch-probe:local bash .github/linux/container.sh "$SCRIPT"
+          else
+            XDG_RUNTIME_DIR="$(mktemp -d)"
+            chmod 700 "$XDG_RUNTIME_DIR"
+            export XDG_RUNTIME_DIR
+            dbus-run-session -- bash ".github/linux/$SCRIPT.sh" ./target/release/examples/linuxprobe linuxprobe
+          fi
 
       - name: Upload
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: linuxprobe-${{ matrix.desktop }}-${{ matrix.copy }}
+          name: linuxprobe-${{ matrix.desktop }}
           path: linuxprobe
           if-no-files-found: warn
 
@@ -149,26 +211,3 @@ jobs:
           if [ -f linuxprobe/report.md ]; then
             cat linuxprobe/report.md >> "$GITHUB_STEP_SUMMARY"
           fi
-
-  mutants:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Bus daemon
-        run: command -v dbus-daemon || { sudo apt-get update && sudo apt-get install -y --no-install-recommends dbus-daemon; }
-
-      - name: Mutants
-        run: bash .github/linux/mutants.sh 2>&1 | tee mutants.txt
-
-      - name: Upload
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: mutants
-          path: mutants.txt
