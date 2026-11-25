@@ -171,6 +171,15 @@ fn median(values: &[f64]) -> Option<f64> {
 }
 
 #[cfg(any(target_os = "macos", test))]
+const UNEXPLAINED_FIT: f32 = 30.0;
+
+#[cfg(any(target_os = "macos", test))]
+fn glide_progress(window: &[(f32, f32)]) -> (bool, usize) {
+    let explained: Vec<f32> = window.iter().filter(|(_, gap)| *gap <= UNEXPLAINED_FIT).map(|(s, _)| *s).collect();
+    (explained.windows(2).all(|pair| pair[1] >= pair[0] - 0.1), window.len() - explained.len())
+}
+
+#[cfg(any(target_os = "macos", test))]
 const SLOW_LIMIT: f64 = 60.0;
 
 #[cfg(any(target_os = "macos", test))]
@@ -375,6 +384,17 @@ mod tests {
         assert!(super::pair_of(&super::drag_of(&slow[1]), &super::drag_of(&off[1])).footing.is_some());
         assert_eq!(super::chosen_pairs(&text, 1).0.len(), 3);
         assert_eq!(super::drag_of(&super::chosen_pairs(&text, 1).0[0]).began, Some(50.0));
+    }
+
+    #[test]
+    fn a_capture_no_frame_explains_is_left_out_of_the_steady_glide_and_counted() {
+        let flashed = [(0.20, 10.14), (1.0, 9.95), (1.0, 9.95), (0.40, 98.71), (1.0, 10.02)];
+        assert_eq!(super::glide_progress(&flashed), (true, 1));
+        let fell = [(0.25, 7.8), (0.85, 7.61), (0.30, 7.7), (1.0, 7.39)];
+        assert_eq!(super::glide_progress(&fell), (false, 0));
+        let steady = [(0.25, 7.8), (0.85, 7.61), (0.80, 7.7), (1.0, 7.39)];
+        assert_eq!(super::glide_progress(&steady), (true, 0));
+        assert_eq!(super::glide_progress(&[(0.5, 30.0), (0.1, 10.0)]), (false, 0));
     }
 
     #[test]
@@ -3716,6 +3736,7 @@ mod probe {
         rate: Option<f64>,
         gap: Option<f64>,
         frames: Option<u32>,
+        unexplained: Vec<f64>,
     }
 
     fn judge_glide(p: &mut Probe, dragged: &Dragged, screen: &Screen, label: &str, evidence: Option<&str>) -> Judged {
@@ -3724,7 +3745,7 @@ mod probe {
         let decode = |path: &Option<PathBuf>| path.as_deref().and_then(|path| objc2::rc::autoreleasepool(|_| picture::decode(path)).ok()).map(|image| halved(&image));
         let (Some(old_still), Some(new_still)) = (dragged.old_still.clone(), decode(&new)) else {
             p.line(format!("- {label}: the two stills could not be read, old {:?} new {new:?}", dragged.old));
-            return Judged { rest: false, enough: false, moving: 0, rate: None, gap: None, frames: None };
+            return Judged { rest: false, enough: false, moving: 0, rate: None, gap: None, frames: None, unexplained: Vec::new() };
         };
         let (width, height) = (old_still.width() as usize, old_still.height() as usize);
         let icons: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().map(|(_, rect)| rect).collect();
@@ -3764,8 +3785,10 @@ mod probe {
         let appeared = classes.iter().position(|class| *class == 'B');
         let returned = appeared.map_or(0, |first| classes[first..].iter().filter(|class| **class == 'A').count());
         let moving: Vec<usize> = (0..classes.len()).filter(|index| classes[*index] == '~' && fitted[*index].is_some_and(|(s, _)| s > 0.04 && s < 0.96)).collect();
-        let window: Vec<f32> = (0..classes.len()).filter(|index| glide_at.is_some_and(|at| dragged.seen[*index].at >= at) && landed.is_none_or(|landed| dragged.seen[*index].at <= landed)).filter_map(|index| fitted[index].map(|(s, _)| s)).collect();
-        let steady = window.windows(2).all(|pair| pair[1] >= pair[0] - 0.1);
+        let inside: Vec<usize> = (0..classes.len()).filter(|index| glide_at.is_some_and(|at| dragged.seen[*index].at >= at) && landed.is_none_or(|landed| dragged.seen[*index].at <= landed) && fitted[*index].is_some()).collect();
+        let window: Vec<(f32, f32)> = inside.iter().filter_map(|index| fitted[*index]).collect();
+        let (steady, _) = crate::glide_progress(&window);
+        let unexplained: Vec<f64> = inside.iter().filter(|index| fitted[**index].is_some_and(|(_, gap)| gap > crate::UNEXPLAINED_FIT)).map(|index| ((dragged.seen[*index].at - dragged.dropped) * 1000.0).round()).collect();
         let settled_old = classes.iter().position(|class| *class == 'A');
         let first_move = settled_old.and_then(|from| (from..classes.len()).find(|index| classes[*index] != 'A' && classes[*index] != '=')).map(|index| (dragged.seen[index].at - dragged.dropped) * 1000.0);
         let span = glide_at.zip(glided).map(|(from, to)| to - from);
@@ -3839,7 +3862,7 @@ mod probe {
             p.line(format!("  - every capture saved in {name} with captures.md, nine frame strip {name}-strip.png"));
         }
         let landing = (settled.is_some() && hand_over.is_some_and(|value| value <= 2)) || gave_up_cleanly;
-        Judged { rest: returned == 0 && steady && inked <= 0.1 && landing, enough: gap.is_some_and(|gap| gap <= SEEN_GAP), moving: moving.len(), rate, gap, frames: frames_drawn }
+        Judged { rest: returned == 0 && steady && inked <= 0.1 && landing, enough: gap.is_some_and(|gap| gap <= SEEN_GAP), moving: moving.len(), rate, gap, frames: frames_drawn, unexplained }
     }
 
     fn stuck(p: &mut Probe, pid: i32) {
@@ -4772,6 +4795,7 @@ mod probe {
         let mut during = String::new();
         let mut held = None;
         let mut tries = Vec::new();
+        let mut flashed = Vec::new();
         for attempt in 1..=3 {
             if attempt > 1 {
                 quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
@@ -4799,6 +4823,11 @@ mod probe {
                 }
                 crate::Try::Glided => {}
             }
+            if !judged.unexplained.is_empty() {
+                p.line(format!("  - attempt {attempt} has no footing, its captures at {:?} ms after the drop, inside the glide, fit no frame of the glide and neither picture better than {}, where every explained capture of 50 judged glides fit within 10.55, so the drag is tried again", judged.unexplained, crate::UNEXPLAINED_FIT));
+                flashed.push(judged.unexplained.clone());
+                continue;
+            }
             if !judged.rest {
                 verdict = Some(false);
                 break;
@@ -4815,6 +4844,10 @@ mod probe {
         let good = match (verdict, &unglided) {
             (Some(good), _) => good,
             (None, Some(_)) => true,
+            (None, None) if !flashed.is_empty() && unseen.is_empty() => {
+                p.fail(format!("the glide was never judged on footing, each of its {} tries that glided had a capture inside the glide that no frame and neither picture explains, at {flashed:?} ms after the drop, which is the footing failing and not a pass", flashed.len()));
+                true
+            }
             (None, None) => {
                 let drew = unseen.iter().all(|frames| frames.is_some_and(|frames| frames >= 3));
                 let which = if unseen.len() == 1 { "the one try that glided and was not judged".to_string() } else { format!("each of the {} tries that glided and were not judged", unseen.len()) };
