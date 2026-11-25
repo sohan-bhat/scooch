@@ -4341,7 +4341,12 @@ mod probe {
         if !good || left > 0 {
             p.failed.push("the daemon's glide did not move steadily under the icons and hand over cleanly".into());
         }
-        many_slides(p, &log, &screen, (name, folder), (centre, aside), &source)?;
+        for variant in ["now", "latency", "pace", "both"] {
+            let _ = fs::write(p.home.join("pace-variant"), variant);
+            p.line(format!("- many slides with the pace variant {variant}"));
+            many_slides(p, &log, &screen, (name, folder), (centre, aside), &source)?;
+        }
+        let _ = fs::write(p.home.join("pace-variant"), "now");
         let scooch = twin()?.with_file_name("scooch.exe");
         let toggle = |home: &Path| Command::new(&scooch).arg("glide").env("SCOOCH_HOME", home).output().map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
         p.line(format!("- scooch glide said {:?}", toggle(&p.home)));
