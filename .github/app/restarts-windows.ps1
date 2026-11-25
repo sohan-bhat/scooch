@@ -1,6 +1,6 @@
 Line ''
 Line '#### Experiment, the daemon started again while the icon runs, many times'
-$rounds = 30
+$rounds = 100
 $restartLog = Join-Path $Out 'restarts.log'
 $startTrace = $false
 try {
@@ -8,55 +8,64 @@ try {
     $startTrace = $true
 } catch { Line "- the system's process start trace could not be opened, $($_.Exception.Message)" }
 function Trace-Starts {
-    if (-not $startTrace) { return 'not open' }
+    if (-not $startTrace) { return @() }
     $events = @(Get-Event -SourceIdentifier 'ProbeStarts' -ErrorAction SilentlyContinue)
     $events | Remove-Event -ErrorAction SilentlyContinue
-    (@($events | ForEach-Object { $e = $_.SourceEventArgs.NewEvent; "$($e.ProcessName) $($e.ProcessID) made by $($e.ParentProcessID) at $([DateTimeOffset]::FromFileTime([long]$e.TIME_CREATED).ToUnixTimeMilliseconds())" }) -join '; ')
+    @($events | ForEach-Object { $e = $_.SourceEventArgs.NewEvent; "$($e.ProcessName) $($e.ProcessID) $($e.ParentProcessID)" })
 }
-$misses = @()
-$tally = @{}
+$tally = @{ misses = 0; traced = 0; once = 0; twice = 0; more = 0; lateLine = 0; extraDaemon = 0; extraApp = 0 }
+$missed = @()
+$lives = @()
+$middles = @()
+$mosts = @()
+$icons = @()
 for ($round = 1; $round -le $rounds; $round++) {
-    $kind = @('redirected', 'plain', 'traced')[$round % 3]
     $old = @(Get-Process -Name scoochw -ErrorAction SilentlyContinue | ForEach-Object Id)
     Get-Process -Name scoochw -ErrorAction SilentlyContinue | Stop-Process -Force
     $gone = Wait-For 15 { (Daemons) -eq 0 }
     Start-Sleep -Seconds 3
-    $early = @(Get-CimInstance Win32_Process -Filter "Name = 'scoochw.exe'" -ErrorAction SilentlyContinue | ForEach-Object { "$($_.ProcessId) made by $($_.ParentProcessId)" }) -join ', '
-    $before = Trace-Starts
+    $early = @(Get-Process -Name scoochw -ErrorAction SilentlyContinue).Count
+    $null = Trace-Starts
     $known = [int[]](@(Icon-Processes | ForEach-Object Id) + $old)
-    $log = if ($kind -eq 'redirected') { Join-Path $Out "restart-$round-stderr.log" } else { $daemonLog }
-    $from = if ($kind -eq 'redirected') { [long]0 } else { Log-Length $daemonLog }
-    if ($kind -eq 'traced') { $env:SCOOCH_TRACE = '1' }
+    $from = Log-Length $daemonLog
     $at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    if ($kind -eq 'redirected') {
-        $started = Start-Process -FilePath $program -ArgumentList $rest -PassThru -RedirectStandardError $log
-    } else {
-        $started = Start-Process -FilePath $program -ArgumentList $rest -WindowStyle Hidden -PassThru
-    }
-    $issued = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $at
-    Remove-Item Env:SCOOCH_TRACE -ErrorAction SilentlyContinue
-    $watched = [Tray]::Watch([string[]]@('scooch-app.exe', 'scoochw.exe'), $known, $log, $from, 30000, 3000) -split '\|', 4
-    Start-Sleep -Milliseconds 500
-    $traced = Trace-Starts
-    $code = if ($started.HasExited) { "ended with code $($started.ExitCode)" } else { 'runs' }
-    $born = try { [DateTimeOffset]::new($started.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds() - $at } catch { 'unknown' }
-    $lines = @((Read-After $log $from) -split "`r?`n" | Where-Object { $_ })
-    $entries = @($watched[3] -split ';' | Where-Object { $_ })
-    $child = $entries | Where-Object { $_ -match "^scooch-app\.exe (\d+) $($started.Id) (\d+) (\d+)$" } | Select-Object -First 1
-    $childId = 0
-    $childAt = -1
-    if ($child -and $child -match '^scooch-app\.exe (\d+) \d+ (\d+) (\d+)$') { $childId = [int]$Matches[1]; $childAt = [int]$Matches[2] }
+    $started = Start-Process -FilePath $program -ArgumentList $rest -WindowStyle Hidden -PassThru
+    $measured = [Tray]::Measure($known, $daemonLog, $from, 30000, 2000) -split '\|', 6
+    Start-Sleep -Milliseconds 700
+    $traced = @(Trace-Starts)
+    $lines = @((Read-After $daemonLog $from) -split "`r?`n" | Where-Object { $_ })
     $iconLine = $lines | Where-Object { $_ -match ' icon (not )?started ' } | Select-Object -First 1
-    $iconAt = if ($iconLine -match '^(\d+)\.(\d{3}) ') { [long]$Matches[1] * 1000 + [long]$Matches[2] - $at } else { 'never' }
-    $kept = if ($childId) { [Tray]::Object($childId) } else { 'no child seen' }
-    $miss = $childAt -lt 0 -or $childAt -gt 8000
-    $verdict = if ($miss) { 'MISS' } else { 'seen' }
-    $tally["$kind $verdict"] = 1 + [int]$tally["$kind $verdict"]
-    Line "- round $round $kind $verdict, killed $($old -join ' ') gone after $gone s, scoochw before the start $(if ($early) { $early } else { 'none' }), start trace before the start $(if ($before) { $before } else { 'none' }), Start-Process returned after $issued ms, the daemon $($started.Id) was made $born ms after the start and $code, its icon line came $iconAt ms after the start, the log was heard at $($watched[0]) ms of the watch, $($watched[1]) snapshots in $($watched[2]) ms, new processes as name id maker first last $($entries -join '; '), the daemon's child $(if ($childId) { "$childId first seen at $childAt ms, now $kept" } else { 'none' }), the start trace says $(if ($traced) { $traced } else { 'nothing' }), app processes now $(Icon-Count)"
-    Line "  - the daemon's lines $(@($lines | Select-Object -First 12) -join ' | ')"
-    Add-Content -Path $restartLog -Value "== round $round $kind $verdict at $at, daemon $($started.Id)"
+    $iconAt = if ($iconLine -match '^(\d+)\.(\d{3}) ') { [long]$Matches[1] * 1000 + [long]$Matches[2] - $at } else { -1 }
+    $icons += $iconAt
+    if ($iconAt -lt 0 -or $iconAt -gt 8000) { $tally.lateLine++ }
+    if ($early -gt 0) { $tally.extraDaemon++ }
+    $children = @($traced | Where-Object { $_ -match "^scooch-app\.exe (\d+) $($started.Id)$" })
+    $others = @($traced | Where-Object { $_ -match '^scooch-app\.exe ' -and $_ -notmatch " $($started.Id)$" })
+    $daemonsStarted = @($traced | Where-Object { $_ -match '^scoochw\.exe ' -and $_ -notmatch "^scoochw\.exe $($started.Id) " })
+    if ($others.Count -gt 0 -or $daemonsStarted.Count -gt 0) { $tally.extraApp++ }
+    if ($children.Count -gt 0) { $tally.traced++ }
+    $seen = @($measured[5] -split ';' | Where-Object { $_ })
+    $child = $seen | Where-Object { $_ -match "^\d+ $($started.Id) " } | Select-Object -First 1
+    $kept = 'none'
+    if ($child) {
+        $parts = $child -split ' '
+        $times = [int]$parts[3]
+        if ($times -eq 1) { $tally.once++ } elseif ($times -eq 2) { $tally.twice++ } else { $tally.more++ }
+        if ($parts.Count -ge 6) { $lives += [double]$parts[4] }
+        $kept = [Tray]::Object([int]$parts[0])
+    } else {
+        $tally.misses++
+        $missed += $round
+    }
+    $middles += [double]$measured[3]
+    $mosts += [double]$measured[4]
+    $verdict = if ($child) { 'seen' } else { 'MISS' }
+    Line "- round $round $verdict, the daemon $($started.Id) $(if ($started.HasExited) { "ended with code $($started.ExitCode)" } else { 'runs' }), scoochw before the start $early, its icon line $iconAt ms after the start, snapshots $($measured[1]) in $($measured[2]) ms with a median period of $($measured[3]) ms and the longest $($measured[4]) ms, polled children as id maker first-ms times-seen life-ms captures-in-life $($seen -join '; '), the start trace says $($traced -join '; '), child handle $kept, app processes $(Icon-Count)"
+    if (-not $child) { Line "  - the daemon's lines $($lines -join ' | ')" }
+    Add-Content -Path $restartLog -Value "== round $round $verdict at $at, daemon $($started.Id), trace $($traced -join '; '), polled $($seen -join '; ')"
     Add-Content -Path $restartLog -Value ($lines -join "`n")
-    if ($miss) { $misses += $round }
 }
 if ($startTrace) { Unregister-Event -SourceIdentifier 'ProbeStarts' -ErrorAction SilentlyContinue }
-Line "- experiment, $rounds restarts, misses within 8 s $($misses.Count) in rounds $($misses -join ' '), by kind $(@($tally.Keys | Sort-Object | ForEach-Object { "$_ $($tally[$_])" }) -join ', ')"
+function Spread($Values) { $sorted = @($Values | Sort-Object); if ($sorted.Count -eq 0) { return 'none' }; "least $($sorted[0]), median $($sorted[[int]($sorted.Count / 2)]), most $($sorted[-1])" }
+Line "- experiment, $rounds restarts, the poll missed the daemon's child in $($tally.misses) rounds $($missed -join ' '), the start trace saw the daemon's child in $($tally.traced), the poll saw it in one snapshot $($tally.once), two $($tally.twice), more $($tally.more), a daemon before the start in $($tally.extraDaemon), another start in the trace in $($tally.extraApp), no icon line within 8 s in $($tally.lateLine)"
+Line "- the icon line came after the start in ms $(Spread $icons), the child lived in ms $(Spread $lives), the poll's median period in ms $(Spread $middles), its longest period in ms $(Spread $mosts)"

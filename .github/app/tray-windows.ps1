@@ -193,30 +193,38 @@ public static class Tray {
             }
         } catch { return ""; }
     }
-    public static string Watch(string[] names, int[] known, string log, long from, int cap, int after) {
+    [DllImport("kernel32.dll")]
+    static extern bool GetProcessTimes(IntPtr process, out long creation, out long exit, out long kernel, out long user);
+    public static string Measure(int[] known, string log, long from, int cap, int after) {
         var first = new Dictionary<uint, string>();
-        var last = new Dictionary<uint, long>();
+        var count = new Dictionary<uint, int>();
+        var held = new Dictionary<uint, IntPtr>();
+        var began = new List<long>();
+        var taken = new List<long>();
         var clock = Stopwatch.StartNew();
         long heard = -1;
         long read = 0;
-        int snaps = 0;
         while (clock.ElapsedMilliseconds < cap && (heard < 0 || clock.ElapsedMilliseconds < heard + after)) {
             long now = clock.ElapsedMilliseconds;
+            began.Add(DateTime.UtcNow.ToFileTimeUtc());
             IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+            taken.Add(DateTime.UtcNow.ToFileTimeUtc());
             var entry = new Entry();
             entry.Size = (uint)Marshal.SizeOf(typeof(Entry));
             if (Process32FirstW(snapshot, ref entry)) {
                 do {
+                    if (!string.Equals(entry.Name, "scooch-app.exe", StringComparison.OrdinalIgnoreCase)) continue;
                     if (Array.IndexOf(known, (int)entry.Id) >= 0) continue;
-                    foreach (var name in names) {
-                        if (!string.Equals(entry.Name, name, StringComparison.OrdinalIgnoreCase)) continue;
-                        if (!first.ContainsKey(entry.Id)) first[entry.Id] = entry.Name + " " + entry.Id + " " + entry.Parent + " " + now;
-                        last[entry.Id] = now;
+                    if (!first.ContainsKey(entry.Id)) {
+                        first[entry.Id] = entry.Parent + " " + now;
+                        count[entry.Id] = 0;
+                        IntPtr handle = OpenProcess(0x1000, false, (int)entry.Id);
+                        if (handle != IntPtr.Zero) held[entry.Id] = handle;
                     }
+                    count[entry.Id]++;
                 } while (Process32NextW(snapshot, ref entry));
             }
             CloseHandle(snapshot);
-            snaps++;
             if (heard < 0 && now >= read) {
                 read = now + 50;
                 string text = ReadFrom(log, from);
@@ -224,9 +232,31 @@ public static class Tray {
             }
             System.Threading.Thread.Sleep(2);
         }
+        long most = 0;
+        var periods = new List<long>();
+        for (int index = 1; index < began.Count; index++) {
+            long gap = began[index] - began[index - 1];
+            periods.Add(gap);
+            if (gap > most) most = gap;
+        }
+        periods.Sort();
+        long middle = periods.Count > 0 ? periods[periods.Count / 2] : 0;
         var told = new List<string>();
-        foreach (var pair in first) told.Add(pair.Value + " " + last[pair.Key]);
-        return heard + "|" + snaps + "|" + clock.ElapsedMilliseconds + "|" + string.Join(";", told);
+        foreach (var pair in first) {
+            string life = "unknown";
+            IntPtr handle;
+            if (held.TryGetValue(pair.Key, out handle)) {
+                long creation, exit, kernel, user;
+                if (GetProcessTimes(handle, out creation, out exit, out kernel, out user) && exit > 0) {
+                    int inside = 0;
+                    for (int index = 0; index < began.Count; index++) if (taken[index] >= creation && began[index] <= exit) inside++;
+                    life = ((exit - creation) / 10000.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + " " + inside;
+                }
+                CloseHandle(handle);
+            }
+            told.Add(pair.Key + " " + pair.Value + " " + count[pair.Key] + " " + life);
+        }
+        return heard + "|" + began.Count + "|" + clock.ElapsedMilliseconds + "|" + (middle / 10000.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + "|" + (most / 10000.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + "|" + string.Join(";", told);
     }
     [DllImport("user32.dll")]
     static extern IntPtr GetForegroundWindow();
