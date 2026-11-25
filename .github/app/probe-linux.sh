@@ -64,6 +64,16 @@ wait_for() {
 
 window() { xdotool search --name '^Scooch$' 2>/dev/null | head -1; }
 has_window() { [ -n "$(window)" ]; }
+app_snapshot() {
+  local pid id holders="" windows=""
+  for pid in $(pgrep -x scooch-app); do
+    ls -l "/proc/$pid/fd" 2>/dev/null | grep -q 'icon\.lock' && holders="$holders $pid"
+    for id in $(xdotool search --pid "$pid" 2>/dev/null); do
+      windows="$windows$pid '$(xdotool getwindowname "$id" 2>/dev/null)' $(xwininfo -id "$id" 2>/dev/null | sed -n 's/.*Map State: //p') at $(xwininfo -id "$id" 2>/dev/null | awk '/-geometry/ { print $2 }'); "
+    done
+  done
+  echo "app processes $(ps -o pid=,ppid=,lstart=,args= -C scooch-app | tr -s ' ' | tr '\n' ';') icon.lock open in${holders:- no process}, which only its holder keeps open, their windows ${windows:-none}"
+}
 state_on() { grep -q '"on": true' "$data/state.json" 2>/dev/null; }
 state_off() { ! grep -q '"on": true' "$data/state.json" 2>/dev/null; }
 rendered() { grep -q '"fingerprint": "' "$data/state.json" 2>/dev/null; }
@@ -132,12 +142,14 @@ line "- older command install at ~/.local/bin/scooch, as install.sh lays it out,
 expect "the older command install turned Scooch on and drew" rendered
 
 clean scooch-app >"$out/app.log" 2>&1 &
-if took=$(wait_for 40 has_window); then line "- window showed after $took s"; else line "- no window after 40 s"; fi
+if took=$(wait_for 40 has_window); then line "- window showed after $took s"; else line "- no window after 40 s, $(app_snapshot)"; fi
 clean scooch-app >"$out/app-second.log" 2>&1 &
 second=$!
 sleep 6
-line "- a second launch left $(pgrep -xc scooch-app) window process, the second one $(kill -0 "$second" 2>/dev/null && echo still runs || echo ended)"
-expect "a second launch leaves one window process" [ "$(pgrep -xc scooch-app)" = 1 ]
+left=$(pgrep -xc scooch-app)
+line "- a second launch left $left window process, the second one $(kill -0 "$second" 2>/dev/null && echo still runs || echo ended), it says $(tr '\n' ' ' <"$out/app-second.log")"
+[ "$left" = 1 ] || line "- after the second launch, $(app_snapshot)"
+expect "a second launch leaves one window process" [ "$left" = 1 ]
 if took=$(wait_for 40 state_on); then line "- Scooch is on after $took s"; else line "- Scooch is not on within 40 s"; fi
 if took=$(wait_for 40 rendered); then line "- Scooch drew the desktop after $took s"; else line "- no render within 40 s"; fi
 expect "first open turned Scooch on and drew" rendered
