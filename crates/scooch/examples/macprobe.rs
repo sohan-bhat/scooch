@@ -207,9 +207,13 @@ struct Pace {
     gap: f64,
     moving: usize,
     stalled: bool,
+    burst: usize,
     waited: Option<[f64; 4]>,
     split: Option<[f64; 4]>,
 }
+
+#[cfg(any(target_os = "macos", test))]
+const BURST_MS: f64 = 8.0;
 
 #[cfg(any(target_os = "macos", test))]
 fn moves_of(frames: &[Drawn]) -> Vec<&Drawn> {
@@ -224,7 +228,8 @@ fn pace_of(frames: &[Drawn]) -> Pace {
     let gap = widest.map_or(0.0, |pair| (pair[1].at - pair[0].at) * 1000.0);
     let waited = widest.and_then(|pair| pair[1].took).map(|[acquire, draw, present, frame]| [acquire, draw, present, (gap - frame).max(0.0)]);
     let split = widest.and_then(|pair| pair[1].split);
-    Pace { gap, moving, stalled: !moves.is_empty() && moving < 3 && gap > STALL_MS, waited, split }
+    let burst = if moves.is_empty() { 0 } else { 1 + moves.windows(2).take_while(|pair| (pair[1].at - pair[0].at) * 1000.0 < BURST_MS).count() };
+    Pace { gap, moving, stalled: !moves.is_empty() && moving < 3 && gap > STALL_MS, burst, waited, split }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -341,10 +346,12 @@ fn pace_summary(paces: &[Pace]) -> String {
     let share = |count: usize| if paces.is_empty() { 0.0 } else { count as f64 * 100.0 / paces.len() as f64 };
     let mut moving: Vec<usize> = paces.iter().map(|pace| pace.moving).collect();
     moving.sort_unstable();
+    let mut bursts: Vec<usize> = paces.iter().map(|pace| pace.burst).collect();
+    bursts.sort_unstable();
     let split = |pace: &Pace| pace.split.map_or(String::new(), |[turn, submit, pop, queue]| format!(", the present split into the turn {turn:.0}, submit {submit:.0}, scope pop {pop:.0}, queue present {queue:.0}"));
     let waits: Vec<String> = stalled.iter().map(|pace| pace.waited.map_or("none recorded".to_string(), |[acquire, draw, present, outside]| format!("{:.0} ms gap, drawable {acquire:.0}, draw {draw:.0}, present {present:.0}, outside the frame call {outside:.0}{}", pace.gap, split(pace)))).collect();
     format!(
-        "{} glides, {} stalled, {:.0} percent, with fewer than 3 frames between the two places {few}, with a gap over {STALL_MS} ms between presents {over}, {:.0} percent, largest gap between presents median {:.0} ms, 90th {:.0} ms, most {:.0} ms, frames between the two places median {}, fewest {}, each stall's largest gap split into waiting for the drawable, drawing, presenting and the time outside the frame call {waits:?}",
+        "{} glides, {} stalled, {:.0} percent, with fewer than 3 frames between the two places {few}, with a gap over {STALL_MS} ms between presents {over}, {:.0} percent, largest gap between presents median {:.0} ms, 90th {:.0} ms, most {:.0} ms, frames between the two places median {}, fewest {}, presents in a row under {BURST_MS} ms apart at the start median {}, most {}, each stall's largest gap split into waiting for the drawable, drawing, presenting and the time outside the frame call {waits:?}",
         paces.len(),
         stalled.len(),
         share(stalled.len()),
@@ -353,8 +360,25 @@ fn pace_summary(paces: &[Pace]) -> String {
         at(0.9),
         gaps.last().copied().unwrap_or(0.0),
         moving.get(moving.len() / 2).copied().unwrap_or(0),
-        moving.first().copied().unwrap_or(0)
+        moving.first().copied().unwrap_or(0),
+        bursts.get(bursts.len() / 2).copied().unwrap_or(0),
+        bursts.last().copied().unwrap_or(0)
     )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn first_moving(log: &[String]) -> Option<f64> {
+    log.iter().filter(|line| line.contains(" glide slid, ")).find_map(|line| line.split(", first moving frame ").nth(1)).and_then(|rest| rest.split(" ms").next()).and_then(|ms| ms.trim().parse::<f64>().ok())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn first_summary(firsts: &[f64]) -> String {
+    let mut sorted = firsts.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    match (sorted.get(sorted.len() / 2), sorted.last()) {
+        (Some(middle), Some(most)) => format!("the first moving frame after the drop in {} glides median {middle:.0} ms, most {most:.0} ms", sorted.len()),
+        _ => "no glide gave its first moving frame after the drop".to_string(),
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -740,7 +764,7 @@ mod tests {
 
     #[test]
     fn plain_slides_on_arm64_fail_past_four_stalls_and_intel_counts_them_for_now() {
-        let pace = |stalled: bool| super::Pace { gap: if stalled { 300.0 } else { 40.0 }, moving: if stalled { 0 } else { 9 }, stalled, waited: None, split: None };
+        let pace = |stalled: bool| super::Pace { gap: if stalled { 300.0 } else { 40.0 }, moving: if stalled { 0 } else { 9 }, stalled, burst: 1, waited: None, split: None };
         let paces = |stalls: usize| (0..40).map(|index| pace(index < stalls)).collect::<Vec<_>>();
         assert_eq!(super::plain_stalls(&paces(4), true), Ok("4 of 40 glides with no capture stalled, within the 4 allowed on arm64".to_string()));
         assert_eq!(super::plain_stalls(&paces(5), true), Err("5 of 40 glides with no capture stalled, more than the 4 allowed on arm64".to_string()));
@@ -773,6 +797,23 @@ mod tests {
         assert!(said.starts_with("2 gaps over 100 ms between moving presents in 1 of 1 glides, the part that held each gap most drawable 1, draw 0, turn 0, submit 0, scope pop 0, queue present 1, outside the frame call 0, 0 with no split"), "{said}");
         assert!(said.contains("by the glide's scale at scale 0.5 2 gaps in 1 of 1 glides"), "{said}");
         assert!(said.contains("the gap after the first moving present 1, after the second 0, after the third 1, later 0, by progress before the picture moved visibly 1, while it moved 1, at its end 0"), "{said}");
+    }
+
+    #[test]
+    fn each_glide_counts_the_presents_that_came_at_once_at_its_start_and_gives_its_first_move() {
+        let log = vec![
+            "1 glide drew 4 layer now drawables 3 latency 2 refresh 16.67 pace 0.00, 10.000 first S@1.00 a0.4 d0.2 p0.3 f1.0, 10.100 move S@1.00 G0.000@0.00 a0.5 d0.2 p0.3 f1.1, 10.103 move S@1.00 G0.000@0.10 a2.0 d0.3 p0.4 f3.0, 10.106 move S@1.00 G0.001@0.20 a2.0 d0.3 p0.4 f3.0, 10.140 move G0.200@1.00 a30.0 d0.3 p0.4 f31.0, 10.145 move G0.500@1.00 a1.0 d0.3 p0.4 f2.0, 10.180 glided G1.000@1.00 a30.0 d0.3 p0.4 f31.0".to_string(),
+            "2 glide slid, on X@, times from the drop, helper parked, glide sent 300 ms, first moving frame 312 ms, set 380 ms".to_string(),
+        ];
+        let frames = super::drew_frames(&log);
+        assert_eq!(frames.len(), 7, "the head of the record was read as a frame {frames:?}");
+        let pace = super::pace_of(&frames);
+        assert_eq!(pace.burst, 3, "only the presents under 8 ms apart from the first one on count");
+        assert!(super::pace_summary(&[pace]).contains("presents in a row under 8 ms apart at the start median 3, most 3"));
+        assert_eq!(super::first_moving(&log), Some(312.0));
+        assert_eq!(super::first_moving(&log[..1]), None);
+        assert_eq!(super::first_summary(&[312.0, 290.0, 400.0]), "the first moving frame after the drop in 3 glides median 312 ms, most 400 ms");
+        assert_eq!(super::pace_of(&super::drew_frames(&["1 glide drew 5 10.000 first S@1.00".to_string()])).burst, 0);
     }
 
     #[test]
@@ -1340,18 +1381,58 @@ mod probe {
         probe.section("5 Move to new wallpaper", moves);
         probe.section("5b Scenery", scenery_check);
         probe.section("5c Glide", glide_check);
-        probe.section("5g Many slides", slides_check);
-        probe.section("5h Slides with no capture", plain_slides_check);
-        probe.section("5d Drags after a start", cold_drags_check);
-        probe.section("5e Quiet minutes and a move after them", rest_check);
-        probe.section("5f Finder after the drop", finder_after_drop);
-        probe.section("6 Idle", idle);
-        probe.section("7 Off", off);
-        probe.section("8 Second cycle", second_cycle);
-        probe.section("9 Spaces", spaces_check);
-        probe.section("9b Program moved", program_moved);
-        probe.section("9c Stop", stop_check);
-        probe.section("9d Consent waiter", consent_waiter);
+        probe.section("5g Many slides, variant now", slides_now);
+        probe.section("5h Slides with no capture, variant now", plain_now);
+        probe.section("5g Many slides, variant latency", slides_latency);
+        probe.section("5h Slides with no capture, variant latency", plain_latency);
+        probe.section("5g Many slides, variant pace", slides_pace);
+        probe.section("5h Slides with no capture, variant pace", plain_pace);
+        probe.section("5g Many slides, variant both", slides_both);
+        probe.section("5h Slides with no capture, variant both", plain_both);
+    }
+
+    fn variant(p: &Probe, name: &str) {
+        let _ = fs::write(p.home.join("pace-variant"), name);
+    }
+
+    fn slides_now(p: &mut Probe) -> Result<()> {
+        variant(p, "now");
+        slides_check(p)
+    }
+
+    fn plain_now(p: &mut Probe) -> Result<()> {
+        variant(p, "now");
+        plain_slides_check(p)
+    }
+
+    fn slides_latency(p: &mut Probe) -> Result<()> {
+        variant(p, "latency");
+        slides_check(p)
+    }
+
+    fn plain_latency(p: &mut Probe) -> Result<()> {
+        variant(p, "latency");
+        plain_slides_check(p)
+    }
+
+    fn slides_pace(p: &mut Probe) -> Result<()> {
+        variant(p, "pace");
+        slides_check(p)
+    }
+
+    fn plain_pace(p: &mut Probe) -> Result<()> {
+        variant(p, "pace");
+        plain_slides_check(p)
+    }
+
+    fn slides_both(p: &mut Probe) -> Result<()> {
+        variant(p, "both");
+        slides_check(p)
+    }
+
+    fn plain_both(p: &mut Probe) -> Result<()> {
+        variant(p, "both");
+        plain_slides_check(p)
     }
 
     fn show(rect: &Rect) -> String {
@@ -5221,7 +5302,7 @@ mod probe {
         let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
         let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
         let (mut glided, mut found, mut gapped) = (0, Vec::new(), Vec::new());
-        let (mut skipped, mut faults, mut each) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut skipped, mut faults, mut each, mut firsts) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for index in 0..count {
             quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
             let from = position(p, name).unwrap_or(subject);
@@ -5244,6 +5325,7 @@ mod probe {
             }
             glided += 1;
             gapped.extend(crate::drew_glides(&log));
+            firsts.extend(crate::first_moving(&log));
             let paced = crate::paces(&log);
             each.push(paced.iter().map(|pace| format!("{}: {:.0} ms, {} between", index + 1, pace.gap, pace.moving)).collect::<Vec<_>>().join(", "));
             if paced.is_empty() || ended.is_none() {
@@ -5255,6 +5337,7 @@ mod probe {
         p.line(format!("- with no capture: {}", crate::pace_summary(&found)));
         p.line(format!("  - each glide with no capture, its largest gap between presents and its frames between the two places {each:?}"));
         p.line(format!("- gaps with no capture: {}", crate::gap_summary(&gapped)));
+        p.line(format!("- first moves with no capture: {}", crate::first_summary(&firsts)));
         match crate::plain_stalls(&found, cfg!(target_arch = "aarch64")) {
             Ok(said) => p.line(format!("- stalls with no capture: {said}")),
             Err(said) => p.fail(said),
@@ -5306,6 +5389,7 @@ mod probe {
         let mut paced = Vec::new();
         let mut gapped = Vec::new();
         let mut each = Vec::new();
+        let mut firsts = Vec::new();
         for index in 0..count {
             quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
             let from = position(p, name).unwrap_or(subject);
@@ -5326,6 +5410,7 @@ mod probe {
             }
             glided += 1;
             gapped.extend(crate::drew_glides(&dragged.log));
+            firsts.extend(crate::first_moving(&dragged.log));
             let slide = crate::paces(&dragged.log);
             each.push(slide.iter().map(|pace| format!("{}: {:.0} ms, {} between", index + 1, pace.gap, pace.moving)).collect::<Vec<_>>().join(", "));
             paced.extend(slide);
@@ -5357,6 +5442,7 @@ mod probe {
         p.line(format!("- with captures: {}", crate::pace_summary(&paced)));
         p.line(format!("  - each glide with captures, its largest gap between presents and its frames between the two places {each:?}"));
         p.line(format!("- gaps with captures: {}", crate::gap_summary(&gapped)));
+        p.line(format!("- first moves with captures: {}", crate::first_summary(&firsts)));
         for fault in faults {
             p.fail(fault);
         }
