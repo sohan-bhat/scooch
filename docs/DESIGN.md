@@ -292,6 +292,7 @@ The first glide runs at the scale remembered for that GPU and screen size, or at
 - The layer is never open at rest. When the layer is not shown yet, the daemon waits for it until 150 ms after the tables are made or 450 ms after the wake, so that drag's wallpaper can be set up to that much later than with the glide off.
 - A move with no drag start seen and no wake before it loads the picture at the move, which can miss the wait on a slow machine.
 - After its first prime the parked helper is an Accessory app for as long as it lives and handles no quit Apple Event, so a logout on a real Mac is the test that it does not hold the logout up.
+- On GitHub's virtual Macs 3 of 40 judged glides had one capture of an all black desktop at the end of the settle, while the layer was up. Whether a person would see that frame or only the capture holds it is not known, and a run on a real Mac is the test.
 - On Windows a primed window is shown as it is drawn, since the DirectComposition visual is presented on a shown window, so the clear before a plain set is what keeps it off the new picture. Keeping it hidden until the open, as on macOS, would cost one show and one composed frame at the open and is not proven on a runner.
 
 ### Measured
@@ -318,6 +319,7 @@ Runner numbers come from GitHub's hosted virtual machines. Their GPUs are virtua
 | A move while a window covers the whole desktop | Glide skipped as hidden, plain at once | macOS and Windows runners, 46d425b and 5fa4754 |
 | Thirty wakes with nothing moved | 1 prime, no command past it, the same parked helper before and after | macOS arm64 runner, 46d425b |
 | Change outside the dropped icon between the settled layer and one second after close | 0 of 255 | macOS arm64 runner, 46d425b |
+| Screen captures of a glide fitted to the frames the CPU draws from the two tables, 40 judged glides on GitHub's virtual Macs | Every capture a frame or one of the two pictures explains fits within 10.55. Three captures, one in each of three runs of two trees, 3b27515 and 91fb9fd, showed the whole desktop black under the icons 10 to 124 ms before the helper reported its settle and fit no better than 94, so the check had failed on one tree and passed on it in another run. A glide with a capture that fits worse than 30 is not judged, the drag is tried again up to three times, and the check fails when no try is free of one | GitHub's virtual Macs, 3b27515 and 91fb9fd |
 | The drag after the helper is killed mid glide | Glides | macOS and Windows runners, 46d425b and 5fa4754 |
 | The drag after a quiet minute with the helper parked | Slides, the picture sent again at the drag start | Windows Server 2022 and 2025 runners, 5fa4754 |
 
