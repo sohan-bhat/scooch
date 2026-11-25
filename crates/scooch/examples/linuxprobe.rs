@@ -438,9 +438,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         if tool::on_path("gdb").is_some() && rooted() {
             for pid in &members {
-                let said = quiet("sudo", &["-n", "gdb", "-p", &pid.to_string(), "-batch", "-nx", "-ex", "set pagination off", "-ex", "thread apply all bt 40"], 90);
                 let file = out.join(format!("hang-gdb-{pid}.txt"));
-                let _ = fs::write(&file, &said);
+                let script = format!("gdb -p {pid} -batch -nx -ex 'set pagination off' -ex 'thread apply all bt 40' > '{}' 2>&1; chmod a+r '{}'", file.display(), file.display());
+                quiet("sudo", &["-n", "sh", "-c", &script], 90);
             }
             lines.push("- user space stacks of every process of the session are in the hang-gdb files beside this report".to_string());
         } else {
