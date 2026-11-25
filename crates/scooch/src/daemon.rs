@@ -2110,6 +2110,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             if report.retry {
                 worker.wake();
             }
+            crate::icon::after_first_tick(&daemon.store);
         }
     })?;
     signal.wake();

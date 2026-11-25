@@ -255,8 +255,7 @@ expect "pressed while off the desktop keeps its wallpaper" [ "$(wallpaper)" = "$
 expect "pressed while off no login item is written" [ ! -f "$autostart" ]
 expect "pressed while off no daemon runs" no_daemon
 expect "pressed while off Scooch's saved state is untouched" [ "$(md5sum <"$data/state.json")" = "$state_sum" ]
-press_pill alt+F4
-wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+close_app
 clean env NO_AT_BRIDGE=0 scooch-app >>"$out/app-controls.log" 2>&1 &
 wait_for 40 has_window >/dev/null
 sleep 4
@@ -270,6 +269,5 @@ sleep 3
 line "- after Turn on the saved state names $(sources), the wallpaper is $(wallpaper), login item $(login), daemons $(daemons)"
 expect "Turn on after the press shows that picture" fresh_from "$pics/probe-canoe.jpg" "$before"
 expect "Turn on after the press writes the login item" [ -f "$autostart" ]
-press_pill alt+F4
-wait_for 15 sh -c '! pgrep -x scooch-app >/dev/null' >/dev/null
+close_app
 line

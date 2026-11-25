@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Scooch",
         "width": 900,
         "height": 620,
