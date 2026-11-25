@@ -433,7 +433,8 @@ mod running {
                 Shown::Glide(_, s) => format!("G{s:.3}@{k:.2}"),
             })
             .collect();
-        format!("{at:.3} {step} {} a{:.1} d{:.1} p{:.1} f{:.1}", parts.join(" "), ms(took.acquire), ms(took.draw), ms(took.present), ms(whole))
+        let split = took.split;
+        format!("{at:.3} {step} {} a{:.1} d{:.1} p{:.1} l{:.1} s{:.1} v{:.1} q{:.1} f{:.1}", parts.join(" "), ms(took.acquire), ms(took.draw), ms(took.present), ms(split.turn), ms(split.submit), ms(split.pop), ms(split.queue), ms(whole))
     }
 
     fn looks(layers: &[(Shown, f32)]) -> Vec<(Look<'_>, f32)> {
@@ -2392,6 +2393,16 @@ mod running {
             assert!(read("").is_err_and(|answer| matches!(*answer, Reply::Failed { id: None, .. })));
             assert!(read("{\"kind\":\"warm\"").is_err_and(|answer| matches!(*answer, Reply::Failed { id: None, .. })));
             assert!(matches!(read(line(&Command::Quit).unwrap().trim()), Ok(Command::Quit)));
+        }
+
+        #[test]
+        fn each_frame_of_the_record_splits_the_present_beside_the_parts_the_probe_reads() {
+            let ms = |value: f64| Duration::from_secs_f64(value / 1000.0);
+            let split = scooch_live::Presented { turn: ms(0.5), submit: ms(1.0), pop: ms(2.0), queue: ms(4.0) };
+            let took = Took { acquire: ms(1.0), draw: ms(2.0), present: ms(7.5), split };
+            let line = described(&[], "move", took, ms(11.0));
+            let words: Vec<&str> = line.split_whitespace().skip(2).collect();
+            assert_eq!(words, ["a1.0", "d2.0", "p7.5", "l0.5", "s1.0", "v2.0", "q4.0", "f11.0"]);
         }
 
         #[test]
