@@ -24,7 +24,7 @@ ready "Wayland socket" 60 wayland_socket
 export WAYLAND_DISPLAY=wayland-0
 ready "GNOME Shell" 60 owned org.gnome.Shell
 ready "Desktop Icons NG" 90 owned com.rastersoft.dingextension || gnome-extensions info ding@rastersoft.com >>"$out/shell.log" 2>&1
-if [ -n "${SCOOCH_PROBE_ROUNDS:-}" ]; then
+if [ -n "${SCOOCH_PROBE_BUS:-}" ]; then
     dbus-monitor --session "type='method_call'" "type='method_return'" "type='error'" >"$out/bus.txt" 2>&1 &
 fi
 run_probe 8

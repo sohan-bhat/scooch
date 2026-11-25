@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         desktop: [gnome, gnome-dual]
-        copy: [1, 2, 3, 4, 5, 6, 7, 8]
+        copy: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         include:
           - script: gnome
             packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
@@ -25,7 +25,7 @@ jobs:
           - desktop: gnome-dual
             monitors: 2
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 130
     steps:
       - uses: actions/checkout@v4
         with:
@@ -106,9 +106,11 @@ jobs:
 
       - name: Probe
         if: ${{ !cancelled() && steps.apt.outcome != 'failure' && steps.image.outcome != 'failure' }}
-        timeout-minutes: 25
+        timeout-minutes: 110
         env:
-          SCOOCH_PROBE_ROUNDS: 25
+          SCOOCH_PROBE_UNTIL_SIX: 1
+          SCOOCH_PROBE_BUS: 1
+          REPEAT: 20
           SCOOCH_SCALE: ${{ matrix.scale || 1 }}
           SCOOCH_MONITORS: ${{ matrix.monitors || 1 }}
           PACKAGES: ${{ matrix.packages }}
@@ -116,14 +118,22 @@ jobs:
           IMAGE: ${{ matrix.container }}
           SCRIPT: ${{ matrix.script || matrix.desktop }}
         run: |
-          if [ -n "$IMAGE" ]; then
-            docker run --rm --pull never --cap-add SYS_NICE -v "$PWD:/work" -w /work -e SCOOCH_SCALE -e SCOOCH_MONITORS -e PACKAGES -e EXTRAS -e HOST_UID="$(id -u)" scooch-probe:local bash .github/linux/container.sh "$SCRIPT"
-          else
-            XDG_RUNTIME_DIR="$(mktemp -d)"
-            chmod 700 "$XDG_RUNTIME_DIR"
-            export XDG_RUNTIME_DIR
-            dbus-run-session -- bash ".github/linux/$SCRIPT.sh" ./target/release/examples/linuxprobe linuxprobe
-          fi
+          for i in $(seq 1 "$REPEAT"); do
+            run="linuxprobe/run-$i"
+            mkdir -p "$run"
+            home="$(mktemp -d)"
+            runtime="$(mktemp -d)"
+            chmod 700 "$runtime"
+            started=$(date +%s)
+            code=0
+            HOME="$home" XDG_RUNTIME_DIR="$runtime" dbus-run-session -- bash ".github/linux/$SCRIPT.sh" ./target/release/examples/linuxprobe "$run" > "$run/console.txt" 2>&1 || code=$?
+            echo "run $i exit $code after $(( $(date +%s) - started )) s" | tee -a linuxprobe/runs.txt
+            if [ "$code" = 0 ]; then
+              find "$run" -type f ! -name report.md ! -name readiness.txt -delete
+            fi
+            pkill -u "$(id -u)" -x scooch || true
+            rm -rf "$home" "$runtime"
+          done
 
       - name: Upload
         if: ${{ always() }}

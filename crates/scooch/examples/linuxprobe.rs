@@ -611,6 +611,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         probe.section("5 Wallpaper", wallpaper);
         if std::env::var_os("SCOOCH_PROBE_ROUNDS").is_some() {
             probe.section("6x The moves of section 6 again and again", again);
+        } else if std::env::var_os("SCOOCH_PROBE_UNTIL_SIX").is_some() {
+            probe.section("6 End to end", end_to_end);
         } else {
             probe.section("6 End to end", end_to_end);
             probe.section("7 Two monitors", monitors);
