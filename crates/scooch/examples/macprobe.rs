@@ -212,10 +212,15 @@ const RECORD_REACH: (f64, f64) = (0.1, 0.02);
 const RECORD_SLACK: f32 = 0.15;
 
 #[cfg(any(target_os = "macos", test))]
+const STALL_MS: f64 = 100.0;
+
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Debug, PartialEq)]
 struct Recorded {
     steady: bool,
     moving: usize,
+    gap: f64,
+    stalled: bool,
     agreed: usize,
     disagreed: Vec<String>,
 }
@@ -225,7 +230,9 @@ fn judge_record(frames: &[Drawn], captures: &[(f64, f64, f32)], dropped: f64) ->
     let moves: Vec<&Drawn> = frames.iter().filter(|frame| matches!(frame.step.as_str(), "move" | "glided") && frame.s.is_some()).collect();
     let values: Vec<f32> = moves.iter().filter_map(|frame| frame.s).collect();
     let moving = values.iter().filter(|s| **s > 0.04 && **s < 0.96).count();
-    let steady = !values.is_empty() && values.windows(2).all(|pair| pair[1] >= pair[0] - 0.001) && values.last().is_some_and(|s| *s >= 0.999) && moving >= 3;
+    let steady = !values.is_empty() && values.windows(2).all(|pair| pair[1] >= pair[0] - 0.001) && values.last().is_some_and(|s| *s >= 0.999);
+    let gap = moves.windows(2).map(|pair| (pair[1].at - pair[0].at) * 1000.0).fold(0.0, f64::max);
+    let stalled = !values.is_empty() && moving < 3 && gap > STALL_MS;
     let (mut agreed, mut disagreed) = (0, Vec::new());
     for (start, end, fitted) in captures.iter().copied().filter(|(_, _, fitted)| *fitted > 0.04 && *fitted < 0.96) {
         let near: Vec<f32> = moves.iter().filter(|frame| frame.at >= start - RECORD_REACH.0 && frame.at <= end + RECORD_REACH.1).filter_map(|frame| frame.s).collect();
@@ -237,7 +244,7 @@ fn judge_record(frames: &[Drawn], captures: &[(f64, f64, f32)], dropped: f64) ->
             disagreed.push(format!("a capture {:.0} ms after the drop fit progress {fitted:.2} where the helper presented {:?}", (start - dropped) * 1000.0, near));
         }
     }
-    Recorded { steady, moving, agreed, disagreed }
+    Recorded { steady, moving, gap, stalled, agreed, disagreed }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -485,13 +492,18 @@ mod tests {
         assert_eq!(frames[7].s, Some(1.0));
         let dropped = 1795551562.0;
         let agree = super::judge_record(&frames, &[(1795551562.45, 1795551562.55, 0.28), (1795551562.62, 1795551562.71, 0.80)], dropped);
-        assert_eq!(agree, super::Recorded { steady: true, moving: 3, agreed: 2, disagreed: Vec::new() });
+        assert_eq!((agree.steady, agree.moving, agree.gap.round(), agree.stalled, agree.agreed, agree.disagreed.len()), (true, 3, 100.0, false, 2, 0));
         let off = super::judge_record(&frames, &[(1795551562.45, 1795551562.55, 0.75)], dropped);
         assert_eq!((off.agreed, off.disagreed.len()), (0, 1));
         let back = super::drew_frames(&["1 glide drew 3 10.0 move G0.200@1.00, 10.1 move G0.500@1.00, 10.2 move G0.400@1.00, 10.3 move G0.600@1.00, 10.4 glided G1.000@1.00".to_string()]);
         assert!(!super::judge_record(&back, &[], 9.0).steady);
-        let short = super::drew_frames(&["1 glide drew 3 10.0 move G0.500@1.00, 10.4 glided G1.000@1.00".to_string()]);
-        assert!(!super::judge_record(&short, &[], 9.0).steady);
+        let short = super::drew_frames(&["1 glide drew 3 10.0 move G0.000@0.30, 10.02 move G0.002@0.40, 10.55 move G0.004@0.43, 10.9 glided G1.000@1.00".to_string()]);
+        let stalled = super::judge_record(&short, &[], 9.0);
+        assert!(stalled.steady && stalled.stalled && stalled.moving == 0, "{stalled:?}");
+        assert!(!super::judge_record(&[], &[], 9.0).stalled);
+        let cut = super::drew_frames(&["1 glide drew 3 10.0 move G0.000@0.30, 10.02 move G0.500@1.00, 10.04 glided G1.000@1.00".to_string()]);
+        let cut = super::judge_record(&cut, &[], 9.0);
+        assert!(!cut.stalled && cut.moving == 1, "a glide that leaps with no stall is not footing {cut:?}");
     }
 
     #[test]
@@ -634,7 +646,6 @@ mod probe {
         fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> *const c_void;
         fn CGDisplayCreateImage(display: u32) -> *const c_void;
         fn CGWindowListCreateImage(bounds: Frame, option: u32, window: u32, image: u32) -> *const c_void;
-        fn CGDisplayCreateImageForRect(display: u32, rect: Frame) -> *const c_void;
         fn CGImageGetWidth(image: *const c_void) -> usize;
         fn CGImageGetHeight(image: *const c_void) -> usize;
         fn CGImageGetBytesPerRow(image: *const c_void) -> usize;
@@ -667,28 +678,6 @@ mod probe {
         fn CFDictionaryCreate(allocator: *const c_void, keys: *const *const c_void, values: *const *const c_void, count: isize, key_callbacks: *const c_void, value_callbacks: *const c_void) -> *const c_void;
         static kCFTypeDictionaryKeyCallBacks: c_void;
         static kCFTypeDictionaryValueCallBacks: c_void;
-    }
-
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGDisplayStreamCreateWithDispatchQueue(display: u32, width: usize, height: usize, format: i32, properties: *const c_void, queue: *mut c_void, handler: &block2::Block<dyn Fn(i32, u64, *mut c_void, *const c_void)>) -> *mut c_void;
-        fn CGDisplayStreamStart(stream: *mut c_void) -> i32;
-        fn CGDisplayStreamStop(stream: *mut c_void) -> i32;
-    }
-
-    #[link(name = "IOSurface", kind = "framework")]
-    extern "C" {
-        fn IOSurfaceLock(surface: *mut c_void, options: u32, seed: *mut u32) -> i32;
-        fn IOSurfaceUnlock(surface: *mut c_void, options: u32, seed: *mut u32) -> i32;
-        fn IOSurfaceGetBaseAddress(surface: *mut c_void) -> *mut c_void;
-        fn IOSurfaceGetBytesPerRow(surface: *mut c_void) -> usize;
-        fn IOSurfaceGetWidth(surface: *mut c_void) -> usize;
-        fn IOSurfaceGetHeight(surface: *mut c_void) -> usize;
-    }
-
-    extern "C" {
-        fn dispatch_queue_create(label: *const std::ffi::c_char, attributes: *const c_void) -> *mut c_void;
-        fn dispatch_release(object: *mut c_void);
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -834,7 +823,7 @@ mod probe {
             "5 Move to new wallpaper" => 62_364,
             "5b Scenery" => 157_529,
             "5c Glide" => 292_101,
-            "5g Many slides" => 1_200_000,
+            "5g Many slides" => 400_000,
             "5d Cold drags" => 1_421_507,
             "5e Bare wakes" => 600_083,
             "5f Finder after the drop" => 60_000,
@@ -971,9 +960,6 @@ mod probe {
         if std::env::args().nth(1).as_deref() == Some("slow-check") {
             return slow_check(std::env::args().skip(2).collect());
         }
-        if std::env::args().nth(1).as_deref() == Some("black-frames") {
-            return black_frames(PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "macblack".into())));
-        }
         if std::env::args().nth(1).as_deref() == Some("gpu-bench") {
             return gpu_bench(PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "macbench".into())));
         }
@@ -1026,13 +1012,7 @@ mod probe {
             return ExitCode::SUCCESS;
         }
         probe.section("2 Permission", permission);
-        if std::env::var("SCOOCH_PROBE_FOCUS").is_ok_and(|focus| focus == "slides") {
-            probe.section("3 Icons", icons);
-            probe.section("4 First run", first_run);
-            probe.section("5g Many slides", slides_check);
-        } else {
-            every_section(&mut probe);
-        }
+        every_section(&mut probe);
         probe.section("10 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -3451,299 +3431,9 @@ mod probe {
         Ok(())
     }
 
-    #[derive(Clone, Copy, PartialEq)]
-    enum Gone {
-        AtSet,
-        AfterClose,
-    }
-
-    struct Hunt {
-        name: &'static str,
-        trials: u32,
-        layer: bool,
-        under: bool,
-        hold: Duration,
-        through: Option<&'static str>,
-        gone: Gone,
-    }
-
-    const HUNTS: [Hunt; 6] = [
-        Hunt { name: "opaque layer, picture set under it, the old picture file deleted at the set as the daemon does, close 600 ms after the set", trials: 30, layer: true, under: true, hold: Duration::from_millis(600), through: None, gone: Gone::AtSet },
-        Hunt { name: "plain set with no layer, the old picture file deleted at the set", trials: 20, layer: false, under: true, hold: Duration::from_millis(1200), through: None, gone: Gone::AtSet },
-        Hunt { name: "see through layer, picture set under it, the old picture file deleted at the set, close 600 ms after the set", trials: 20, layer: true, under: true, hold: Duration::from_millis(600), through: Some("layer"), gone: Gone::AtSet },
-        Hunt { name: "opaque layer, picture set under it, the old picture file deleted after the close", trials: 15, layer: true, under: true, hold: Duration::from_millis(600), through: None, gone: Gone::AfterClose },
-        Hunt { name: "opaque layer, picture set under it, the old picture file deleted at the set, close 3 s after the set", trials: 10, layer: true, under: true, hold: Duration::from_millis(3000), through: None, gone: Gone::AtSet },
-        Hunt { name: "plain set with no layer, the old picture file deleted after 1.2 s", trials: 10, layer: false, under: true, hold: Duration::from_millis(1200), through: None, gone: Gone::AfterClose },
-    ];
-    const HUNT_AFTER: Duration = Duration::from_millis(500);
-    const HUNT_REGION: (f32, f32, f32, f32) = (0.1, 0.3, 0.9, 0.6);
-
-    fn tone(width: u32, height: u32, from: [u8; 3], to: [u8; 3]) -> RgbImage {
-        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
-        for _ in 0..height {
-            for x in 0..width {
-                let t = x as f32 / width.max(1) as f32;
-                for channel in 0..3 {
-                    rgb.push((f32::from(from[channel]) + (f32::from(to[channel]) - f32::from(from[channel])) * t).round() as u8);
-                }
-            }
-        }
-        RgbImage::from_raw(width, height, rgb).unwrap_or_default()
-    }
-
-    fn band(display: u32, screen: &Screen) -> Option<Shot> {
-        let rect = Frame { x: f64::from(screen.frame.w * HUNT_REGION.0), y: f64::from(screen.frame.h * HUNT_REGION.1), w: f64::from(screen.frame.w * (HUNT_REGION.2 - HUNT_REGION.0)), h: f64::from(screen.frame.h * (HUNT_REGION.3 - HUNT_REGION.1)) };
-        unpack(unsafe { CGDisplayCreateImageForRect(display, rect) })
-    }
-
-    fn tone_of(rgb: impl Iterator<Item = [u8; 3]>) -> (f32, [f32; 3]) {
-        let (mut dark, mut count, mut sum) = (0usize, 0usize, [0f64; 3]);
-        for pixel in rgb {
-            count += 1;
-            if pixel.iter().all(|channel| *channel <= 12) {
-                dark += 1;
-            }
-            for channel in 0..3 {
-                sum[channel] += f64::from(pixel[channel]);
-            }
-        }
-        let count = count.max(1);
-        (dark as f32 / count as f32, sum.map(|total| (total / count as f64) as f32))
-    }
-
-    fn region_tone(shot: &Shot, region: (f32, f32, f32, f32)) -> (f32, [f32; 3]) {
-        let (left, top) = ((shot.width as f32 * region.0) as usize, (shot.height as f32 * region.1) as usize);
-        let (right, bottom) = ((shot.width as f32 * region.2) as usize, (shot.height as f32 * region.3) as usize);
-        tone_of((top..bottom.max(top + 1)).step_by(6).flat_map(|y| (left..right.max(left + 1)).step_by(6).map(move |x| (x, y))).map(|(x, y)| shot.at(x, y)))
-    }
-
-    fn sort_of(found: (f32, [f32; 3]), a: [f32; 3], b: [f32; 3]) -> char {
-        let (dark, mean) = found;
-        let apart = |want: [f32; 3]| (0..3).map(|channel| (mean[channel] - want[channel]).abs()).sum::<f32>() / 3.0;
-        if dark >= 0.9 {
-            'K'
-        } else if dark < 0.02 && apart(a) < 20.0 {
-            'A'
-        } else if dark < 0.02 && apart(b) < 20.0 {
-            'B'
-        } else {
-            '~'
-        }
-    }
-
     fn below_desktop() -> Vec<String> {
         let (desktop, _) = layer::levels();
         layer::listing().into_iter().filter(|window| window.layer <= desktop).map(|window| format!("{} {} '{}' at {} alpha {:.3}", window.number, window.owner, window.name, window.layer, window.alpha)).collect()
-    }
-
-    struct Caught {
-        at: f64,
-        took: f64,
-        sort: char,
-        ours: bool,
-        tone: (f32, [f32; 3]),
-    }
-
-    struct Tried {
-        caught: Vec<Caught>,
-        before: Vec<String>,
-        armed: Vec<String>,
-        after: Vec<String>,
-        under: Option<char>,
-        under_black: Option<char>,
-        ours_black: Option<char>,
-        held: f64,
-    }
-
-    fn shows(display: u32, screen: &Screen, want: char, a: [f32; 3], b: [f32; 3], limit: Duration) -> bool {
-        let started = Instant::now();
-        while started.elapsed() < limit {
-            if band(display, screen).is_some_and(|shot| sort_of(region_tone(&shot, (0.0, 0.0, 1.0, 1.0)), a, b) == want) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(30));
-        }
-        false
-    }
-
-    fn whole(window: Option<i64>, a: [f32; 3], b: [f32; 3]) -> Option<char> {
-        window.and_then(grab_window).map(|shot| sort_of(region_tone(&shot, HUNT_REGION), a, b))
-    }
-
-    fn watch_close(display: u32, screen: &Screen, pid: Option<u32>, after: Duration, tones: ([f32; 3], [f32; 3]), out: &Path, saved: &mut usize) -> (Vec<Caught>, Option<char>, Option<char>) {
-        let (a, b) = tones;
-        let started = Instant::now();
-        let mut caught = Vec::new();
-        let (mut under_black, mut ours_black) = (None, None);
-        while started.elapsed() < after {
-            let mine = pid.and_then(|pid| layer::listing().into_iter().find(|window| window.pid == i64::from(pid)).map(|window| window.number));
-            let at = started.elapsed().as_secs_f64() * 1000.0;
-            let Some(shot) = band(display, screen) else { continue };
-            let took = started.elapsed().as_secs_f64() * 1000.0 - at;
-            let tone = region_tone(&shot, (0.0, 0.0, 1.0, 1.0));
-            let sort = sort_of(tone, a, b);
-            if sort == 'K' && under_black.is_none() {
-                under_black = whole(picture_window(screen).map(|window| window.number), a, b).or(Some('?'));
-                ours_black = mine.and_then(|number| whole(Some(number), a, b));
-                if *saved < 8 {
-                    *saved += 1;
-                    let _ = scooch_core::encode_jpeg(&shot.image(), 80).map(|bytes| fs::write(out.join(format!("black-{saved}.jpg")), bytes));
-                }
-            }
-            caught.push(Caught { at, took, sort, ours: mine.is_some(), tone });
-        }
-        (caught, under_black, ours_black)
-    }
-
-    fn hunt_trial(helper: Option<&mut scooch::live::Helper>, hunt: &Hunt, id: u32, files: (&Path, &Path), (display, screen): (u32, &Screen), tones: ([f32; 3], [f32; 3]), (out, saved): (&Path, &mut usize)) -> Result<Tried> {
-        let desktop = platform::current()?;
-        let (a, b) = tones;
-        let (first, second) = if hunt.under { files } else { (files.1, files.1) };
-        desktop.set_wallpaper(screen, first)?;
-        let start = if hunt.under { 'A' } else { 'B' };
-        if !shows(display, screen, start, a, b, Duration::from_secs(4)) {
-            anyhow::bail!("the first picture did not show within 4 s");
-        }
-        std::thread::sleep(Duration::from_millis(200));
-        let before = below_desktop();
-        let Some(helper) = helper.filter(|_| hunt.layer) else {
-            let set = Instant::now();
-            desktop.set_wallpaper(screen, second)?;
-            if hunt.gone == Gone::AtSet {
-                let _ = fs::remove_file(first);
-            }
-            let (caught, under_black, _) = watch_close(display, screen, None, hunt.hold, tones, out, saved);
-            let _ = fs::remove_file(first);
-            return Ok(Tried { caught, before, armed: Vec::new(), after: below_desktop(), under: None, under_black, ours_black: None, held: set.elapsed().as_secs_f64() * 1000.0 });
-        };
-        helper.open(id, screen, first, Duration::from_secs(5))?;
-        std::thread::sleep(Duration::from_millis(150));
-        let set = Instant::now();
-        if hunt.under {
-            desktop.set_wallpaper(screen, second)?;
-            if hunt.gone == Gone::AtSet {
-                let _ = fs::remove_file(first);
-            }
-        }
-        helper.ask_settle(id, second, None)?;
-        helper.settled(id, Duration::from_secs(3))?;
-        while set.elapsed() < hunt.hold {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let armed = below_desktop();
-        let under = if id.is_multiple_of(2) { whole(picture_window(screen).map(|window| window.number), a, b) } else { None };
-        let held = set.elapsed().as_secs_f64() * 1000.0;
-        helper.send(&scooch::live::Command::Close { id })?;
-        let (caught, under_black, ours_black) = watch_close(display, screen, Some(helper.pid), HUNT_AFTER, tones, out, saved);
-        if hunt.under {
-            let _ = fs::remove_file(first);
-        }
-        helper.expect(Duration::from_secs(3), |reply| match reply {
-            scooch::live::Reply::Closed { id: closed } if *closed == id => Some(Ok(())),
-            scooch::live::Reply::Failed { id: Some(failed), why } if *failed == id => Some(Err(anyhow::anyhow!("{why}"))),
-            _ => None,
-        })?;
-        Ok(Tried { caught, before, armed, after: below_desktop(), under, under_black, ours_black, held })
-    }
-
-    fn black_frames(out: PathBuf) -> ExitCode {
-        let _ = fs::create_dir_all(&out);
-        let mut lines = vec!["# Black frames at the close of the layer".to_string(), String::new()];
-        if !std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
-            lines.push(format!("- {RUNNER_ONLY}"));
-            let _ = fs::write(out.join("report.md"), lines.join("\n") + "\n");
-            return ExitCode::SUCCESS;
-        }
-        let icon = dirs::desktop_dir().unwrap_or_default().join("scooch-black-probe.txt");
-        let _ = fs::write(&icon, "probe");
-        std::thread::sleep(Duration::from_secs(3));
-        let result = hunt(&out, &mut lines);
-        let _ = fs::remove_file(&icon);
-        if let Err(error) = result {
-            lines.push(format!("- **stopped** {error:#}"));
-        }
-        let _ = fs::write(out.join("report.md"), lines.join("\n") + "\n");
-        ExitCode::SUCCESS
-    }
-
-    fn hunt(out: &Path, lines: &mut Vec<String>) -> Result<()> {
-        let say = |lines: &mut Vec<String>, text: String| {
-            println!("{text}");
-            lines.push(text);
-            let _ = fs::write(out.join("report.md"), lines.join("\n") + "\n");
-        };
-        let marker = MainThreadMarker::new().context("not on the main thread")?;
-        let desktop = platform::current()?;
-        let screen = desktop.screens()?.into_iter().next().context("no screen")?;
-        let original = desktop.wallpaper(&screen).ok().flatten();
-        let (_, display) = picture::screen_for(marker, &screen.id)?;
-        let (width, height) = pixels(&screen);
-        let home = std::env::temp_dir().join(format!("scooch-black-{}", std::process::id()));
-        fs::create_dir_all(&home)?;
-        let bin = std::env::current_exe()?.parent().and_then(Path::parent).map(|folder| folder.join("scooch")).context("no folder for the scooch program")?;
-        let (one, two) = (tone(width, height, [60, 120, 210], [140, 190, 240]), tone(width, height, [235, 150, 70], [250, 215, 140]));
-        let mean = |image: &RgbImage| {
-            let shot = Shot { width: image.width() as usize, height: image.height() as usize, rgb: image.as_raw().clone() };
-            region_tone(&shot, HUNT_REGION).1
-        };
-        let tones = (mean(&one), mean(&two));
-        let (bytes_a, bytes_b) = (scooch_core::encode_jpeg(&one, 92)?, scooch_core::encode_jpeg(&two, 92)?);
-        say(lines, format!("- screen `{}` {} at scale {}, display {display}, pictures {width}x{height}, A mean {:?}, B mean {:?}, original {:?}", screen.id, show(&screen.frame), screen.scale, tones.0, tones.1, original));
-        say(lines, "- each capture is a band of the display from 10 to 90 percent across and 30 to 60 percent down, K black, A the first picture, B the second, ~ neither, captured from the close for 500 ms, times in ms from the close. Even trials capture the picture window alone before the close, odd trials do not, so the odd ones keep the timing of a slide".to_string());
-        let mut saved = 0usize;
-        let mut file = 0u32;
-        for hunt in HUNTS.iter() {
-            say(lines, String::new());
-            say(lines, format!("## {}", hunt.name));
-            say(lines, String::new());
-            let env: Vec<(&str, &str)> = hunt.through.map(|through| (scooch::live::SEE_THROUGH, through)).into_iter().collect();
-            let mut helper = if hunt.layer {
-                let mut helper = scooch::live::Helper::spawn_with(&bin, Duration::from_secs(5), &env)?;
-                let ready = helper.warm(scooch::live::Hints::default(), None, None, Duration::from_secs(30))?;
-                say(lines, format!("- helper {} on {}", helper.pid, ready.adapter));
-                Some(helper)
-            } else {
-                None
-            };
-            let (mut black_trials, mut black_captures, mut captures, mut ours_during) = (0, 0, 0, 0);
-            let mut intervals = Vec::new();
-            for trial in 1..=hunt.trials {
-                file += 1;
-                let (a, b) = (home.join(format!("a-{file}.jpg")), home.join(format!("b-{file}.jpg")));
-                fs::write(&a, &bytes_a)?;
-                fs::write(&b, &bytes_b)?;
-                match hunt_trial(helper.as_mut(), hunt, trial, (&a, &b), (display, &screen), tones, (out, &mut saved)) {
-                    Ok(tried) => {
-                        let blacks: Vec<&Caught> = tried.caught.iter().filter(|caught| caught.sort == 'K').collect();
-                        captures += tried.caught.len();
-                        black_captures += blacks.len();
-                        ours_during += blacks.iter().filter(|caught| caught.ours).count();
-                        if !blacks.is_empty() {
-                            black_trials += 1;
-                        }
-                        intervals.extend(tried.caught.iter().map(|caught| caught.took));
-                        let sorts: String = tried.caught.iter().map(|caught| caught.sort).collect();
-                        let marks: Vec<String> = tried.caught.iter().filter(|caught| caught.sort != 'B').map(|caught| format!("{} at {:.0}+{:.0} ms ours listed {} dark {:.2} mean {:?}", caught.sort, caught.at, caught.took, caught.ours, caught.tone.0, caught.tone.1.map(|value| value.round()))).collect();
-                        say(lines, format!("- trial {trial}: close {:.0} ms after the set, picture window before the close {:?}, captures {sorts}, not B {marks:?}, at the first black the picture window alone {:?} and the layer alone {:?}", tried.held, tried.under, tried.under_black, tried.ours_black));
-                        if trial == 1 || !blacks.is_empty() {
-                            say(lines, format!("  - windows at or below the desktop before {:?}", tried.before));
-                            say(lines, format!("  - before the close {:?}", tried.armed));
-                            say(lines, format!("  - after {:?}", tried.after));
-                        }
-                    }
-                    Err(error) => say(lines, format!("- trial {trial}: stopped {error:#}")),
-                }
-            }
-            drop(helper.take());
-            intervals.sort_by(f64::total_cmp);
-            let middle = intervals.get(intervals.len() / 2).copied().unwrap_or(0.0);
-            say(lines, format!("- summary: {black_trials} of {} trials had a black capture, {black_captures} black of {captures} captures, {ours_during} of the black captures began with the layer window still listed, median capture took {middle:.1} ms", hunt.trials));
-        }
-        if let Some(original) = original.filter(|path| path.is_file()) {
-            let _ = desktop.set_wallpaper(&screen, &original);
-        }
-        let _ = fs::remove_dir_all(&home);
-        Ok(())
     }
 
     const REVEAL_OPENS: u32 = 20;
@@ -4147,93 +3837,6 @@ mod probe {
         }
         let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).collect();
         Some(Dragged { dropped, skip, seen, moment, log, old, old_still, old_tables })
-    }
-
-    struct Frames {
-        stream: *mut c_void,
-        queue: *mut c_void,
-        seen: Arc<Mutex<Vec<(u64, f32)>>>,
-        idle: Arc<std::sync::atomic::AtomicUsize>,
-        offset: f64,
-    }
-
-    const BGRA: i32 = 0x4247_5241;
-    const READ_ONLY: u32 = 1;
-
-    fn surface_dark(surface: *mut c_void) -> Option<f32> {
-        if surface.is_null() || unsafe { IOSurfaceLock(surface, READ_ONLY, std::ptr::null_mut()) } != 0 {
-            return None;
-        }
-        let (width, height, row, base) = unsafe { (IOSurfaceGetWidth(surface), IOSurfaceGetHeight(surface), IOSurfaceGetBytesPerRow(surface), IOSurfaceGetBaseAddress(surface) as *const u8) };
-        let (mut dark, mut count) = (0usize, 0usize);
-        if !base.is_null() {
-            for y in (height / 10..height * 85 / 100).step_by(4) {
-                for x in (width / 20..width * 95 / 100).step_by(4) {
-                    let pixel = unsafe { std::slice::from_raw_parts(base.add(y * row + x * 4), 3) };
-                    count += 1;
-                    if pixel.iter().all(|channel| *channel <= 12) {
-                        dark += 1;
-                    }
-                }
-            }
-        }
-        unsafe { IOSurfaceUnlock(surface, READ_ONLY, std::ptr::null_mut()) };
-        (count > 0).then(|| dark as f32 / count as f32)
-    }
-
-    fn mach_seconds(ticks: u64) -> f64 {
-        let mut base = Timebase::default();
-        unsafe { mach_timebase_info(&mut base) };
-        if base.denom == 0 {
-            return ticks as f64 / 1e9;
-        }
-        ticks as f64 * f64::from(base.numer) / f64::from(base.denom) / 1e9
-    }
-
-    impl Frames {
-        fn start(display: u32, screen: &Screen) -> Option<Frames> {
-            let (width, height) = pixels(screen);
-            let seen: Arc<Mutex<Vec<(u64, f32)>>> = Arc::new(Mutex::new(Vec::new()));
-            let idle = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let (kept, waited) = (seen.clone(), idle.clone());
-            let handler = block2::RcBlock::new(move |status: i32, time: u64, surface: *mut c_void, _update: *const c_void| {
-                if status == 1 {
-                    waited.fetch_add(1, Ordering::SeqCst);
-                }
-                if status != 0 {
-                    return;
-                }
-                if let (Some(dark), Ok(mut kept)) = (surface_dark(surface), kept.lock()) {
-                    kept.push((time, dark));
-                }
-            });
-            let queue = unsafe { dispatch_queue_create(c"scooch-probe-frames".as_ptr(), std::ptr::null()) };
-            let stream = unsafe { CGDisplayStreamCreateWithDispatchQueue(display, (width / 4).max(1) as usize, (height / 4).max(1) as usize, BGRA, std::ptr::null(), queue, &handler) };
-            if stream.is_null() {
-                unsafe { dispatch_release(queue) };
-                return None;
-            }
-            let offset = epoch() - mach_seconds(unsafe { mach_absolute_time() });
-            if unsafe { CGDisplayStreamStart(stream) } != 0 {
-                unsafe {
-                    CFRelease(stream);
-                    dispatch_release(queue);
-                }
-                return None;
-            }
-            Some(Frames { stream, queue, seen, idle, offset })
-        }
-
-        fn stop(self) -> (Vec<(f64, f32)>, usize) {
-            unsafe { CGDisplayStreamStop(self.stream) };
-            std::thread::sleep(Duration::from_millis(100));
-            unsafe {
-                CFRelease(self.stream);
-                dispatch_release(self.queue);
-            }
-            let seen = self.seen.lock().map(|seen| seen.clone()).unwrap_or_default();
-            (seen.into_iter().map(|(time, dark)| (self.offset + mach_seconds(time), dark)).collect(), self.idle.load(Ordering::SeqCst))
-        }
     }
 
     fn quick_dark(shot: &Shot) -> f32 {
@@ -5290,37 +4893,9 @@ mod probe {
     const SLIDES: usize = 36;
 
     fn slides_check(p: &mut Probe) -> Result<()> {
-        let focus = std::env::var("SCOOCH_PROBE_FOCUS").is_ok_and(|focus| focus == "slides");
-        let mut result = many_slides(p, "the layer as built", 0, (if focus { 50 } else { SLIDES }, false));
-        if focus {
-            let see = [(scooch::live::SEE_THROUGH, "layer")];
-            for (kind, env, stream) in [("a see through layer", &see[..], false), ("the layer as built while a display stream runs", &[][..], true)] {
-                let since = watch_log(&p.home.join("watch.log")).len();
-                if result.is_ok() && restart_daemon_env(p, env).unwrap_or(false) {
-                    result = many_slides(p, kind, since, (50, stream));
-                }
-            }
-            let _ = restart_daemon_env(p, &[]);
-        }
+        let result = many_slides(p, SLIDES);
         put_motion_back(p);
         result
-    }
-
-    fn restart_daemon_env(p: &mut Probe, env: &[(&str, &str)]) -> Result<bool> {
-        let Some(mut child) = p.stand.take() else { return Ok(false) };
-        let _ = child.kill();
-        let _ = child.wait();
-        stutters(p);
-        p.struck = false;
-        let _ = fs::remove_file(p.home.join("watch.pid"));
-        let log = fs::OpenOptions::new().create(true).append(true).open(p.home.join("watch.log"))?;
-        let mut command = Command::new(&p.bin);
-        command.arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").env_remove(scooch::live::SLOW_HELLO).env_remove(scooch::live::READ_LAG).env_remove(scooch::live::SEE_THROUGH).envs(env.iter().copied()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
-        p.stand = Some(command.spawn()?);
-        let home = p.home.clone();
-        wait_until(Duration::from_secs(15), || fs::read_to_string(home.join("watch.pid")).ok().and_then(|text| text.trim().parse::<i32>().ok()).is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)).context("the restarted daemon wrote no pid file")?;
-        p.line(format!("- the daemon started again with {env:?}"));
-        Ok(true)
     }
 
     fn drew_near(log: &[String], at: f64, reach: f64) -> Vec<String> {
@@ -5331,7 +4906,7 @@ mod probe {
             .collect()
     }
 
-    fn many_slides(p: &mut Probe, kind: &str, since: usize, (count, stream): (usize, bool)) -> Result<()> {
+    fn many_slides(p: &mut Probe, count: usize) -> Result<()> {
         let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
         accessory(marker);
         let screen = main_screen(p)?;
@@ -5347,7 +4922,7 @@ mod probe {
         }
         set_motion(p, false);
         poke(p);
-        let parked = wait_parked(p, since, Duration::from_secs(60));
+        let parked = wait_parked(p, 0, Duration::from_secs(60));
         if parked.is_none() {
             p.fail("the helper never parked within 60 s, so no slide was watched, which is the footing failing and not a pass");
             return Ok(());
@@ -5355,27 +4930,14 @@ mod probe {
         let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
         let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
         let (mut watched, mut glided, mut judged, mut by_record, mut captures, mut black) = (0, 0, 0, 0, 0, 0);
-        let (mut streamed, mut displayed) = (0, 0);
         let mut faults = Vec::new();
         let mut skipped = Vec::new();
         for index in 0..count {
             quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
             let from = position(p, name).unwrap_or(subject);
             let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
-            let frames = if stream { Frames::start(display, &screen) } else { None };
-            let dragged = watch_drag(p, display, &screen, from, to, &[]);
-            let (shown, idle) = frames.map(Frames::stop).unwrap_or_default();
-            let Some(dragged) = dragged else { continue };
+            let Some(dragged) = watch_drag(p, display, &screen, from, to, &[]) else { continue };
             watched += 1;
-            streamed += shown.len();
-            let dark: Vec<f64> = shown.iter().filter(|(_, dark)| *dark >= crate::BLACK_SHARE).map(|(at, _)| ((at - dragged.dropped) * 1000.0).round()).collect();
-            let longest = shown.windows(2).map(|pair| pair[1].0 - pair[0].0).fold(0.0f64, f64::max);
-            if !dark.is_empty() {
-                let closed = logged(&dragged, "after its wallpaper was set").map(|closed| ((closed - dragged.dropped) * 1000.0).round());
-                p.line(format!("  - slide {}: the display showed black in {} frames at {dark:?} ms after the drop, the close {closed:?} ms, {} frames and {idle} idle reports, longest gap {:.0} ms", index + 1, dark.len(), shown.len(), longest * 1000.0));
-                faults.push(format!("slide {} the display showed a black desktop at {dark:?} ms after the drop", index + 1));
-                displayed += dark.len();
-            }
             captures += dragged.seen.len();
             match crate::glide_try(&dragged.log, true) {
                 crate::Try::Glided => {}
@@ -5409,8 +4971,7 @@ mod probe {
             }
         }
         let odd = faults.iter().filter(|fault| fault.contains("neither picture")).count();
-        p.line(format!("- with {kind}, the display stream sent {streamed} frames over the slides, {displayed} of them black"));
-        p.line(format!("- with {kind}, {count} slides dragged, {watched} watched, {glided} glided, {judged} judged by dense captures and {by_record} by the helper's record checked against the captures, {captures} captures in all, {black} black captures, {odd} captures no frame or picture explains, skips {skipped:?}"));
+        p.line(format!("- {count} slides dragged, {watched} watched, {glided} glided, {judged} judged by dense captures and {by_record} by the helper's record checked against the captures, {captures} captures in all, {black} black captures, {odd} captures no frame or picture explains, skips {skipped:?}"));
         for fault in faults {
             p.fail(fault);
         }
@@ -5483,6 +5044,7 @@ mod probe {
         p.line(format!("- solid icon ink pixels of the still icons {:?}", masks.iter().map(Vec::len).collect::<Vec<_>>()));
         let mut verdict: Option<bool> = None;
         let mut unseen = Vec::new();
+        let mut stalls: Vec<f64> = Vec::new();
         let mut during = String::new();
         let mut held = None;
         let mut tries = Vec::new();
@@ -5539,9 +5101,14 @@ mod probe {
                 verdict = Some(judged.moving >= 2);
                 break;
             }
+            if judged.recorded.stalled {
+                p.line(format!("  - attempt {attempt} has no footing, the helper's presents stopped for {:.0} ms during the glide and only {} frames between the two places reached the screen, while the probe's captures kept this runner's window server busy, so the drag is tried again", judged.recorded.gap, judged.recorded.moving));
+                stalls.push(judged.recorded.gap.round());
+                continue;
+            }
             if judged.recorded.agreed >= 1 {
                 p.line(format!("  - the captures were too sparse to follow the glide, so it is judged by the helper's record of what it presented, {} frames moving between the two places, steady and ending on the new place {}, and {} captures inside the glide agree with it", judged.recorded.moving, judged.recorded.steady, judged.recorded.agreed));
-                verdict = Some(judged.recorded.steady);
+                verdict = Some(judged.recorded.steady && !judged.recorded.stalled);
                 break;
             }
             p.line(format!("  - captures between the old and the new picture not judged, {} captures a second, largest gap {:?} ms, two in-between captures are certain only with no gap over {} ms", judged.rate.map_or(0.0, f64::round), judged.gap.map(|gap| (gap * 1000.0).round()), (SEEN_GAP * 1000.0) as u32));
@@ -5551,10 +5118,14 @@ mod probe {
         let good = match (verdict, &unglided) {
             (Some(good), _) => good,
             (None, Some(_)) => true,
+            (None, None) if unseen.is_empty() && !stalls.is_empty() => {
+                p.limit(format!("the frames between the old and the new picture could not be judged on this runner, since the helper's presents stopped for {stalls:?} ms in each try that glided while the probe captured the screen, and every other glide check passed"));
+                true
+            }
             (None, None) => {
                 let drew = unseen.iter().all(|frames| frames.is_some_and(|frames| frames >= 3));
                 let which = if unseen.len() == 1 { "the one try that glided and was not judged".to_string() } else { format!("each of the {} tries that glided and were not judged", unseen.len()) };
-                p.limit(format!("the frames between the old and the new picture could not be judged on this runner, since screen capture slowed below one every {} ms during {which}, while the helper drew {unseen:?} frames and every other glide check passed", (SEEN_GAP * 1000.0) as u32));
+                p.limit(format!("the frames between the old and the new picture could not be judged on this runner, since screen capture slowed below one every {} ms and no capture fell between the two pictures during {which}, while the helper drew {unseen:?} frames and every other glide check passed", (SEEN_GAP * 1000.0) as u32));
                 drew
             }
         };
