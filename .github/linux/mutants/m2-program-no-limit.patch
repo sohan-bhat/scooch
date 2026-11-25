@@ -1,0 +1,14 @@
+# test platform::linux::tests::a_program_that_never_ends_is_stopped_at_the_limit_in_plain_words
+diff --git a/crates/scooch/src/platform/linux/mod.rs b/crates/scooch/src/platform/linux/mod.rs
+index c9fba93..aa1b330 100644
+--- a/crates/scooch/src/platform/linux/mod.rs
++++ b/crates/scooch/src/platform/linux/mod.rs
+@@ -153,7 +153,7 @@ mod system {
+             let _open = super::pending::open(format!("the program {program} {}", named.join(" ").chars().take(160).collect::<String>()));
+             let mut command = Command::new(program);
+             super::super::children::clean(&mut command).args(arguments).env("LC_ALL", "C.UTF-8").env_remove("LANGUAGE");
+-            match within(&mut command, LIMIT) {
++            match command.stdin(std::process::Stdio::null()).output().map(Some) {
+                 Ok(Some(output)) => Ok(output),
+                 Ok(None) => Err(anyhow!("{program} did not finish within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())),
+                 Err(_) => Err(anyhow!("Scooch could not run {program}, so install it or check your PATH.")),

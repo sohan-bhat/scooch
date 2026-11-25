@@ -1,0 +1,14 @@
+# test platform::linux::screens::tests::a_compositor_that_never_answers_ends_in_plain_words_at_the_limit
+diff --git a/crates/scooch/src/platform/linux/screens.rs b/crates/scooch/src/platform/linux/screens.rs
+index 24040c6..059fca6 100644
+--- a/crates/scooch/src/platform/linux/screens.rs
++++ b/crates/scooch/src/platform/linux/screens.rs
+@@ -229,7 +229,7 @@ fn open_on(conn: Connection) -> Result<(EventQueue<State>, State)> {
+     let mut state = State::default();
+     let deadline = Instant::now() + super::LIMIT;
+     for _ in 0..3 {
+-        roundtrip_within(&conn, &mut queue, &mut state, deadline)?;
++        queue.roundtrip(&mut state).map_err(|_| stopped())?;
+     }
+     if state.manager.is_none() {
+         bail!("This Wayland desktop does not share screen positions, so Scooch cannot place the picture.");

@@ -1,0 +1,15 @@
+# test platform::linux::tests::a_peer_that_takes_the_call_and_never_answers_ends_in_plain_words_at_the_limit
+# test platform::linux::tests::a_tick_held_by_a_call_nobody_answers_comes_back_and_the_next_tick_draws
+diff --git a/crates/scooch/src/platform/linux/mod.rs b/crates/scooch/src/platform/linux/mod.rs
+index c9fba93..682dc60 100644
+--- a/crates/scooch/src/platform/linux/mod.rs
++++ b/crates/scooch/src/platform/linux/mod.rs
+@@ -240,7 +240,7 @@ mod system {
+                 Some(address) => Builder::address(address)?,
+                 None => Builder::session()?,
+             };
+-            builder.method_timeout(LIMIT).build()
++            builder.build()
+         }
+ 
+         pub fn session() -> Result<Connection> {

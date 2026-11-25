@@ -1,0 +1,14 @@
+# test platform::linux::tests::a_program_that_ends_gives_its_output_and_status
+diff --git a/crates/scooch/src/platform/linux/mod.rs b/crates/scooch/src/platform/linux/mod.rs
+index c9fba93..30d1c3e 100644
+--- a/crates/scooch/src/platform/linux/mod.rs
++++ b/crates/scooch/src/platform/linux/mod.rs
+@@ -193,7 +193,7 @@ mod system {
+             }
+             loop {
+                 if let Some(status) = child.try_wait()? {
+-                    let [stdout, stderr] = read;
++                    let [stderr, stdout] = read;
+                     return Ok(Some(Output { status, stdout, stderr }));
+                 }
+                 if Instant::now() >= deadline {

@@ -149,3 +149,26 @@ jobs:
           if [ -f linuxprobe/report.md ]; then
             cat linuxprobe/report.md >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  mutants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Bus daemon
+        run: command -v dbus-daemon || { sudo apt-get update && sudo apt-get install -y --no-install-recommends dbus-daemon; }
+
+      - name: Mutants
+        run: bash .github/linux/mutants.sh 2>&1 | tee mutants.txt
+
+      - name: Upload
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants
+          path: mutants.txt
