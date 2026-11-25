@@ -2299,9 +2299,12 @@ mod running {
             let mut waiting: Option<usize> = None;
             let mut found = Vec::new();
             let mut check = |layers: &[(Shown, f32)], scale: f32, at: u64, step: &str| {
-                let frame = gpu.snapshot_at(width, height, &looks(layers), scale).expect("snapshot");
+                let (frame, cover) = gpu.snapshot_cover_at(width, height, &looks(layers), scale).expect("snapshot");
                 if let Some(why) = darker_than_its_pictures(&frame, &pair.stills) {
                     found.push(format!("{name} at {at} ms, {step} frame of {} layers at scale {scale}: {why}", layers.len()));
+                }
+                if cover < u8::MAX {
+                    found.push(format!("{name} at {at} ms, {step} frame of {} layers at scale {scale}: a pixel covers only {cover} of 255, so the see through layer would show what lies under it", layers.len()));
                 }
             };
             let last = cues.iter().map(|(at, _)| *at).max().unwrap_or(0) + 1200;
