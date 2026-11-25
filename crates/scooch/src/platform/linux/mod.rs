@@ -135,8 +135,13 @@ mod system {
     pub mod tool {
         use anyhow::{anyhow, Result};
         use std::ffi::{OsStr, OsString};
+        use std::io::Read;
         use std::path::PathBuf;
-        use std::process::{Command, Output, Stdio};
+        use std::process::{Child, Command, Output, Stdio};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        pub use super::LIMIT;
 
         pub fn run(program: &str, arguments: &[&str]) -> Result<Output> {
             let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
@@ -146,13 +151,62 @@ mod system {
         pub fn run_os(program: &str, arguments: &[OsString]) -> Result<Output> {
             let named: Vec<String> = arguments.iter().map(|argument| argument.to_string_lossy().into_owned()).collect();
             let _open = super::pending::open(format!("the program {program} {}", named.join(" ").chars().take(160).collect::<String>()));
-            super::super::children::clean(&mut Command::new(program))
-                .args(arguments)
-                .env("LC_ALL", "C.UTF-8")
-                .env_remove("LANGUAGE")
-                .stdin(Stdio::null())
-                .output()
-                .map_err(|_| anyhow!("Scooch could not run {program}, so install it or check your PATH."))
+            let mut command = Command::new(program);
+            super::super::children::clean(&mut command).args(arguments).env("LC_ALL", "C.UTF-8").env_remove("LANGUAGE");
+            match within(&mut command, LIMIT) {
+                Ok(Some(output)) => Ok(output),
+                Ok(None) => Err(anyhow!("{program} did not finish within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())),
+                Err(_) => Err(anyhow!("Scooch could not run {program}, so install it or check your PATH.")),
+            }
+        }
+
+        pub fn within(command: &mut Command, limit: Duration) -> std::io::Result<Option<Output>> {
+            let deadline = Instant::now() + limit;
+            let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+            let (sender, receiver) = mpsc::channel::<(usize, Vec<u8>)>();
+            let pipes: [Option<Box<dyn Read + Send>>; 2] = [child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>), child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>)];
+            for (index, pipe) in pipes.into_iter().enumerate() {
+                let sender = sender.clone();
+                let Some(mut pipe) = pipe else {
+                    let _ = sender.send((index, Vec::new()));
+                    continue;
+                };
+                let reader = std::thread::Builder::new().name("scooch-tool".into()).spawn(move || {
+                    let mut bytes = Vec::new();
+                    let _ = pipe.read_to_end(&mut bytes);
+                    let _ = sender.send((index, bytes));
+                });
+                if let Err(error) = reader {
+                    stop(child);
+                    return Err(error);
+                }
+            }
+            let mut read = [Vec::new(), Vec::new()];
+            for _ in 0..2 {
+                match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok((index, bytes)) => read[index] = bytes,
+                    Err(_) => {
+                        stop(child);
+                        return Ok(None);
+                    }
+                }
+            }
+            loop {
+                if let Some(status) = child.try_wait()? {
+                    let [stdout, stderr] = read;
+                    return Ok(Some(Output { status, stdout, stderr }));
+                }
+                if Instant::now() >= deadline {
+                    stop(child);
+                    return Ok(None);
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        fn stop(mut child: Child) {
+            let _ = child.kill();
+            let _ = child.wait();
         }
 
         pub fn gtk_scale(schema: &str, key: &str) -> f32 {
