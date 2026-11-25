@@ -3,7 +3,11 @@ use super::parse::geometry;
 use crate::platform::Screen;
 use anyhow::{anyhow, bail, Context, Result};
 use scooch_core::Rect;
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
+use std::time::Instant;
+use wayland_client::backend::WaylandError;
+use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::{wl_output, wl_registry};
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
@@ -79,6 +83,7 @@ struct State {
     outputs: Vec<Output>,
     manager: Option<ZxdgOutputManagerV1>,
     changed: bool,
+    synced: bool,
 }
 
 impl State {
@@ -169,15 +174,62 @@ impl Dispatch<ZxdgOutputV1, usize> for State {
 
 wayland_client::delegate_noop!(State: ignore ZxdgOutputManagerV1);
 
+impl Dispatch<WlCallback, ()> for State {
+    fn event(state: &mut Self, _: &WlCallback, event: wl_callback::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let wl_callback::Event::Done { .. } = event {
+            state.synced = true;
+        }
+    }
+}
+
+fn stopped() -> anyhow::Error {
+    anyhow!("The Wayland display stopped answering, so try again.")
+}
+
+fn roundtrip_within(conn: &Connection, queue: &mut EventQueue<State>, state: &mut State, deadline: Instant) -> Result<()> {
+    state.synced = false;
+    conn.display().sync(&queue.handle(), ());
+    loop {
+        queue.dispatch_pending(state).map_err(|_| stopped())?;
+        if state.synced {
+            return Ok(());
+        }
+        queue.flush().map_err(|_| stopped())?;
+        let Some(guard) = queue.prepare_read() else { continue };
+        let left = deadline.saturating_duration_since(Instant::now());
+        let mut ready = [libc::pollfd { fd: guard.connection_fd().as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        let found = if left.is_zero() { 0 } else { unsafe { libc::poll(ready.as_mut_ptr(), 1, left.as_millis().min(i32::MAX as u128) as i32) } };
+        if found == 0 {
+            bail!("The Wayland display did not answer within {} seconds, so check that the desktop still runs.", super::LIMIT.as_secs());
+        }
+        if found < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(stopped());
+        }
+        match guard.read() {
+            Ok(_) => {}
+            Err(WaylandError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => return Err(stopped()),
+        }
+    }
+}
+
 fn open() -> Result<(EventQueue<State>, State)> {
-    let _open = super::pending::open("the Wayland roundtrips for the screens".to_string());
     let conn = Connection::connect_to_env().map_err(|_| anyhow!("Scooch could not reach the Wayland display, so check that WAYLAND_DISPLAY is set."))?;
+    open_on(conn)
+}
+
+fn open_on(conn: Connection) -> Result<(EventQueue<State>, State)> {
+    let _open = super::pending::open("the Wayland roundtrips for the screens".to_string());
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();
     conn.display().get_registry(&qh, ());
     let mut state = State::default();
+    let deadline = Instant::now() + super::LIMIT;
     for _ in 0..3 {
-        queue.roundtrip(&mut state).map_err(|_| anyhow!("The Wayland display stopped answering, so try again."))?;
+        roundtrip_within(&conn, &mut queue, &mut state, deadline)?;
     }
     if state.manager.is_none() {
         bail!("This Wayland desktop does not share screen positions, so Scooch cannot place the picture.");
@@ -237,4 +289,27 @@ pub fn resources() -> Option<String> {
     let root = conn.setup().roots.get(number)?.root;
     let reply = conn.get_property(false, root, AtomEnum::RESOURCE_MANAGER, AtomEnum::STRING, 0, 1 << 20).ok()?.reply().ok()?;
     Some(String::from_utf8_lossy(&reply.value).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_on;
+    use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_compositor_that_never_answers_ends_in_plain_words_at_the_limit() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let conn = wayland_client::Connection::from_socket(client).unwrap();
+        let (said, answer) = mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let _ = said.send(open_on(conn).map(|_| ()).map_err(|error| error.to_string()));
+        });
+        let reply = answer.recv_timeout(super::super::LIMIT + Duration::from_secs(5)).expect("the roundtrip still waited 5 s past the limit");
+        drop(server);
+        assert!(started.elapsed() >= super::super::LIMIT - Duration::from_millis(500), "the roundtrip ended before the limit {:?}", started.elapsed());
+        assert_eq!(reply, Err("The Wayland display did not answer within 10 seconds, so check that the desktop still runs.".to_string()));
+    }
 }
