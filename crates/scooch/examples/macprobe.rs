@@ -206,7 +206,7 @@ fn drew_frames(log: &[String]) -> Vec<Drawn> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-const RECORD_REACH: (f64, f64) = (0.1, 0.02);
+const RECORD_REACH: (f64, f64) = (0.3, 0.02);
 
 #[cfg(any(target_os = "macos", test))]
 const RECORD_SLACK: f32 = 0.15;
@@ -235,8 +235,8 @@ fn judge_record(frames: &[Drawn], captures: &[(f64, f64, f32)], dropped: f64) ->
     let stalled = !values.is_empty() && moving < 3 && gap > STALL_MS;
     let (mut agreed, mut disagreed) = (0, Vec::new());
     for (start, end, fitted) in captures.iter().copied().filter(|(_, _, fitted)| *fitted > 0.04 && *fitted < 0.96) {
-        let near: Vec<f32> = moves.iter().filter(|frame| frame.at >= start - RECORD_REACH.0 && frame.at <= end + RECORD_REACH.1).filter_map(|frame| frame.s).collect();
-        let near = if near.is_empty() { moves.iter().rev().find(|frame| frame.at < start).and_then(|frame| frame.s).into_iter().collect() } else { near };
+        let shown = moves.iter().rev().find(|frame| frame.at < start - RECORD_REACH.0).and_then(|frame| frame.s);
+        let near: Vec<f32> = shown.into_iter().chain(moves.iter().filter(|frame| frame.at >= start - RECORD_REACH.0 && frame.at <= end + RECORD_REACH.1).filter_map(|frame| frame.s)).collect();
         let (low, high) = near.iter().fold((f32::MAX, f32::MIN), |(low, high), s| (low.min(*s), high.max(*s)));
         if !near.is_empty() && fitted >= low - RECORD_SLACK && fitted <= high + RECORD_SLACK {
             agreed += 1;
@@ -495,6 +495,12 @@ mod tests {
         assert_eq!((agree.steady, agree.moving, agree.gap.round(), agree.stalled, agree.agreed, agree.disagreed.len()), (true, 3, 100.0, false, 2, 0));
         let off = super::judge_record(&frames, &[(1795551562.45, 1795551562.55, 0.75)], dropped);
         assert_eq!((off.agreed, off.disagreed.len()), (0, 1));
+        let late = super::drew_frames(&["1 glide drew 50 1795597419.309 move S@1.00 G0.001@0.30, 1795597419.364 move G0.208@1.00, 1795597419.424 move G0.508@1.00, 1795597419.484 move G0.659@1.00, 1795597419.519 move G0.903@1.00, 1795597419.551 move G0.940@1.00, 1795597419.586 move G0.982@1.00, 1795597419.659 glided G1.000@1.00".to_string()]);
+        let lagged = super::judge_record(&late, &[(1795597419.55, 1795597419.65, 0.50)], 1795597419.0);
+        assert_eq!((lagged.agreed, lagged.disagreed.len()), (1, 0), "a frame the window server showed 160 ms late is still a frame the helper drew");
+        let stall = super::drew_frames(&["1 glide drew 7 20.0 move G0.300@1.00, 20.5 move G0.800@1.00, 20.6 glided G1.000@1.00".to_string()]);
+        let held = super::judge_record(&stall, &[(20.45, 20.55, 0.30)], 19.0);
+        assert_eq!((held.agreed, held.disagreed.len()), (1, 0), "the frame on screen through a stall is the last one presented before it");
         let back = super::drew_frames(&["1 glide drew 3 10.0 move G0.200@1.00, 10.1 move G0.500@1.00, 10.2 move G0.400@1.00, 10.3 move G0.600@1.00, 10.4 glided G1.000@1.00".to_string()]);
         assert!(!super::judge_record(&back, &[], 9.0).steady);
         let short = super::drew_frames(&["1 glide drew 3 10.0 move G0.000@0.30, 10.02 move G0.002@0.40, 10.55 move G0.004@0.43, 10.9 glided G1.000@1.00".to_string()]);
