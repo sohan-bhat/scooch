@@ -209,7 +209,7 @@ fn rule(signal: &Signal) -> &'static str {
 }
 
 fn listen(signal: &Signal, wake: &Shared) -> bool {
-    let Ok(connection) = zbus::blocking::Connection::session() else { return false };
+    let Ok(connection) = super::bus::connect(None) else { return false };
     let Ok(messages) = zbus::blocking::MessageIterator::for_match_rule(rule(signal), &connection, Some(256)) else { return false };
     for message in messages {
         let Ok(message) = message else { break };
@@ -221,7 +221,7 @@ fn listen(signal: &Signal, wake: &Shared) -> bool {
 }
 
 pub fn monitor() -> zbus::Result<zbus::blocking::MessageIterator> {
-    let connection = zbus::blocking::Connection::session()?;
+    let connection = super::bus::connect(None)?;
     connection.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus.Monitoring"), "BecomeMonitor", &(&[wakes::SAVE_RULE] as &[&str], 0u32))?;
     Ok(zbus::blocking::MessageIterator::from(connection))
 }

@@ -30,7 +30,7 @@ pub mod watch;
 pub mod xfce;
 
 #[cfg(target_os = "linux")]
-pub use system::{bus, decode, desktop, desktop_folder, pending, set_recently, shell, tool, Linux, Shell, Signal, Watches, FileWatch};
+pub use system::{bus, decode, desktop, desktop_folder, pending, set_recently, shell, tool, Linux, Shell, Signal, Watches, FileWatch, LIMIT};
 
 #[cfg(target_os = "linux")]
 mod system {
@@ -45,6 +45,7 @@ mod system {
 
     static LAST_SET: AtomicU64 = AtomicU64::new(0);
     const OWN_ECHO: Duration = Duration::from_secs(1);
+    pub const LIMIT: Duration = Duration::from_secs(10);
 
     fn now_millis() -> u64 {
         SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
@@ -170,18 +171,30 @@ mod system {
         use anyhow::{anyhow, Result};
         use serde::de::DeserializeOwned;
         use serde::Serialize;
+        use std::io::ErrorKind;
         use std::sync::Mutex;
+        use zbus::blocking::connection::Builder;
         use zbus::blocking::Connection;
         use zbus::zvariant::{DynamicType, Type};
 
+        pub use super::LIMIT;
+
         static SESSION: Mutex<Option<Connection>> = Mutex::new(None);
+
+        pub fn connect(address: Option<&str>) -> zbus::Result<Connection> {
+            let builder = match address {
+                Some(address) => Builder::address(address)?,
+                None => Builder::session()?,
+            };
+            builder.method_timeout(LIMIT).build()
+        }
 
         pub fn session() -> Result<Connection> {
             let mut slot = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(connection) = slot.as_ref() {
                 return Ok(connection.clone());
             }
-            let connection = Connection::session().map_err(|_| anyhow!("Scooch could not reach the session bus, so log in to a desktop session first."))?;
+            let connection = connect(None).map_err(|_| anyhow!("Scooch could not reach the session bus, so log in to a desktop session first."))?;
             *slot = Some(connection.clone());
             Ok(connection)
         }
@@ -190,21 +203,50 @@ mod system {
             *SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         }
 
+        pub fn late(error: &zbus::Error) -> bool {
+            matches!(error, zbus::Error::InputOutput(io) if io.kind() == ErrorKind::TimedOut)
+        }
+
+        fn raw<B>(connection: &Connection, destination: &str, path: &str, interface: &str, method: &str, body: &B) -> zbus::Result<zbus::Message>
+        where
+            B: Serialize + DynamicType,
+        {
+            let _open = super::pending::open(format!("the bus call {interface}.{method} to {destination}"));
+            connection.call_method(Some(destination), path, Some(interface), method, body)
+        }
+
+        fn finish<R>(reply: zbus::Result<zbus::Message>, destination: &str, method: &str) -> Result<R>
+        where
+            R: DeserializeOwned + Type,
+        {
+            match reply {
+                Ok(reply) => Ok(reply.body().deserialize()?),
+                Err(error) if late(&error) => Err(anyhow!("{destination} did not answer {method} within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())),
+                Err(error) => Err(error.into()),
+            }
+        }
+
+        pub fn call_on<B, R>(connection: &Connection, destination: &str, path: &str, interface: &str, method: &str, body: &B) -> Result<R>
+        where
+            B: Serialize + DynamicType,
+            R: DeserializeOwned + Type,
+        {
+            finish(raw(connection, destination, path, interface, method, body), destination, method)
+        }
+
         pub fn call<B, R>(destination: &str, path: &str, interface: &str, method: &str, body: &B) -> Result<R>
         where
             B: Serialize + DynamicType,
             R: DeserializeOwned + Type,
         {
-            let _open = super::pending::open(format!("the bus call {interface}.{method} to {destination}"));
-            let reply = match session()?.call_method(Some(destination), path, Some(interface), method, body) {
-                Ok(reply) => reply,
-                Err(zbus::Error::InputOutput(_)) => {
+            let reply = match raw(&session()?, destination, path, interface, method, body) {
+                Err(zbus::Error::InputOutput(io)) if io.kind() != ErrorKind::TimedOut => {
                     forget();
-                    session()?.call_method(Some(destination), path, Some(interface), method, body)?
+                    raw(&session()?, destination, path, interface, method, body)
                 }
-                Err(error) => return Err(error.into()),
+                other => other,
             };
-            Ok(reply.body().deserialize()?)
+            finish(reply, destination, method)
         }
 
         pub fn has_owner(name: &str) -> bool {
