@@ -13,6 +13,10 @@ fn main() -> std::process::ExitCode {
 mod slides;
 
 #[cfg(windows)]
+#[path = "judge/skips.rs"]
+mod skips;
+
+#[cfg(windows)]
 mod probe {
     use anyhow::{anyhow, bail, Context, Result};
     use scooch::platform::windows::layout::{self, Cell, Label, SPACING};
@@ -3861,6 +3865,10 @@ mod probe {
         let (mut glided, mut captures, mut black, mut odd) = (0usize, 0usize, 0usize, 0usize);
         let (mut skipped, mut faults, mut widest, mut unjudged) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         p.line(format!("- {SLIDES} slides of one icon between two places, each captured back to back from the drop to a second after the close, every capture judged against the old picture, the new one and 21 frames between them"));
+        if wait_until(Duration::from_secs(60), || crate::skips::parked_in(&log_lines(log)).is_some()).is_none() {
+            p.failed.push("the helper never parked within 60 s, so no slide was watched, which is the footing failing and not a pass".into());
+            return Ok(());
+        }
         for index in 0..SLIDES {
             let slide = index + 1;
             quiet_log(log, Duration::from_millis(800), Duration::from_secs(10));
@@ -3879,7 +3887,10 @@ mod probe {
             captures += watched.shots.len();
             if !watched.log.iter().any(|line| line.contains(" glide slid, ")) {
                 let reason = watched.log.iter().find_map(|line| line.split(" glide skipped, ").nth(1)).and_then(|rest| rest.split(',').next()).unwrap_or("no line").to_string();
-                skipped.push(format!("{slide}: {reason}"));
+                match crate::skips::slide_skip(slide, &crate::skips::glide_try(&watched.log, true)) {
+                    Some(Err(fault)) => faults.push(fault),
+                    Some(Ok(_)) | None => skipped.push(format!("{slide}: {reason}")),
+                }
                 continue;
             }
             glided += 1;
