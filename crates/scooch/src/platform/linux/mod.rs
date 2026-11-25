@@ -509,3 +509,121 @@ mod system {
         RgbImage::from_raw(width, height, rgb).context("The picture did not fit in memory.")
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::{bus, tool, LIMIT};
+    use std::io::{BufRead, BufReader};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    pub const SILENT: &str = "org.scooch.Silent";
+
+    pub struct Private {
+        daemon: Child,
+        pub address: String,
+    }
+
+    impl Drop for Private {
+        fn drop(&mut self) {
+            let _ = self.daemon.kill();
+            let _ = self.daemon.wait();
+        }
+    }
+
+    pub fn private_bus() -> Option<Private> {
+        let started = Command::new("dbus-daemon").args(["--session", "--nofork", "--print-address=1"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
+        let Ok(mut daemon) = started else {
+            assert!(std::env::var_os("SCOOCH_NEED_BUS").is_none(), "no dbus-daemon, and this runner must have one");
+            return None;
+        };
+        let mut line = String::new();
+        if let Some(out) = daemon.stdout.take() {
+            let _ = BufReader::new(out).read_line(&mut line);
+        }
+        let address = line.trim().to_string();
+        let private = Private { daemon, address };
+        assert!(!private.address.is_empty(), "dbus-daemon printed no address");
+        Some(private)
+    }
+
+    pub fn silent_peer(address: &str) -> (zbus::blocking::Connection, mpsc::Receiver<String>) {
+        let peer = bus::connect(Some(address)).unwrap();
+        peer.request_name(SILENT).unwrap();
+        let calls = zbus::blocking::MessageIterator::from(peer.clone());
+        let (took, taken) = mpsc::channel();
+        std::thread::spawn(move || {
+            for message in calls.flatten() {
+                if let Some(member) = message.header().member() {
+                    let _ = took.send(member.to_string());
+                }
+            }
+        });
+        (peer, taken)
+    }
+
+    #[test]
+    fn a_peer_that_takes_the_call_and_never_answers_ends_in_plain_words_at_the_limit() {
+        let Some(private) = private_bus() else { return };
+        let (_peer, taken) = silent_peer(&private.address);
+        let caller = bus::connect(Some(&private.address)).unwrap();
+        let (said, answer) = mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let reply: anyhow::Result<bool> = bus::call_on(&caller, SILENT, "/org/scooch/Silent", "org.gtk.Actions", "Describe", &("desktopGeometry",));
+            let _ = said.send(reply.map_err(|error| error.to_string()));
+        });
+        assert_eq!(taken.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("Describe"), "the silent peer never got the call");
+        let reply = answer.recv_timeout(LIMIT + Duration::from_secs(5)).expect("the call still waited 5 s past the limit");
+        assert!(started.elapsed() >= LIMIT - Duration::from_millis(500), "the call ended before the limit {:?}", started.elapsed());
+        assert_eq!(reply, Err(format!("{SILENT} did not answer Describe within 10 seconds, so check that the desktop still runs.")));
+    }
+
+    #[test]
+    fn a_tick_held_by_a_call_nobody_answers_comes_back_and_the_next_tick_draws() {
+        let Some(private) = private_bus() else { return };
+        let (_peer, taken) = silent_peer(&private.address);
+        let (daemon, fake, _) = crate::daemon::tests::rig("held-tick", vec![crate::daemon::tests::screen("main", 0.0, 1.0)]);
+        let caller = bus::connect(Some(&private.address)).unwrap();
+        let (said, answer) = mpsc::channel();
+        fake.during(move || {
+            let reply: anyhow::Result<bool> = bus::call_on(&caller, SILENT, "/org/scooch/Silent", "org.gtk.Actions", "Describe", &("desktopGeometry",));
+            let _ = said.send(reply.map_err(|error| error.to_string()));
+        });
+        let daemon = std::sync::Arc::new(daemon);
+        let ticking = daemon.clone();
+        let (done, finished) = mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let held = ticking.tick();
+            let after = ticking.tick();
+            let _ = done.send((held.outcomes.len(), after.problem, after.outcomes.len()));
+        });
+        let ticks = finished.recv_timeout(LIMIT + Duration::from_secs(10)).expect("the tick still sat in the call 10 s past the limit");
+        assert!(started.elapsed() >= LIMIT - Duration::from_millis(500), "the tick ended before the limit {:?}", started.elapsed());
+        assert_eq!(taken.try_recv().as_deref(), Ok("Describe"));
+        assert_eq!(answer.try_recv(), Ok(Err(format!("{SILENT} did not answer Describe within 10 seconds, so check that the desktop still runs."))));
+        assert_eq!(ticks, (1, None, 1));
+    }
+
+    #[test]
+    fn a_program_that_never_ends_is_stopped_at_the_limit_in_plain_words() {
+        let (said, answer) = mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let _ = said.send(tool::run("sleep", &["600"]).map(|_| ()).map_err(|error| error.to_string()));
+        });
+        let reply = answer.recv_timeout(LIMIT + Duration::from_secs(5)).expect("the program still ran 5 s past the limit");
+        assert!(started.elapsed() >= LIMIT - Duration::from_millis(500), "the program was stopped before the limit {:?}", started.elapsed());
+        assert_eq!(reply, Err("sleep did not finish within 10 seconds, so check that the desktop still runs.".to_string()));
+        let left = Command::new("pgrep").args(["-f", "^sleep 600$"]).output().map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
+        assert!(left.is_empty(), "the stopped program is still running as {left}");
+    }
+
+    #[test]
+    fn a_program_that_ends_gives_its_output_and_status() {
+        let output = tool::run("sh", &["-c", "echo out; echo error >&2; exit 3"]).unwrap();
+        assert_eq!((String::from_utf8_lossy(&output.stdout).trim(), String::from_utf8_lossy(&output.stderr).trim(), output.status.code()), ("out", "error", Some(3)));
+    }
+}
