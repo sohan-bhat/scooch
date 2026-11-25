@@ -3311,6 +3311,12 @@ mod probe {
         Ok(())
     }
 
+    #[derive(Clone, Copy, PartialEq)]
+    enum Gone {
+        AtSet,
+        AfterClose,
+    }
+
     struct Hunt {
         name: &'static str,
         trials: u32,
@@ -3318,15 +3324,16 @@ mod probe {
         under: bool,
         hold: Duration,
         through: Option<&'static str>,
+        gone: Gone,
     }
 
     const HUNTS: [Hunt; 6] = [
-        Hunt { name: "opaque layer, picture set under it, close 600 ms after the set", trials: 25, layer: true, under: true, hold: Duration::from_millis(600), through: None },
-        Hunt { name: "see through layer, picture set under it, close 600 ms after the set", trials: 25, layer: true, under: true, hold: Duration::from_millis(600), through: Some("layer") },
-        Hunt { name: "faint window, picture set under it, close 600 ms after the set", trials: 15, layer: true, under: true, hold: Duration::from_millis(600), through: Some("alpha") },
-        Hunt { name: "opaque layer, picture set under it, close 3 s after the set", trials: 10, layer: true, under: true, hold: Duration::from_millis(3000), through: None },
-        Hunt { name: "opaque layer, nothing set under it", trials: 10, layer: true, under: false, hold: Duration::from_millis(600), through: None },
-        Hunt { name: "plain set with no layer", trials: 10, layer: false, under: true, hold: Duration::from_millis(1200), through: None },
+        Hunt { name: "opaque layer, picture set under it, the old picture file deleted at the set as the daemon does, close 600 ms after the set", trials: 30, layer: true, under: true, hold: Duration::from_millis(600), through: None, gone: Gone::AtSet },
+        Hunt { name: "plain set with no layer, the old picture file deleted at the set", trials: 20, layer: false, under: true, hold: Duration::from_millis(1200), through: None, gone: Gone::AtSet },
+        Hunt { name: "see through layer, picture set under it, the old picture file deleted at the set, close 600 ms after the set", trials: 20, layer: true, under: true, hold: Duration::from_millis(600), through: Some("layer"), gone: Gone::AtSet },
+        Hunt { name: "opaque layer, picture set under it, the old picture file deleted after the close", trials: 15, layer: true, under: true, hold: Duration::from_millis(600), through: None, gone: Gone::AfterClose },
+        Hunt { name: "opaque layer, picture set under it, the old picture file deleted at the set, close 3 s after the set", trials: 10, layer: true, under: true, hold: Duration::from_millis(3000), through: None, gone: Gone::AtSet },
+        Hunt { name: "plain set with no layer, the old picture file deleted after 1.2 s", trials: 10, layer: false, under: true, hold: Duration::from_millis(1200), through: None, gone: Gone::AfterClose },
     ];
     const HUNT_AFTER: Duration = Duration::from_millis(500);
     const HUNT_REGION: (f32, f32, f32, f32) = (0.1, 0.3, 0.9, 0.6);
@@ -3462,7 +3469,11 @@ mod probe {
         let Some(helper) = helper.filter(|_| hunt.layer) else {
             let set = Instant::now();
             desktop.set_wallpaper(screen, second)?;
+            if hunt.gone == Gone::AtSet {
+                let _ = fs::remove_file(first);
+            }
             let (caught, under_black, _) = watch_close(display, screen, None, hunt.hold, tones, out, saved);
+            let _ = fs::remove_file(first);
             return Ok(Tried { caught, before, armed: Vec::new(), after: below_desktop(), under: None, under_black, ours_black: None, held: set.elapsed().as_secs_f64() * 1000.0 });
         };
         helper.open(id, screen, first, Duration::from_secs(5))?;
@@ -3470,6 +3481,9 @@ mod probe {
         let set = Instant::now();
         if hunt.under {
             desktop.set_wallpaper(screen, second)?;
+            if hunt.gone == Gone::AtSet {
+                let _ = fs::remove_file(first);
+            }
         }
         helper.ask_settle(id, second, None)?;
         helper.settled(id, Duration::from_secs(3))?;
@@ -3481,6 +3495,9 @@ mod probe {
         let held = set.elapsed().as_secs_f64() * 1000.0;
         helper.send(&scooch::live::Command::Close { id })?;
         let (caught, under_black, ours_black) = watch_close(display, screen, Some(helper.pid), HUNT_AFTER, tones, out, saved);
+        if hunt.under {
+            let _ = fs::remove_file(first);
+        }
         helper.expect(Duration::from_secs(3), |reply| match reply {
             scooch::live::Reply::Closed { id: closed } if *closed == id => Some(Ok(())),
             scooch::live::Reply::Failed { id: Some(failed), why } if *failed == id => Some(Err(anyhow::anyhow!("{why}"))),
@@ -3576,8 +3593,6 @@ mod probe {
                     }
                     Err(error) => say(lines, format!("- trial {trial}: stopped {error:#}")),
                 }
-                let _ = fs::remove_file(&a);
-                let _ = fs::remove_file(&b);
             }
             drop(helper.take());
             intervals.sort_by(f64::total_cmp);
