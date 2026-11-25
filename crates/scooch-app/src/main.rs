@@ -5,6 +5,7 @@ mod appimage;
 mod children;
 mod life;
 mod lock;
+mod look;
 mod pictures;
 mod place;
 #[cfg(target_os = "macos")]
@@ -22,7 +23,6 @@ use scooch::facade::{self, Icons, Problem, Started, Switch, View};
 use scooch::facade::Tally;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::window::Color;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Runtime, Theme, WebviewWindow, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
@@ -264,10 +264,40 @@ fn gnome_icons() -> anyhow::Result<()> {
 }
 
 fn paint<R: Runtime>(window: &WebviewWindow<R>, theme: Theme) {
-    let color = if theme == Theme::Light { Color(239, 231, 214, 255) } else { Color(20, 17, 14, 255) };
-    let _ = window.set_background_color(Some(color));
+    let _ = window.set_background_color(Some(look::room(theme == Theme::Light).into()));
 }
 
+#[cfg(windows)]
+fn light_look() -> bool {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (key, name) = (wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), wide("AppsUseLightTheme"));
+    let (mut value, mut size) = (1u32, 4u32);
+    let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), (&mut value as *mut u32).cast(), &mut size) };
+    status != 0 || value != 0
+}
+
+#[cfg(windows)]
+fn spot<R: Runtime>(app: &AppHandle<R>, inner: Option<(u32, u32)>, fallback: (f64, f64)) -> Option<look::Spot> {
+    let pointer = app.cursor_position().ok()?;
+    let screens: Vec<look::Screen> = app.available_monitors().ok()?.iter().map(|monitor| {
+        let (at, size, work) = (monitor.position(), monitor.size(), monitor.work_area());
+        look::Screen { area: (at.x, at.y, size.width, size.height), work: (work.position.x, work.position.y, work.size.width, work.size.height), scale: monitor.scale_factor() }
+    }).collect();
+    look::place((pointer.x, pointer.y), &screens, inner, fallback)
+}
+
+#[cfg(windows)]
+fn place_on_pointer<R: Runtime>(window: &WebviewWindow<R>) {
+    let inner = window.inner_size().ok().map(|size| (size.width, size.height));
+    if let Some(((x, y), ..)) = spot(window.app_handle(), inner, (0.0, 0.0)) {
+        if !window.is_maximized().unwrap_or(false) && window.outer_position().ok() != Some(PhysicalPosition::new(x, y)) {
+            let _ = window.set_position(PhysicalPosition::new(x, y));
+        }
+    }
+}
+
+#[cfg(not(windows))]
 fn place_on_pointer<R: Runtime>(window: &WebviewWindow<R>) {
     let Ok(pointer) = window.cursor_position() else { return };
     let Ok(monitors) = window.available_monitors() else { return };
@@ -287,17 +317,30 @@ static PRESENTING: Mutex<()> = Mutex::new(());
 static SHOWN: life::Gate = life::Gate::new();
 
 fn made_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
+    let began = std::time::Instant::now();
     #[allow(unused_mut)]
     let mut config = app.config().app.windows.iter().find(|window| window.label == "main").cloned().ok_or(tauri::Error::WindowNotFound)?;
     #[cfg(target_os = "linux")]
     if config.theme.is_none() {
         config.theme = session::portal_theme();
     }
+    #[cfg(windows)]
+    {
+        use tauri_plugin_window_state::AppHandleExt;
+        let _ = app.save_window_state(StateFlags::SIZE | StateFlags::MAXIMIZED);
+        let file = app.path().app_config_dir().map(|folder| folder.join(app.filename()));
+        let (inner, maximized) = look::saved(&file.ok().and_then(|file| std::fs::read_to_string(file).ok()).unwrap_or_default());
+        if let Some(((x, y), (width, height), scale)) = spot(app, inner, (config.width, config.height)) {
+            (config.x, config.y, config.width, config.height) = (Some(x as f64 / scale), Some(y as f64 / scale), width as f64 / scale, height as f64 / scale);
+        }
+        (config.maximized, config.visible, config.background_color) = (maximized, true, Some(look::room(light_look()).into()));
+    }
     let window = tauri::WebviewWindowBuilder::from_config(app, &config)?.build()?;
     if let Ok(theme) = window.theme() {
         paint(&window, theme);
     }
     place_on_pointer(&window);
+    eprintln!("scooch-app window made in {} ms", began.elapsed().as_millis());
     Ok(window)
 }
 
