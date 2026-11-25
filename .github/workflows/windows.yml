@@ -31,7 +31,11 @@ jobs:
         run: cargo build --release -p scooch --bins --examples
 
       - name: Test
-        run: cargo test --release -p scooch
+        shell: pwsh
+        run: |
+          if ('${{ matrix.image }}' -eq 'windows-2025') { $env:SCOOCH_NEED_ADAPTER = '1' }
+          cargo test --release -p scooch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: GPU frames
         if: ${{ !cancelled() }}

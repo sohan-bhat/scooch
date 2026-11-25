@@ -1652,6 +1652,8 @@ dependencies = [
 name = "scooch-live"
 version = "0.1.1"
 dependencies = [
+ "objc2",
+ "objc2-quartz-core",
  "pollster",
  "raw-window-handle",
  "scooch-core",

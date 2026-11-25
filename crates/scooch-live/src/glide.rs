@@ -807,13 +807,17 @@ impl Gpu {
     }
 
     fn present_drawn(&self, encoder: wgpu::CommandEncoder, texture: wgpu::SurfaceTexture) -> Result<(), String> {
+        self.present_if_drawn(encoder, texture, |texture| self.queue.present(texture))
+    }
+
+    fn present_if_drawn(&self, encoder: wgpu::CommandEncoder, texture: wgpu::SurfaceTexture, present: impl FnOnce(wgpu::SurfaceTexture)) -> Result<(), String> {
         let _turn = self.turn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         self.queue.submit([encoder.finish()]);
         if let Some(error) = pollster::block_on(scope.pop()) {
             return Err(format!("a frame was not drawn, so it was not shown {error}"));
         }
-        self.queue.present(texture);
+        present(texture);
         Ok(())
     }
 
@@ -966,8 +970,15 @@ impl Gpu {
         config.present_mode = wgpu::PresentMode::Fifo;
         config.alpha_mode = alpha_for(&target, &capabilities.alpha_modes).unwrap_or(config.alpha_mode);
         self.configure(&surface, &config)?;
-        Ok(Screen { gpu: self.clone(), surface, width: config.width, height: config.height, scale: 1.0 })
+        Ok(Screen { gpu: self.clone(), surface, width: config.width, height: config.height, scale: 1.0, took: Took::default() })
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Took {
+    pub acquire: Duration,
+    pub draw: Duration,
+    pub present: Duration,
 }
 
 pub fn alpha_for(target: &Target, offered: &[wgpu::CompositeAlphaMode]) -> Option<wgpu::CompositeAlphaMode> {
@@ -984,10 +995,13 @@ pub struct Screen {
     pub width: u32,
     pub height: u32,
     pub scale: f32,
+    pub took: Took,
 }
 
 impl Screen {
     pub fn show(&mut self, layers: &[(Look, f32)]) -> Result<(), String> {
+        let started = Instant::now();
+        self.took = Took::default();
         let texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Timeout => return Err("the surface timed out".into()),
@@ -996,10 +1010,13 @@ impl Screen {
             wgpu::CurrentSurfaceTexture::Lost => return Err("the surface was lost".into()),
             wgpu::CurrentSurfaceTexture::Validation => return Err("the surface failed validation".into()),
         };
+        self.took.acquire = started.elapsed();
         let view = texture.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(OUTPUT), ..Default::default() });
         self.gpu.healthy()?;
         let encoder = self.gpu.encode(&view, (self.width, self.height), layers, self.scale)?;
+        self.took.draw = started.elapsed() - self.took.acquire;
         self.gpu.present_drawn(encoder, texture)?;
+        self.took.present = started.elapsed() - self.took.acquire - self.took.draw;
         self.gpu.healthy()?;
         Ok(())
     }
@@ -1008,5 +1025,57 @@ impl Screen {
 impl Drop for Screen {
     fn drop(&mut self) {
         let _ = self.gpu.idle(Duration::from_secs(1));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use crate::{Gpu, Target, OUTPUT};
+    use objc2::rc::Retained;
+    use objc2_quartz_core::CAMetalLayer;
+
+    fn frame(gpu: &Gpu, screen: &super::Screen, broken: bool, presented: &mut u32) -> Result<(), String> {
+        let texture = match screen.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            _ => return Err("the layer gave no drawable".into()),
+        };
+        let view = texture.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(OUTPUT), ..Default::default() });
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
+        {
+            let mut pass = Gpu::pass(&mut encoder, &view);
+            if broken {
+                pass.set_pipeline(&gpu.pipes()?.still);
+                pass.draw(0..3, 0..1);
+            }
+        }
+        gpu.present_if_drawn(encoder, texture, |texture| {
+            *presented += 1;
+            gpu.queue.present(texture);
+        })
+    }
+
+    #[test]
+    fn a_frame_whose_commands_fail_validation_never_reaches_the_present() {
+        let metal = CAMetalLayer::new();
+        metal.setOpaque(false);
+        let gpu = match Gpu::new(false) {
+            Ok(gpu) => gpu,
+            Err(why) => {
+                assert!(std::env::var_os("SCOOCH_NEED_ADAPTER").is_none(), "no adapter, and this runner must have one");
+                println!("skipped: no adapter {why}");
+                return;
+            }
+        };
+        let screen = gpu.screen(Target::Layer(Retained::as_ptr(&metal) as *mut std::ffi::c_void), 64, 48).expect("a surface on the layer");
+        let mut presented = 0;
+        assert_eq!(frame(&gpu, &screen, false, &mut presented), Ok(()));
+        assert_eq!(presented, 1, "a frame that was drawn was not presented");
+        let refused = frame(&gpu, &screen, true, &mut presented);
+        assert!(refused.as_ref().is_err_and(|why| why.starts_with("a frame was not drawn, so it was not shown")), "{refused:?}");
+        assert_eq!(presented, 1, "a frame whose commands failed validation reached the present");
+        assert_eq!(gpu.fault(), None, "the failed frame was not caught by its own error scope");
+        assert_eq!(frame(&gpu, &screen, false, &mut presented), Ok(()));
+        assert_eq!(presented, 2, "the frame after a refused one was not presented");
+        drop(screen);
     }
 }

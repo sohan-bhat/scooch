@@ -14,7 +14,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 pub const HELPER: &str = "--live-helper";
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 pub const SLOW_HELLO: &str = "SCOOCH_HELPER_SLOW_HELLO_MS";
 pub const READ_LAG: &str = "SCOOCH_READ_LAG_MS";
 pub const SPIN: &str = "SCOOCH_HELPER_SPIN";
@@ -578,6 +578,82 @@ mod tests {
         for reply in replies {
             assert_eq!(serde_json::from_str::<Reply>(line(&reply).unwrap().trim()).unwrap(), reply);
         }
+    }
+
+    const SPOKEN: [(u32, &str); 2] = [
+        (5, "commands hello warm park window open glide settle close unprime quit, replies hello ready shown drawn primed device canvas glided settled closed unprimed failed"),
+        (6, "commands hello warm park window open glide settle close unprime quit, replies hello ready shown drawn primed device canvas glided settled drew closed unprimed failed"),
+    ];
+
+    fn kind<T: Serialize>(message: &T) -> String {
+        serde_json::to_value(message).ok().and_then(|value| value["kind"].as_str().map(str::to_string)).unwrap_or_default()
+    }
+
+    fn spoken() -> String {
+        let rect = Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+        let commands = [
+            Command::Hello { version: VERSION },
+            Command::Warm { hints: Hints::default(), picture: None, size: None, warm_id: None, canvas: None, key: None, scales: BTreeMap::new() },
+            Command::Park { warm_id: None },
+            Command::Window { screen: "s".into(), rect, scale: 1.0, stills: Stills::default() },
+            Command::Open { id: 1, screen: "s".into(), rect, scale: 1.0, stills: Stills::default() },
+            Command::Glide { id: 1, a: PathBuf::from("a"), b: PathBuf::from("b"), ms: 1 },
+            Command::Settle { id: 1, still: PathBuf::from("s"), ms: None },
+            Command::Close { id: 1 },
+            Command::Unprime { screen: "s".into() },
+            Command::Quit,
+        ];
+        let replies = [
+            Reply::Hello { version: VERSION, pid: 1 },
+            Reply::Ready { adapter: "gpu".into(), ms: 1, uploads: 0, kind: "integrated".into(), warm_id: None, from: None, scale: None },
+            Reply::Shown { id: 1, ms: 1 },
+            Reply::Drawn { id: 1, window: 1, first: 1, reveal: 1, make: 1, present: 1, found: true, steps: Vec::new(), revealing: Vec::new(), still: None, screen_gpu: None },
+            Reply::Primed { screen: "s".into(), window: 1, first: 1, still: "raw".into() },
+            Reply::Device { ms: 1 },
+            Reply::Canvas { warm_id: None, ms: 1 },
+            Reply::Glided { id: 1, frames: 1, slow_frames: 0, first_frame_ms: 1, uploads: 0, scale: 1.0 },
+            Reply::Settled { id: 1 },
+            Reply::Drew { id: 1, frames: String::new() },
+            Reply::Closed { id: 1 },
+            Reply::Unprimed { screen: "s".into() },
+            Reply::Failed { id: None, why: String::new() },
+        ];
+        for command in &commands {
+            match command {
+                Command::Hello { .. } | Command::Warm { .. } | Command::Park { .. } | Command::Window { .. } | Command::Open { .. } | Command::Glide { .. } | Command::Settle { .. } | Command::Close { .. } | Command::Unprime { .. } | Command::Quit => {}
+            }
+        }
+        for reply in &replies {
+            match reply {
+                Reply::Hello { .. } | Reply::Ready { .. } | Reply::Shown { .. } | Reply::Drawn { .. } | Reply::Primed { .. } | Reply::Device { .. } | Reply::Canvas { .. } | Reply::Glided { .. } | Reply::Settled { .. } | Reply::Drew { .. } | Reply::Closed { .. } | Reply::Unprimed { .. } | Reply::Failed { .. } => {}
+            }
+        }
+        format!("commands {}, replies {}", commands.iter().map(kind).collect::<Vec<_>>().join(" "), replies.iter().map(kind).collect::<Vec<_>>().join(" "))
+    }
+
+    #[test]
+    fn every_change_to_what_the_helper_speaks_raises_the_version() {
+        let now = spoken();
+        let recorded = SPOKEN.iter().find(|(version, _)| *version == VERSION).map(|(_, kinds)| *kinds);
+        assert_eq!(recorded, Some(now.as_str()), "version {VERSION} is recorded as speaking another set of commands and replies, so a daemon and a helper of different builds would not part at the hello");
+        for (version, kinds) in SPOKEN.iter().filter(|(version, _)| *version != VERSION) {
+            assert!(*version < VERSION, "version {version} is recorded but {VERSION} is the newest");
+            assert_ne!(*kinds, now.as_str(), "version {version} speaks the same as {VERSION}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_of_the_version_before_parts_at_the_hello() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = crate::state::scratch("helper-older");
+        let program = folder.join("older");
+        std::fs::write(&program, format!("#!/bin/sh\necho '{{\"kind\":\"hello\",\"version\":{},\"pid\":4}}'\nexec sleep 5\n", VERSION - 1)).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        let refused = Helper::spawn(&program, Duration::from_secs(5)).err().map(|error| format!("{error:#}"));
+        assert_eq!(refused, Some(format!("the helper speaks version {}, not {VERSION}", VERSION - 1)));
+        assert!(started.elapsed() < Duration::from_secs(4), "the hello was not answered at once");
     }
 
     #[test]

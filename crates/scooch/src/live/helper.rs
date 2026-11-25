@@ -50,7 +50,7 @@ mod running {
     use crate::platform::Screen;
     use anyhow::Result;
     use scooch_core::{Bundle, RgbImage};
-    use scooch_live::{Glide, Gpu, Look, Picture, Side, Still, Target};
+    use scooch_live::{Glide, Gpu, Look, Picture, Side, Still, Target, Took};
     use std::collections::{BTreeMap, VecDeque};
     use std::io::BufRead;
     use std::path::{Path, PathBuf};
@@ -423,8 +423,9 @@ mod running {
         Glide(Arc<Glide>, f32),
     }
 
-    fn described(layers: &[(Shown, f32)], step: &str) -> String {
+    fn described(layers: &[(Shown, f32)], step: &str, took: Took, whole: Duration) -> String {
         let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |since| since.as_secs_f64());
+        let ms = |time: Duration| time.as_secs_f64() * 1000.0;
         let parts: Vec<String> = layers
             .iter()
             .map(|(shown, k)| match shown {
@@ -432,7 +433,7 @@ mod running {
                 Shown::Glide(_, s) => format!("G{s:.3}@{k:.2}"),
             })
             .collect();
-        format!("{at:.3} {step} {}", parts.join(" "))
+        format!("{at:.3} {step} {} a{:.1} d{:.1} p{:.1} f{:.1}", parts.join(" "), ms(took.acquire), ms(took.draw), ms(took.present), ms(whole))
     }
 
     fn looks(layers: &[(Shown, f32)]) -> Vec<(Look<'_>, f32)> {
@@ -652,9 +653,11 @@ mod running {
             tell(Event::Kept { path, still: first.clone() });
         }
         let mut reel = Reel::new(first);
+        let started = Instant::now();
         let result = P::frame(|| screen.show(&looks(&reel.shown)));
+        let whole = started.elapsed();
         let ok = result.is_ok();
-        let mut drew = if ok { vec![described(&reel.shown, "first")] } else { Vec::new() };
+        let mut drew = if ok { vec![described(&reel.shown, "first", screen.took, whole)] } else { Vec::new() };
         if let (true, Some(commit)) = (ok, commit.as_ref()) {
             commit();
         }
@@ -723,13 +726,14 @@ mod running {
                 }
             }
             let Some((layers, step)) = reel.next(Instant::now()) else { continue };
+            let started = Instant::now();
             if let Err(why) = P::frame(|| screen.show(&looks(&layers))) {
                 tell(Event::Broke { id, why });
                 reel.halt();
                 continue;
             }
             let now = Instant::now();
-            drew.push(described(&layers, step.word()));
+            drew.push(described(&layers, step.word(), screen.took, now.saturating_duration_since(started)));
             match step {
                 Step::Glided => {
                     let scale = screen.scale;
@@ -740,11 +744,12 @@ mod running {
                 }
                 Step::Settled => {
                     for _ in 0..FLUSH {
+                        let started = Instant::now();
                         if let Err(why) = P::frame(|| screen.show(&looks(&layers))) {
                             tell(Event::Broke { id, why });
                             break;
                         }
-                        drew.push(described(&layers, "flush"));
+                        drew.push(described(&layers, "flush", screen.took, started.elapsed()));
                     }
                     let _ = gpu.idle(COMPOSE_WAIT);
                     P::composed();

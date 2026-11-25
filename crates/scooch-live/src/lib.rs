@@ -2,7 +2,7 @@
 
 mod glide;
 
-pub use glide::{alpha_for, choose, half, heavy, levels, rgba, scaled_size, step, Glide, Look, Picture, Screen, Side, Still, OUTPUT, SCALES};
+pub use glide::{alpha_for, choose, half, heavy, levels, rgba, scaled_size, step, Glide, Look, Picture, Screen, Side, Still, Took, OUTPUT, SCALES};
 use std::num::NonZeroIsize;
 use std::sync::{Arc, Mutex};
 
