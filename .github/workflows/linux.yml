@@ -175,6 +175,8 @@ jobs:
 
       - name: Test
         if: ${{ !matrix.container }}
+        env:
+          SCOOCH_NEED_BUS: "1"
         run: cargo test --release -p scooch
 
       - name: Probe
