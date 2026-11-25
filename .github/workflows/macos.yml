@@ -30,9 +30,11 @@ jobs:
       - name: Build
         run: cargo build --release -p scooch --bins --examples
 
-      - name: Black frames
-        timeout-minutes: 30
-        run: ./target/release/examples/macprobe black-frames macprobe/black
+      - name: Slides
+        timeout-minutes: 45
+        env:
+          SCOOCH_PROBE_FOCUS: slides
+        run: ./target/release/examples/macprobe macprobe
 
       - name: Upload
         if: ${{ !cancelled() }}
@@ -45,6 +47,6 @@ jobs:
       - name: Summary
         if: ${{ !cancelled() }}
         run: |
-          if [ -f macprobe/black/report.md ]; then
-            cat macprobe/black/report.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -f macprobe/report.md ]; then
+            cat macprobe/report.md >> "$GITHUB_STEP_SUMMARY"
           fi
