@@ -368,11 +368,11 @@ enum Footing {
 
 #[cfg(any(target_os = "macos", test))]
 impl Footing {
-    fn of(verdict: Option<bool>, unglided: bool, unseen: &[Option<u32>], stalls: &[f64]) -> Footing {
+    fn of(verdict: Option<bool>, unglided: bool, unseen: &[Option<u32>], stalls: &[f64], tried: usize) -> Footing {
         match (verdict, unglided) {
             (Some(good), _) => Footing::Judged(good),
             (None, true) => Footing::NoneGlided,
-            (None, false) if unseen.is_empty() && !stalls.is_empty() => Footing::Stalled,
+            (None, false) if !stalls.is_empty() && (unseen.is_empty() || tried > TRIES) => Footing::Stalled,
             (None, false) => Footing::Sparse(unseen.iter().all(|frames| frames.is_some_and(|frames| frames >= 3))),
         }
     }
@@ -388,7 +388,39 @@ impl Footing {
 
 #[cfg(any(target_os = "macos", test))]
 fn never_came(stalls: &[f64]) -> String {
-    format!("the footing for the glide check never came, the helper's presents stopped for {stalls:?} ms in each of the {} tries that glided, one after another, while the probe captured the screen, so the frames between the old and the new picture were never judged", stalls.len())
+    format!("the footing for the glide check never came, the helper's presents stopped for {stalls:?} ms in each of the {} tries that stalled, with fewer than 3 frames presented between the old and the new picture in each, so no try was judged", stalls.len())
+}
+
+#[cfg(any(target_os = "macos", test))]
+const TRIES: usize = 3;
+
+#[cfg(any(target_os = "macos", test))]
+const STALLED_TRIES: usize = 6;
+
+#[cfg(any(target_os = "macos", test))]
+fn tries_allowed(tries: &[Try], stalls: usize) -> usize {
+    let glided = tries.iter().filter(|tried| **tried == Try::Glided).count();
+    if stalls > 0 && stalls == glided {
+        STALLED_TRIES
+    } else {
+        TRIES
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+const PLAIN_STALLS: usize = 4;
+
+#[cfg(any(target_os = "macos", test))]
+fn plain_stalls(paces: &[Pace], arm: bool) -> Result<String, String> {
+    let stalled = paces.iter().filter(|pace| pace.stalled).count();
+    let counted = format!("{stalled} of {} glides with no capture stalled", paces.len());
+    if !arm {
+        Ok(format!("{counted}, a count judged against nothing on Intel until the cause of the stalls there is known"))
+    } else if stalled > PLAIN_STALLS {
+        Err(format!("{counted}, more than the {PLAIN_STALLS} allowed on arm64"))
+    } else {
+        Ok(format!("{counted}, within the {PLAIN_STALLS} allowed on arm64"))
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -675,15 +707,45 @@ mod tests {
 
     #[test]
     fn stalled_tries_with_nothing_else_are_footing_that_never_came_and_fail() {
-        let stalled = super::Footing::of(None, false, &[], &[338.0, 240.0, 410.0]);
+        let stalled = super::Footing::of(None, false, &[], &[338.0, 240.0, 410.0], 3);
         assert_eq!(stalled, super::Footing::Stalled);
         assert!(!stalled.passes(), "three stalled tries in a row passed as a runner limit");
-        assert!(super::never_came(&[338.0, 240.0, 410.0]).starts_with("the footing for the glide check never came, the helper's presents stopped for [338.0, 240.0, 410.0] ms in each of the 3 tries"));
-        assert_eq!(super::Footing::of(None, false, &[Some(8)], &[338.0]), super::Footing::Sparse(true));
-        assert!(!super::Footing::of(None, false, &[Some(2)], &[]).passes());
-        assert!(super::Footing::of(None, true, &[], &[]).passes());
-        assert!(super::Footing::of(Some(true), false, &[], &[338.0]).passes());
-        assert!(!super::Footing::of(Some(false), false, &[], &[]).passes());
+        let said = super::never_came(&[338.0, 240.0, 410.0]);
+        assert_eq!(said, "the footing for the glide check never came, the helper's presents stopped for [338.0, 240.0, 410.0] ms in each of the 3 tries that stalled, with fewer than 3 frames presented between the old and the new picture in each, so no try was judged");
+        assert!(!said.contains("captur"), "the words blame the captures, which round 37 measured to stall as often with none running");
+        assert_eq!(super::Footing::of(None, false, &[Some(8)], &[338.0], 2), super::Footing::Sparse(true));
+        assert!(!super::Footing::of(None, false, &[Some(2)], &[], 3).passes());
+        assert!(super::Footing::of(None, true, &[], &[], 3).passes());
+        assert!(super::Footing::of(Some(true), false, &[], &[338.0], 2).passes());
+        assert!(!super::Footing::of(Some(false), false, &[], &[], 1).passes());
+    }
+
+    #[test]
+    fn tries_that_only_stalled_get_six_and_any_other_reason_keeps_three() {
+        use super::Try::{Glided, Skipped};
+        let hidden = || Skipped("hidden".into());
+        assert_eq!(super::tries_allowed(&[], 0), 3);
+        assert_eq!(super::tries_allowed(&[Glided], 1), 6);
+        assert_eq!(super::tries_allowed(&[Glided, Glided, Glided], 3), 6, "three stalls in a row ended the check, which a stall in one try of five makes about one Intel run in a hundred");
+        assert_eq!(super::tries_allowed(&[Glided, hidden(), Glided, Glided, Glided], 4), 6);
+        assert_eq!(super::tries_allowed(&[Glided, Glided, Glided], 2), 3, "a try with sparse captures is another reason, which keeps three");
+        assert_eq!(super::tries_allowed(&[hidden(), hidden()], 0), 3);
+        let six = [338.0, 240.0, 410.0, 220.0, 300.0, 260.0];
+        assert_eq!(super::Footing::of(None, false, &[], &six, 6), super::Footing::Stalled);
+        assert!(!super::Footing::of(None, false, &[], &six, 6).passes());
+        assert_eq!(super::Footing::of(None, false, &[Some(8)], &six[..3], 4), super::Footing::Stalled, "a pass after the third try needs a judged try");
+        assert!(super::Footing::of(Some(true), false, &[], &six[..5], 6).passes());
+        assert!(!super::Footing::of(Some(false), false, &[], &six[..5], 6).passes());
+    }
+
+    #[test]
+    fn plain_slides_on_arm64_fail_past_four_stalls_and_intel_counts_them_for_now() {
+        let pace = |stalled: bool| super::Pace { gap: if stalled { 300.0 } else { 40.0 }, moving: if stalled { 0 } else { 9 }, stalled, waited: None, split: None };
+        let paces = |stalls: usize| (0..40).map(|index| pace(index < stalls)).collect::<Vec<_>>();
+        assert_eq!(super::plain_stalls(&paces(4), true), Ok("4 of 40 glides with no capture stalled, within the 4 allowed on arm64".to_string()));
+        assert_eq!(super::plain_stalls(&paces(5), true), Err("5 of 40 glides with no capture stalled, more than the 4 allowed on arm64".to_string()));
+        assert_eq!(super::plain_stalls(&paces(0), true), Ok("0 of 40 glides with no capture stalled, within the 4 allowed on arm64".to_string()));
+        assert_eq!(super::plain_stalls(&paces(10), false), Ok("10 of 40 glides with no capture stalled, a count judged against nothing on Intel until the cause of the stalls there is known".to_string()));
     }
 
     #[test]
@@ -5193,6 +5255,10 @@ mod probe {
         p.line(format!("- with no capture: {}", crate::pace_summary(&found)));
         p.line(format!("  - each glide with no capture, its largest gap between presents and its frames between the two places {each:?}"));
         p.line(format!("- gaps with no capture: {}", crate::gap_summary(&gapped)));
+        match crate::plain_stalls(&found, cfg!(target_arch = "aarch64")) {
+            Ok(said) => p.line(format!("- stalls with no capture: {said}")),
+            Err(said) => p.fail(said),
+        }
         for fault in faults {
             p.fail(fault);
         }
@@ -5367,7 +5433,9 @@ mod probe {
         let mut during = String::new();
         let mut held = None;
         let mut tries = Vec::new();
-        for attempt in 1..=3 {
+        let mut attempt = 0;
+        while attempt < crate::tries_allowed(&tries, stalls.len()) {
+            attempt += 1;
             if attempt > 1 {
                 quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
             }
@@ -5421,8 +5489,9 @@ mod probe {
                 break;
             }
             if judged.recorded.stalled {
-                p.line(format!("  - attempt {attempt} has no footing, the helper's presents stopped for {:.0} ms during the glide and only {} frames between the two places reached the screen, while the probe's captures kept this runner's window server busy, so the drag is tried again", judged.recorded.gap, judged.recorded.moving));
                 stalls.push(judged.recorded.gap.round());
+                let next = if attempt < crate::tries_allowed(&tries, stalls.len()) { "so the drag is tried again" } else { "and no try is left" };
+                p.line(format!("  - attempt {attempt} has no footing, the helper's presents stopped for {:.0} ms during the glide and it presented only {} frames between the two places, {next}", judged.recorded.gap, judged.recorded.moving));
                 continue;
             }
             if judged.recorded.agreed >= 1 {
@@ -5434,7 +5503,7 @@ mod probe {
             unseen.push(judged.frames);
         }
         let unglided = crate::none_glided(&tries);
-        let footing = crate::Footing::of(verdict, unglided.is_some(), &unseen, &stalls);
+        let footing = crate::Footing::of(verdict, unglided.is_some(), &unseen, &stalls, attempt);
         match &footing {
             crate::Footing::Stalled => p.fail(crate::never_came(&stalls)),
             crate::Footing::Sparse(_) => {
