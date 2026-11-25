@@ -955,6 +955,10 @@ impl Gpu {
     }
 
     pub fn screen(&self, target: Target, width: u32, height: u32) -> Result<Screen, String> {
+        self.screen_with(target, width, height, LATENCY)
+    }
+
+    pub fn screen_with(&self, target: Target, width: u32, height: u32, latency: u32) -> Result<Screen, String> {
         self.healthy()?;
         self.pipes()?;
         self.fits(width, height)?;
@@ -973,10 +977,26 @@ impl Gpu {
             return Err(format!("the surface offers no {OUTPUT:?}"));
         }
         config.present_mode = wgpu::PresentMode::Fifo;
+        config.desired_maximum_frame_latency = latency;
         config.alpha_mode = alpha_for(&target, &capabilities.alpha_modes).unwrap_or(config.alpha_mode);
         self.configure(&surface, &config)?;
-        Ok(Screen { gpu: self.clone(), surface, width: config.width, height: config.height, scale: 1.0, took: Took::default() })
+        Ok(Screen { gpu: self.clone(), surface, width: config.width, height: config.height, scale: 1.0, took: Took::default(), latency, drawables: drawables(&target) })
     }
+}
+
+pub const LATENCY: u32 = 2;
+
+#[cfg(target_os = "macos")]
+fn drawables(target: &Target) -> Option<usize> {
+    match target {
+        Target::Layer(layer) if !layer.is_null() => Some(unsafe { &*(*layer as *const objc2_quartz_core::CAMetalLayer) }.maximumDrawableCount()),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn drawables(_target: &Target) -> Option<usize> {
+    None
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1010,6 +1030,8 @@ pub struct Screen {
     pub height: u32,
     pub scale: f32,
     pub took: Took,
+    pub latency: u32,
+    pub drawables: Option<usize>,
 }
 
 impl Screen {
