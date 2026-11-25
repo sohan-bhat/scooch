@@ -834,7 +834,7 @@ mod probe {
             "5 Move to new wallpaper" => 62_364,
             "5b Scenery" => 157_529,
             "5c Glide" => 292_101,
-            "5g Many slides" => 900_000,
+            "5g Many slides" => 1_200_000,
             "5d Cold drags" => 1_421_507,
             "5e Bare wakes" => 600_083,
             "5f Finder after the drop" => 60_000,
@@ -5290,10 +5290,16 @@ mod probe {
     const SLIDES: usize = 36;
 
     fn slides_check(p: &mut Probe) -> Result<()> {
-        let mut result = many_slides(p, "the layer as built", 0);
-        if result.is_ok() && std::env::var("SCOOCH_PROBE_FOCUS").is_ok_and(|focus| focus == "slides") {
-            let since = watch_log(&p.home.join("watch.log")).len();
-            result = restart_daemon_env(p, &[(scooch::live::SEE_THROUGH, "layer")]).and_then(|restarted| if restarted { many_slides(p, "a see through layer", since) } else { Ok(()) });
+        let focus = std::env::var("SCOOCH_PROBE_FOCUS").is_ok_and(|focus| focus == "slides");
+        let mut result = many_slides(p, "the layer as built", 0, (if focus { 50 } else { SLIDES }, false));
+        if focus {
+            let see = [(scooch::live::SEE_THROUGH, "layer")];
+            for (kind, env, stream) in [("a see through layer", &see[..], false), ("the layer as built while a display stream runs", &[][..], true)] {
+                let since = watch_log(&p.home.join("watch.log")).len();
+                if result.is_ok() && restart_daemon_env(p, env).unwrap_or(false) {
+                    result = many_slides(p, kind, since, (50, stream));
+                }
+            }
             let _ = restart_daemon_env(p, &[]);
         }
         put_motion_back(p);
@@ -5325,7 +5331,7 @@ mod probe {
             .collect()
     }
 
-    fn many_slides(p: &mut Probe, kind: &str, since: usize) -> Result<()> {
+    fn many_slides(p: &mut Probe, kind: &str, since: usize, (count, stream): (usize, bool)) -> Result<()> {
         let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
         accessory(marker);
         let screen = main_screen(p)?;
@@ -5352,11 +5358,11 @@ mod probe {
         let (mut streamed, mut displayed) = (0, 0);
         let mut faults = Vec::new();
         let mut skipped = Vec::new();
-        for index in 0..SLIDES {
+        for index in 0..count {
             quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
             let from = position(p, name).unwrap_or(subject);
             let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
-            let frames = Frames::start(display, &screen);
+            let frames = if stream { Frames::start(display, &screen) } else { None };
             let dragged = watch_drag(p, display, &screen, from, to, &[]);
             let (shown, idle) = frames.map(Frames::stop).unwrap_or_default();
             let Some(dragged) = dragged else { continue };
@@ -5404,12 +5410,12 @@ mod probe {
         }
         let odd = faults.iter().filter(|fault| fault.contains("neither picture")).count();
         p.line(format!("- with {kind}, the display stream sent {streamed} frames over the slides, {displayed} of them black"));
-        p.line(format!("- with {kind}, {SLIDES} slides dragged, {watched} watched, {glided} glided, {judged} judged by dense captures and {by_record} by the helper's record checked against the captures, {captures} captures in all, {black} black captures, {odd} captures no frame or picture explains, skips {skipped:?}"));
+        p.line(format!("- with {kind}, {count} slides dragged, {watched} watched, {glided} glided, {judged} judged by dense captures and {by_record} by the helper's record checked against the captures, {captures} captures in all, {black} black captures, {odd} captures no frame or picture explains, skips {skipped:?}"));
         for fault in faults {
             p.fail(fault);
         }
-        if glided * 2 < SLIDES {
-            p.fail(format!("only {glided} of {SLIDES} slides glided, so the slides were not watched on footing"));
+        if glided * 2 < count {
+            p.fail(format!("only {glided} of {count} slides glided, so the slides were not watched on footing"));
         }
         Ok(())
     }
