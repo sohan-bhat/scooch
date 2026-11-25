@@ -369,10 +369,17 @@ wait_for 15 sh -c '! pgrep -f "MacOS/scooch watch" >/dev/null' >/dev/null
 sleep 3
 line "- booted the daemon out, the icon process $icon $(kill -0 "$icon" 2>/dev/null && echo still runs || echo ended)"
 expect "the icon does not die with the daemon" kill -0 "$icon"
+from=$(wc -l <"$data/watch.log" 2>/dev/null || echo 0)
 launchctl bootstrap "gui/$(id -u)" "$plist" >/dev/null 2>&1
-wait_for 15 sh -c 'pgrep -f "MacOS/scooch watch" >/dev/null' >/dev/null
-sleep 8
-line "- the login item started the daemon again, app processes $(icon_count), the same icon $([ "$(icon_pid)" = "$icon" ] && echo yes || echo no)"
+since_start() { if [ "$(wc -l <"$data/watch.log" 2>/dev/null || echo 0)" -lt "$from" ]; then cat "$data/watch.log"; else sed -n "$((from + 1)),\$p" "$data/watch.log"; fi 2>/dev/null; }
+icon_said() { since_start | grep -E -m1 ' icon (not )?started '; }
+one_icon() { [ "$(icon_count)" = 1 ]; }
+heard=$(wait_for 60 icon_said >/dev/null && echo yes || echo no)
+sleep 3
+wait_for 10 one_icon >/dev/null
+line "- the login item started the daemon again, its line $([ "$heard" = yes ] && echo "'$(icon_said)'" || echo 'on the icon did not come within 60 s'), app processes $(icon_count), the same icon $([ "$(icon_pid)" = "$icon" ] && echo yes || echo no)"
+line "- the daemon's lines since that start $(since_start | sed '/^$/d' | paste -sd '|' - | sed 's/|/ | /g')"
+expect "the restarted daemon wrote its icon line within 60 s, which the restart check stands on" [ "$heard" = yes ]
 expect "a daemon that starts again while the icon runs leaves one app process" [ "$(icon_count)" = 1 ]
 stand_in "the login, through the login item"
 wait_for 40 rendered >/dev/null
@@ -425,3 +432,4 @@ wait "$holder" 2>/dev/null
 wait_for 20 icon_shown >/dev/null
 line "- with the lock free again a background start made the icon $(status where)"
 expect "with the lock free a background start makes the icon" icon_shown
+cp "$data/watch.log" "$out/daemon-watch.log" 2>/dev/null
