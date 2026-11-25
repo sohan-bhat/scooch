@@ -142,14 +142,26 @@ line "- older command install at ~/.local/bin/scooch, as install.sh lays it out,
 expect "the older command install turned Scooch on and drew" rendered
 
 clean scooch-app >"$out/app.log" 2>&1 &
-if took=$(wait_for 40 has_window); then line "- window showed after $took s"; else line "- no window after 40 s, $(app_snapshot)"; fi
+window_made() { grep -q 'scooch-app window made in' "$out/app.log" 2>/dev/null; }
+if took=$(wait_for 120 has_window); then
+  wait_for 5 window_made >/dev/null
+  line "- window showed after $took s, the app says $(grep -o 'window made in [0-9]* ms' "$out/app.log" | head -1)"
+else
+  line "- no window after 120 s, the app says $(tr '\n' ' ' <"$out/app.log"), $(app_snapshot)"
+fi
+expect "the app said it made its window, which the window check stands on" window_made
+expect "the app opened its window within 120 s" has_window
 clean scooch-app >"$out/app-second.log" 2>&1 &
 second=$!
-sleep 6
+second_said() { grep -q 'scooch-app ' "$out/app-second.log" 2>/dev/null; }
+second_gone() { ! ps -o stat= -p "$second" 2>/dev/null | grep -qv Z; }
+ended=-1
+if said=$(wait_for 60 second_said); then ended=$(wait_for 30 second_gone) || ended=-1; else said=-1; fi
 left=$(pgrep -xc scooch-app)
-line "- a second launch left $left window process, the second one $(kill -0 "$second" 2>/dev/null && echo still runs || echo ended), it says $(tr '\n' ' ' <"$out/app-second.log")"
-[ "$left" = 1 ] || line "- after the second launch, $(app_snapshot)"
-expect "a second launch leaves one window process" [ "$left" = 1 ]
+line "- a second launch wrote its first line after $said s and was gone $ended s after that line, leaving $left window process, it says $(tr '\n' ' ' <"$out/app-second.log")"
+[ "$said" -ge 0 ] && [ "$ended" -ge 0 ] && [ "$left" = 1 ] || line "- after the second launch, $(app_snapshot)"
+expect "the second launch wrote its first line within 60 s, which the second launch check stands on" [ "$said" -ge 0 ]
+expect "a second launch leaves one window process" eval '[ "$ended" -ge 0 ] && [ "$left" = 1 ]'
 if took=$(wait_for 40 state_on); then line "- Scooch is on after $took s"; else line "- Scooch is not on within 40 s"; fi
 if took=$(wait_for 40 rendered); then line "- Scooch drew the desktop after $took s"; else line "- no render within 40 s"; fi
 expect "first open turned Scooch on and drew" rendered
