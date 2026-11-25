@@ -170,6 +170,7 @@ impl Dispatch<ZxdgOutputV1, usize> for State {
 wayland_client::delegate_noop!(State: ignore ZxdgOutputManagerV1);
 
 fn open() -> Result<(EventQueue<State>, State)> {
+    let _open = super::pending::open("the Wayland roundtrips for the screens".to_string());
     let conn = Connection::connect_to_env().map_err(|_| anyhow!("Scooch could not reach the Wayland display, so check that WAYLAND_DISPLAY is set."))?;
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();

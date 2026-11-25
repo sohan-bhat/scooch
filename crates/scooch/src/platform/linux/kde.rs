@@ -26,6 +26,7 @@ pub fn groups(name: &str) -> Vec<keyfile::Group> {
 }
 
 pub fn evaluate(script: &str) -> Result<String> {
+    let _open = super::pending::open(format!("the bus call org.kde.PlasmaShell.evaluateScript to {SHELL_NAME}"));
     let connection = super::bus::session()?;
     let reply = connection
         .call_method(Some(SHELL_NAME), "/PlasmaShell", Some("org.kde.PlasmaShell"), "evaluateScript", &(script,))

@@ -30,7 +30,7 @@ pub mod watch;
 pub mod xfce;
 
 #[cfg(target_os = "linux")]
-pub use system::{bus, decode, desktop, desktop_folder, set_recently, shell, tool, Linux, Shell, Signal, Watches, FileWatch};
+pub use system::{bus, decode, desktop, desktop_folder, pending, set_recently, shell, tool, Linux, Shell, Signal, Watches, FileWatch};
 
 #[cfg(target_os = "linux")]
 mod system {
@@ -100,6 +100,37 @@ mod system {
         fn tools(&self) -> &'static [&'static str];
     }
 
+    pub mod pending {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Mutex, MutexGuard};
+        use std::time::{Duration, Instant};
+
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        static OPEN: Mutex<Vec<(u64, String, Instant)>> = Mutex::new(Vec::new());
+
+        pub struct Open(u64);
+
+        fn list() -> MutexGuard<'static, Vec<(u64, String, Instant)>> {
+            OPEN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        pub fn open(what: String) -> Open {
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            list().push((id, what, Instant::now()));
+            Open(id)
+        }
+
+        impl Drop for Open {
+            fn drop(&mut self) {
+                list().retain(|(id, _, _)| *id != self.0);
+            }
+        }
+
+        pub fn now() -> Vec<(String, Duration)> {
+            list().iter().map(|(_, what, since)| (what.clone(), since.elapsed())).collect()
+        }
+    }
+
     pub mod tool {
         use anyhow::{anyhow, Result};
         use std::ffi::{OsStr, OsString};
@@ -112,6 +143,8 @@ mod system {
         }
 
         pub fn run_os(program: &str, arguments: &[OsString]) -> Result<Output> {
+            let named: Vec<String> = arguments.iter().map(|argument| argument.to_string_lossy().into_owned()).collect();
+            let _open = super::pending::open(format!("the program {program} {}", named.join(" ").chars().take(160).collect::<String>()));
             super::super::children::clean(&mut Command::new(program))
                 .args(arguments)
                 .env("LC_ALL", "C.UTF-8")
@@ -162,6 +195,7 @@ mod system {
             B: Serialize + DynamicType,
             R: DeserializeOwned + Type,
         {
+            let _open = super::pending::open(format!("the bus call {interface}.{method} to {destination}"));
             let reply = match session()?.call_method(Some(destination), path, Some(interface), method, body) {
                 Ok(reply) => reply,
                 Err(zbus::Error::InputOutput(_)) => {
