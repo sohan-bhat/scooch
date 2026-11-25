@@ -292,6 +292,13 @@ left=$(pgrep -f 'MacOS/scooch-app' | wc -l | tr -d ' ')
 line "- a second launch with open -n left $left window process, it says $(tr '\n' ' ' <"$out/app-second.log" 2>/dev/null)"
 [ "$left" = 1 ] || line "- after the second launch, $(app_snapshot)"
 expect "a second launch leaves one window process" [ "$left" = 1 ]
+if [ "${SCOOCH_EXPERIMENT:-}" = launch ]; then
+  line
+  line "#### Experiment, a second launch with open -n, many times"
+  python3 "$(dirname "$0")/launches-macos.py" "$app" "$out" "$data" 50 | while IFS= read -r row; do line "$row"; done
+  cp "$data/watch.log" "$out/watch-data.log" 2>/dev/null
+  finish
+fi
 if took=$(wait_for 30 state_on); then line "- first open turned Scooch on after $took s"; else line "- first open did not turn Scooch on within 30 s"; fi
 expect "first open turned Scooch on" state_on
 expect "the login item points at the helper's program" login_at "$daemon"

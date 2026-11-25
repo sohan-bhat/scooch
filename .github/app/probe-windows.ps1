@@ -385,7 +385,10 @@ Line "- animation effects before $([Desk]::Animations())"
 [Desk]::SetAnimations($true)
 Line "- animation effects after the probe turned them on $([Desk]::Animations())"
 $app = Get-ChildItem $folder -Filter 'scooch-app.exe' | Select-Object -First 1
-Start-Process -FilePath $app.FullName -RedirectStandardError (Join-Path $Out 'app.log')
+$experiment = $env:SCOOCH_EXPERIMENT -eq 'launch'
+if ($experiment) { . (Join-Path $PSScriptRoot 'launches-windows.ps1') }
+$firstStart = Start-Process -FilePath $app.FullName -RedirectStandardError (Join-Path $Out 'app.log') -PassThru
+if ($experiment) { First-Launch $firstStart }
 $shown = Wait-For 40 { [bool](Find-Window) }
 Line "- window showed after $shown s"
 if ($shown -lt 0) { Line "- with no window found, $(App-Snapshot)" }
@@ -397,6 +400,11 @@ $left = @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count
 Line "- a second launch left $left window process, it says $((Read-Shared $secondLog) -replace "`r?`n", ' ')"
 if ($left -ne 1) { Line "- after the second launch, $(App-Snapshot)" }
 Expect "a second launch leaves one window process" ($left -eq 1)
+if ($experiment) {
+    Run-Launches
+    Save-Launch-Daemon-Log
+    Finish
+}
 Start-Sleep -Seconds 3
 $on = Wait-For 40 { State-On }
 Line "- first open turned Scooch on after $on s"
