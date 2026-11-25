@@ -22,6 +22,7 @@ pub struct Host {
     app: bool,
     reveal: Reveal,
     revealed: Vec<(&'static str, u64)>,
+    through: Option<String>,
 }
 
 impl Platform for Host {
@@ -48,6 +49,9 @@ impl Platform for Host {
         objc2::rc::autoreleasepool(|_| {
             if self.reveal == Reveal::Transaction {
                 layer.transact(true);
+            }
+            if self.through.as_deref() == Some("alpha") {
+                layer.faint();
             }
             layer.order()
         });
@@ -89,6 +93,9 @@ impl Platform for Host {
             Reveal::Transaction => {
                 layer.transact(false);
                 layer.reveal();
+                if self.through.as_deref() == Some("layer") {
+                    layer.see_through();
+                }
                 self.revealed = vec![("unhide", started.elapsed().as_millis() as u64)];
             }
             Reveal::Spin => {
@@ -162,5 +169,5 @@ pub fn serve() -> ExitCode {
     let Some(marker) = MainThreadMarker::new() else {
         return helper::refuse("the helper has to run on the main thread");
     };
-    helper::serve(Host { marker, busy: None, app: false, reveal: Reveal::chosen(), revealed: Vec::new() })
+    helper::serve(Host { marker, busy: None, app: false, reveal: Reveal::chosen(), revealed: Vec::new(), through: std::env::var(crate::live::SEE_THROUGH).ok() })
 }

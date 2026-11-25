@@ -373,6 +373,18 @@ impl Layer {
         CATransaction::flush();
     }
 
+    pub fn see_through(&self) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.metal.setOpaque(false);
+        CATransaction::commit();
+        CATransaction::flush();
+    }
+
+    pub fn faint(&self) {
+        self.window.setAlphaValue(0.996);
+    }
+
     pub fn hide(&self) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
