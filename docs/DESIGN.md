@@ -270,6 +270,8 @@ On macOS the layer is a borderless window at the desktop window level, above the
 
 **The raw still.** One per screen, `<output>.still` beside the tables, the picture on screen as raw RGBA after a 16 byte header, `SCST`, version 1, width and height. A 2880 by 1800 screen makes a file of 20,736,016 bytes. The daemon writes it on its own thread after each set, from the picture it drew when the output is lossless and otherwise from the output decoded the way the system decodes it, so it is the picture on screen. The helper reads it in about 5 ms where decoding the JPEG took 170 to 280 ms on an Intel Mac. When it is missing the helper decodes the output with the system's decoder, since the image crate's decode was off by up to 3 of 255 against the system's on GitHub's arm64 Mac. The helper keeps the last two stills it drew, so a move from the picture it just settled on reads nothing.
 
+**The protocol version.** The daemon and the helper speak one JSON line a message, and the daemon's first line and the helper's first answer carry the version, `VERSION` in `crates/scooch/src/live/mod.rs`. It is 6 since the helper sends its record of what it presented, `drew`. Any command or reply that is added or changed raises it, so a daemon and a helper of different builds part at the hello and neither reads a line it does not know as a failure. A test lists what each version speaks and fails when the list changes and the version does not.
+
 **Milestones.** Each is signalled by the thread that reaches it:
 
 | Milestone | Signalled by | Reply |
