@@ -171,10 +171,11 @@ fn median(values: &[f64]) -> Option<f64> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-const UNEXPLAINED_FIT: f32 = 30.0;
+#[path = "judge/slides.rs"]
+mod slides;
 
 #[cfg(any(target_os = "macos", test))]
-const BLACK_SHARE: f32 = 0.9;
+use slides::slide_faults;
 
 #[cfg(any(target_os = "macos", test))]
 fn glide_progress(window: &[(f32, f32)]) -> bool {
@@ -187,6 +188,7 @@ struct Drawn {
     at: f64,
     step: String,
     s: Option<f32>,
+    took: Option<[f64; 4]>,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -199,8 +201,11 @@ fn drew_frames(log: &[String]) -> Vec<Drawn> {
             let mut words = frame.split_whitespace();
             let at = words.next()?.parse::<f64>().ok()?;
             let step = words.next()?.to_string();
-            let s = words.filter_map(|layer| layer.strip_prefix('G')).filter_map(|layer| layer.split('@').next()?.parse::<f32>().ok()).next_back();
-            Some(Drawn { at, step, s })
+            let rest: Vec<&str> = words.collect();
+            let s = rest.iter().filter_map(|layer| layer.strip_prefix('G')).filter_map(|layer| layer.split('@').next()?.parse::<f32>().ok()).next_back();
+            let part = |key: char| rest.iter().find_map(|word| word.strip_prefix(key).and_then(|value| value.parse::<f64>().ok()));
+            let took = part('a').zip(part('d')).zip(part('p')).zip(part('f')).map(|(((a, d), p), f)| [a, d, p, f]);
+            Some(Drawn { at, step, s, took })
         })
         .collect()
 }
@@ -226,6 +231,104 @@ struct Recorded {
 }
 
 #[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq)]
+struct Pace {
+    gap: f64,
+    moving: usize,
+    stalled: bool,
+    waited: Option<[f64; 4]>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn pace_of(frames: &[Drawn]) -> Pace {
+    let moves: Vec<&Drawn> = frames.iter().filter(|frame| matches!(frame.step.as_str(), "move" | "glided") && frame.s.is_some()).collect();
+    let moving = moves.iter().filter(|frame| frame.s.is_some_and(|s| s > 0.04 && s < 0.96)).count();
+    let widest = moves.windows(2).max_by(|one, two| (one[1].at - one[0].at).total_cmp(&(two[1].at - two[0].at)));
+    let gap = widest.map_or(0.0, |pair| (pair[1].at - pair[0].at) * 1000.0);
+    let waited = widest.and_then(|pair| pair[1].took).map(|[acquire, draw, present, frame]| [acquire, draw, present, (gap - frame).max(0.0)]);
+    Pace { gap, moving, stalled: !moves.is_empty() && moving < 3 && gap > STALL_MS, waited }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn paces(log: &[String]) -> Vec<Pace> {
+    log.iter()
+        .filter(|line| line.contains(" glide drew "))
+        .map(|line| drew_frames(std::slice::from_ref(line)))
+        .filter(|frames| frames.iter().any(|frame| matches!(frame.step.as_str(), "move" | "glided") && frame.s.is_some()))
+        .map(|frames| pace_of(&frames))
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn pace_summary(paces: &[Pace]) -> String {
+    let mut gaps: Vec<f64> = paces.iter().map(|pace| pace.gap).collect();
+    gaps.sort_by(f64::total_cmp);
+    let at = |share: f64| gaps.get(((gaps.len().saturating_sub(1)) as f64 * share).round() as usize).copied().unwrap_or(0.0);
+    let stalled: Vec<&Pace> = paces.iter().filter(|pace| pace.stalled).collect();
+    let few = paces.iter().filter(|pace| pace.moving < 3).count();
+    let over = paces.iter().filter(|pace| pace.gap > STALL_MS).count();
+    let share = |count: usize| if paces.is_empty() { 0.0 } else { count as f64 * 100.0 / paces.len() as f64 };
+    let mut moving: Vec<usize> = paces.iter().map(|pace| pace.moving).collect();
+    moving.sort_unstable();
+    let waits: Vec<String> = stalled.iter().map(|pace| pace.waited.map_or("none recorded".to_string(), |[acquire, draw, present, outside]| format!("{:.0} ms gap, drawable {acquire:.0}, draw {draw:.0}, present {present:.0}, outside the frame call {outside:.0}", pace.gap))).collect();
+    format!(
+        "{} glides, {} stalled, {:.0} percent, with fewer than 3 frames between the two places {few}, with a gap over {STALL_MS} ms between presents {over}, {:.0} percent, largest gap between presents median {:.0} ms, 90th {:.0} ms, most {:.0} ms, frames between the two places median {}, fewest {}, each stall's largest gap split into waiting for the drawable, drawing, presenting and the time outside the frame call {waits:?}",
+        paces.len(),
+        stalled.len(),
+        share(stalled.len()),
+        share(over),
+        at(0.5),
+        at(0.9),
+        gaps.last().copied().unwrap_or(0.0),
+        moving.get(moving.len() / 2).copied().unwrap_or(0),
+        moving.first().copied().unwrap_or(0)
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn slide_skip(slide: usize, tried: &Try) -> Option<Result<String, String>> {
+    match tried {
+        Try::Glided => None,
+        Try::Skipped(reason) => Some(Ok(format!("{slide}: {reason}"))),
+        Try::Fault(reason) => Some(Err(format!("slide {slide} did not glide with the helper parked, the daemon skipped it as {reason}, which it does not count as normal"))),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq)]
+enum Footing {
+    Judged(bool),
+    NoneGlided,
+    Stalled,
+    Sparse(bool),
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Footing {
+    fn of(verdict: Option<bool>, unglided: bool, unseen: &[Option<u32>], stalls: &[f64]) -> Footing {
+        match (verdict, unglided) {
+            (Some(good), _) => Footing::Judged(good),
+            (None, true) => Footing::NoneGlided,
+            (None, false) if unseen.is_empty() && !stalls.is_empty() => Footing::Stalled,
+            (None, false) => Footing::Sparse(unseen.iter().all(|frames| frames.is_some_and(|frames| frames >= 3))),
+        }
+    }
+
+    fn passes(&self) -> bool {
+        match self {
+            Footing::Judged(good) | Footing::Sparse(good) => *good,
+            Footing::NoneGlided => true,
+            Footing::Stalled => false,
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn never_came(stalls: &[f64]) -> String {
+    format!("the footing for the glide check never came, the helper's presents stopped for {stalls:?} ms in each of the {} tries that glided, one after another, while the probe captured the screen, so the frames between the old and the new picture were never judged", stalls.len())
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn judge_record(frames: &[Drawn], captures: &[(f64, f64, f32)], dropped: f64) -> Recorded {
     let moves: Vec<&Drawn> = frames.iter().filter(|frame| matches!(frame.step.as_str(), "move" | "glided") && frame.s.is_some()).collect();
     let values: Vec<f32> = moves.iter().filter_map(|frame| frame.s).collect();
@@ -245,20 +348,6 @@ fn judge_record(frames: &[Drawn], captures: &[(f64, f64, f32)], dropped: f64) ->
         }
     }
     Recorded { steady, moving, gap, stalled, agreed, disagreed }
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn slide_faults(captures: &[(f64, Option<f32>, f32)]) -> Vec<String> {
-    captures
-        .iter()
-        .filter_map(|(at, gap, dark)| {
-            if *dark >= BLACK_SHARE {
-                Some(format!("a capture during the slide showed a black desktop at {at:.0} ms after the drop"))
-            } else {
-                gap.filter(|gap| *gap > UNEXPLAINED_FIT).map(|gap| format!("a capture during the slide showed neither picture nor a frame between them at {at:.0} ms after the drop, {gap:.1} from the nearest"))
-            }
-        })
-        .collect()
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -488,7 +577,7 @@ mod tests {
         ];
         let frames = super::drew_frames(&log);
         assert_eq!(frames.len(), 10);
-        assert_eq!(frames[3], super::Drawn { at: 1795551562.5, step: "move".into(), s: Some(0.3) });
+        assert_eq!(frames[3], super::Drawn { at: 1795551562.5, step: "move".into(), s: Some(0.3), took: None });
         assert_eq!(frames[7].s, Some(1.0));
         let dropped = 1795551562.0;
         let agree = super::judge_record(&frames, &[(1795551562.45, 1795551562.55, 0.28), (1795551562.62, 1795551562.71, 0.80)], dropped);
@@ -510,6 +599,53 @@ mod tests {
         let cut = super::drew_frames(&["1 glide drew 3 10.0 move G0.000@0.30, 10.02 move G0.500@1.00, 10.04 glided G1.000@1.00".to_string()]);
         let cut = super::judge_record(&cut, &[], 9.0);
         assert!(!cut.stalled && cut.moving == 1, "a glide that leaps with no stall is not footing {cut:?}");
+    }
+
+    #[test]
+    fn a_fault_with_the_helper_parked_fails_the_slide_in_its_own_words() {
+        let cold = super::glide_try(&log(&["1 glide skipped, helper cold, the helper was not ready"]), true);
+        assert_eq!(super::slide_skip(7, &cold), Some(Err("slide 7 did not glide with the helper parked, the daemon skipped it as helper cold, which it does not count as normal".to_string())));
+        assert_eq!(super::slide_skip(12, &Try::Fault("strikes".into())), Some(Err("slide 12 did not glide with the helper parked, the daemon skipped it as strikes, which it does not count as normal".to_string())));
+        assert_eq!(super::slide_skip(3, &Try::Skipped("hidden".into())), Some(Ok("3: hidden".to_string())));
+        assert_eq!(super::slide_skip(4, &Try::Glided), None);
+    }
+
+    #[test]
+    fn stalled_tries_with_nothing_else_are_footing_that_never_came_and_fail() {
+        let stalled = super::Footing::of(None, false, &[], &[338.0, 240.0, 410.0]);
+        assert_eq!(stalled, super::Footing::Stalled);
+        assert!(!stalled.passes(), "three stalled tries in a row passed as a runner limit");
+        assert!(super::never_came(&[338.0, 240.0, 410.0]).starts_with("the footing for the glide check never came, the helper's presents stopped for [338.0, 240.0, 410.0] ms in each of the 3 tries"));
+        assert_eq!(super::Footing::of(None, false, &[Some(8)], &[338.0]), super::Footing::Sparse(true));
+        assert!(!super::Footing::of(None, false, &[Some(2)], &[]).passes());
+        assert!(super::Footing::of(None, true, &[], &[]).passes());
+        assert!(super::Footing::of(Some(true), false, &[], &[338.0]).passes());
+        assert!(!super::Footing::of(Some(false), false, &[], &[]).passes());
+    }
+
+    #[test]
+    fn the_record_gives_each_glide_its_largest_gap_and_where_the_time_went() {
+        let log = vec![
+            "1 glide drew 4 10.000 first S@1.00 a0.4 d0.2 p0.3 f1.0, 10.100 move S@1.00 G0.000@0.30 a0.5 d0.2 p0.3 f1.1, 10.130 move G0.200@1.00 a8.0 d0.3 p0.4 f9.0, 10.160 move G0.500@1.00 a8.1 d0.3 p0.4 f9.1, 10.190 move G0.800@1.00 a8.0 d0.3 p0.4 f9.0, 10.230 glided G1.000@1.00 a9.0 d0.3 p0.4 f10.0, 10.400 settled S@1.00 a1.0 d0.2 p0.2 f1.5".to_string(),
+            "2 glide settled after 300 ms".to_string(),
+            "3 glide drew 5 20.000 move G0.000@0.30 a1.0 d0.2 p0.3 f1.6, 20.020 move G0.010@1.00 a1.0 d0.2 p0.3 f1.6, 20.360 move G0.990@1.00 a300.0 d0.3 p0.4 f301.0, 20.400 glided G1.000@1.00 a9.0 d0.3 p0.4 f10.0".to_string(),
+            "4 glide drew 6 30.000 first S@1.00".to_string(),
+            "5 glide drew 7 40.000 glided G1.000@1.00 a1.0 d0.2 p0.3 f1.6".to_string(),
+        ];
+        let found = super::paces(&log);
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert_eq!((found[2].gap, found[2].moving, found[2].stalled), (0.0, 0, false));
+        let found = &found[..2];
+        assert_eq!((found[0].gap.round(), found[0].moving, found[0].stalled), (40.0, 3, false));
+        assert_eq!((found[1].gap.round(), found[1].moving, found[1].stalled), (340.0, 0, true));
+        let [acquire, draw, present, outside] = found[1].waited.expect("the stall's split");
+        assert_eq!((acquire, draw, present, outside.round()), (300.0, 0.3, 0.4, 39.0));
+        let said = super::pace_summary(found);
+        assert!(said.starts_with("2 glides, 1 stalled, 50 percent, with fewer than 3 frames between the two places 1, with a gap over 100 ms between presents 1, 50 percent"), "{said}");
+        assert!(said.contains("[\"340 ms gap, drawable 300, draw 0, present 0, outside the frame call 39\"]"), "{said}");
+        let old = super::drew_frames(&["1 glide drew 3 10.0 move G0.200@1.00, 10.1 move G0.500@1.00".to_string()]);
+        assert_eq!(old[0].took, None);
+        assert_eq!(super::pace_of(&old).waited, None);
     }
 
     #[test]
@@ -830,6 +966,7 @@ mod probe {
             "5b Scenery" => 157_529,
             "5c Glide" => 292_101,
             "5g Many slides" => 400_000,
+            "5h Slides with no capture" => 250_000,
             "5d Cold drags" => 1_421_507,
             "5e Bare wakes" => 600_083,
             "5f Finder after the drop" => 60_000,
@@ -1052,6 +1189,7 @@ mod probe {
         probe.section("5b Scenery", scenery_check);
         probe.section("5c Glide", glide_check);
         probe.section("5g Many slides", slides_check);
+        probe.section("5h Slides with no capture", plain_slides_check);
         probe.section("5d Drags after a start", cold_drags_check);
         probe.section("5e Quiet minutes and a move after them", rest_check);
         probe.section("5f Finder after the drop", finder_after_drop);
@@ -3823,7 +3961,7 @@ mod probe {
             let at = epoch();
             let Some(shot) = grab(display) else { continue };
             let took = epoch() - at;
-            if moment.is_none() && quick_dark(&shot) >= crate::BLACK_SHARE {
+            if moment.is_none() && quick_dark(&shot) >= crate::slides::BLACK_SHARE {
                 let windows = below_desktop();
                 let paper = picture_window(screen).and_then(|window| grab_window(window.number)).map(|shot| quick_dark(&shot));
                 let ours: Vec<Option<f32>> = layer::listing().into_iter().filter(|window| window.owner == "scooch").map(|window| grab_window(window.number).map(|shot| quick_dark(&shot))).collect();
@@ -3943,7 +4081,7 @@ mod probe {
         let steady = crate::glide_progress(&window);
         let mut said = Vec::new();
         let drawn = crate::drew_frames(&dragged.log);
-        let followed: Vec<(f64, f64, f32)> = inside.iter().filter_map(|index| fitted[*index].filter(|(_, gap)| *gap <= crate::UNEXPLAINED_FIT).map(|(s, _)| (dragged.seen[*index].at, dragged.seen[*index].at + dragged.seen[*index].took, s))).collect();
+        let followed: Vec<(f64, f64, f32)> = inside.iter().filter_map(|index| fitted[*index].filter(|(_, gap)| *gap <= crate::slides::UNEXPLAINED_FIT).map(|(s, _)| (dragged.seen[*index].at, dragged.seen[*index].at + dragged.seen[*index].took, s))).collect();
         let recorded = crate::judge_record(&drawn, &followed, dragged.dropped);
         let dark = |seen: &Seen| {
             let raw = seen.half.as_raw();
@@ -4896,12 +5034,80 @@ mod probe {
         result
     }
 
-    const SLIDES: usize = 36;
+    const SLIDES: usize = 40;
 
     fn slides_check(p: &mut Probe) -> Result<()> {
         let result = many_slides(p, SLIDES);
         put_motion_back(p);
         result
+    }
+
+    fn plain_slides_check(p: &mut Probe) -> Result<()> {
+        let result = plain_slides(p, SLIDES);
+        put_motion_back(p);
+        result
+    }
+
+    fn plain_slides(p: &mut Probe, count: usize) -> Result<()> {
+        let screen = main_screen(p)?;
+        let name = PROBES[0].0;
+        if dismiss_prompt(p).is_none() {
+            p.line("- the slides need Apple Events to Finder, which the open consent window blocks, so they were skipped".to_string());
+            return Ok(());
+        }
+        if scooch_pid(p).is_none() {
+            p.fail("no daemon runs for the slides with no capture");
+            return Ok(());
+        }
+        set_motion(p, false);
+        poke(p);
+        quiet_log(p, Duration::from_millis(1500), Duration::from_secs(15));
+        if wait_parked(p, 0, Duration::from_secs(60)).is_none() {
+            p.fail("the helper never parked within 60 s, so no slide with no capture was made, which is the footing failing and not a pass");
+            return Ok(());
+        }
+        let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
+        let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
+        let (mut glided, mut found) = (0, Vec::new());
+        let (mut skipped, mut faults, mut each) = (Vec::new(), Vec::new(), Vec::new());
+        for index in 0..count {
+            quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
+            let from = position(p, name).unwrap_or(subject);
+            let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
+            let lines = daemon_log(p).lines().count();
+            let home = p.home.clone();
+            drag(from, to);
+            let ended = wait_until(Duration::from_secs(8), || new_lines(&fs::read_to_string(home.join("watch.log")).unwrap_or_default(), lines).iter().any(|line| line.contains(" tick ") && !line.contains("Unchanged")));
+            let log: Vec<String> = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).collect();
+            match crate::slide_skip(index + 1, &crate::glide_try(&log, true)) {
+                None => {}
+                Some(Ok(skip)) => {
+                    skipped.push(skip);
+                    continue;
+                }
+                Some(Err(fault)) => {
+                    faults.push(fault);
+                    continue;
+                }
+            }
+            glided += 1;
+            let paced = crate::paces(&log);
+            each.push(paced.iter().map(|pace| format!("{}: {:.0} ms, {} between", index + 1, pace.gap, pace.moving)).collect::<Vec<_>>().join(", "));
+            if paced.is_empty() || ended.is_none() {
+                p.line(format!("  - slide {}: glided with no record of what the helper presented or no tick within 8 s, the tick seen {}", index + 1, ended.is_some()));
+            }
+            found.extend(paced);
+        }
+        p.line(format!("- {count} slides dragged with no capture running, only the drag and the daemon's log read, {glided} glided, skips {skipped:?}"));
+        p.line(format!("- with no capture: {}", crate::pace_summary(&found)));
+        p.line(format!("  - each glide with no capture, its largest gap between presents and its frames between the two places {each:?}"));
+        for fault in faults {
+            p.fail(fault);
+        }
+        if glided * 2 < count {
+            p.fail(format!("only {glided} of {count} slides with no capture glided, so the pace was not measured on footing"));
+        }
+        Ok(())
     }
 
     fn drew_near(log: &[String], at: f64, reach: f64) -> Vec<String> {
@@ -4928,6 +5134,7 @@ mod probe {
         }
         set_motion(p, false);
         poke(p);
+        quiet_log(p, Duration::from_millis(1500), Duration::from_secs(15));
         let parked = wait_parked(p, 0, Duration::from_secs(60));
         if parked.is_none() {
             p.fail("the helper never parked within 60 s, so no slide was watched, which is the footing failing and not a pass");
@@ -4938,6 +5145,8 @@ mod probe {
         let (mut watched, mut glided, mut judged, mut by_record, mut captures, mut black) = (0, 0, 0, 0, 0, 0);
         let mut faults = Vec::new();
         let mut skipped = Vec::new();
+        let mut paced = Vec::new();
+        let mut each = Vec::new();
         for index in 0..count {
             quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
             let from = position(p, name).unwrap_or(subject);
@@ -4945,14 +5154,21 @@ mod probe {
             let Some(dragged) = watch_drag(p, display, &screen, from, to, &[]) else { continue };
             watched += 1;
             captures += dragged.seen.len();
-            match crate::glide_try(&dragged.log, true) {
-                crate::Try::Glided => {}
-                crate::Try::Skipped(reason) | crate::Try::Fault(reason) => {
-                    skipped.push(format!("{}: {reason}", index + 1));
+            match crate::slide_skip(index + 1, &crate::glide_try(&dragged.log, true)) {
+                None => {}
+                Some(Ok(skip)) => {
+                    skipped.push(skip);
+                    continue;
+                }
+                Some(Err(fault)) => {
+                    faults.push(fault);
                     continue;
                 }
             }
             glided += 1;
+            let slide = crate::paces(&dragged.log);
+            each.push(slide.iter().map(|pace| format!("{}: {:.0} ms, {} between", index + 1, pace.gap, pace.moving)).collect::<Vec<_>>().join(", "));
+            paced.extend(slide);
             let label = format!("slide {}", index + 1);
             let evidence = format!("slide-{}", index + 1);
             let seen = judge_glide(p, &dragged, &screen, &label, None, true);
@@ -4978,6 +5194,8 @@ mod probe {
         }
         let odd = faults.iter().filter(|fault| fault.contains("neither picture")).count();
         p.line(format!("- {count} slides dragged, {watched} watched, {glided} glided, {judged} judged by dense captures and {by_record} by the helper's record checked against the captures, {captures} captures in all, {black} black captures, {odd} captures no frame or picture explains, skips {skipped:?}"));
+        p.line(format!("- with captures: {}", crate::pace_summary(&paced)));
+        p.line(format!("  - each glide with captures, its largest gap between presents and its frames between the two places {each:?}"));
         for fault in faults {
             p.fail(fault);
         }
@@ -5121,20 +5339,16 @@ mod probe {
             unseen.push(judged.frames);
         }
         let unglided = crate::none_glided(&tries);
-        let good = match (verdict, &unglided) {
-            (Some(good), _) => good,
-            (None, Some(_)) => true,
-            (None, None) if unseen.is_empty() && !stalls.is_empty() => {
-                p.limit(format!("the frames between the old and the new picture could not be judged on this runner, since the helper's presents stopped for {stalls:?} ms in each try that glided while the probe captured the screen, and every other glide check passed"));
-                true
-            }
-            (None, None) => {
-                let drew = unseen.iter().all(|frames| frames.is_some_and(|frames| frames >= 3));
+        let footing = crate::Footing::of(verdict, unglided.is_some(), &unseen, &stalls);
+        match &footing {
+            crate::Footing::Stalled => p.fail(crate::never_came(&stalls)),
+            crate::Footing::Sparse(_) => {
                 let which = if unseen.len() == 1 { "the one try that glided and was not judged".to_string() } else { format!("each of the {} tries that glided and were not judged", unseen.len()) };
                 p.limit(format!("the frames between the old and the new picture could not be judged on this runner, since screen capture slowed below one every {} ms and no capture fell between the two pictures during {which}, while the helper drew {unseen:?} frames and every other glide check passed", (SEEN_GAP * 1000.0) as u32));
-                drew
             }
-        };
+            crate::Footing::Judged(_) | crate::Footing::NoneGlided => {}
+        }
+        let good = footing.passes();
         p.line(format!("  - daemon {daemon} before the burst {rest_before}, right after the glide {during}, its sessions hold {held:?}"));
         std::thread::sleep(Duration::from_millis(1000));
         let pids = helper_pids(p);
