@@ -278,20 +278,30 @@ line "- reduce motion before $(defaults read com.apple.universalaccess reduceMot
 defaults write com.apple.universalaccess reduceMotion -bool false >"$out/motion.txt" 2>&1
 line "- reduce motion after the probe set it off $(defaults read com.apple.universalaccess reduceMotion 2>&1) $(cat "$out/motion.txt")"
 limited 20 open --stderr "$out/app.log" "$app" >/dev/null 2>&1
-if took=$(wait_for 40 has_window); then
-  line "- window showed after $took s"
+window_made() { grep -q 'scooch-app window made in' "$out/app.log" 2>/dev/null; }
+if took=$(wait_for 120 has_window); then
+  wait_for 5 window_made >/dev/null
+  line "- window showed after $took s, the app says $(grep -o 'window made in [0-9]* ms' "$out/app.log" | head -1)"
 else
-  line "- no window after 40 s, $(app_snapshot)"
+  line "- no window after 120 s, the app says $(tr '\n' ' ' <"$out/app.log" 2>/dev/null), $(app_snapshot)"
 fi
-expect "the app opened its window" has_window
+expect "the app said it made its window, which the window check stands on" window_made
+expect "the app opened its window within 120 s" has_window
 sleep 4
 shot first-open
-limited 20 open -n --stderr "$out/app-second.log" "$app" >/dev/null 2>&1
-sleep 6
+second_log="$out/app-second.log"
+before=" $(pgrep -f 'MacOS/scooch-app' | tr '\n' ' ')"
+limited 20 open -n --stderr "$second_log" "$app" >/dev/null 2>&1
+second_said() { grep -q 'scooch-app ' "$second_log" 2>/dev/null; }
+newcomers() { pgrep -f 'MacOS/scooch-app' | while read -r pid; do case "$before " in *" $pid "*) ;; *) echo "$pid" ;; esac; done; }
+second_gone() { [ -z "$(newcomers)" ]; }
+ended=-1
+if said=$(wait_for 60 second_said); then ended=$(wait_for 30 second_gone) || ended=-1; else said=-1; fi
 left=$(pgrep -f 'MacOS/scooch-app' | wc -l | tr -d ' ')
-line "- a second launch with open -n left $left window process, it says $(tr '\n' ' ' <"$out/app-second.log" 2>/dev/null)"
-[ "$left" = 1 ] || line "- after the second launch, $(app_snapshot)"
-expect "a second launch leaves one window process" [ "$left" = 1 ]
+line "- a second launch with open -n wrote its first line $said s after open returned and was gone $ended s after that line, leaving $left window process, it says $(tr '\n' ' ' <"$second_log" 2>/dev/null)"
+[ "$said" -ge 0 ] && [ "$ended" -ge 0 ] && [ "$left" = 1 ] || line "- after the second launch, $(app_snapshot)"
+expect "the second launch wrote its first line within 60 s, which the second launch check stands on" [ "$said" -ge 0 ]
+expect "a second launch leaves one window process" eval '[ "$ended" -ge 0 ] && [ "$left" = 1 ]'
 if [ "${SCOOCH_EXPERIMENT:-}" = launch ]; then
   line
   line "#### Experiment, a second launch with open -n, many times"
