@@ -174,9 +174,25 @@ fn median(values: &[f64]) -> Option<f64> {
 const UNEXPLAINED_FIT: f32 = 30.0;
 
 #[cfg(any(target_os = "macos", test))]
-fn glide_progress(window: &[(f32, f32)]) -> (bool, usize) {
-    let explained: Vec<f32> = window.iter().filter(|(_, gap)| *gap <= UNEXPLAINED_FIT).map(|(s, _)| *s).collect();
-    (explained.windows(2).all(|pair| pair[1] >= pair[0] - 0.1), window.len() - explained.len())
+const BLACK_SHARE: f32 = 0.9;
+
+#[cfg(any(target_os = "macos", test))]
+fn glide_progress(window: &[(f32, f32)]) -> bool {
+    window.windows(2).all(|pair| pair[1].0 >= pair[0].0 - 0.1)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn slide_faults(captures: &[(f64, Option<f32>, f32)]) -> Vec<String> {
+    captures
+        .iter()
+        .filter_map(|(at, gap, dark)| {
+            if *dark >= BLACK_SHARE {
+                Some(format!("a capture during the slide showed a black desktop at {at:.0} ms after the drop"))
+            } else {
+                gap.filter(|gap| *gap > UNEXPLAINED_FIT).map(|gap| format!("a capture during the slide showed neither picture nor a frame between them at {at:.0} ms after the drop, {gap:.1} from the nearest"))
+            }
+        })
+        .collect()
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -387,14 +403,24 @@ mod tests {
     }
 
     #[test]
-    fn a_capture_no_frame_explains_is_left_out_of_the_steady_glide_and_counted() {
-        let flashed = [(0.20, 10.14), (1.0, 9.95), (1.0, 9.95), (0.40, 98.71), (1.0, 10.02)];
-        assert_eq!(super::glide_progress(&flashed), (true, 1));
+    fn a_black_capture_or_one_no_frame_explains_fails_the_slide_in_its_own_words() {
+        let black = [(1080.0, Some(9.75), 0.0), (1140.0, Some(9.75), 0.0), (1161.0, Some(98.71), 0.97), (1223.0, Some(10.02), 0.0)];
+        assert_eq!(super::slide_faults(&black), vec!["a capture during the slide showed a black desktop at 1161 ms after the drop".to_string()]);
+        let unread = [(951.0, None, 0.95)];
+        assert_eq!(super::slide_faults(&unread), vec!["a capture during the slide showed a black desktop at 951 ms after the drop".to_string()]);
+        let odd = [(400.0, Some(41.0), 0.1)];
+        assert_eq!(super::slide_faults(&odd), vec!["a capture during the slide showed neither picture nor a frame between them at 400 ms after the drop, 41.0 from the nearest".to_string()]);
+        let clean = [(100.0, Some(7.36), 0.0), (650.0, Some(10.55), 0.0), (1300.0, Some(7.39), 0.02)];
+        assert!(super::slide_faults(&clean).is_empty());
+    }
+
+    #[test]
+    fn the_glide_progress_counts_every_capture() {
         let fell = [(0.25, 7.8), (0.85, 7.61), (0.30, 7.7), (1.0, 7.39)];
-        assert_eq!(super::glide_progress(&fell), (false, 0));
+        assert!(!super::glide_progress(&fell));
         let steady = [(0.25, 7.8), (0.85, 7.61), (0.80, 7.7), (1.0, 7.39)];
-        assert_eq!(super::glide_progress(&steady), (true, 0));
-        assert_eq!(super::glide_progress(&[(0.5, 30.0), (0.1, 10.0)]), (false, 0));
+        assert!(super::glide_progress(&steady));
+        assert!(!super::glide_progress(&[(0.4, 98.71), (0.1, 10.0)]));
     }
 
     #[test]
@@ -706,6 +732,7 @@ mod probe {
             "5 Move to new wallpaper" => 62_364,
             "5b Scenery" => 157_529,
             "5c Glide" => 292_101,
+            "5g Many slides" => 400_000,
             "5d Cold drags" => 1_421_507,
             "5e Bare wakes" => 600_083,
             "5f Finder after the drop" => 60_000,
@@ -897,24 +924,13 @@ mod probe {
             return ExitCode::SUCCESS;
         }
         probe.section("2 Permission", permission);
-        probe.section("3 Icons", icons);
-        probe.section("3b Live layer", live);
-        probe.section("3c Helper colour and scale", colour_scale);
-        probe.section("3d Reveal captures", reveal_check);
-        probe.section("4 First run", first_run);
-        probe.section("5 Move to new wallpaper", moves);
-        probe.section("5b Scenery", scenery_check);
-        probe.section("5c Glide", glide_check);
-        probe.section("5d Drags after a start", cold_drags_check);
-        probe.section("5e Quiet minutes and a move after them", rest_check);
-        probe.section("5f Finder after the drop", finder_after_drop);
-        probe.section("6 Idle", idle);
-        probe.section("7 Off", off);
-        probe.section("8 Second cycle", second_cycle);
-        probe.section("9 Spaces", spaces_check);
-        probe.section("9b Program moved", program_moved);
-        probe.section("9c Stop", stop_check);
-        probe.section("9d Consent waiter", consent_waiter);
+        if std::env::var("SCOOCH_PROBE_FOCUS").is_ok_and(|focus| focus == "slides") {
+            probe.section("3 Icons", icons);
+            probe.section("4 First run", first_run);
+            probe.section("5g Many slides", slides_check);
+        } else {
+            every_section(&mut probe);
+        }
         probe.section("10 Cleanup", cleanup);
         probe.line(String::new());
         probe.line("## Result".to_string());
@@ -936,6 +952,28 @@ mod probe {
         } else {
             ExitCode::FAILURE
         }
+    }
+
+    fn every_section(probe: &mut Probe) {
+        probe.section("3 Icons", icons);
+        probe.section("3b Live layer", live);
+        probe.section("3c Helper colour and scale", colour_scale);
+        probe.section("3d Reveal captures", reveal_check);
+        probe.section("4 First run", first_run);
+        probe.section("5 Move to new wallpaper", moves);
+        probe.section("5b Scenery", scenery_check);
+        probe.section("5c Glide", glide_check);
+        probe.section("5g Many slides", slides_check);
+        probe.section("5d Drags after a start", cold_drags_check);
+        probe.section("5e Quiet minutes and a move after them", rest_check);
+        probe.section("5f Finder after the drop", finder_after_drop);
+        probe.section("6 Idle", idle);
+        probe.section("7 Off", off);
+        probe.section("8 Second cycle", second_cycle);
+        probe.section("9 Spaces", spaces_check);
+        probe.section("9b Program moved", program_moved);
+        probe.section("9c Stop", stop_check);
+        probe.section("9d Consent waiter", consent_waiter);
     }
 
     fn show(rect: &Rect) -> String {
@@ -3902,6 +3940,7 @@ mod probe {
         dropped: f64,
         skip: Option<[usize; 4]>,
         seen: Vec<Seen>,
+        moment: Option<String>,
         log: Vec<String>,
         old: Option<PathBuf>,
         old_still: Option<RgbImage>,
@@ -3979,10 +4018,17 @@ mod probe {
         let mut previous: Option<Shot> = None;
         let mut done: Option<f64> = None;
         let mut checks = 0;
+        let mut moment = None;
         while started.elapsed() < Duration::from_secs(8) {
             let bare = !layer::listing().iter().any(|window| window.owner == "scooch");
             let at = epoch();
             let Some(shot) = grab(display) else { continue };
+            if moment.is_none() && quick_dark(&shot) >= crate::BLACK_SHARE {
+                let windows = below_desktop();
+                let paper = picture_window(screen).and_then(|window| grab_window(window.number)).map(|shot| quick_dark(&shot));
+                let ours: Vec<Option<f32>> = layer::listing().into_iter().filter(|window| window.owner == "scooch").map(|window| grab_window(window.number).map(|shot| quick_dark(&shot))).collect();
+                moment = Some(format!("a black capture began {:.0} ms after the drop with the layer listed {}, right after it the windows at or below the desktop {windows:?}, dark share of the picture window alone {paper:?} and of the layer windows alone {ours:?}", (at - dropped) * 1000.0, !bare));
+            }
             let inked = masks.iter().map(|ink| ink.iter().filter(|(x, y)| !near(shot.at(*x, *y), baseline.at(*x, *y))).count() as f32 / ink.len().max(1) as f32).fold(0.0, f32::max);
             let step = previous.as_ref().map_or_else(Spot::default, |previous| spot_outside(previous, &shot, menu, skip));
             seen.push(Seen { at, half: half_shot(&shot), inked, step, bare });
@@ -3996,7 +4042,14 @@ mod probe {
             }
         }
         let log = new_lines(&daemon_log(p), lines).into_iter().filter(|line| line.contains(" glide ") || line.contains(" tick ")).collect();
-        Some(Dragged { dropped, skip, seen, log, old, old_still, old_tables })
+        Some(Dragged { dropped, skip, seen, moment, log, old, old_still, old_tables })
+    }
+
+    fn quick_dark(shot: &Shot) -> f32 {
+        let (top, bottom) = (shot.height / 10, shot.height * 85 / 100);
+        let (left, right) = (shot.width / 20, shot.width * 95 / 100);
+        let samples: Vec<[u8; 3]> = (top..bottom).step_by(8).flat_map(|y| (left..right).step_by(8).map(move |x| (x, y))).map(|(x, y)| shot.at(x, y)).collect();
+        samples.iter().filter(|pixel| pixel.iter().all(|channel| *channel <= 12)).count() as f32 / samples.len().max(1) as f32
     }
 
     fn logged(dragged: &Dragged, word: &str) -> Option<f64> {
@@ -4035,16 +4088,16 @@ mod probe {
         rate: Option<f64>,
         gap: Option<f64>,
         frames: Option<u32>,
-        unexplained: Vec<f64>,
+        faults: Vec<String>,
     }
 
-    fn judge_glide(p: &mut Probe, dragged: &Dragged, screen: &Screen, label: &str, evidence: Option<&str>) -> Judged {
+    fn judge_glide(p: &mut Probe, dragged: &Dragged, screen: &Screen, label: &str, evidence: Option<&str>, quiet: bool) -> Judged {
         let desktop = platform::current().ok();
         let new = desktop.as_ref().and_then(|desktop| desktop.wallpaper(screen).ok().flatten());
         let decode = |path: &Option<PathBuf>| path.as_deref().and_then(|path| objc2::rc::autoreleasepool(|_| picture::decode(path)).ok()).map(|image| halved(&image));
         let (Some(old_still), Some(new_still)) = (dragged.old_still.clone(), decode(&new)) else {
             p.line(format!("- {label}: the two stills could not be read, old {:?} new {new:?}", dragged.old));
-            return Judged { rest: false, enough: false, moving: 0, rate: None, gap: None, frames: None, unexplained: Vec::new() };
+            return Judged { rest: false, enough: false, moving: 0, rate: None, gap: None, frames: None, faults: Vec::new() };
         };
         let (width, height) = (old_still.width() as usize, old_still.height() as usize);
         let icons: Vec<Rect> = finder::named(&finder::view()).unwrap_or_default().into_iter().map(|(_, rect)| rect).collect();
@@ -4086,8 +4139,13 @@ mod probe {
         let moving: Vec<usize> = (0..classes.len()).filter(|index| classes[*index] == '~' && fitted[*index].is_some_and(|(s, _)| s > 0.04 && s < 0.96)).collect();
         let inside: Vec<usize> = (0..classes.len()).filter(|index| glide_at.is_some_and(|at| dragged.seen[*index].at >= at) && landed.is_none_or(|landed| dragged.seen[*index].at <= landed) && fitted[*index].is_some()).collect();
         let window: Vec<(f32, f32)> = inside.iter().filter_map(|index| fitted[*index]).collect();
-        let (steady, _) = crate::glide_progress(&window);
-        let unexplained: Vec<f64> = inside.iter().filter(|index| fitted[**index].is_some_and(|(_, gap)| gap > crate::UNEXPLAINED_FIT)).map(|index| ((dragged.seen[*index].at - dragged.dropped) * 1000.0).round()).collect();
+        let steady = crate::glide_progress(&window);
+        let mut said = Vec::new();
+        let dark = |seen: &Seen| {
+            let raw = seen.half.as_raw();
+            keep.iter().filter(|index| raw.get(*index * 3..*index * 3 + 3).is_some_and(|pixel| pixel.iter().all(|channel| *channel <= 12))).count() as f32 / keep.len().max(1) as f32
+        };
+        let faults = crate::slide_faults(&dragged.seen.iter().enumerate().map(|(index, seen)| ((seen.at - dragged.dropped) * 1000.0, fitted[index].map(|(_, gap)| gap), dark(seen))).collect::<Vec<_>>());
         let settled_old = classes.iter().position(|class| *class == 'A');
         let first_move = settled_old.and_then(|from| (from..classes.len()).find(|index| classes[*index] != 'A' && classes[*index] != '=')).map(|index| (dragged.seen[index].at - dragged.dropped) * 1000.0);
         let span = glide_at.zip(glided).map(|(from, to)| to - from);
@@ -4107,7 +4165,7 @@ mod probe {
         let gave_up_cleanly = given_up.is_some() && budget.is_some() && !bare.is_empty() && bare_new && bare_step <= 2;
         let hand_spot = handed.map(|seen| format!("{} ms after the drop at pixel {},{} from {:?} to {:?}", ((seen.at - dragged.dropped) * 1000.0).round(), seen.step.x, seen.step.y, seen.step.before, seen.step.after));
         let at = |time: Option<f64>| time.map(|time| ((time - dragged.dropped) * 1000.0).round());
-        p.line(format!(
+        said.push(format!(
             "- {label}: {} captures in {:.0} ms, {} pixels differ between the two stills, classes {}, {} moving between the two places, old picture after the new {returned}, glide progress steady {steady} over {} captures",
             dragged.seen.len(),
             dragged.seen.last().map_or(0.0, |seen| (seen.at - dragged.dropped) * 1000.0),
@@ -4116,20 +4174,20 @@ mod probe {
             moving.len(),
             window.len()
         ));
-        p.line(format!("  - captures a second during the glide {:?}, largest gap between captures during the glide {:?} ms, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95, frames the helper drew {frames_drawn:?}", rate.map(|rate| rate.round()), gap.map(|gap| (gap * 1000.0).round()), expected.map(|value| value.round())));
-        p.line(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, settle given up {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(given_up), at(closed)));
+        said.push(format!("  - captures a second during the glide {:?}, largest gap between captures during the glide {:?} ms, so a 450 ms glide should show about {:?} captures with progress between 0.05 and 0.95, frames the helper drew {frames_drawn:?}", rate.map(|rate| rate.round()), gap.map(|gap| (gap * 1000.0).round()), expected.map(|value| value.round())));
+        said.push(format!("  - drop to first moving frame on screen {:?} ms, glide sent {:?} ms, wallpaper set {:?} ms, glided {:?} ms, settled {:?} ms, settle given up {:?} ms, closed {:?} ms", first_move.map(f64::round), at(glide_at), at(set), at(glided), at(settled), at(given_up), at(closed)));
         let masked = dragged.skip.map_or("nothing masked, the dropped icon was not found".to_string(), |[left, top, right, bottom]| format!("outside the dropped icon's box of {}x{} px at {left},{top}, its Finder rect grown by 6 px", right - left, bottom - top));
-        p.line(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, {masked}, captures of the settled layer before close {layered:?}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
+        said.push(format!("  - largest share of a still icon's solid ink that changed {inked:.3}, largest change between captures from settled to one second after close {hand_over:?} of 255 {}, {masked}, captures of the settled layer before close {layered:?}, CPU frames to fit {}", hand_spot.unwrap_or_default(), frames.len()));
         let gone_ms = closed.zip(gone).map(|(closed, gone)| ((gone - closed) * 1000.0).round());
         if given_up.is_some() {
             let given_ms = dragged.log.iter().find_map(|line| line.split(" glide gave up the settle after ").nth(1)).and_then(|rest| rest.split_whitespace().next()).and_then(|ms| ms.parse::<u64>().ok());
             let stayed = glided.zip(gone).map(|(glided, gone)| ((gone - glided) * 1000.0).round());
-            p.line(format!("  - the daemon gave up the settle after {given_ms:?} ms with its skip line logged {}, the glide's last frame stayed on screen {stayed:?} ms until the layer was gone, the first capture with no layer window left began {gone_ms:?} ms after the close was sent, the hand over judged on the {} captures that began with no layer window left, all of them the new picture {bare_new}, largest change between them {bare_step} of 255", budget.is_some(), bare.len()));
+            said.push(format!("  - the daemon gave up the settle after {given_ms:?} ms with its skip line logged {}, the glide's last frame stayed on screen {stayed:?} ms until the layer was gone, the first capture with no layer window left began {gone_ms:?} ms after the close was sent, the hand over judged on the {} captures that began with no layer window left, all of them the new picture {bare_new}, largest change between them {bare_step} of 255", budget.is_some(), bare.len()));
         } else {
-            p.line(format!("  - the first capture with no layer window left began {gone_ms:?} ms after the close was sent"));
+            said.push(format!("  - the first capture with no layer window left began {gone_ms:?} ms after the close was sent"));
         }
-        p.line(format!("  - the change across the settle fade from the glide's last frame to the still, which ends before settled, {:?} of 255 at pixel {:?} from {:?} to {:?}", fade.map(|step| step.worst), fade.map(|step| (step.x, step.y)), fade.map(|step| step.before), fade.map(|step| step.after)));
-        p.line(format!("  - daemon log {:?}", dragged.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
+        said.push(format!("  - the change across the settle fade from the glide's last frame to the still, which ends before settled, {:?} of 255 at pixel {:?} from {:?} to {:?}", fade.map(|step| step.worst), fade.map(|step| (step.x, step.y)), fade.map(|step| step.before), fade.map(|step| step.after)));
+        said.push(format!("  - daemon log {:?}", dragged.log.iter().map(|line| line.chars().take(200).collect::<String>()).collect::<Vec<_>>()));
         if let Some(name) = evidence {
             let folder = p.out.join(name);
             let _ = fs::create_dir_all(&folder);
@@ -4158,10 +4216,15 @@ mod probe {
                     let _ = scooch_core::encode_png(&strip).map(|bytes| fs::write(p.out.join(format!("{name}-strip.png")), bytes));
                 }
             }
-            p.line(format!("  - every capture saved in {name} with captures.md, nine frame strip {name}-strip.png"));
+            said.push(format!("  - every capture saved in {name} with captures.md, nine frame strip {name}-strip.png"));
+        }
+        if !quiet {
+            for line in said {
+                p.line(line);
+            }
         }
         let landing = (settled.is_some() && hand_over.is_some_and(|value| value <= 2)) || gave_up_cleanly;
-        Judged { rest: returned == 0 && steady && inked <= 0.1 && landing, enough: gap.is_some_and(|gap| gap <= SEEN_GAP), moving: moving.len(), rate, gap, frames: frames_drawn, unexplained }
+        Judged { rest: returned == 0 && steady && inked <= 0.1 && landing && faults.is_empty(), enough: gap.is_some_and(|gap| gap <= SEEN_GAP), moving: moving.len(), rate, gap, frames: frames_drawn, faults }
     }
 
     fn stuck(p: &mut Probe, pid: i32) {
@@ -5028,6 +5091,91 @@ mod probe {
         result
     }
 
+    const SLIDES: usize = 36;
+
+    fn slides_check(p: &mut Probe) -> Result<()> {
+        let result = many_slides(p);
+        put_motion_back(p);
+        result
+    }
+
+    fn drew_near(log: &[String], at: f64, reach: f64) -> Vec<String> {
+        log.iter()
+            .filter_map(|line| line.split(" glide drew ").nth(1))
+            .flat_map(|record| record.split(", ").map(str::to_string).collect::<Vec<_>>())
+            .filter(|frame| frame.split_whitespace().nth(1).and_then(|stamp| stamp.parse::<f64>().ok()).or_else(|| frame.split_whitespace().next().and_then(|stamp| stamp.parse::<f64>().ok())).is_some_and(|stamp| (stamp - at).abs() <= reach))
+            .collect()
+    }
+
+    fn many_slides(p: &mut Probe) -> Result<()> {
+        let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
+        accessory(marker);
+        let screen = main_screen(p)?;
+        let (_, display) = picture::screen_for(marker, &screen.id)?;
+        let name = PROBES[0].0;
+        if dismiss_prompt(p).is_none() {
+            p.line("- the slides need Apple Events to Finder, which the open consent window blocks, so they were skipped".to_string());
+            return Ok(());
+        }
+        if scooch_pid(p).is_none() {
+            p.fail("no daemon runs for the slides");
+            return Ok(());
+        }
+        set_motion(p, false);
+        poke(p);
+        let parked = wait_parked(p, 0, Duration::from_secs(60));
+        if parked.is_none() {
+            p.fail("the helper never parked within 60 s, so no slide was watched, which is the footing failing and not a pass");
+            return Ok(());
+        }
+        let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
+        let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
+        let (mut watched, mut glided, mut judged, mut captures, mut black) = (0, 0, 0, 0, 0);
+        let mut faults = Vec::new();
+        let mut skipped = Vec::new();
+        for index in 0..SLIDES {
+            quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
+            let from = position(p, name).unwrap_or(subject);
+            let to = if (from.0 - subject.0).abs() < 5.0 { aside } else { subject };
+            let Some(dragged) = watch_drag(p, display, &screen, from, to, &[]) else { continue };
+            watched += 1;
+            captures += dragged.seen.len();
+            match crate::glide_try(&dragged.log, true) {
+                crate::Try::Glided => {}
+                crate::Try::Skipped(reason) | crate::Try::Fault(reason) => {
+                    skipped.push(format!("{}: {reason}", index + 1));
+                    continue;
+                }
+            }
+            glided += 1;
+            let label = format!("slide {}", index + 1);
+            let evidence = format!("slide-{}", index + 1);
+            let seen = judge_glide(p, &dragged, &screen, &label, None, true);
+            if seen.enough {
+                judged += 1;
+            }
+            if !seen.faults.is_empty() {
+                let _ = judge_glide(p, &dragged, &screen, &label, Some(&evidence), false);
+                let closed = logged(&dragged, "after its wallpaper was set");
+                for fault in &seen.faults {
+                    black += usize::from(fault.contains("black desktop"));
+                    let at = fault.split(" at ").nth(1).and_then(|rest| rest.split(" ms").next()).and_then(|ms| ms.parse::<f64>().ok()).map(|ms| dragged.dropped + ms / 1000.0);
+                    let near = at.map(|at| drew_near(&dragged.log, at, 0.15)).unwrap_or_default();
+                    p.line(format!("  - slide {}: {fault}, the close {:?} ms after the drop, what the helper presented within 150 ms of it {near:?}, {}", index + 1, closed.map(|closed| ((closed - dragged.dropped) * 1000.0).round()), dragged.moment.clone().unwrap_or_else(|| "no black capture was seen while watching".into())));
+                    faults.push(format!("slide {} {fault}", index + 1));
+                }
+            }
+        }
+        p.line(format!("- {SLIDES} slides dragged, {watched} watched, {glided} glided, {judged} with captures dense enough to judge the frames between, {captures} captures in all, {black} black captures, {} captures no frame or picture explains, skips {skipped:?}", faults.len() - black));
+        for fault in faults {
+            p.fail(fault);
+        }
+        if glided * 2 < SLIDES {
+            p.fail(format!("only {glided} of {SLIDES} slides glided, so the slides were not watched on footing"));
+        }
+        Ok(())
+    }
+
     fn glide_steps(p: &mut Probe) -> Result<()> {
         let marker = MainThreadMarker::new().context("the probe is not on the main thread")?;
         accessory(marker);
@@ -5094,7 +5242,6 @@ mod probe {
         let mut during = String::new();
         let mut held = None;
         let mut tries = Vec::new();
-        let mut flashed = Vec::new();
         for attempt in 1..=3 {
             if attempt > 1 {
                 quiet_log(p, Duration::from_millis(1000), Duration::from_secs(10));
@@ -5107,7 +5254,7 @@ mod probe {
                 held = daemon_log(p).lines().rev().find_map(|line| line.split("sessions hold ").nth(1).map(str::to_string));
             }
             let evidence = if attempt == 1 { "glide".to_string() } else { format!("glide-{attempt}") };
-            let judged = judge_glide(p, &dragged, &screen, &format!("glide on, CGEvent drag, attempt {attempt}"), Some(&evidence));
+            let judged = judge_glide(p, &dragged, &screen, &format!("glide on, CGEvent drag, attempt {attempt}"), Some(&evidence), false);
             let tried = crate::glide_try(&dragged.log, true);
             tries.push(tried.clone());
             match tried {
@@ -5122,10 +5269,15 @@ mod probe {
                 }
                 crate::Try::Glided => {}
             }
-            if !judged.unexplained.is_empty() {
-                p.line(format!("  - attempt {attempt} has no footing, its captures at {:?} ms after the drop, inside the glide, fit no frame of the glide and neither picture better than {}, where every explained capture of 50 judged glides fit within 10.55, so the drag is tried again", judged.unexplained, crate::UNEXPLAINED_FIT));
-                flashed.push(judged.unexplained.clone());
-                continue;
+            if !judged.faults.is_empty() {
+                for fault in &judged.faults {
+                    p.fail(fault.clone());
+                }
+                if let Some(moment) = &dragged.moment {
+                    p.line(format!("  - {moment}"));
+                }
+                verdict = Some(false);
+                break;
             }
             if !judged.rest {
                 verdict = Some(false);
@@ -5143,10 +5295,6 @@ mod probe {
         let good = match (verdict, &unglided) {
             (Some(good), _) => good,
             (None, Some(_)) => true,
-            (None, None) if !flashed.is_empty() && unseen.is_empty() => {
-                p.fail(format!("the glide was never judged on footing, each of its {} tries that glided had a capture inside the glide that no frame and neither picture explains, at {flashed:?} ms after the drop, which is the footing failing and not a pass", flashed.len()));
-                true
-            }
             (None, None) => {
                 let drew = unseen.iter().all(|frames| frames.is_some_and(|frames| frames >= 3));
                 let which = if unseen.len() == 1 { "the one try that glided and was not judged".to_string() } else { format!("each of the {} tries that glided and were not judged", unseen.len()) };
