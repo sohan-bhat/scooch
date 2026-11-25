@@ -609,12 +609,16 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         probe.section("3 Geometry truth from pixels", geometry);
         probe.section("4 Move and events", events);
         probe.section("5 Wallpaper", wallpaper);
-        probe.section("6 End to end", end_to_end);
-        probe.section("7 Two monitors", monitors);
-        probe.section("7b Desktop after the drop", after_drop);
-        probe.section("7c The AppImage thrown away", thrown_away);
-        probe.section("7d The final off", final_off_check);
-        probe.section("8 Cleanup", cleanup);
+        if std::env::var_os("SCOOCH_PROBE_ROUNDS").is_some() {
+            probe.section("6x The moves of section 6 again and again", again);
+        } else {
+            probe.section("6 End to end", end_to_end);
+            probe.section("7 Two monitors", monitors);
+            probe.section("7b Desktop after the drop", after_drop);
+            probe.section("7c The AppImage thrown away", thrown_away);
+            probe.section("7d The final off", final_off_check);
+            probe.section("8 Cleanup", cleanup);
+        }
         probe.line(String::new());
         probe.line("## Result".to_string());
         probe.line(String::new());
@@ -3113,6 +3117,41 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             p.line(format!("  - wakes after the drop {woke}, the daemon set the wallpaper at {} ms", shown_ms(set)));
         }
         rounds
+    }
+
+    fn again(p: &mut Probe) -> Result<()> {
+        let count: usize = std::env::var("SCOOCH_PROBE_ROUNDS").ok().and_then(|value| value.parse().ok()).unwrap_or(0);
+        let linux = p.linux()?;
+        let screen = linux.screens()?.first().cloned().context("no screen")?;
+        let program = scooch_program()?;
+        let mut short = 0;
+        for run in 1..=count {
+            let _step = doing(format!("run {run} of the moves"), Duration::ZERO);
+            let started = Instant::now();
+            if let Some(picture) = p.pictures.first().cloned() {
+                linux.set_wallpaper(&screen, &picture)?;
+            }
+            let name = format!("watch-{run}.log");
+            let process = start_daemon(p, &program, &name)?;
+            let home = p.home.clone();
+            let first = wait_until(Duration::from_secs(60), || rendered(&home));
+            std::thread::sleep(Duration::from_secs(2));
+            let log = p.out.join(&name);
+            let rounds = move_rounds(p, &linux, &screen, &log);
+            unsafe { libc::kill(process as libc::pid_t, libc::SIGTERM) };
+            if let Some(mut child) = p.daemon.take() {
+                if wait_until(Duration::from_secs(5), || matches!(child.try_wait(), Ok(Some(_)))).is_none() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+            if rounds.times.len() < 5 {
+                short += 1;
+            }
+            p.line(format!("- run {run} of {count}, first render after {:?} ms, a new wallpaper for {} of 5 moves, took {} ms", first.map(|time| time.as_millis()), rounds.times.len(), started.elapsed().as_millis()));
+        }
+        p.line(format!("- all {count} runs of the five moves came back, {short} of them with a move that brought no new wallpaper"));
+        Ok(())
     }
 
     fn end_to_end(p: &mut Probe) -> Result<()> {
