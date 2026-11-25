@@ -158,6 +158,7 @@ struct Drawn {
     step: String,
     s: Option<f32>,
     took: Option<[f64; 4]>,
+    split: Option<[f64; 4]>,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -174,7 +175,8 @@ fn drew_frames(log: &[String]) -> Vec<Drawn> {
             let s = rest.iter().filter_map(|layer| layer.strip_prefix('G')).filter_map(|layer| layer.split('@').next()?.parse::<f32>().ok()).next_back();
             let part = |key: char| rest.iter().find_map(|word| word.strip_prefix(key).and_then(|value| value.parse::<f64>().ok()));
             let took = part('a').zip(part('d')).zip(part('p')).zip(part('f')).map(|(((a, d), p), f)| [a, d, p, f]);
-            Some(Drawn { at, step, s, took })
+            let split = part('l').zip(part('s')).zip(part('v')).zip(part('q')).map(|(((l, s), v), q)| [l, s, v, q]);
+            Some(Drawn { at, step, s, took, split })
         })
         .collect()
 }
@@ -206,16 +208,116 @@ struct Pace {
     moving: usize,
     stalled: bool,
     waited: Option<[f64; 4]>,
+    split: Option<[f64; 4]>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn moves_of(frames: &[Drawn]) -> Vec<&Drawn> {
+    frames.iter().filter(|frame| matches!(frame.step.as_str(), "move" | "glided") && frame.s.is_some()).collect()
 }
 
 #[cfg(any(target_os = "macos", test))]
 fn pace_of(frames: &[Drawn]) -> Pace {
-    let moves: Vec<&Drawn> = frames.iter().filter(|frame| matches!(frame.step.as_str(), "move" | "glided") && frame.s.is_some()).collect();
+    let moves = moves_of(frames);
     let moving = moves.iter().filter(|frame| frame.s.is_some_and(|s| s > 0.04 && s < 0.96)).count();
     let widest = moves.windows(2).max_by(|one, two| (one[1].at - one[0].at).total_cmp(&(two[1].at - two[0].at)));
     let gap = widest.map_or(0.0, |pair| (pair[1].at - pair[0].at) * 1000.0);
     let waited = widest.and_then(|pair| pair[1].took).map(|[acquire, draw, present, frame]| [acquire, draw, present, (gap - frame).max(0.0)]);
-    Pace { gap, moving, stalled: !moves.is_empty() && moving < 3 && gap > STALL_MS, waited }
+    let split = widest.and_then(|pair| pair[1].split);
+    Pace { gap, moving, stalled: !moves.is_empty() && moving < 3 && gap > STALL_MS, waited, split }
+}
+
+#[cfg(any(target_os = "macos", test))]
+const PARTS: [&str; 7] = ["drawable", "draw", "turn", "submit", "scope pop", "queue present", "outside the frame call"];
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq)]
+struct Gap {
+    gap: f64,
+    after: usize,
+    s: f32,
+    parts: Option<[f64; 7]>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn long_gaps(frames: &[Drawn]) -> Vec<Gap> {
+    let moves = moves_of(frames);
+    moves
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, pair)| {
+            let gap = (pair[1].at - pair[0].at) * 1000.0;
+            let parts = pair[1].took.zip(pair[1].split).map(|([acquire, draw, _, frame], [turn, submit, pop, queue])| [acquire, draw, turn, submit, pop, queue, (gap - frame).max(0.0)]);
+            (gap > STALL_MS).then(|| Gap { gap, after: index + 1, s: pair[0].s.unwrap_or(0.0), parts })
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn glide_scale(log: &[String]) -> Option<String> {
+    log.iter().find_map(|line| line.split(" glide glided ").nth(1)).and_then(|rest| rest.split(" at scale ").nth(1)).and_then(|rest| rest.split(',').next()).map(|scale| scale.trim().to_string())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn drew_glides(log: &[String]) -> Vec<(Vec<Drawn>, Option<String>)> {
+    let scale = glide_scale(log);
+    log.iter()
+        .filter(|line| line.contains(" glide drew "))
+        .map(|line| drew_frames(std::slice::from_ref(line)))
+        .filter(|frames| !moves_of(frames).is_empty())
+        .map(|frames| (frames, scale.clone()))
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn gap_summary(glides: &[(Vec<Drawn>, Option<String>)]) -> String {
+    let mut largest = [0usize; 7];
+    let mut unsplit = 0;
+    let mut values: Vec<Vec<f64>> = vec![Vec::new(); 7];
+    let mut scales: std::collections::BTreeMap<String, (usize, usize, usize)> = std::collections::BTreeMap::new();
+    let mut after = [0usize; 4];
+    let mut along = [0usize; 3];
+    let (mut count, mut with) = (0, 0);
+    for (frames, scale) in glides {
+        let gaps = long_gaps(frames);
+        let seen = scales.entry(scale.clone().unwrap_or_else(|| "unknown".into())).or_default();
+        seen.0 += 1;
+        seen.1 += usize::from(!gaps.is_empty());
+        seen.2 += gaps.len();
+        count += gaps.len();
+        with += usize::from(!gaps.is_empty());
+        for gap in &gaps {
+            after[(gap.after - 1).min(3)] += 1;
+            along[if gap.s < 0.04 { 0 } else if gap.s < 0.96 { 1 } else { 2 }] += 1;
+            match gap.parts {
+                Some(parts) => {
+                    let most = (0..7).max_by(|one, two| parts[*one].total_cmp(&parts[*two])).unwrap_or(0);
+                    largest[most] += 1;
+                    for (index, value) in parts.iter().enumerate() {
+                        values[index].push(*value);
+                    }
+                }
+                None => unsplit += 1,
+            }
+        }
+    }
+    let held: Vec<String> = PARTS.iter().zip(largest).map(|(name, count)| format!("{name} {count}")).collect();
+    let medians: Vec<String> = PARTS.iter().zip(&values).map(|(name, values)| format!("{name} {:.0}", median(values).unwrap_or(0.0))).collect();
+    let by_scale: Vec<String> = scales.iter().map(|(scale, (glides, gapped, gaps))| format!("at scale {scale} {gaps} gaps in {gapped} of {glides} glides")).collect();
+    format!(
+        "{count} gaps over {STALL_MS} ms between moving presents in {with} of {} glides, the part that held each gap most {}, {unsplit} with no split, the median of each part over those gaps in ms {}, by the glide's scale {}, by place the gap after the first moving present {}, after the second {}, after the third {}, later {}, by progress before the picture moved visibly {}, while it moved {}, at its end {}",
+        glides.len(),
+        held.join(", "),
+        medians.join(", "),
+        by_scale.join(", "),
+        after[0],
+        after[1],
+        after[2],
+        after[3],
+        along[0],
+        along[1],
+        along[2]
+    )
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -239,7 +341,8 @@ fn pace_summary(paces: &[Pace]) -> String {
     let share = |count: usize| if paces.is_empty() { 0.0 } else { count as f64 * 100.0 / paces.len() as f64 };
     let mut moving: Vec<usize> = paces.iter().map(|pace| pace.moving).collect();
     moving.sort_unstable();
-    let waits: Vec<String> = stalled.iter().map(|pace| pace.waited.map_or("none recorded".to_string(), |[acquire, draw, present, outside]| format!("{:.0} ms gap, drawable {acquire:.0}, draw {draw:.0}, present {present:.0}, outside the frame call {outside:.0}", pace.gap))).collect();
+    let split = |pace: &Pace| pace.split.map_or(String::new(), |[turn, submit, pop, queue]| format!(", the present split into the turn {turn:.0}, submit {submit:.0}, scope pop {pop:.0}, queue present {queue:.0}"));
+    let waits: Vec<String> = stalled.iter().map(|pace| pace.waited.map_or("none recorded".to_string(), |[acquire, draw, present, outside]| format!("{:.0} ms gap, drawable {acquire:.0}, draw {draw:.0}, present {present:.0}, outside the frame call {outside:.0}{}", pace.gap, split(pace)))).collect();
     format!(
         "{} glides, {} stalled, {:.0} percent, with fewer than 3 frames between the two places {few}, with a gap over {STALL_MS} ms between presents {over}, {:.0} percent, largest gap between presents median {:.0} ms, 90th {:.0} ms, most {:.0} ms, frames between the two places median {}, fewest {}, each stall's largest gap split into waiting for the drawable, drawing, presenting and the time outside the frame call {waits:?}",
         paces.len(),
@@ -537,7 +640,7 @@ mod tests {
         ];
         let frames = super::drew_frames(&log);
         assert_eq!(frames.len(), 10);
-        assert_eq!(frames[3], super::Drawn { at: 1795551562.5, step: "move".into(), s: Some(0.3), took: None });
+        assert_eq!(frames[3], super::Drawn { at: 1795551562.5, step: "move".into(), s: Some(0.3), took: None, split: None });
         assert_eq!(frames[7].s, Some(1.0));
         let dropped = 1795551562.0;
         let agree = super::judge_record(&frames, &[(1795551562.45, 1795551562.55, 0.28), (1795551562.62, 1795551562.71, 0.80)], dropped);
@@ -581,6 +684,33 @@ mod tests {
         assert!(super::Footing::of(None, true, &[], &[]).passes());
         assert!(super::Footing::of(Some(true), false, &[], &[338.0]).passes());
         assert!(!super::Footing::of(Some(false), false, &[], &[]).passes());
+    }
+
+    #[test]
+    fn the_record_splits_the_present_and_places_each_long_gap() {
+        let log = vec![
+            "1 glide glided 4 with 6 frames, 1 slow, at scale 0.5, first frame 30 ms after the glide was sent".to_string(),
+            "2 glide drew 4 10.000 first S@1.00 a0.4 d0.2 p0.3 l0.0 s0.1 v0.0 q0.2 f1.0, 10.100 move S@1.00 G0.000@0.30 a0.5 d0.2 p0.3 l0.0 s0.1 v0.0 q0.2 f1.1, 10.350 move G0.010@1.00 a2.0 d0.3 p240.0 l0.1 s0.4 v0.6 q239.0 f243.0, 10.380 move G0.400@1.00 a8.0 d0.3 p0.4 l0.0 s0.2 v0.0 q0.2 f9.0, 10.600 move G0.900@1.00 a150.0 d40.0 p20.0 l0.0 s1.0 v0.0 q19.0 f210.0, 10.630 glided G1.000@1.00 a9.0 d0.3 p0.4 l0.0 s0.2 v0.0 q0.2 f10.0".to_string(),
+            "3 glide settled after 300 ms".to_string(),
+        ];
+        let frames = super::drew_frames(&log);
+        assert_eq!(frames[2].split, Some([0.1, 0.4, 0.6, 239.0]));
+        assert_eq!(frames[2].took, Some([2.0, 0.3, 240.0, 243.0]), "the parts round 37 reads stay where they were");
+        let gaps = super::long_gaps(&frames);
+        assert_eq!(gaps.len(), 2, "{gaps:?}");
+        assert_eq!((gaps[0].gap.round(), gaps[0].after, gaps[0].s), (250.0, 1, 0.0));
+        assert_eq!(gaps[0].parts.map(|parts| parts.map(f64::round)), Some([2.0, 0.0, 0.0, 0.0, 1.0, 239.0, 7.0]));
+        assert_eq!((gaps[1].gap.round(), gaps[1].after, gaps[1].s), (220.0, 3, 0.4));
+        let pace = super::pace_of(&frames);
+        assert_eq!((pace.gap.round(), pace.split), (250.0, Some([0.1, 0.4, 0.6, 239.0])));
+        assert!(super::pace_summary(&[super::Pace { stalled: true, ..pace }]).contains("250 ms gap, drawable 2, draw 0, present 240, outside the frame call 7, the present split into the turn 0, submit 0, scope pop 1, queue present 239"));
+        let glides = super::drew_glides(&log);
+        assert_eq!(glides.len(), 1);
+        assert_eq!(glides[0].1.as_deref(), Some("0.5"));
+        let said = super::gap_summary(&glides);
+        assert!(said.starts_with("2 gaps over 100 ms between moving presents in 1 of 1 glides, the part that held each gap most drawable 1, draw 0, turn 0, submit 0, scope pop 0, queue present 1, outside the frame call 0, 0 with no split"), "{said}");
+        assert!(said.contains("by the glide's scale at scale 0.5 2 gaps in 1 of 1 glides"), "{said}");
+        assert!(said.contains("the gap after the first moving present 1, after the second 0, after the third 1, later 0, by progress before the picture moved visibly 1, while it moved 1, at its end 0"), "{said}");
     }
 
     #[test]
@@ -5028,7 +5158,7 @@ mod probe {
         }
         let subject = (screen.frame.x + screen.frame.w * 0.5, screen.frame.y + screen.frame.h * 0.5);
         let aside = (screen.frame.x + screen.frame.w * 0.38, screen.frame.y + screen.frame.h * 0.5);
-        let (mut glided, mut found) = (0, Vec::new());
+        let (mut glided, mut found, mut gapped) = (0, Vec::new(), Vec::new());
         let (mut skipped, mut faults, mut each) = (Vec::new(), Vec::new(), Vec::new());
         for index in 0..count {
             quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
@@ -5051,6 +5181,7 @@ mod probe {
                 }
             }
             glided += 1;
+            gapped.extend(crate::drew_glides(&log));
             let paced = crate::paces(&log);
             each.push(paced.iter().map(|pace| format!("{}: {:.0} ms, {} between", index + 1, pace.gap, pace.moving)).collect::<Vec<_>>().join(", "));
             if paced.is_empty() || ended.is_none() {
@@ -5061,6 +5192,7 @@ mod probe {
         p.line(format!("- {count} slides dragged with no capture running, only the drag and the daemon's log read, {glided} glided, skips {skipped:?}"));
         p.line(format!("- with no capture: {}", crate::pace_summary(&found)));
         p.line(format!("  - each glide with no capture, its largest gap between presents and its frames between the two places {each:?}"));
+        p.line(format!("- gaps with no capture: {}", crate::gap_summary(&gapped)));
         for fault in faults {
             p.fail(fault);
         }
@@ -5106,6 +5238,7 @@ mod probe {
         let mut faults = Vec::new();
         let mut skipped = Vec::new();
         let mut paced = Vec::new();
+        let mut gapped = Vec::new();
         let mut each = Vec::new();
         for index in 0..count {
             quiet_log(p, Duration::from_millis(800), Duration::from_secs(10));
@@ -5126,6 +5259,7 @@ mod probe {
                 }
             }
             glided += 1;
+            gapped.extend(crate::drew_glides(&dragged.log));
             let slide = crate::paces(&dragged.log);
             each.push(slide.iter().map(|pace| format!("{}: {:.0} ms, {} between", index + 1, pace.gap, pace.moving)).collect::<Vec<_>>().join(", "));
             paced.extend(slide);
@@ -5156,6 +5290,7 @@ mod probe {
         p.line(format!("- {count} slides dragged, {watched} watched, {glided} glided, {judged} judged by dense captures and {by_record} by the helper's record checked against the captures, {captures} captures in all, {black} black captures, {odd} captures no frame or picture explains, skips {skipped:?}"));
         p.line(format!("- with captures: {}", crate::pace_summary(&paced)));
         p.line(format!("  - each glide with captures, its largest gap between presents and its frames between the two places {each:?}"));
+        p.line(format!("- gaps with captures: {}", crate::gap_summary(&gapped)));
         for fault in faults {
             p.fail(fault);
         }
