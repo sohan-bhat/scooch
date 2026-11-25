@@ -230,6 +230,7 @@ mod running {
         Presented { id: u32, result: Result<(), String>, first: u64, still: &'static str },
         Glided { id: u32, frames: u32, slow: u32, first: u64, scale: f32, timed: Option<Duration> },
         Settled { id: u32 },
+        Drew { id: u32, frames: String },
         Broke { id: u32, why: String },
         Stopped { id: u32 },
         Kept { path: PathBuf, still: Arc<Still> },
@@ -422,6 +423,18 @@ mod running {
         Glide(Arc<Glide>, f32),
     }
 
+    fn described(layers: &[(Shown, f32)], step: &str) -> String {
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |since| since.as_secs_f64());
+        let parts: Vec<String> = layers
+            .iter()
+            .map(|(shown, k)| match shown {
+                Shown::Still(_) => format!("S@{k:.2}"),
+                Shown::Glide(_, s) => format!("G{s:.3}@{k:.2}"),
+            })
+            .collect();
+        format!("{at:.3} {step} {}", parts.join(" "))
+    }
+
     fn looks(layers: &[(Shown, f32)]) -> Vec<(Look<'_>, f32)> {
         layers
             .iter()
@@ -449,12 +462,142 @@ mod running {
     }
 
     struct Settling {
-        incoming: Option<Receiver<Result<RgbImage, String>>>,
-        path: PathBuf,
         still: Option<Arc<Still>>,
         length: Duration,
         from: Vec<(Shown, f32)>,
         started: Option<Instant>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Step {
+        Moving,
+        Glided,
+        Fading,
+        Settled,
+    }
+
+    impl Step {
+        fn word(self) -> &'static str {
+            match self {
+                Step::Moving => "move",
+                Step::Glided => "glided",
+                Step::Fading => "fade",
+                Step::Settled => "settled",
+            }
+        }
+    }
+
+    struct Ended {
+        frames: u32,
+        slow: u32,
+        first: u64,
+    }
+
+    fn span(ms: u32) -> Duration {
+        Duration::from_millis(u64::from(ms.clamp(1, LONGEST)))
+    }
+
+    struct Reel {
+        shown: Vec<(Shown, f32)>,
+        motion: Option<Motion>,
+        settling: Option<Settling>,
+    }
+
+    impl Reel {
+        fn new(first: Arc<Still>) -> Reel {
+            Reel { shown: vec![(Shown::Still(first), 1.0)], motion: None, settling: None }
+        }
+
+        fn animating(&self) -> bool {
+            self.motion.is_some() || self.settling.as_ref().is_some_and(|settle| settle.started.is_some() || settle.still.is_some())
+        }
+
+        fn glide(&mut self, glide: Glide, ms: u32, asked: Instant, now: Instant) {
+            let compatible = glide.compatible();
+            let from = self.motion.take().map(|moving| vec![(Shown::Glide(moving.glide, 1.0), 1.0)]).unwrap_or_else(|| self.shown.clone());
+            self.motion = Some(Motion { glide: Arc::new(glide), compatible, from, started: now, length: span(ms), asked, frames: 0, slow: 0, first: None, last: None });
+        }
+
+        fn settle(&mut self, ms: u32) {
+            self.settling = Some(Settling { still: None, length: span(ms), from: Vec::new(), started: None });
+        }
+
+        fn ready(&mut self, still: Arc<Still>) {
+            if let Some(settle) = self.settling.as_mut() {
+                settle.still = Some(still);
+            }
+        }
+
+        fn unsettle(&mut self) {
+            self.settling = None;
+        }
+
+        fn halt(&mut self) {
+            self.motion = None;
+            self.settling = None;
+        }
+
+        fn next(&mut self, now: Instant) -> Option<(Vec<(Shown, f32)>, Step)> {
+            if let Some(moving) = self.motion.as_ref() {
+                let elapsed = now.saturating_duration_since(moving.started);
+                let t = (elapsed.as_secs_f32() / moving.length.as_secs_f32()).min(1.0);
+                let s = ease(t);
+                let mut layers = moving.from.clone();
+                if moving.compatible {
+                    let lead = (elapsed.as_secs_f32() / LEAD_IN.as_secs_f32()).min(1.0);
+                    if lead >= 1.0 {
+                        layers.clear();
+                    }
+                    layers.push((Shown::Glide(moving.glide.clone(), s), if layers.is_empty() { 1.0 } else { lead }));
+                } else if t >= 1.0 {
+                    layers = vec![(Shown::Glide(moving.glide.clone(), 1.0), 1.0)];
+                } else {
+                    layers.push((Shown::Glide(moving.glide.clone(), 1.0), s));
+                }
+                return Some((layers, if t >= 1.0 { Step::Glided } else { Step::Moving }));
+            }
+            let settle = self.settling.as_mut()?;
+            let still = settle.still.clone()?;
+            if settle.started.is_none() {
+                settle.from = self.shown.clone();
+                settle.started = Some(now);
+            }
+            let started = settle.started.unwrap_or(now);
+            let u = (now.saturating_duration_since(started).as_secs_f32() / settle.length.as_secs_f32()).min(1.0);
+            if u >= 1.0 {
+                return Some((vec![(Shown::Still(still), 1.0)], Step::Settled));
+            }
+            let mut layers = settle.from.clone();
+            layers.push((Shown::Still(still), ease(u)));
+            Some((layers, Step::Fading))
+        }
+
+        fn presented(&mut self, layers: Vec<(Shown, f32)>, step: Step, now: Instant, slow_after: Duration) -> Option<Ended> {
+            self.shown = layers;
+            match step {
+                Step::Moving | Step::Glided => {
+                    let moving = self.motion.as_mut()?;
+                    if moving.first.is_none() {
+                        moving.first = Some(now.saturating_duration_since(moving.asked).as_millis() as u64);
+                    }
+                    if moving.last.is_some_and(|last| now.saturating_duration_since(last) > slow_after) {
+                        moving.slow += 1;
+                    }
+                    moving.last = Some(now);
+                    moving.frames += 1;
+                    if step == Step::Moving {
+                        return None;
+                    }
+                    let moving = self.motion.take()?;
+                    Some(Ended { frames: moving.frames, slow: moving.slow, first: moving.first.unwrap_or(0) })
+                }
+                Step::Fading => None,
+                Step::Settled => {
+                    self.settling = None;
+                    None
+                }
+            }
+        }
     }
 
     struct Start {
@@ -508,21 +651,20 @@ mod running {
         if let (Some(path), false) = (stills.still.clone(), from == "kept") {
             tell(Event::Kept { path, still: first.clone() });
         }
-        let mut shown = vec![(Shown::Still(first), 1.0f32)];
-        let result = P::frame(|| screen.show(&looks(&shown)));
+        let mut reel = Reel::new(first);
+        let result = P::frame(|| screen.show(&looks(&reel.shown)));
         let ok = result.is_ok();
+        let mut drew = if ok { vec![described(&reel.shown, "first")] } else { Vec::new() };
         if let (true, Some(commit)) = (ok, commit.as_ref()) {
             commit();
         }
         tell(Event::Presented { id, result, first: begun.elapsed().as_millis() as u64, still: from });
         let mut prepared: Option<Prepared> = stills.tables.as_deref().filter(|_| ok).and_then(|path| side_of(&gpu, path).ok().map(|(key, side)| (path.to_path_buf(), key, side)));
         let slow_after = period.mul_f32(1.5);
-        let mut motion: Option<Motion> = None;
-        let mut settling: Option<Settling> = None;
+        let mut decoding: Option<(Receiver<Result<RgbImage, String>>, PathBuf)> = None;
         let mut stop = !ok;
         while !stop {
-            let animating = motion.is_some() || settling.as_ref().is_some_and(|settle| settle.started.is_some() || settle.still.is_some() && motion.is_none());
-            let job = if animating {
+            let job = if reel.animating() {
                 jobs.try_recv().ok()
             } else {
                 match jobs.recv_timeout(Duration::from_millis(20)) {
@@ -536,11 +678,7 @@ mod running {
                 Some(Job::Glide { a, b, ms, loaded, asked, scale }) => {
                     screen.scale = scale;
                     match build_glide(&gpu, (&a, &b), &loaded, prepared.take()) {
-                        Ok(glide) => {
-                            let compatible = glide.compatible();
-                            let from = motion.take().map(|moving| vec![(Shown::Glide(moving.glide, 1.0), 1.0)]).unwrap_or_else(|| shown.clone());
-                            motion = Some(Motion { glide: Arc::new(glide), compatible, from, started: Instant::now(), length: Duration::from_millis(u64::from(ms.clamp(1, LONGEST))), asked, frames: 0, slow: 0, first: None, last: None });
-                        }
+                        Ok(glide) => reel.glide(glide, ms, asked, Instant::now()),
                         Err(why) => tell(Event::Broke { id, why }),
                     }
                 }
@@ -551,7 +689,10 @@ mod running {
                         let _ = sender.send(P::decode(&still).map_err(|error| format!("{error:#}")));
                     });
                     match spawned {
-                        Ok(_) => settling = Some(Settling { incoming: Some(incoming), path, still: None, length: Duration::from_millis(u64::from(ms.clamp(1, LONGEST))), from: Vec::new(), started: None }),
+                        Ok(_) => {
+                            decoding = Some((incoming, path));
+                            reel.settle(ms);
+                        }
                         Err(error) => tell(Event::Broke { id, why: format!("could not start the decode thread {error}") }),
                     }
                 }
@@ -560,113 +701,66 @@ mod running {
             if stop {
                 break;
             }
-            if let Some(settle) = settling.as_mut() {
-                if let Some(incoming) = &settle.incoming {
-                    match incoming.try_recv() {
-                        Ok(Ok(image)) => {
-                            settle.incoming = None;
-                            match gpu.still(&image) {
-                                Ok(still) => {
-                                    let still = Arc::new(still);
-                                    tell(Event::Kept { path: settle.path.clone(), still: still.clone() });
-                                    settle.still = Some(still);
-                                }
-                                Err(why) => {
-                                    tell(Event::Broke { id, why });
-                                    settling = None;
-                                }
-                            }
-                        }
-                        Ok(Err(why)) => {
-                            tell(Event::Broke { id, why });
-                            settling = None;
-                        }
-                        Err(mpsc::TryRecvError::Empty) => {}
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            tell(Event::Broke { id, why: "the still could not be decoded".into() });
-                            settling = None;
-                        }
+            if let Some((incoming, path)) = decoding.as_ref() {
+                let decoded = match incoming.try_recv() {
+                    Ok(Ok(image)) => Some(gpu.still(&image).map(Arc::new)),
+                    Ok(Err(why)) => Some(Err(why)),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => Some(Err("the still could not be decoded".to_string())),
+                };
+                match decoded {
+                    Some(Ok(still)) => {
+                        tell(Event::Kept { path: path.clone(), still: still.clone() });
+                        reel.ready(still);
+                        decoding = None;
                     }
+                    Some(Err(why)) => {
+                        tell(Event::Broke { id, why });
+                        reel.unsettle();
+                        decoding = None;
+                    }
+                    None => {}
                 }
             }
-            let frame: Option<(Vec<(Shown, f32)>, bool)> = if let Some(moving) = motion.as_mut() {
-                let elapsed = moving.started.elapsed();
-                let t = (elapsed.as_secs_f32() / moving.length.as_secs_f32()).min(1.0);
-                let s = ease(t);
-                let mut layers = moving.from.clone();
-                if moving.compatible {
-                    let lead = (elapsed.as_secs_f32() / LEAD_IN.as_secs_f32()).min(1.0);
-                    if lead >= 1.0 {
-                        layers.clear();
-                    }
-                    layers.push((Shown::Glide(moving.glide.clone(), s), if layers.is_empty() { 1.0 } else { lead }));
-                } else if t >= 1.0 {
-                    layers = vec![(Shown::Glide(moving.glide.clone(), 1.0), 1.0)];
-                } else {
-                    layers.push((Shown::Glide(moving.glide.clone(), 1.0), s));
-                }
-                Some((layers, t >= 1.0))
-            } else if let Some(settle) = settling.as_mut() {
-                if let Some(still) = settle.still.clone() {
-                    if settle.started.is_none() {
-                        settle.from = shown.clone();
-                        settle.started = Some(Instant::now());
-                    }
-                    let started = settle.started.unwrap_or_else(Instant::now);
-                    let u = (started.elapsed().as_secs_f32() / settle.length.as_secs_f32()).min(1.0);
-                    if u >= 1.0 {
-                        Some((vec![(Shown::Still(still), 1.0)], true))
-                    } else {
-                        let mut layers = settle.from.clone();
-                        layers.push((Shown::Still(still), ease(u)));
-                        Some((layers, false))
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let Some((layers, last)) = frame else { continue };
-            let presented = P::frame(|| screen.show(&looks(&layers)));
-            let now = Instant::now();
-            if let Err(why) = presented {
+            let Some((layers, step)) = reel.next(Instant::now()) else { continue };
+            if let Err(why) = P::frame(|| screen.show(&looks(&layers))) {
                 tell(Event::Broke { id, why });
-                motion = None;
-                settling = None;
+                reel.halt();
                 continue;
             }
-            if let Some(moving) = motion.as_mut() {
-                if moving.first.is_none() {
-                    moving.first = Some(moving.asked.elapsed().as_millis() as u64);
-                }
-                if moving.last.is_some_and(|last| now - last > slow_after) {
-                    moving.slow += 1;
-                }
-                moving.last = Some(now);
-                moving.frames += 1;
-                if last {
+            let now = Instant::now();
+            drew.push(described(&layers, step.word()));
+            match step {
+                Step::Glided => {
                     let scale = screen.scale;
                     let timed = gpu.time_at(screen.width, screen.height, &looks(&layers), scale).ok();
-                    shown = layers;
-                    tell(Event::Glided { id, frames: moving.frames, slow: moving.slow, first: moving.first.unwrap_or(0), scale, timed });
-                    motion = None;
-                }
-            } else if last {
-                for _ in 0..FLUSH {
-                    if let Err(why) = P::frame(|| screen.show(&looks(&layers))) {
-                        tell(Event::Broke { id, why });
-                        break;
+                    if let Some(ended) = reel.presented(layers, step, now, slow_after) {
+                        tell(Event::Glided { id, frames: ended.frames, slow: ended.slow, first: ended.first, scale, timed });
                     }
                 }
-                let _ = gpu.idle(COMPOSE_WAIT);
-                P::composed();
-                shown = layers;
-                tell(Event::Settled { id });
-                settling = None;
+                Step::Settled => {
+                    for _ in 0..FLUSH {
+                        if let Err(why) = P::frame(|| screen.show(&looks(&layers))) {
+                            tell(Event::Broke { id, why });
+                            break;
+                        }
+                        drew.push(described(&layers, "flush"));
+                    }
+                    let _ = gpu.idle(COMPOSE_WAIT);
+                    P::composed();
+                    reel.presented(layers, step, now, slow_after);
+                    tell(Event::Drew { id, frames: std::mem::take(&mut drew).join(", ") });
+                    tell(Event::Settled { id });
+                }
+                Step::Moving | Step::Fading => {
+                    reel.presented(layers, step, now, slow_after);
+                }
             }
         }
         drop(screen);
+        if !drew.is_empty() {
+            tell(Event::Drew { id, frames: drew.join(", ") });
+        }
         tell(Event::Stopped { id });
     }
 
@@ -1337,6 +1431,10 @@ mod running {
                         live.touched = Instant::now();
                     }
                     self.tell(Reply::Glided { id, frames, slow_frames: slow, first_frame_ms: first, uploads: self.uploads, scale });
+                }
+                Event::Drew { id, frames } => {
+                    let id = self.aliases.get(&id).copied().unwrap_or(id);
+                    self.tell(Reply::Drew { id, frames });
                 }
                 Event::Settled { id } => {
                     let id = self.aliases.get(&id).copied().unwrap_or(id);
@@ -2125,6 +2223,163 @@ mod running {
             let unprimed = replies.iter().rposition(|reply| matches!(reply, Reply::Unprimed { screen } if screen == "main"));
             assert!(unprimed.is_some(), "{replies:?}");
             let _ = std::fs::remove_dir_all(&folder);
+        }
+
+        const REEL: [u32; 2] = [240, 150];
+
+        fn warm(shift: u32) -> RgbImage {
+            let [width, height] = REEL;
+            RgbImage::from_fn(width, height, |x, y| {
+                let (dx, dy) = (x as f32 - width as f32 * 0.62, y as f32 - height as f32 * 0.45);
+                if (dx * dx + dy * dy).sqrt() < height as f32 * 0.22 {
+                    [150, 70 + ((x + shift) % 40) as u8, 60].into()
+                } else {
+                    [230 - (y * 40 / height) as u8, 170 + (x * 50 / width) as u8, 90 + ((x + y + shift) % 30) as u8].into()
+                }
+            })
+        }
+
+        struct Pair {
+            a: scooch_core::Bundle,
+            b: scooch_core::Bundle,
+            crossed: scooch_core::Bundle,
+            stills: [RgbImage; 3],
+            image: RgbImage,
+        }
+
+        fn pair() -> Pair {
+            let [width, height] = REEL;
+            let image = warm(0);
+            let analysis = scooch_core::analyze(&image);
+            let options = scooch_core::Options::default();
+            let icon = |x: f32, y: f32| Rect { x, y, w: 30.0, h: 34.0 };
+            let first = scooch_core::Scene { width, height, icons: vec![icon(4.0, 4.0), icon(4.0, 60.0), icon(200.0, 110.0)] };
+            let second = scooch_core::Scene { width, height, icons: vec![icon(4.0, 4.0), icon(140.0, 52.0), icon(200.0, 110.0)] };
+            let a = scooch_core::solve(&analysis, &first, &options, None);
+            let b = scooch_core::solve(&analysis, &second, &options, Some(&a));
+            let mut flipped = a.clone();
+            flipped.fx.iter_mut().for_each(|value| *value = 1.0 - *value);
+            flipped.mirrored = !a.mirrored;
+            let render = |placement: &scooch_core::Placement, scene: &scooch_core::Scene| scooch_core::render_with(&image, &analysis, placement, scene, &options);
+            let stills = [render(&a, &first), render(&b, &second), render(&flipped, &first)];
+            let bundle = |placement: &scooch_core::Placement, scene: &scooch_core::Scene| scooch_core::bundle(&image, &analysis, placement, scene, &options);
+            Pair { a: bundle(&a, &first), b: bundle(&b, &second), crossed: bundle(&flipped, &first), stills, image }
+        }
+
+        fn luma(pixel: &[u8]) -> f32 {
+            0.2126 * f32::from(pixel[0]) + 0.7152 * f32::from(pixel[1]) + 0.0722 * f32::from(pixel[2])
+        }
+
+        fn mean_luma(image: &RgbImage) -> f32 {
+            image.as_raw().as_chunks::<3>().0.iter().map(|pixel| luma(pixel)).sum::<f32>() / (image.width() * image.height()).max(1) as f32
+        }
+
+        fn darker_than_its_pictures(frame: &RgbImage, pictures: &[RgbImage]) -> Option<String> {
+            let dark = frame.as_raw().as_chunks::<3>().0.iter().filter(|pixel| pixel.iter().all(|channel| *channel <= 24)).count();
+            let (mean, floor) = (mean_luma(frame), pictures.iter().map(mean_luma).fold(f32::MAX, f32::min) - 8.0);
+            (dark > 0 || mean < floor).then(|| format!("{dark} near black pixels, mean lightness {mean:.1} against {floor:.1} below the darker picture"))
+        }
+
+        enum Cue {
+            Glide(usize, f32),
+            Settle(usize, u32),
+            Ready,
+            Failed,
+            Broken,
+        }
+
+        fn play(gpu: &Gpu, pair: &Pair, name: &str, cues: &[(u64, Cue)]) -> Vec<String> {
+            let [width, height] = REEL;
+            let picture = gpu.picture(&scooch_core::canvas(&pair.image, width, height));
+            let stills: Vec<Arc<Still>> = pair.stills.iter().map(|image| Arc::new(gpu.still(image).expect("still"))).collect();
+            let glides = [(&pair.a, &pair.b), (&pair.a, &pair.crossed), (&pair.b, &pair.a)];
+            let start = Instant::now();
+            let mut reel = Reel::new(stills[0].clone());
+            let mut scale = 1.0f32;
+            let mut waiting: Option<usize> = None;
+            let mut found = Vec::new();
+            let mut check = |layers: &[(Shown, f32)], scale: f32, at: u64, step: &str| {
+                let (frame, cover) = gpu.snapshot_cover_at(width, height, &looks(layers), scale).expect("snapshot");
+                if let Some(why) = darker_than_its_pictures(&frame, &pair.stills) {
+                    found.push(format!("{name} at {at} ms, {step} frame of {} layers at scale {scale}: {why}", layers.len()));
+                }
+                if cover < u8::MAX {
+                    found.push(format!("{name} at {at} ms, {step} frame of {} layers at scale {scale}: a pixel covers only {cover} of 255, so the see through layer would show what lies under it", layers.len()));
+                }
+            };
+            let last = cues.iter().map(|(at, _)| *at).max().unwrap_or(0) + 1200;
+            let mut at = 0u64;
+            while at <= last {
+                let now = start + Duration::from_millis(at);
+                for (_, cue) in cues.iter().filter(|(when, _)| *when == at) {
+                    match cue {
+                        Cue::Glide(index, chosen) => {
+                            scale = *chosen;
+                            let (a, b) = glides[*index];
+                            reel.glide(gpu.glide(&picture, a, b).expect("glide"), 450, now, now);
+                        }
+                        Cue::Settle(index, ms) => {
+                            waiting = Some(*index);
+                            reel.settle(*ms);
+                        }
+                        Cue::Ready => {
+                            if let Some(index) = waiting.take() {
+                                reel.ready(stills[index].clone());
+                            }
+                        }
+                        Cue::Failed => {
+                            waiting = None;
+                            reel.unsettle();
+                        }
+                        Cue::Broken => reel.halt(),
+                    }
+                }
+                if let Some((layers, step)) = reel.next(now) {
+                    check(&layers, scale, at, &format!("{step:?}"));
+                    if step == Step::Glided {
+                        let _ = gpu.time_at(width, height, &looks(&layers), scale);
+                    }
+                    if step == Step::Settled {
+                        for _ in 0..FLUSH {
+                            check(&layers, scale, at, "flush");
+                        }
+                    }
+                    reel.presented(layers, step, now, Duration::from_millis(25));
+                }
+                at += 16;
+            }
+            found
+        }
+
+        #[test]
+        fn no_frame_of_any_sequence_is_darker_than_both_of_its_pictures() {
+            let _device = DEVICE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let gpu = match Gpu::new(false) {
+                Ok(gpu) => gpu,
+                Err(why) => {
+                    assert!(std::env::var_os("SCOOCH_NEED_ADAPTER").is_none(), "no adapter, and this runner must have one");
+                    println!("skipped: no adapter {why}");
+                    return;
+                }
+            };
+            let pair = pair();
+            assert!(scooch_core::compatible(&pair.a, &pair.b) && !scooch_core::compatible(&pair.a, &pair.crossed), "the pair does not hold one glide and one cross");
+            let sequences: Vec<(&str, Vec<(u64, Cue)>)> = vec![
+                ("glide then settle", vec![(0, Cue::Glide(0, 1.0)), (96, Cue::Settle(1, SETTLE)), (560, Cue::Ready)]),
+                ("cross then settle", vec![(0, Cue::Glide(1, 1.0)), (96, Cue::Settle(2, SETTLE)), (560, Cue::Ready)]),
+                ("glide then settle back", vec![(0, Cue::Glide(0, 1.0)), (480, Cue::Settle(0, SETTLE)), (496, Cue::Ready)]),
+                ("settle ready before the glide ends", vec![(0, Cue::Glide(0, 0.6)), (64, Cue::Settle(1, SETTLE)), (160, Cue::Ready)]),
+                ("failed decode then settle back", vec![(0, Cue::Glide(0, 0.6)), (96, Cue::Settle(1, SETTLE)), (512, Cue::Failed), (608, Cue::Settle(0, SETTLE)), (640, Cue::Ready)]),
+                ("scale change mid glide", vec![(0, Cue::Glide(0, 0.6)), (208, Cue::Glide(2, 1.0)), (304, Cue::Settle(0, SETTLE)), (800, Cue::Ready)]),
+                ("new picture fades in", vec![(0, Cue::Settle(1, 450)), (32, Cue::Ready)]),
+                ("present broken mid glide then settle back", vec![(0, Cue::Glide(0, 0.5)), (160, Cue::Broken), (320, Cue::Settle(0, SETTLE)), (336, Cue::Ready)]),
+                ("glide during the fade", vec![(0, Cue::Settle(1, 450)), (16, Cue::Ready), (208, Cue::Glide(2, 0.75)), (320, Cue::Settle(0, SETTLE)), (720, Cue::Ready)]),
+            ];
+            let mut found = Vec::new();
+            for (name, cues) in &sequences {
+                found.extend(play(&gpu, &pair, name, cues));
+            }
+            assert!(found.is_empty(), "{} frames were darker than both of their pictures {found:#?}", found.len());
         }
 
         #[test]

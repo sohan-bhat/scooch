@@ -38,11 +38,12 @@ impl Signal {
         self.ready.notify_one();
     }
 
-    pub fn first(&self) {
+    pub fn first(&self) -> Instant {
         let mut pending = self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         while pending.last.is_none() {
             pending = self.ready.wait(pending).unwrap_or_else(|poisoned| poisoned.into_inner());
         }
+        pending.first.unwrap_or_else(Instant::now)
     }
 
     pub fn take(&self) {
@@ -423,14 +424,81 @@ pub fn trace() -> bool {
     *TRACE.get_or_init(|| std::env::var_os("SCOOCH_TRACE").is_some_and(|value| !value.is_empty() && value != "0"))
 }
 
-thread_local! {
-    static LAPS: std::cell::RefCell<Vec<(&'static str, u128)>> = const { std::cell::RefCell::new(Vec::new()) };
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spent {
+    pub thread: Duration,
+    pub process: Duration,
+    pub writers: usize,
 }
 
-fn lap(name: &'static str, since: &mut Instant) {
+static WRITERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(any(windows, target_os = "macos"))]
+struct Writing;
+
+#[cfg(any(windows, target_os = "macos"))]
+impl Writing {
+    fn begin() -> Writing {
+        WRITERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Writing
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+impl Drop for Writing {
+    fn drop(&mut self) {
+        WRITERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(unix)]
+fn spent() -> Spent {
+    let mut clock = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let thread = if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut clock) } == 0 { Duration::new(clock.tv_sec.max(0) as u64, clock.tv_nsec.max(0) as u32) } else { Duration::ZERO };
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    let seconds = |time: libc::timeval| Duration::new(time.tv_sec.max(0) as u64, (time.tv_usec.max(0) as u32) * 1000);
+    let process = if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } == 0 { seconds(usage.ru_utime) + seconds(usage.ru_stime) } else { Duration::ZERO };
+    Spent { thread, process, writers: WRITERS.load(std::sync::atomic::Ordering::SeqCst) }
+}
+
+#[cfg(not(unix))]
+fn spent() -> Spent {
+    Spent { writers: WRITERS.load(std::sync::atomic::Ordering::SeqCst), ..Spent::default() }
+}
+
+thread_local! {
+    static LAPS: std::cell::RefCell<Vec<(&'static str, u128)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static LAPPED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    static WOKE: std::cell::Cell<Option<Spent>> = const { std::cell::Cell::new(None) };
+    static SET: std::cell::Cell<Option<Spent>> = const { std::cell::Cell::new(None) };
+}
+
+fn lap(name: &'static str) {
     if trace() {
-        LAPS.with(|laps| laps.borrow_mut().push((name, since.elapsed().as_millis())));
-        *since = Instant::now();
+        let now = Instant::now();
+        let since = LAPPED.with(|lapped| lapped.replace(Some(now))).unwrap_or(now);
+        LAPS.with(|laps| laps.borrow_mut().push((name, now.saturating_duration_since(since).as_millis())));
+    }
+}
+
+fn lap_set() {
+    lap("set");
+    if trace() {
+        SET.with(|set| set.set(Some(spent())));
+    }
+}
+
+fn laps_from(at: Instant) {
+    if trace() {
+        LAPPED.with(|lapped| lapped.set(Some(at)));
+    }
+}
+
+fn begin_laps(woke: Instant) {
+    if trace() {
+        laps_from(woke);
+        WOKE.with(|start| start.set(Some(spent())));
+        SET.with(|set| set.set(None));
     }
 }
 
@@ -444,6 +512,15 @@ fn give_laps(given: Vec<(&'static str, u128)>) {
 
 fn laps() -> String {
     LAPS.with(|laps| laps.borrow_mut().drain(..).map(|(name, millis)| format!("{name} {millis}")).collect::<Vec<_>>().join(", "))
+}
+
+pub fn spent_words(woke: Option<Spent>, set: Option<Spent>) -> String {
+    let (Some(woke), Some(set)) = (woke, set) else { return String::new() };
+    format!(", cpu to the set {} ms on the tick thread and {} ms in the daemon, writers {} at the wake and {} at the set", set.thread.saturating_sub(woke.thread).as_millis(), set.process.saturating_sub(woke.process).as_millis(), woke.writers, set.writers)
+}
+
+fn spent_line() -> String {
+    spent_words(WOKE.with(std::cell::Cell::get), SET.with(std::cell::Cell::take))
 }
 
 #[cfg(any(unix, windows))]
@@ -588,7 +665,9 @@ impl Daemon {
         *self.woke.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(now);
         self.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).woke(now);
         self.wake_early();
+        lap("prime");
         if self.predicted(worker) || self.heard_save(worker) {
+            lap("look");
             return;
         }
         if self.quick_look() {
@@ -596,6 +675,7 @@ impl Daemon {
         } else {
             worker.settle(QUIET, LIMIT);
         }
+        lap("look");
     }
 
     fn predicted(&self, worker: &Signal) -> bool {
@@ -675,12 +755,16 @@ impl Daemon {
             return false;
         }
         let Some(entry) = state.screens.get(&screen.id) else { return false };
+        let scene = scene::scene(screen, &[]);
+        if self.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).cannot(&screen.id, [scene.width, scene.height]).is_some() {
+            return false;
+        }
+        self.mark("prime look", &screen.id);
         let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { return false };
         if !self.desktop.wallpaper(screen).ok().flatten().is_some_and(|shown| same(&shown, output)) {
             return false;
         }
         let Ok(key) = tables_key(&entry.source, &state.options) else { return false };
-        let scene = scene::scene(screen, &[]);
         let canvas = Some(self.store.canvas_for(&screen.id, key)).filter(|canvas| canvas.is_file());
         let warm = Warmup { picture: entry.source.clone(), size: [scene.width, scene.height], canvas, key };
         let stills = self.stills_of(output, key);
@@ -748,7 +832,7 @@ impl Daemon {
         self.with_session(screen, key, |session| session.tables_shared(image, analysis, placement, scene, options))
     }
 
-    fn bare(&self, entry: &mut Entry, screen: &str, (source, key): (&Path, u64), (image, analysis, scene, options): (&mut Option<RgbImage>, &Analysis, &Scene, &Options), clock: &mut Instant) -> Result<bool> {
+    fn bare(&self, entry: &mut Entry, screen: &str, (source, key): (&Path, u64), (image, analysis, scene, options): (&mut Option<RgbImage>, &Analysis, &Scene, &Options)) -> Result<bool> {
         if !crate::state::scenery_on(options) || scene.icons.is_empty() {
             return Ok(false);
         }
@@ -760,7 +844,7 @@ impl Daemon {
             Some(decoded) => decoded,
             None => {
                 let decoded = self.pixels(source, key)?;
-                lap("decode", clock);
+                lap("decode");
                 decoded
             }
         };
@@ -774,7 +858,7 @@ impl Daemon {
             slot.1.options(&decoded, analysis, scene, options).scenery == options.scenery
         };
         *self.used.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
-        lap("belongs", clock);
+        lap("belongs");
         *image = Some(decoded);
         entry.belongs = Some(crate::state::Belongs { key, stamp, answer });
         Ok(!answer)
@@ -900,9 +984,10 @@ impl Daemon {
             self.glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).stop();
             self.restore(&mut state, &mut report);
         } else {
-            let mut clock = Instant::now();
+            lap("state");
             let glider = self.glider.clone();
             let blocked = self.glide_block(&state);
+            lap("block");
             let mut gliding = blocked.is_none().then(|| glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
             if let Some(glider) = gliding.as_deref_mut() {
                 glider.know(&state.scales);
@@ -911,7 +996,7 @@ impl Daemon {
                 Some((_, snapshot)) => Ok(snapshot),
                 None => self.desktop.snapshot(),
             };
-            lap("snapshot", &mut clock);
+            lap("snapshot");
             let mut moved = false;
             if let Ok(snapshot) = &snapshot {
                 let print = icon_print(snapshot);
@@ -1003,13 +1088,17 @@ impl Daemon {
         if !self.moved.lock().map(|moved| moved.contains(&screen.id)).unwrap_or(false) {
             return;
         }
+        let scene = scene::scene(screen, &[]);
+        if glider.cannot(&screen.id, [scene.width, scene.height]).is_some() {
+            return;
+        }
+        self.mark("read tables", &screen.id);
         let Some(output) = entry.output.as_ref().filter(|output| output.is_file()) else { return };
         let Ok(key) = tables_key(&entry.source, options) else { return };
         let tables = self.store.tables_for(output, key);
         if !tables.is_file() || !current.is_some_and(|shown| same(shown, output)) || stale_tables(&tables).is_some() {
             return;
         }
-        let scene = scene::scene(screen, &[]);
         let canvas = Some(self.store.canvas_for(&screen.id, key)).filter(|canvas| canvas.is_file());
         glider.open_early(screen, (&entry.source, key), [scene.width, scene.height], &self.stills_of(output, key), canvas.as_deref());
     }
@@ -1018,6 +1107,7 @@ impl Daemon {
         let options = state.options;
         let known = self.desktop.known().ok().flatten();
         prune(state, self.desktop.as_ref(), &self.store, known.as_deref(), &snapshot.screens, unix_now());
+        lap("screens");
         for screen in &snapshot.screens {
             if unplaced(state, &screen.id) {
                 report.outcomes.push((screen.id.clone(), Outcome::Skipped));
@@ -1116,6 +1206,7 @@ impl Daemon {
             }
             if showing && glider.is_some() && !settling {
                 self.ready_files(entry, screen, &scene, options);
+                lap("ready");
             }
             if showing || settling {
                 return Ok(Outcome::Unchanged);
@@ -1127,10 +1218,10 @@ impl Daemon {
             self.show(screen, &shown)?;
             return Ok(Outcome::Reapplied);
         }
+        lap("wallpaper");
         if let (Some(glider), false) = (glider.as_deref_mut(), settling) {
-            let mut clock = Instant::now();
             self.open_after_snapshot(entry, screen, options, current.as_deref(), glider);
-            lap("early", &mut clock);
+            lap("early");
         }
         let outcome = self.place(entry, screen, &scene, options, (current.as_deref().filter(|_| !settling), current.as_deref()), (glider, blocked))?;
         if outcome != Outcome::Interrupted {
@@ -1146,19 +1237,18 @@ impl Daemon {
         let mut trail = Move::new(&screen.id, *self.woke.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
         let changed = entry.placement.is_none();
         let mut image: Option<RgbImage> = None;
-        let mut clock = Instant::now();
         let key = cache::key(&source)?;
         let analysis = cache::analysis(&self.store, key, || {
             let decoded = self.pixels(&source, key)?;
-            lap("decode", &mut clock);
+            lap("decode");
             let made = scooch_core::analyze(&decoded);
             image = Some(decoded);
             Ok(made)
         })?;
-        lap("analysis", &mut clock);
+        lap("analysis");
         let placed = solved_with(options);
         let bare_off;
-        let options = if self.bare(entry, &screen.id, (&source, key), (&mut image, &analysis, scene, options), &mut clock)? {
+        let options = if self.bare(entry, &screen.id, (&source, key), (&mut image, &analysis, scene, options))? {
             bare_off = Options { scenery: scooch_core::Scenery::Off, ..*options };
             &bare_off
         } else {
@@ -1167,8 +1257,9 @@ impl Daemon {
         let wanted = crate::state::scenery_on(options) && !scene.icons.is_empty();
         let previous = entry.placement.as_ref().filter(|_| wanted || !entry.painted).filter(|_| entry.placed.as_deref().is_none_or(|before| before == placed));
         let placement = scooch_core::solve(&analysis, scene, options, previous);
-        lap("solve", &mut clock);
+        lap("solve");
         entry.flip_helps = flip_check(&analysis, scene, options, &placement);
+        lap("flip");
         let pads = scooch_core::pads_active(&analysis, &placement, scene, options);
         let output = entry.output.clone().filter(|path| path.is_file());
         let showing_output = matches!((current, &output), (Some(current), Some(output)) if same(current, output));
@@ -1216,68 +1307,84 @@ impl Daemon {
             Some(decoded) => decoded,
             None => self.pixels(&source, key)?,
         };
-        lap("decode", &mut clock);
+        lap("decode");
         let format = self.desktop.format();
         let shown = output.clone().filter(|_| showing_output);
         let parts: Parts = (&decoded, &analysis, &placement, scene, options);
-        let finish = |clock: &mut Instant| {
+        let finish = || {
             let started = Instant::now();
             self.mark("drawing", &screen.id);
             let (bundle, picture) = self.session_still(&screen.id, key, parts);
             self.mark("drawn", &screen.id);
-            lap("render", clock);
+            lap("render");
             let encoded = encode(&picture, format, self.desktop.profile().as_deref(), self.desktop.live());
             let lossless = format == Format::Png;
-            lap("encode", clock);
+            lap("encode");
             let same = encoded.as_ref().is_ok_and(|bytes| shown.as_deref().is_some_and(|output| std::fs::read(output).is_ok_and(|old| old == *bytes)));
+            lap("same");
             self.stills.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(screen.id.clone(), started.elapsed());
             Finished { bundle: Some(bundle), encoded, same, picture: lossless.then_some(picture) }
         };
-        let beside = |clock: &mut Instant, wait: &mut dyn FnMut()| -> Finished {
+        let beside = |wait: &mut dyn FnMut()| -> Finished {
             std::thread::scope(|scope| {
                 let drawing = scope.spawn(|| {
-                    let mut own = Instant::now();
-                    let done = finish(&mut own);
+                    laps_from(Instant::now());
+                    let done = finish();
                     (done, take_laps())
                 });
                 wait();
                 let (done, laps) = drawing.join().unwrap_or_else(|_| (Finished { bundle: None, encoded: Err(anyhow::anyhow!("the still could not be drawn")), same: false, picture: None }, Vec::new()));
                 give_laps(laps);
-                *clock = Instant::now();
+                laps_from(Instant::now());
                 done
             })
         };
         let tables_key = if glider.is_some() { tables_key(&source, options).ok() } else { None };
+        let plain = glider.as_deref_mut().and_then(|glider| match shown {
+            None if current.is_some_and(|current| !self.store.owns(current)) => Some(("system picture", "the system's own picture is on screen, so this first set swaps plainly".to_string())),
+            None => Some(("output not shown", "the picture on screen is not the one Scooch set last".to_string())),
+            Some(_) => glider.cannot(&screen.id, [scene.width, scene.height]).map(|(reason, detail)| (reason, if changed { format!("{detail}, the picture changed") } else { detail.to_string() })),
+        });
+        lap("cold");
         let mut flight = None;
         let mut crossing = false;
         let mut made = None;
         let mut finished = None;
-        if let Some(glider) = glider.as_deref_mut() {
+        if let (Some(glider), Some((reason, detail))) = (glider.as_deref_mut(), plain.as_ref()) {
+            trail.skip(reason, detail);
+            glider.clear(&screen.id);
+            lap("clear");
+        }
+        if let (Some(glider), None) = (glider.as_deref_mut(), plain.as_ref()) {
             if self.adopt_kept(&screen.id, key) {
-                lap("map", &mut clock);
+                lap("map");
             }
+            self.mark("read tables", &screen.id);
             let from = tables_key.zip(shown.as_deref()).map(|(tables_key, output)| self.store.tables_for(output, tables_key)).filter(|from| from.is_file());
             let on_screen = from.as_deref().and_then(|from| std::fs::read(from).ok());
             let stale = from.as_deref().zip(on_screen.as_deref()).and_then(|(from, bytes)| stale_bytes(from, bytes));
+            lap("read");
             let canvas = tables_key.map(|tables_key| self.store.canvas_for(&screen.id, tables_key)).filter(|canvas| canvas.is_file());
             let size = [scene.width, scene.height];
             match (tables_key, from, shown.as_deref()) {
                 (Some(_), Some(_), Some(_)) if stale.is_some() => trail.skip("old tables", stale.as_deref().unwrap_or_default()),
                 (Some(tables_key), Some(from), Some(still)) => {
                     let plan = Plan { screen, picture: &source, canvas: canvas.as_deref(), key: tables_key, size, stills: self.stills_of(still, tables_key) };
-                    if let Some((reason, detail)) = glider.refused(&plan) {
+                    let refused = glider.refused(&plan);
+                    lap("ask");
+                    if let Some((reason, detail)) = refused {
                         glider.close_early_for(&screen.id);
                         trail.skip(reason, detail);
                     } else {
                         let tables = self.session_tables(&screen.id, key, parts);
                         self.mark("tables", &screen.id);
-                        lap("bundle", &mut clock);
+                        lap("bundle");
                         trail.tables = Some(Instant::now());
                         let fresh = tables.tables_to_bytes();
                         if on_screen.as_deref() == Some(fresh.as_slice()) {
                             trail.skip("nothing moves", "the new tables are the tables on screen");
                         } else {
-                            finished = Some(beside(&mut clock, &mut || {
+                            finished = Some(beside(&mut || {
                                 let Some(id) = glider.prepare(&plan, &mut trail) else { return };
                                 let (_, next) = self.fresh_name(&screen.id, entry.counter, format.extension(), current);
                                 let target = self.store.tables_for(&next, tables_key);
@@ -1295,57 +1402,55 @@ impl Daemon {
                                     }
                                 }
                             }));
-                            lap("open", &mut clock);
+                            lap("open");
                         }
                     }
                 }
                 (Some(tables_key), None, Some(still)) if changed => {
                     let plan = Plan { screen, picture: &source, canvas: canvas.as_deref(), key: tables_key, size, stills: Stills { tables: None, ..self.stills_of(still, tables_key) } };
-                    finished = Some(beside(&mut clock, &mut || {
+                    finished = Some(beside(&mut || {
                         if let Some(id) = glider.cross(&plan, &mut trail) {
                             flight = Some(id);
                             crossing = true;
                         }
                     }));
-                    lap("open", &mut clock);
+                    lap("open");
                 }
-                (_, _, None) if current.is_some_and(|current| !self.store.owns(current)) => trail.skip("system picture", "the system's own picture is on screen, so this first set swaps plainly"),
-                (_, _, None) => trail.skip("output not shown", "the picture on screen is not the one Scooch set last"),
                 _ => trail.skip("no tables", "the picture on screen has no tables"),
             }
             if flight.is_none() {
                 glider.clear(&screen.id);
+                lap("clear");
             }
         }
         let Finished { bundle, encoded, same, picture } = match finished {
             Some(done) => done,
-            None if glider.is_some() => finish(&mut clock),
+            None if glider.is_some() && plain.is_none() => finish(),
             None => {
                 trail.skip(blocked.unwrap_or("not live"), "");
                 let held = entry.placement.as_ref() == Some(&placement);
-                let picture = if wanted || held {
+                let (bundle, picture) = if wanted || held {
                     if self.adopt_kept(&screen.id, key) {
-                        lap("map", &mut clock);
+                        lap("map");
                     }
                     self.mark("drawing", &screen.id);
-                    let still = self.session_still(&screen.id, key, parts).1;
+                    let (bundle, still) = self.session_still(&screen.id, key, parts);
                     self.mark("drawn", &screen.id);
-                    still
+                    (Some(bundle), still)
                 } else {
                     self.forget_session(&screen.id);
                     self.mark("rendering", &screen.id);
-                    Arc::new(scooch_core::render_with(&decoded, &analysis, &placement, scene, options))
+                    (None, Arc::new(scooch_core::render_with(&decoded, &analysis, &placement, scene, options)))
                 };
-                lap("render", &mut clock);
+                lap("render");
                 let encoded = encode(&picture, format, self.desktop.profile().as_deref(), self.desktop.live());
-                drop(picture);
-                lap("encode", &mut clock);
+                let lossless = format == Format::Png;
+                lap("encode");
                 let same = encoded.as_ref().is_ok_and(|bytes| shown.as_deref().is_some_and(|output| std::fs::read(output).is_ok_and(|old| old == *bytes)));
-                Finished { bundle: None, encoded, same, picture: None }
+                lap("same");
+                Finished { bundle, encoded, same, picture: lossless.then_some(picture) }
             }
         };
-        drop(decoded);
-        drop(analysis);
         let back = |glider: &mut Glider, why: &str| {
             if let (Some(id), Some(old)) = (flight, shown.as_deref()) {
                 glider.settle_back(id, old, why);
@@ -1406,10 +1511,17 @@ impl Daemon {
         }
         let set = Instant::now();
         trail.set = Some(set);
+        let bundle = bundle.or_else(|| {
+            tables_key?;
+            let tables = self.session_tables(&screen.id, key, parts);
+            self.mark("tables", &screen.id);
+            Some(tables)
+        });
+        drop(decoded);
+        drop(analysis);
         entry.placement = Some(placement);
         entry.placed = Some(placed);
         entry.drawn = Some(drawn);
-        lap("set", &mut clock);
         if let (Some(bundle), Some(output), Some(tables_key)) = (bundle, entry.output.clone(), tables_key) {
             let wanted = self.store.tables_for(&output, tables_key);
             let written = match &made {
@@ -1423,7 +1535,7 @@ impl Daemon {
             self.keep_still(&output, picture);
             self.keep_canvas(&screen.id, tables_key, bundle);
             match written {
-                Ok(()) => lap("later", &mut clock),
+                Ok(()) => lap("later"),
                 Err(error) => eprintln!("{} tables not written to {}, {error:#}", stamp(), wanted.display()),
             }
         }
@@ -1479,7 +1591,9 @@ impl Daemon {
             return;
         }
         let writing = self.canvases.clone();
+        let busy = Writing::begin();
         let spawned = std::thread::Builder::new().name("scooch-canvas".into()).spawn(move || {
+            let _busy = busy;
             let print = crate::live::canvas::fingerprint(bundle.canvas_width, bundle.canvas_height, &bundle.canvas);
             let canvas = scooch_core::Canvas { width: bundle.canvas_width, height: bundle.canvas_height, pixels: bundle.canvas.clone() };
             drop(bundle);
@@ -1497,7 +1611,9 @@ impl Daemon {
     #[cfg(any(windows, target_os = "macos"))]
     fn keep_still(&self, output: &Path, picture: Option<Arc<RgbImage>>) {
         let (target, source, desktop) = (self.store.still_for(output), output.to_path_buf(), self.desktop.clone());
+        let busy = Writing::begin();
         let _ = std::thread::Builder::new().name("scooch-still".into()).spawn(move || {
+            let _busy = busy;
             let image = match picture {
                 Some(picture) => picture,
                 None => match desktop.decode(&source) {
@@ -1524,16 +1640,19 @@ impl Daemon {
         let (counter, path) = self.fresh_name(&screen.id, entry.counter, extension, current);
         std::fs::create_dir_all(self.store.out()).with_context(|| format!("Scooch could not make {}, so check the disk.", self.store.out().display()))?;
         write(&path)?;
+        lap("write");
         let made = [path.clone()];
         if self.picked_meanwhile(screen, seen)? || !self.note(&screen.id, &Entry { output: Some(path.clone()), counter, ..entry.clone() })? {
             discard(self.desktop.as_ref(), &self.store, &made, &made);
             return Ok(false);
         }
+        lap("check");
         if let Err(error) = self.show(screen, &path) {
             let _ = self.note(&screen.id, entry);
             discard(self.desktop.as_ref(), &self.store, &made, &made);
             return Err(error);
         }
+        lap_set();
         entry.counter = counter;
         entry.output = Some(path);
         Ok(true)
@@ -1952,8 +2071,9 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     std::thread::Builder::new().name("scooch-tick".into()).spawn(move || {
         let mut said: Option<String> = None;
         loop {
-            worker.first();
+            begin_laps(worker.first());
             let busy = daemon.desktop.busy();
+            lap("wake");
             daemon.gather(&worker);
             if !stop.begin() {
                 return;
@@ -1971,7 +2091,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             relieve();
             stop.end();
             if tracing {
-                eprintln!("{} tick {} ms {:?} {}, sessions hold {} MB", stamp(), started.elapsed().as_millis(), report.outcomes, laps(), daemon.held_bytes() >> 20);
+                eprintln!("{} tick {} ms {:?} {}, sessions hold {} MB{}", stamp(), started.elapsed().as_millis(), report.outcomes, laps(), daemon.held_bytes() >> 20, spent_line());
             }
             if report.problem != said {
                 if let Some(problem) = &report.problem {
@@ -4432,6 +4552,104 @@ pub mod tests {
         events(&fake)
     }
 
+    fn timed_tick(daemon: &Daemon) -> (Outcome, String) {
+        begin_laps(Instant::now());
+        let report = daemon.tick();
+        let laps = laps();
+        (outcome(&report), format!("{laps}{}", spent_line()))
+    }
+
+    fn writers_done() {
+        let started = Instant::now();
+        while WRITERS.load(std::sync::atomic::Ordering::SeqCst) > 0 && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    #[test]
+    #[ignore]
+    fn the_pieces_of_a_cold_move_and_an_off_move_timed() {
+        for (width, height, scenery) in [(1024u32, 768u32, scooch_core::Scenery::Off), (1920, 1080, scooch_core::Scenery::Off), (1024, 768, scooch_core::Scenery::Auto), (1920, 1080, scooch_core::Scenery::Auto)] {
+            let name = format!("pieces-{width}-{scenery:?}");
+            let (mut daemon, fake, _) = rig(&name, vec![Screen { id: "main".into(), frame: Rect { x: 0.0, y: 0.0, w: width as f32, h: height as f32 }, scale: 1.0 }]);
+            daemon.grace = Duration::ZERO;
+            *fake.live.lock().unwrap() = true;
+            let spawner = crate::glide::tests::FakeSpawner::new(fake.events.clone());
+            let script = spawner.script.clone();
+            daemon.glider = Arc::new(Mutex::new(Glider::new(Box::new(spawner))));
+            let mut state = daemon.store.load();
+            state.options = Options { scenery, ..Options::default() };
+            daemon.store.save(&state).unwrap();
+            let folder = scratch(&format!("{name}-picture"));
+            let (cx, cy, radius) = (width as f32 / 2.0, height as f32 / 2.0, height as f32 / 7.0);
+            let disc = RgbImage::from_fn(width, height, |x, y| if ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt() < radius { [245, 196, 92].into() } else { scooch_core::ISLAND_WATER.into() });
+            let path = folder.join("disc.jpg");
+            std::fs::write(&path, scooch_core::encode_jpeg(&disc, 92).unwrap()).unwrap();
+            fake.show("main", &path);
+            let icon = |x: f32, y: f32| Rect { x: x - 52.0, y: y - 56.0, w: 104.0, h: 112.0 };
+            let column: Vec<Rect> = (1..4).map(|index| icon(width as f32 * 0.85, height as f32 * 0.25 + 110.0 * index as f32)).collect();
+            let at = |x: f32| [vec![icon(x, height as f32 * 0.5)], column.clone()].concat();
+            let (subject, aside) = (width as f32 * 0.5, width as f32 * 0.38);
+            fake.place(at(subject));
+            println!("{width}x{height} {scenery:?} first {:?}", timed_tick(&daemon));
+            writers_done();
+            fake.place(at(aside));
+            println!("{width}x{height} {scenery:?} second {:?}", timed_tick(&daemon));
+            writers_done();
+            let glide = |on: bool| {
+                let mut state = daemon.store.load();
+                state.glide = on;
+                daemon.store.save(&state).unwrap();
+            };
+            for pair in 0..7 {
+                script.lock().unwrap().slow_hello = Duration::from_secs(60);
+                daemon.glider.lock().unwrap().reset_for_test();
+                daemon.glider.lock().unwrap().keep_parked();
+                println!("{width}x{height} {scenery:?} pair {pair} toggle on {:?}", timed_tick(&daemon));
+                writers_done();
+                fake.place(at(aside));
+                println!("{width}x{height} {scenery:?} pair {pair} back {:?}", timed_tick(&daemon));
+                writers_done();
+                fake.place(at(subject));
+                println!("{width}x{height} {scenery:?} pair {pair} slow {:?}", timed_tick(&daemon));
+                writers_done();
+                glide(false);
+                println!("{width}x{height} {scenery:?} pair {pair} toggle off {:?}", timed_tick(&daemon));
+                writers_done();
+                fake.place(at(aside));
+                println!("{width}x{height} {scenery:?} pair {pair} back {:?}", timed_tick(&daemon));
+                writers_done();
+                fake.place(at(subject));
+                println!("{width}x{height} {scenery:?} pair {pair} off {:?}", timed_tick(&daemon));
+                writers_done();
+                glide(true);
+            }
+        }
+    }
+
+    #[test]
+    fn the_tick_line_gives_the_cpu_from_the_wake_to_the_set_and_the_writers_beside_it() {
+        let woke = Spent { thread: Duration::from_millis(10), process: Duration::from_millis(30), writers: 1 };
+        let set = Spent { thread: Duration::from_millis(25), process: Duration::from_millis(70), writers: 0 };
+        assert_eq!(spent_words(Some(woke), Some(set)), ", cpu to the set 15 ms on the tick thread and 40 ms in the daemon, writers 1 at the wake and 0 at the set");
+        assert_eq!(spent_words(Some(woke), None), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_cpu_of_a_tick_counts_its_own_thread_and_not_its_sleep() {
+        let (before, began) = (spent(), Instant::now());
+        std::thread::sleep(Duration::from_millis(60));
+        let busy = Instant::now();
+        while spent().thread.saturating_sub(before.thread) < Duration::from_millis(25) && busy.elapsed() < Duration::from_secs(2) {
+            std::hint::black_box((0..1000u64).sum::<u64>());
+        }
+        let (after, wall) = (spent(), began.elapsed());
+        let (thread, process) = (after.thread.saturating_sub(before.thread), after.process.saturating_sub(before.process));
+        assert!(thread >= Duration::from_millis(20) && thread + Duration::from_millis(40) <= wall && process + Duration::from_millis(1) >= thread, "{before:?} {after:?} {wall:?}");
+    }
+
     #[test]
     fn a_helper_that_has_not_parked_builds_no_tables_and_opens_no_layer_before_the_set() {
         let (_, _, _, events) = cold_skip("cold-skip-tables", true);
@@ -4440,23 +4658,52 @@ pub mod tests {
         assert!(at(&events, "drawing main") < set, "{events:?}");
     }
 
-    #[test]
-    fn a_cold_helper_and_the_glide_off_make_the_same_engine_calls_with_scenery() {
-        let (_, _, _, cold) = cold_skip("cold-skip-same", true);
-        let off = glide_off_move("cold-skip-same-off", true);
-        assert_eq!(engine(&cold), engine(&off), "{cold:?} against {off:?}");
-        assert_eq!(engine(&cold), vec!["drawing main".to_string(), "drawn main".to_string()]);
+    fn before_set(events: &[String]) -> Vec<String> {
+        let set = at(events, "set ");
+        engine(&events[..set])
     }
 
     #[test]
-    fn without_scenery_a_changed_placement_draws_a_session_still_on_the_skip_path_for_the_next_tables() {
-        let off = glide_off_move("cold-skip-plain-off", false);
-        assert_eq!(engine(&off), vec!["rendering main".to_string()], "{off:?}");
-        let (daemon, fake, _, cold) = cold_skip("cold-skip-plain", false);
-        assert_eq!(engine(&cold), vec!["drawing main".to_string(), "drawn main".to_string()], "{cold:?}");
-        let name = name_of(&fake.showing("main"));
-        let tables: Vec<String> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
-        assert!(tables.iter().any(|file| file.starts_with(&format!("{name}.")) && file.ends_with(".tables")), "{tables:?}");
+    fn a_cold_helper_draws_like_the_glide_off_and_makes_the_next_tables_after_the_set() {
+        for scenery in [true, false] {
+            let (daemon, fake, _, cold) = cold_skip(&format!("cold-skip-same-{scenery}"), scenery);
+            let off = glide_off_move(&format!("cold-skip-same-off-{scenery}"), scenery);
+            assert_eq!(before_set(&cold), before_set(&off), "scenery {scenery} {cold:?} against {off:?}");
+            let drawn = if scenery { vec!["drawing main".to_string(), "drawn main".to_string()] } else { vec!["rendering main".to_string()] };
+            assert_eq!(before_set(&cold), drawn, "scenery {scenery} {cold:?}");
+            if !scenery {
+                assert!(at(&cold, "set ") < at(&cold, "tables main"), "{cold:?}");
+            }
+            let name = name_of(&fake.showing("main"));
+            let tables: Vec<String> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+            assert!(tables.iter().any(|file| file.starts_with(&format!("{name}.")) && file.ends_with(".tables")), "scenery {scenery} {tables:?}");
+        }
+    }
+
+    #[test]
+    fn a_cold_helper_reads_no_glide_file_before_the_set() {
+        let (daemon, fake, script, _) = marked_rig("cold-skip-reads");
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let state = daemon.store.load();
+        let entry = &state.screens["main"];
+        let on_screen = daemon.store.tables_for(entry.output.as_ref().unwrap(), tables_key(&entry.source, &state.options).unwrap());
+        std::fs::write(&on_screen, b"SCBT torn").unwrap();
+        script.lock().unwrap().slow_hello = Duration::from_secs(60);
+        daemon.glider.lock().unwrap().reset_for_test();
+        daemon.glider.lock().unwrap().keep_parked();
+        daemon.glider.lock().unwrap().forget_wake_for_test();
+        *fake.pointer.lock().unwrap() = Some(center(subject()));
+        fake.events.lock().unwrap().clear();
+        assert!(!daemon.wake_early(), "a wake primed a cold helper");
+        assert!(!daemon.launch_at_drag(center(subject())), "a drag start primed a cold helper");
+        fake.place(vec![moved_subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let events = events(&fake);
+        let set = at(&events, "set ");
+        assert!(!events[..set].iter().any(|event| event.starts_with("read tables") || event.starts_with("prime look")), "{events:?}");
+        let said = daemon.glider.lock().unwrap().said.clone();
+        assert!(said.iter().any(|line| line.starts_with("skipped, helper cold")), "{said:?}");
     }
 
     #[test]
@@ -4474,16 +4721,18 @@ pub mod tests {
 
     #[test]
     fn after_a_skip_the_new_picture_has_its_tables_and_the_next_move_glides_from_them() {
-        let (daemon, fake, script, _) = cold_skip("cold-skip-next", true);
-        let name = name_of(&fake.showing("main"));
-        let tables: Vec<String> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
-        assert!(tables.iter().any(|file| file.starts_with(&format!("{name}.")) && file.ends_with(".tables")), "{tables:?}");
-        script.lock().unwrap().slow_hello = Duration::ZERO;
-        fake.events.lock().unwrap().clear();
-        fake.place(vec![Rect { x: 66.0, y: 42.0, w: 28.0, h: 28.0 }]);
-        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
-        let events = events(&fake);
-        assert!(events.iter().any(|event| event.starts_with("glide ") && event.ends_with(" true true")), "{events:?}");
+        for scenery in [true, false] {
+            let (daemon, fake, script, _) = cold_skip(&format!("cold-skip-next-{scenery}"), scenery);
+            let name = name_of(&fake.showing("main"));
+            let tables: Vec<String> = std::fs::read_dir(daemon.store.tables()).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+            assert!(tables.iter().any(|file| file.starts_with(&format!("{name}.")) && file.ends_with(".tables")), "scenery {scenery} {tables:?}");
+            script.lock().unwrap().slow_hello = Duration::ZERO;
+            fake.events.lock().unwrap().clear();
+            fake.place(vec![if scenery { Rect { x: 66.0, y: 42.0, w: 28.0, h: 28.0 } } else { Rect { x: 30.0, y: 20.0, w: 50.0, h: 60.0 } }]);
+            assert_eq!(outcome(&daemon.tick()), Outcome::Rendered, "scenery {scenery} {:?}", daemon.glider.lock().unwrap().said);
+            let events = events(&fake);
+            assert!(events.iter().any(|event| event.starts_with("glide ") && event.ends_with(" true true")), "scenery {scenery} {events:?}");
+        }
     }
 
     #[test]

@@ -183,6 +183,11 @@ impl Real {
                 self.drawn.push((id, Split { window: part(window), first: part(first), reveal: part(reveal), make: part(make), present: part(present), found, steps, revealing, still, screen_gpu }));
             }
             Reply::Settled { id } => self.heard.push(Heard::Settled(id)),
+            Reply::Drew { id, frames } => {
+                if crate::daemon::trace() {
+                    eprintln!("{} glide drew {id} {frames}", crate::daemon::stamp());
+                }
+            }
             Reply::Glided { id, frames, slow_frames, scale, first_frame_ms, .. } => self.heard.push(Heard::Glided { id, frames, slow: slow_frames, scale, first: first_frame_ms }),
             Reply::Failed { id: Some(id), .. } if self.gone.contains(&id) => {}
             Reply::Failed { id, why } => self.failed.push((id, why)),
@@ -971,12 +976,14 @@ impl Glider {
     }
 
     pub fn refused(&mut self, plan: &Plan) -> Option<(&'static str, &'static str)> {
+        self.cannot(&plan.screen.id, plan.size).or_else(|| (!plan.stills.still.as_deref().is_some_and(exact)).then_some(("old still", "the picture on screen was saved with less color detail than the layer shows, so this move swaps it plainly")))
+    }
+
+    pub fn cannot(&mut self, screen: &str, size: [u32; 2]) -> Option<(&'static str, &'static str)> {
         if !self.usable() {
             Some((if self.software { "software adapter" } else { "strikes" }, ""))
-        } else if self.too_large(&plan.screen.id, plan.size) {
+        } else if self.too_large(screen, size) {
             Some(("too large", ""))
-        } else if !plan.stills.still.as_deref().is_some_and(exact) {
-            Some(("old still", "the picture on screen was saved with less color detail than the layer shows, so this move swaps it plainly"))
         } else if self.given_up {
             Some(("helper cold", "the helper was given up after it stopped twice, so this move swaps plainly"))
         } else if self.link.is_none() {

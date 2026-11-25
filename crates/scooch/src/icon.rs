@@ -68,8 +68,20 @@ fn once(flag: &AtomicBool) -> bool {
 }
 
 pub fn after_first_tick(store: &Store) {
-    if once(&STARTED) {
-        show(&store.load(), &store.log_file());
+    let store = store.clone();
+    beside(&STARTED, move || show(&store.load(), &store.log_file()));
+}
+
+fn beside(flag: &AtomicBool, work: impl FnOnce() + Send + 'static) -> Option<std::thread::JoinHandle<()>> {
+    if !once(flag) {
+        return None;
+    }
+    match std::thread::Builder::new().name("scooch-icon".into()).spawn(work) {
+        Ok(started) => Some(started),
+        Err(error) => {
+            eprintln!("{} icon not started, its thread could not start, {error}", crate::daemon::stamp());
+            None
+        }
     }
 }
 
@@ -165,6 +177,22 @@ mod tests {
         state.on = on;
         state.restoring = restoring;
         state
+    }
+
+    #[test]
+    fn the_icon_starts_on_a_thread_of_its_own_so_the_tick_never_waits_for_it() {
+        let flag = AtomicBool::new(false);
+        let (told, heard) = std::sync::mpsc::channel();
+        let began = std::time::Instant::now();
+        let started = beside(&flag, move || {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            let _ = told.send(std::thread::current().name().map(str::to_string));
+        });
+        let returned = began.elapsed();
+        assert!(returned < std::time::Duration::from_millis(300), "the start held the caller for {returned:?}");
+        assert!(beside(&flag, || panic!("the icon started twice")).is_none());
+        started.expect("no icon thread").join().unwrap();
+        assert_eq!(heard.recv().unwrap().as_deref(), Some("scooch-icon"));
     }
 
     #[test]

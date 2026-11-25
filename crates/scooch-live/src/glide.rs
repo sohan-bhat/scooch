@@ -741,6 +741,9 @@ impl Gpu {
 
     fn encode(&self, view: &wgpu::TextureView, output: (u32, u32), layers: &[(Look, f32)], scale: f32) -> Result<wgpu::CommandEncoder, String> {
         let pipes = self.pipes()?;
+        if layers.is_empty() {
+            return Err("a frame needs a whole picture at its base".into());
+        }
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("show") });
         let first = layers.iter().position(|(look, _)| matches!(look, Look::Glide(..)));
         let small = match (first, scale_key(scale) < 1000) {
@@ -760,7 +763,7 @@ impl Gpu {
         {
             let mut pass = Self::pass(&mut encoder, view);
             for (index, (look, k)) in layers.iter().enumerate() {
-                let weight = f64::from(k.clamp(0.0, 1.0));
+                let weight = if index == 0 { 1.0 } else { f64::from(k.clamp(0.0, 1.0)) };
                 match look {
                     Look::Still(still) => {
                         pass.set_pipeline(&pipes.still);
@@ -775,7 +778,7 @@ impl Gpu {
                         pass.set_bind_group(0, bind, &[]);
                         pass.draw(0..3, 0..1);
                     }
-                    Look::Glide(glide, s) => self.draw_glide(&mut pass, pipes, &glide.full, glide.compatible, *s, *k),
+                    Look::Glide(glide, s) => self.draw_glide(&mut pass, pipes, &glide.full, glide.compatible, *s, weight as f32),
                 }
             }
         }
@@ -801,6 +804,17 @@ impl Gpu {
         if let Some(texture) = texture {
             self.queue.present(texture);
         }
+    }
+
+    fn present_drawn(&self, encoder: wgpu::CommandEncoder, texture: wgpu::SurfaceTexture) -> Result<(), String> {
+        let _turn = self.turn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        self.queue.submit([encoder.finish()]);
+        if let Some(error) = pollster::block_on(scope.pop()) {
+            return Err(format!("a frame was not drawn, so it was not shown {error}"));
+        }
+        self.queue.present(texture);
+        Ok(())
     }
 
     pub(crate) fn configure(&self, surface: &wgpu::Surface<'static>, config: &wgpu::SurfaceConfiguration) -> Result<(), String> {
@@ -887,6 +901,10 @@ impl Gpu {
     }
 
     pub fn snapshot_at(&self, width: u32, height: u32, layers: &[(Look, f32)], scale: f32) -> Result<RgbImage, String> {
+        self.snapshot_cover_at(width, height, layers, scale).map(|(image, _)| image)
+    }
+
+    pub fn snapshot_cover_at(&self, width: u32, height: u32, layers: &[(Look, f32)], scale: f32) -> Result<(RgbImage, u8), String> {
         self.healthy()?;
         self.fits(width, height)?;
         let target = self.target(width, height);
@@ -913,16 +931,18 @@ impl Gpu {
         }
         let mapped = buffer.get_mapped_range(..).map_err(|error| format!("the readback could not be read {error}"))?;
         let mut out = Vec::with_capacity((width * height * 3) as usize);
+        let mut cover = u8::MAX;
         for y in 0..height {
             let line = &mapped[(y * row) as usize..(y * row + width * 4) as usize];
             for pixel in line.as_chunks::<4>().0.iter() {
                 out.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+                cover = cover.min(pixel[3]);
             }
         }
         drop(mapped);
         buffer.unmap();
         self.healthy()?;
-        RgbImage::from_raw(width, height, out).ok_or_else(|| "the readback has the wrong size".to_string())
+        RgbImage::from_raw(width, height, out).map(|image| (image, cover)).ok_or_else(|| "the readback has the wrong size".to_string())
     }
 
     pub fn screen(&self, target: Target, width: u32, height: u32) -> Result<Screen, String> {
@@ -944,12 +964,18 @@ impl Gpu {
             return Err(format!("the surface offers no {OUTPUT:?}"));
         }
         config.present_mode = wgpu::PresentMode::Fifo;
-        if capabilities.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
-            config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
-        }
+        config.alpha_mode = alpha_for(&target, &capabilities.alpha_modes).unwrap_or(config.alpha_mode);
         self.configure(&surface, &config)?;
         Ok(Screen { gpu: self.clone(), surface, width: config.width, height: config.height, scale: 1.0 })
     }
+}
+
+pub fn alpha_for(target: &Target, offered: &[wgpu::CompositeAlphaMode]) -> Option<wgpu::CompositeAlphaMode> {
+    let wanted = match target {
+        Target::Layer(_) => wgpu::CompositeAlphaMode::PostMultiplied,
+        Target::Window { .. } => wgpu::CompositeAlphaMode::Opaque,
+    };
+    offered.contains(&wanted).then_some(wanted).or_else(|| offered.contains(&wgpu::CompositeAlphaMode::Opaque).then_some(wgpu::CompositeAlphaMode::Opaque))
 }
 
 pub struct Screen {
@@ -973,7 +999,7 @@ impl Screen {
         let view = texture.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(OUTPUT), ..Default::default() });
         self.gpu.healthy()?;
         let encoder = self.gpu.encode(&view, (self.width, self.height), layers, self.scale)?;
-        self.gpu.submit(encoder, Some(texture));
+        self.gpu.present_drawn(encoder, texture)?;
         self.gpu.healthy()?;
         Ok(())
     }

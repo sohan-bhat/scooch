@@ -215,6 +215,27 @@ fn a_mirrored_pair_cross_fades_like_the_cpu() {
 }
 
 #[test]
+fn a_frame_with_no_picture_at_its_base_is_refused_and_a_faint_base_is_drawn_whole() {
+    let Some(gpu) = device() else { return };
+    assert!(gpu.snapshot_at(8, 8, &[], 1.0).err().is_some_and(|why| why.contains("base")));
+    let image = RgbImage::from_raw(8, 8, vec![200u8; 8 * 8 * 3]).expect("image");
+    let still = gpu.still(&image).expect("still");
+    let (drawn, cover) = gpu.snapshot_cover_at(8, 8, &[(Look::Still(&still), 0.25)], 1.0).expect("snapshot");
+    assert_eq!((drawn, cover), (image, 255));
+}
+
+#[test]
+fn a_layer_is_shown_see_through_and_a_window_opaque() {
+    let both = [wgpu::CompositeAlphaMode::Opaque, wgpu::CompositeAlphaMode::PostMultiplied];
+    let layer = scooch_live::Target::Layer(std::ptr::null_mut());
+    let window = scooch_live::Target::Window { window: 1, instance: 0, composition: false };
+    assert_eq!(scooch_live::alpha_for(&layer, &both), Some(wgpu::CompositeAlphaMode::PostMultiplied));
+    assert_eq!(scooch_live::alpha_for(&window, &both), Some(wgpu::CompositeAlphaMode::Opaque));
+    assert_eq!(scooch_live::alpha_for(&layer, &[wgpu::CompositeAlphaMode::Opaque]), Some(wgpu::CompositeAlphaMode::Opaque));
+    assert_eq!(scooch_live::alpha_for(&window, &[wgpu::CompositeAlphaMode::Inherit]), None);
+}
+
+#[test]
 fn four_channel_copies_keep_every_pixel_and_set_alpha() {
     for pixels in [0usize, 1, 3, 4, 5, 9, 4097] {
         let rgb: Vec<u8> = (0..pixels * 3).map(|index| (index * 7 % 256) as u8).collect();
