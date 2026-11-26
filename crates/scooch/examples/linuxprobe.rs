@@ -182,6 +182,7 @@ mod probe {
     use scooch::platform::linux::parse::geometry::{intersect, Insets};
     use scooch::platform::linux::parse::{caja, ding, gio, gvariant, kde as kde_rules, keyfile, nemo, record, wakes, xfce as xfce_rules};
     use scooch::platform::linux::settings::{self, Gsettings, Plasma, Xfconf};
+    use scooch::platform::linux::screens::x11_within;
     use scooch::platform::linux::{bus, cinnamon, decode, drops, gnome, gvfs, kde, mate, pending, screens, tool, xfce, Linux};
     use scooch::platform::{Desktop, Screen};
     use scooch_core::{Rect, RgbImage};
@@ -1082,6 +1083,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn capture_x11(area: &Rect) -> Result<RgbImage> {
+        let area = *area;
+        x11_within("a capture", move || capture_x11_now(&area))
+    }
+
+    fn capture_x11_now(area: &Rect) -> Result<RgbImage> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let (width, height) = (area.w as u16, area.h as u16);
@@ -1340,9 +1346,13 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn wander(p: &mut Probe) -> Result<String> {
+        let frame = primary_frame(p).context("no screen")?;
+        x11_within("the pointer steps", move || wander_now(frame))
+    }
+
+    fn wander_now(frame: Rect) -> Result<String> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
-        let frame = primary_frame(p).context("no screen")?;
         for step in 0..40i32 {
             let x = frame.x + frame.w * (0.3 + 0.4 * (step as f32 / 40.0));
             let y = frame.y + frame.h * (0.4 + 0.2 * ((step % 10) as f32 / 10.0));
@@ -1359,6 +1369,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn drag_ending(from: (i16, i16), to: (i16, i16), escape: bool) -> Result<()> {
+        x11_within("a drag", move || drag_ending_now(from, to, escape))
+    }
+
+    fn drag_ending_now(from: (i16, i16), to: (i16, i16), escape: bool) -> Result<()> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
@@ -1403,6 +1417,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn control_click(point: (i16, i16)) -> Result<()> {
+        x11_within("a click", move || control_click_now(point))
+    }
+
+    fn control_click_now(point: (i16, i16)) -> Result<()> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let control = control_code(&conn).context("no Control key")?;
@@ -1427,6 +1445,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn clicks(points: &[(i16, i16)]) -> Result<bool> {
+        let points = points.to_vec();
+        x11_within("the clicks", move || clicks_now(&points))
+    }
+
+    fn clicks_now(points: &[(i16, i16)]) -> Result<bool> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let Some(control) = control_code(&conn) else { return Ok(false) };
@@ -1974,6 +1997,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn desktop_active() -> Result<bool> {
+        x11_within("the active window", desktop_active_now)
+    }
+
+    fn desktop_active_now() -> Result<bool> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let Some(window) = active_window(&conn, root) else { return Ok(false) };
@@ -2020,6 +2047,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn tap_shift() -> Result<()> {
+        x11_within("a key press", tap_shift_now)
+    }
+
+    fn tap_shift_now() -> Result<()> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let code = key_code(&conn, 0xffe1).context("no Shift key")?;
@@ -2135,6 +2166,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn hook_drag(from: (i16, i16), jump: (i16, i16), to: (i16, i16)) -> Result<()> {
+        x11_within("a drag", move || hook_drag_now(from, jump, to))
+    }
+
+    fn hook_drag_now(from: (i16, i16), jump: (i16, i16), to: (i16, i16)) -> Result<()> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
