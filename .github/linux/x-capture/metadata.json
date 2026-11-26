@@ -1,0 +1,6 @@
+{
+  "uuid": "capture@scooch",
+  "name": "Scooch probe capture",
+  "description": "Takes a screenshot from inside the shell for the Scooch probe",
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51", "52"]
+}
