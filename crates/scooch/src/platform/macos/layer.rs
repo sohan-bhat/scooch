@@ -569,6 +569,87 @@ extern "C" fn tick(_link: *mut c_void, _now: *const TimeStamp, output: *const Ti
     0
 }
 
+struct Beat {
+    last: Mutex<Option<Instant>>,
+    came: std::sync::Condvar,
+}
+
+extern "C" fn beat(_link: *mut c_void, _now: *const TimeStamp, _output: *const TimeStamp, _flags: u64, _out: *mut u64, context: *mut c_void) -> i32 {
+    if context.is_null() {
+        return 0;
+    }
+    let beat = unsafe { &*(context as *const Beat) };
+    if let Ok(mut last) = beat.last.lock() {
+        *last = Some(Instant::now());
+    }
+    beat.came.notify_all();
+    0
+}
+
+pub struct Beats {
+    link: *mut c_void,
+    beat: *const Beat,
+    running: bool,
+}
+
+unsafe impl Send for Beats {}
+
+impl Beats {
+    pub fn new(display: u32) -> Option<Beats> {
+        let mut link: *mut c_void = std::ptr::null_mut();
+        if unsafe { CVDisplayLinkCreateWithCGDisplay(display, &mut link) } != 0 || link.is_null() {
+            return None;
+        }
+        let shared = Arc::into_raw(Arc::new(Beat { last: Mutex::new(None), came: std::sync::Condvar::new() }));
+        unsafe { CVDisplayLinkSetOutputCallback(link, beat, shared as *mut c_void) };
+        Some(Beats { link, beat: shared, running: false })
+    }
+}
+
+impl crate::live::helper::Ticks for Beats {
+    fn run(&mut self) {
+        if !self.running {
+            self.running = unsafe { CVDisplayLinkStart(self.link) } == 0;
+        }
+    }
+
+    fn rest(&mut self) {
+        if self.running {
+            unsafe { CVDisplayLinkStop(self.link) };
+            self.running = false;
+        }
+    }
+
+    fn last(&self) -> Option<Instant> {
+        unsafe { &*self.beat }.last.lock().ok().and_then(|last| *last)
+    }
+
+    fn wait(&self, newer: Option<Instant>, until: Instant) {
+        let beat = unsafe { &*self.beat };
+        let Ok(mut last) = beat.last.lock() else { return };
+        while *last == newer {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            match beat.came.wait_timeout(last, left) {
+                Ok((held, _)) => last = held,
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+impl Drop for Beats {
+    fn drop(&mut self) {
+        unsafe {
+            CVDisplayLinkStop(self.link);
+            CVDisplayLinkRelease(self.link);
+            drop(Arc::from_raw(self.beat));
+        }
+    }
+}
+
 pub struct Paced {
     pub arrivals: Vec<f64>,
     pub outputs: Vec<f64>,

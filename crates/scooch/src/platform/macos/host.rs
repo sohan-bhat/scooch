@@ -117,6 +117,10 @@ impl Platform for Host {
         objc2::rc::autoreleasepool(|_| layer::display_gpu(layer.display))
     }
 
+    fn ticks(&self, layer: &layer::Layer) -> Option<Box<dyn helper::Ticks>> {
+        layer::Beats::new(layer.display).map(|ticks| Box::new(ticks) as Box<dyn helper::Ticks>)
+    }
+
     fn committer(&self) -> Option<Commit> {
         (self.reveal == Reveal::Transaction).then(|| Box::new(layer::commit) as Commit)
     }
