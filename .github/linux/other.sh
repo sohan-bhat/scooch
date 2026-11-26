@@ -24,7 +24,7 @@ if [ "$step" = run ]; then
     id -u tester >/dev/null 2>&1 || useradd -m -u "${HOST_UID:-1001}" tester
     chown -R tester "$out"
     exec runuser -u tester -- env -i HOME=/home/tester USER=tester LOGNAME=tester PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
-        SETS="${SETS:-3000}" SCOOCH_REPLACES="${SCOOCH_REPLACES:-100}" bash .github/linux/other.sh session
+        SETS="${SETS:-3000}" SCOOCH_REPLACES="${SCOOCH_REPLACES:-100}" SCOOCH_UNSAFE=1 bash .github/linux/other.sh session
 fi
 total=0
 silent=0
@@ -38,7 +38,7 @@ while [ "$total" -lt "$SETS" ] && [ "$empty" -lt 3 ]; do
     chmod 700 "$runtime"
     first=""
     if [ "$sessions" = 1 ]; then first=1; fi
-    XDG_RUNTIME_DIR="$runtime" SCOOCH_NO_DING=1 SCOOCH_WRITES=two SCOOCH_REPLACE_FIRST="$first" SCOOCH_SETS_LEFT=$((SETS - total)) \
+    XDG_RUNTIME_DIR="$runtime" SCOOCH_UNSAFE="${SCOOCH_UNSAFE:-}" SCOOCH_NO_DING=1 SCOOCH_WRITES=two SCOOCH_REPLACE_FIRST="$first" SCOOCH_SETS_LEFT=$((SETS - total)) \
         dbus-run-session -- bash .github/linux/gnome.sh "$PWD/.github/linux/other-probe.sh" "$run" >"$run/console.txt" 2>&1 || true
     done_here=0
     gone=0

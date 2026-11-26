@@ -16,7 +16,11 @@ monitors=(--virtual-monitor 1920x1080)
 if [ "${SCOOCH_MONITORS:-1}" = "2" ]; then
     monitors+=(--virtual-monitor 1920x1080)
 fi
-gnome-shell --headless --wayland --no-x11 "${monitors[@]}" >"$out/shell.log" 2>&1 &
+extra=()
+if [ -n "${SCOOCH_UNSAFE:-}" ] && gnome-shell --help 2>&1 | grep -q -- --unsafe-mode; then
+    extra=(--unsafe-mode)
+fi
+gnome-shell --headless --wayland --no-x11 "${monitors[@]}" "${extra[@]}" >"$out/shell.log" 2>&1 &
 
 wayland_socket() {
     [ -S "$XDG_RUNTIME_DIR/wayland-0" ]

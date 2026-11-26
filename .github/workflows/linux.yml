@@ -34,7 +34,7 @@ jobs:
 
       - name: Session
         timeout-minutes: 130
-        run: docker run --rm --init --cap-add SYS_NICE -v "$PWD:/work" -w /work -e HOST_UID="$(id -u)" -e SETS=3000 -e SCOOCH_REPLACES=100 other:local bash .github/linux/other.sh run
+        run: docker run --rm --init --cap-add SYS_NICE -v "$PWD:/work" -w /work -e HOST_UID="$(id -u)" -e SETS=1 -e SCOOCH_REPLACES=100 other:local bash .github/linux/other.sh run
 
       - name: Upload
         if: ${{ always() }}

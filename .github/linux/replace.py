@@ -12,7 +12,7 @@ from gi.repository import GdkPixbuf, Gio, GLib
 
 out = sys.argv[1]
 count = int(sys.argv[2])
-folder = os.path.join(out, "replace")
+folder = os.path.abspath(os.path.join(out, "replace"))
 os.makedirs(folder, exist_ok=True)
 swatches = [(214, 64, 40), (36, 84, 214)]
 bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
