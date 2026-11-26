@@ -12,89 +12,46 @@ permissions:
   contents: read
 
 jobs:
-  probe:
+  writes:
     strategy:
       fail-fast: false
       matrix:
+        desktop: [gnome, gnome-dual]
+        variant: [rename, inplace, two]
+        copy: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        exclude:
+          - variant: two
+            copy: 6
+          - variant: two
+            copy: 7
+          - variant: two
+            copy: 8
+          - variant: two
+            copy: 9
         include:
-          - desktop: gnome
-            way: rename
-            count: 100
-            packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
-            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli
-          - desktop: gnome
-            way: inplace
-            count: 100
-            packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
-            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli
-          - desktop: gnome
-            way: setting
-            count: 100
-            packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
-            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli
+          - packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
+            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli gdb
           - desktop: gnome-dual
-            way: rename
-            count: 100
-            script: gnome
             monitors: 2
+          - desktop: gnome
+            variant: rename
+            copy: long
             packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
-            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli
-          - desktop: gnome-dual
-            way: inplace
-            count: 100
-            script: gnome
-            monitors: 2
+            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli gdb
+          - desktop: gnome
+            variant: two
+            copy: long
             packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
-            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli
-          - desktop: gnome-dual
-            way: setting
-            count: 100
-            script: gnome
-            monitors: 2
-            packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
-            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli
-          - desktop: cinnamon
-            way: rename
-            count: 20
-            packages: xvfb x11-utils cinnamon cinnamon-settings-daemon nemo gvfs gvfs-daemons libglib2.0-bin python3-gi
-            extras: cinnamon-desktop-data
-          - desktop: cinnamon
-            way: inplace
-            count: 20
-            packages: xvfb x11-utils cinnamon cinnamon-settings-daemon nemo gvfs gvfs-daemons libglib2.0-bin python3-gi
-            extras: cinnamon-desktop-data
-          - desktop: cinnamon
-            way: setting
-            count: 20
-            packages: xvfb x11-utils cinnamon cinnamon-settings-daemon nemo gvfs gvfs-daemons libglib2.0-bin python3-gi
-            extras: cinnamon-desktop-data
-          - desktop: mate
-            way: rename
-            count: 20
-            packages: xvfb x11-utils caja marco mate-panel gvfs gvfs-daemons libglib2.0-bin
-            extras: mate-desktop-environment-core mate-backgrounds
-          - desktop: mate
-            way: inplace
-            count: 20
-            packages: xvfb x11-utils caja marco mate-panel gvfs gvfs-daemons libglib2.0-bin
-            extras: mate-desktop-environment-core mate-backgrounds
-          - desktop: mate
-            way: setting
-            count: 20
-            packages: xvfb x11-utils caja marco mate-panel gvfs gvfs-daemons libglib2.0-bin
-            extras: mate-desktop-environment-core mate-backgrounds
+            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli gdb
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 140
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - name: Package list
         id: list
-        if: ${{ !matrix.container }}
         env:
           LIST: ${{ matrix.packages }} ${{ matrix.extras }} ${{ hashFiles('.github/linux/apt.sh') }}
         run: |
@@ -104,7 +61,6 @@ jobs:
 
       - name: Package cache
         id: cache
-        if: ${{ !matrix.container }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: /var/tmp/apt-archives
@@ -113,7 +69,6 @@ jobs:
 
       - name: Packages
         id: apt
-        if: ${{ !matrix.container }}
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
         env:
           PACKAGES: ${{ matrix.packages }}
@@ -124,86 +79,54 @@ jobs:
           on_retry_command: sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
           command: sudo timeout -k 20s 8m env PACKAGES="$PACKAGES" EXTRAS="$EXTRAS" bash .github/linux/apt.sh /var/tmp/apt-archives
 
-      - name: Package cache owner
-        if: ${{ !cancelled() && !matrix.container && steps.cache.outputs.cache-hit != 'true' }}
-        run: sudo chown -R "$(id -u):$(id -g)" /var/tmp/apt-archives || true
-
-      - name: Package cache save
-        if: ${{ !cancelled() && !matrix.container && steps.cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: /var/tmp/apt-archives
-          key: ${{ steps.apt.outcome == 'success' && steps.list.outputs.key || format('{0}-part-{1}-{2}', steps.list.outputs.key, github.run_id, github.run_attempt) }}
-
-      - name: Packages
-        id: image
-        if: ${{ matrix.container }}
-        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
+      - name: Writes
+        timeout-minutes: 130
         env:
-          PACKAGES: ${{ matrix.packages }}
-          EXTRAS: ${{ matrix.extras }}
-          IMAGE: ${{ matrix.container }}
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          on_retry_command: docker rm -f packages
-          command: |
-            set -e
-            docker run --name packages -v "$PWD:/work" -w /work -v "$RUNNER_TEMP/packages:/var/cache/pacman/pkg" -v "$RUNNER_TEMP/packages:/var/cache/apt/archives" -e PACKAGES -e EXTRAS "$IMAGE" bash .github/linux/container.sh install
-            docker commit packages scooch-probe:local
-            docker rm packages
-
-      - name: Build
-        run: cargo build --release -p scooch --bins --examples
-
-      - name: Test
-        if: ${{ false }}
-        env:
-          SCOOCH_NEED_BUS: "1"
-        run: cargo test --release -p scooch
-
-      - name: Source
-        if: ${{ startsWith(matrix.desktop, 'gnome') }}
-        run: |
-          mkdir -p linuxprobe
-          dpkg-query -W gnome-shell gjs libgjs0g libglib2.0-0t64 dconf-gsettings-backend dconf-service libmutter-14-0 libmozjs-115-0t64 > linuxprobe/versions-extra.txt || true
-          for file in /usr/lib/gnome-shell/*.so /usr/bin/gnome-shell; do
-            if gresource list "$file" 2>/dev/null | grep -qx /org/gnome/shell/ui/background.js; then
-              gresource extract "$file" /org/gnome/shell/ui/background.js > linuxprobe/background-runner.js
-              echo "$file" > linuxprobe/background-runner-from.txt
-            fi
-          done
-
-      - name: Probe
-        if: ${{ !cancelled() && steps.apt.outcome != 'failure' && steps.image.outcome != 'failure' }}
-        timeout-minutes: 60
-        env:
-          SCOOCH_PROBE_REPLACE: ${{ matrix.way }}
-          SCOOCH_PROBE_REPLACES: ${{ matrix.count }}
-          SCOOCH_SCALE: ${{ matrix.scale || 1 }}
           SCOOCH_MONITORS: ${{ matrix.monitors || 1 }}
-          PACKAGES: ${{ matrix.packages }}
-          EXTRAS: ${{ matrix.extras }}
-          IMAGE: ${{ matrix.container }}
-          SCRIPT: ${{ matrix.script || matrix.desktop }}
+          VARIANT: ${{ matrix.variant }}
+          SETS: ${{ matrix.copy == 'long' && 9000 || 2000 }}
+          SCOOCH_PACE: "0.5"
         run: |
-          if [ -n "$IMAGE" ]; then
-            docker run --rm --init --pull never --cap-add SYS_NICE -v "$PWD:/work" -w /work -e SCOOCH_SCALE -e SCOOCH_MONITORS -e PACKAGES -e EXTRAS -e HOST_UID="$(id -u)" scooch-probe:local bash .github/linux/container.sh "$SCRIPT"
-          else
-            bash .github/linux/tries.sh "$SCRIPT"
-          fi
+          mkdir -p writes
+          total=0
+          silent=0
+          sessions=0
+          empty=0
+          writes="${VARIANT%-noding}"
+          noding=""
+          if [ "$VARIANT" != "$writes" ]; then noding=1; fi
+          while [ "$total" -lt "$SETS" ] && [ "$empty" -lt 3 ]; do
+            sessions=$((sessions + 1))
+            run="writes/session-$sessions"
+            mkdir -p "$run"
+            home="$(mktemp -d)"
+            runtime="$(mktemp -d)"
+            chmod 700 "$runtime"
+            HOME="$home" XDG_RUNTIME_DIR="$runtime" SCOOCH_WRITES="$writes" SCOOCH_NO_DING="$noding" SCOOCH_SETS_LEFT=$((SETS - total)) \
+              dbus-run-session -- bash .github/linux/gnome.sh "$PWD/.github/linux/writes.sh" "$run" > "$run/console.txt" 2>&1 || true
+            done_here=0
+            gone=0
+            if [ -f "$run/count.txt" ]; then read -r done_here gone < "$run/count.txt"; fi
+            if [ "$done_here" = 0 ]; then empty=$((empty + 1)); fi
+            total=$((total + done_here))
+            silent=$((silent + gone))
+            echo "session $sessions sets $done_here silent $gone total $total" | tee -a writes/sessions.txt
+            for pid in $(pgrep -u "$(id -u)"); do
+              if tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qx "XDG_RUNTIME_DIR=$runtime"; then
+                kill -9 "$pid" 2>/dev/null || true
+              fi
+            done
+            for mount in "$runtime/doc" "$runtime/gvfs"; do
+              fusermount3 -uz "$mount" 2>/dev/null || fusermount -uz "$mount" 2>/dev/null || true
+            done
+            rm -rf "$home" "$runtime" 2>/dev/null || true
+          done
+          echo "desktop ${{ matrix.desktop }} variant $VARIANT sets $total silent $silent sessions $sessions" | tee -a writes/sessions.txt
 
       - name: Upload
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: linuxprobe-${{ matrix.desktop }}-${{ matrix.way }}
-          path: linuxprobe
+          name: writes-${{ matrix.desktop }}-${{ matrix.variant }}-${{ matrix.copy }}
+          path: writes
           if-no-files-found: warn
-
-      - name: Summary
-        if: ${{ always() }}
-        run: |
-          if [ -f linuxprobe/report.md ]; then
-            cat linuxprobe/report.md >> "$GITHUB_STEP_SUMMARY"
-          fi
