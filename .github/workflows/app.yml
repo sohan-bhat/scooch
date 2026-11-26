@@ -333,7 +333,7 @@ jobs:
           - name: linux-arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 55
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -342,12 +342,16 @@ jobs:
         with:
           name: app-${{ matrix.name }}
           path: built
+      - name: Install the desktop packages
+        timeout-minutes: 30
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y xvfb xauth x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11 libglib2.0-bin file gnome-themes-extra python3-pyatspi at-spi2-core dconf-gsettings-backend dconf-service rpm
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --download-only ./built/*.deb
       - name: Probe
         timeout-minutes: 35
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb xauth x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11 libglib2.0-bin file gnome-themes-extra python3-pyatspi at-spi2-core dconf-gsettings-backend dconf-service rpm
-          sudo apt-get install -y ./built/*.deb
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ./built/*.deb
           XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
           export XDG_RUNTIME_DIR
@@ -373,7 +377,7 @@ jobs:
     needs: bundle-linux
     if: ${{ github.workflow == 'app' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -382,19 +386,23 @@ jobs:
         with:
           name: app-linux-x64
           path: built
+      - name: Install the desktop packages
+        timeout-minutes: 30
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y gnome-shell gvfs gvfs-daemons dconf-service libglib2.0-bin gnome-shell-extension-prefs fonts-cantarell adwaita-icon-theme dconf-cli xdg-user-dirs python3-pyatspi at-spi2-core
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --download-only ./built/*.deb gnome-shell-extension-desktop-icons-ng
       - name: Probe
         timeout-minutes: 35
         run: |
-          sudo apt-get update
-          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y gnome-shell gvfs gvfs-daemons dconf-service libglib2.0-bin gnome-shell-extension-prefs fonts-cantarell adwaita-icon-theme dconf-cli xdg-user-dirs python3-pyatspi at-spi2-core
-          sudo apt-get install -y ./built/*.deb
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ./built/*.deb
           sudo apt-get remove -y gnome-shell-extension-desktop-icons-ng || true
           XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
           export XDG_RUNTIME_DIR
           failed=0
           PASS=missing dbus-run-session -- bash .github/linux/gnome.sh .github/app/probe-gnome.sh appprobe || failed=1
-          sudo apt-get install -y gnome-shell-extension-desktop-icons-ng
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y gnome-shell-extension-desktop-icons-ng
           XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
           export XDG_RUNTIME_DIR
@@ -422,16 +430,19 @@ jobs:
           - desktop: kde
             packages: xvfb x11-utils dbus-x11 plasma-desktop plasma-workspace kwin-x11
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Install the desktop packages
+        timeout-minutes: 30
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ${{ matrix.packages }}
       - name: Measure
         timeout-minutes: 30
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ${{ matrix.packages }}
           XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
           export XDG_RUNTIME_DIR
