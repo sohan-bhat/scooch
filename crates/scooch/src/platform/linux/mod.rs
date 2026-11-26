@@ -4,6 +4,21 @@ pub mod saves;
 
 pub use children::child_env;
 
+#[derive(Debug)]
+pub struct Silent(pub String);
+
+impl std::fmt::Display for Silent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Silent {}
+
+pub fn silent(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<Silent>())
+}
+
 #[cfg(target_os = "linux")]
 pub mod autostart;
 #[cfg(target_os = "linux")]
@@ -155,7 +170,7 @@ mod system {
             super::super::children::clean(&mut command).args(arguments).env("LC_ALL", "C.UTF-8").env_remove("LANGUAGE");
             match within(&mut command, LIMIT) {
                 Ok(Some(output)) => Ok(output),
-                Ok(None) => Err(anyhow!("{program} did not finish within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())),
+                Ok(None) => Err(anyhow::Error::new(super::super::Silent(format!("{program} did not finish within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())))),
                 Err(_) => Err(anyhow!("Scooch could not run {program}, so install it or check your PATH.")),
             }
         }
@@ -275,7 +290,7 @@ mod system {
         {
             match reply {
                 Ok(reply) => Ok(reply.body().deserialize()?),
-                Err(error) if late(&error) => Err(anyhow!("{destination} did not answer {method} within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())),
+                Err(error) if late(&error) => Err(anyhow::Error::new(super::super::Silent(format!("{destination} did not answer {method} within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())))),
                 Err(error) => Err(error.into()),
             }
         }
@@ -605,6 +620,39 @@ mod tests {
         assert_eq!(taken.try_recv().as_deref(), Ok("Describe"));
         assert_eq!(answer.try_recv(), Ok(Err(format!("{SILENT} did not answer Describe within 10 seconds, so check that the desktop still runs."))));
         assert_eq!(ticks, (1, None, 1));
+    }
+
+    #[test]
+    fn a_tick_the_desktop_did_not_answer_is_tried_again_with_no_wake_and_the_waits_end_with_a_tick_that_works() {
+        use crate::daemon::{rearm, retry_wait, Signal};
+        let (daemon, fake, _) = crate::daemon::tests::rig("silent-retry", vec![crate::daemon::tests::screen("main", 0.0, 1.0)]);
+        *fake.silent.lock().unwrap() = 1;
+        let held = daemon.tick();
+        assert!(held.silent);
+        assert_eq!(held.problem.as_deref(), Some("The Wayland display did not answer within 10 seconds, so check that the desktop still runs."));
+        let worker = std::sync::Arc::new(Signal::default());
+        assert_eq!(rearm(&worker, &held, 0), 1);
+        let (waiting, (woke, heard)) = (worker.clone(), mpsc::channel());
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            waiting.first();
+            let _ = woke.send(());
+        });
+        heard.recv_timeout(retry_wait(0) + Duration::from_secs(5)).expect("no tick was tried again without a wake");
+        assert!(started.elapsed() >= retry_wait(0) - Duration::from_millis(100), "the retry came after {:?}", started.elapsed());
+        worker.take();
+        let back = daemon.tick();
+        assert_eq!((back.silent, back.problem.clone(), back.outcomes.len()), (false, None, 1));
+        assert_eq!(rearm(&worker, &back, 1), 0);
+        let (idle, (late, never)) = (worker.clone(), mpsc::channel());
+        std::thread::spawn(move || {
+            idle.first();
+            let _ = late.send(());
+        });
+        assert!(never.recv_timeout(Duration::from_secs(1)).is_err(), "a timer ran while nothing was wrong");
+        *fake.broken.lock().unwrap() = Some("Scooch only moves picture files, so pick a photo as your wallpaper to use it again.".into());
+        assert!(!daemon.tick().silent);
+        assert_eq!((0..5).map(|tries| retry_wait(tries).as_secs()).collect::<Vec<_>>(), vec![5, 30, 120, 120, 120]);
     }
 
     #[test]

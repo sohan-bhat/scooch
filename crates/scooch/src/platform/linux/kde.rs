@@ -26,7 +26,7 @@ pub fn groups(name: &str) -> Vec<keyfile::Group> {
 }
 
 pub fn evaluate(script: &str) -> Result<String> {
-    super::bus::call::<_, String>(SHELL_NAME, "/PlasmaShell", "org.kde.PlasmaShell", "evaluateScript", &(script,)).map_err(|_| anyhow!("Plasma did not answer, so check that plasmashell runs."))
+    super::bus::call::<_, String>(SHELL_NAME, "/PlasmaShell", "org.kde.PlasmaShell", "evaluateScript", &(script,)).map_err(|error| if super::silent(&error) { error } else { anyhow!("Plasma did not answer, so check that plasmashell runs.") })
 }
 
 pub fn state() -> Result<State> {

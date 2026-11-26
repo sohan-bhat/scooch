@@ -182,6 +182,7 @@ mod probe {
     use scooch::platform::linux::parse::geometry::{intersect, Insets};
     use scooch::platform::linux::parse::{caja, ding, gio, gvariant, kde as kde_rules, keyfile, nemo, record, wakes, xfce as xfce_rules};
     use scooch::platform::linux::settings::{self, Gsettings, Plasma, Xfconf};
+    use scooch::platform::linux::screens::x11_within;
     use scooch::platform::linux::{bus, cinnamon, decode, drops, gnome, gvfs, kde, mate, pending, screens, tool, xfce, Linux};
     use scooch::platform::{Desktop, Screen};
     use scooch_core::{Rect, RgbImage};
@@ -509,7 +510,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         listening: bool,
         failed: Vec<String>,
         soft: Vec<String>,
+        lost: Option<String>,
     }
+
+    const LOST: u8 = 75;
+
+    type Check = fn(&mut Probe) -> Result<()>;
 
     impl Probe {
         fn line(&mut self, text: impl Into<String>) {
@@ -529,7 +535,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let _ = fs::write(self.out.join("report.md"), self.report.join("\n") + "\n");
         }
 
-        fn section(&mut self, title: &str, check: fn(&mut Probe) -> Result<()>) {
+        fn section(&mut self, title: &str, check: Check) {
             self.line(String::new());
             self.line(format!("## {title}"));
             self.line(String::new());
@@ -540,7 +546,23 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 self.failed.push(format!("{title} stopped with {error:#}"));
             }
             self.line(format!("- took {} ms", started.elapsed().as_millis()));
+            if let Some(why) = self.silence() {
+                self.line(format!("- **silent desktop** the desktop stopped answering by the end of section {title}, {why}, so this session ends and a fresh session makes the sections again"));
+                self.lost = Some(title.to_string());
+            }
             self.save();
+        }
+
+        fn silence(&self) -> Option<String> {
+            match self.linux().and_then(|linux| linux.snapshot()) {
+                Err(error) if scooch::platform::linux::silent(&error) => {
+                    let said = format!("{error:#}");
+                    let said = said.trim_end_matches('.');
+                    let mut letters = said.chars();
+                    Some(letters.next().map(|first| first.to_lowercase().chain(letters).collect()).unwrap_or_default())
+                }
+                _ => None,
+            }
         }
 
         fn fail(&mut self, text: impl Into<String>) {
@@ -602,22 +624,46 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             listening: false,
             failed: Vec::new(),
             soft: Vec::new(),
+            lost: None,
         };
         held(&LINES).extend(probe.report.iter().cloned());
-        probe.section("1 Session facts", facts);
-        probe.section("2 Read", read);
-        probe.section("3 Geometry truth from pixels", geometry);
-        probe.section("4 Move and events", events);
-        probe.section("5 Wallpaper", wallpaper);
-        probe.section("6 End to end", end_to_end);
-        probe.section("7 Two monitors", monitors);
-        probe.section("7b Desktop after the drop", after_drop);
-        probe.section("7c The AppImage thrown away", thrown_away);
-        probe.section("7d The final off", final_off_check);
-        probe.section("8 Cleanup", cleanup);
+        let sections: [(&str, Check); 11] = [
+            ("1 Session facts", facts),
+            ("2 Read", read),
+            ("3 Geometry truth from pixels", geometry),
+            ("4 Move and events", events),
+            ("5 Wallpaper", wallpaper),
+            ("6 End to end", end_to_end),
+            ("7 Two monitors", monitors),
+            ("7b Desktop after the drop", after_drop),
+            ("7c The AppImage thrown away", thrown_away),
+            ("7d The final off", final_off_check),
+            ("8 Cleanup", cleanup),
+        ];
+        for (title, check) in sections {
+            probe.section(title, check);
+            if probe.lost.is_some() {
+                break;
+            }
+        }
+        let earlier: usize = std::env::var("SCOOCH_PROBE_SILENT").ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0);
+        let tries = std::env::var("SCOOCH_PROBE_TRY").unwrap_or_else(|_| "1".into());
         probe.line(String::new());
         probe.line("## Result".to_string());
         probe.line(String::new());
+        probe.line(format!("- silent desktops in this job {}, this session is try {tries} of 3", earlier + usize::from(probe.lost.is_some())));
+        if let Some(title) = probe.lost.clone() {
+            if let Some(mut child) = probe.daemon.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            probe.line(format!("- **silent desktop** the desktop stopped answering by the end of section {title}, which is no wrong answer of Scooch, so a fresh session makes the sections again"));
+            for failed in probe.failed.clone() {
+                probe.line(format!("- set aside with the lost footing {failed}"));
+            }
+            probe.save();
+            return ExitCode::from(LOST);
+        }
         if probe.failed.is_empty() {
             probe.line("- every check passed".to_string());
         }
@@ -1042,6 +1088,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn capture_x11(area: &Rect) -> Result<RgbImage> {
+        let area = *area;
+        x11_within("a capture", move || capture_x11_now(&area))
+    }
+
+    fn capture_x11_now(area: &Rect) -> Result<RgbImage> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let (width, height) = (area.w as u16, area.h as u16);
@@ -1300,9 +1351,13 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn wander(p: &mut Probe) -> Result<String> {
+        let frame = primary_frame(p).context("no screen")?;
+        x11_within("the pointer steps", move || wander_now(frame))
+    }
+
+    fn wander_now(frame: Rect) -> Result<String> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
-        let frame = primary_frame(p).context("no screen")?;
         for step in 0..40i32 {
             let x = frame.x + frame.w * (0.3 + 0.4 * (step as f32 / 40.0));
             let y = frame.y + frame.h * (0.4 + 0.2 * ((step % 10) as f32 / 10.0));
@@ -1319,6 +1374,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn drag_ending(from: (i16, i16), to: (i16, i16), escape: bool) -> Result<()> {
+        x11_within("a drag", move || drag_ending_now(from, to, escape))
+    }
+
+    fn drag_ending_now(from: (i16, i16), to: (i16, i16), escape: bool) -> Result<()> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
@@ -1363,6 +1422,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn control_click(point: (i16, i16)) -> Result<()> {
+        x11_within("a click", move || control_click_now(point))
+    }
+
+    fn control_click_now(point: (i16, i16)) -> Result<()> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let control = control_code(&conn).context("no Control key")?;
@@ -1387,6 +1450,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn clicks(points: &[(i16, i16)]) -> Result<bool> {
+        let points = points.to_vec();
+        x11_within("the clicks", move || clicks_now(&points))
+    }
+
+    fn clicks_now(points: &[(i16, i16)]) -> Result<bool> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let Some(control) = control_code(&conn) else { return Ok(false) };
@@ -1934,6 +2002,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn desktop_active() -> Result<bool> {
+        x11_within("the active window", desktop_active_now)
+    }
+
+    fn desktop_active_now() -> Result<bool> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let Some(window) = active_window(&conn, root) else { return Ok(false) };
@@ -1980,6 +2052,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn tap_shift() -> Result<()> {
+        x11_within("a key press", tap_shift_now)
+    }
+
+    fn tap_shift_now() -> Result<()> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let code = key_code(&conn, 0xffe1).context("no Shift key")?;
@@ -2095,6 +2171,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn hook_drag(from: (i16, i16), jump: (i16, i16), to: (i16, i16)) -> Result<()> {
+        x11_within("a drag", move || hook_drag_now(from, jump, to))
+    }
+
+    fn hook_drag_now(from: (i16, i16), jump: (i16, i16), to: (i16, i16)) -> Result<()> {
         let (conn, number) = x11rb::connect(None)?;
         let root = conn.setup().roots.get(number).context("no root")?.root;
         let pause = |ms| std::thread::sleep(Duration::from_millis(ms));

@@ -58,4 +58,4 @@ chown -R tester linuxprobe
 
 exec runuser -u tester -- env -i HOME=/home/tester USER=tester LOGNAME=tester PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
     SCOOCH_SCALE="${SCOOCH_SCALE:-1}" SCOOCH_MONITORS="${SCOOCH_MONITORS:-1}" \
-    bash -c 'XDG_RUNTIME_DIR="$(mktemp -d)"; chmod 700 "$XDG_RUNTIME_DIR"; export XDG_RUNTIME_DIR; exec dbus-run-session -- bash ".github/linux/$0.sh" ./target/release/examples/linuxprobe linuxprobe' "$script"
+    bash .github/linux/tries.sh "$script"

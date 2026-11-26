@@ -21,6 +21,7 @@ pub const QUALITY: u8 = 95;
 struct Pending {
     first: Option<Instant>,
     last: Option<Instant>,
+    due: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -41,9 +42,21 @@ impl Signal {
     pub fn first(&self) -> Instant {
         let mut pending = self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         while pending.last.is_none() {
-            pending = self.ready.wait(pending).unwrap_or_else(|poisoned| poisoned.into_inner());
+            let now = Instant::now();
+            pending = match pending.due {
+                Some(due) if due <= now => {
+                    (pending.first, pending.last) = (Some(now), Some(now));
+                    pending
+                }
+                Some(due) => self.ready.wait_timeout(pending, due - now).unwrap_or_else(|poisoned| poisoned.into_inner()).0,
+                None => self.ready.wait(pending).unwrap_or_else(|poisoned| poisoned.into_inner()),
+            };
         }
         pending.first.unwrap_or_else(Instant::now)
+    }
+
+    pub fn retry_in(&self, wait: Duration) {
+        self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).due = Some(Instant::now() + wait);
     }
 
     pub fn take(&self) {
@@ -83,6 +96,7 @@ pub struct Report {
     pub outcomes: Vec<(String, Outcome)>,
     pub problem: Option<String>,
     pub retry: bool,
+    pub silent: bool,
     pub unsaved: bool,
     pub exit: bool,
     pub unload: bool,
@@ -1016,7 +1030,10 @@ impl Daemon {
             }
             match snapshot {
                 Ok(snapshot) => self.pass(&mut state, &snapshot, &mut report, (gliding.as_deref_mut(), blocked)),
-                Err(error) => report.problem = Some(error.to_string()),
+                Err(error) => {
+                    report.silent = silent(&error);
+                    report.problem = Some(error.to_string());
+                }
             }
             {
                 let mut held = gliding.take().unwrap_or_else(|| glider.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
@@ -2025,6 +2042,30 @@ pub fn gave_up(state: &State) -> Result<()> {
     Ok(())
 }
 
+pub const RETRY_WAITS: [Duration; 3] = [Duration::from_secs(5), Duration::from_secs(30), Duration::from_secs(120)];
+
+pub fn retry_wait(tries: usize) -> Duration {
+    RETRY_WAITS[tries.min(RETRY_WAITS.len() - 1)]
+}
+
+pub fn rearm(worker: &Signal, report: &Report, tries: usize) -> usize {
+    if !report.silent {
+        return 0;
+    }
+    worker.retry_in(retry_wait(tries));
+    tries + 1
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn silent(error: &anyhow::Error) -> bool {
+    crate::platform::linux::silent(error)
+}
+
+#[cfg(not(any(target_os = "linux", test)))]
+fn silent(_error: &anyhow::Error) -> bool {
+    false
+}
+
 pub fn prime(desktop: &dyn Desktop, signal: &Arc<Signal>) {
     let consent = signal.clone();
     desktop.watching(Box::new(move || consent.wake()));
@@ -2070,6 +2111,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
     let origin = crate::program::linux::Watcher::start(trashed.clone(), signal.clone());
     std::thread::Builder::new().name("scooch-tick".into()).spawn(move || {
         let mut said: Option<String> = None;
+        let mut tries = 0;
         loop {
             begin_laps(worker.first());
             let busy = daemon.desktop.busy();
@@ -2110,6 +2152,7 @@ pub fn watch(desktop: Arc<dyn Desktop>, store: Store) -> Result<()> {
             if report.retry {
                 worker.wake();
             }
+            tries = rearm(&worker, &report, tries);
             crate::icon::after_first_tick(&daemon.store);
         }
     })?;
@@ -2171,12 +2214,13 @@ pub mod tests {
         pub offered: Mutex<Option<Hold>>,
         pub hold: Mutex<Option<Hold>>,
         pub events: crate::glide::tests::Events,
+        pub silent: Mutex<usize>,
     }
 
     impl Fake {
         pub fn new(screens: Vec<Screen>, picture: &Path) -> Arc<Self> {
             let shown = screens.iter().map(|screen| (screen.id.clone(), picture.to_path_buf())).collect();
-            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), bad_profile: Mutex::new(false), slow_profile: Mutex::new(Duration::ZERO), saves: Mutex::new(Vec::new()), predicted: Mutex::new(None), leaves: AtomicUsize::new(0), installs: AtomicUsize::new(0), detached: Mutex::new(Vec::new()), offered: Mutex::new(None), hold: Mutex::new(None), events: Arc::new(Mutex::new(Vec::new())) })
+            Arc::new(Self { screens: Mutex::new(screens), known: Mutex::new(None), blind: Mutex::new(false), unloads: AtomicUsize::new(0), icons: Mutex::new(Vec::new()), shown: Mutex::new(shown), sets: AtomicUsize::new(0), decodes: AtomicUsize::new(0), snapshots: AtomicUsize::new(0), hook: Mutex::new(None), moving: Mutex::new(None), after_read: Mutex::new(None), lost: Mutex::new(Vec::new()), gallery: Mutex::new(Vec::new()), broken: Mutex::new(None), mid_render: Mutex::new(None), on_set: Mutex::new(None), refuse: Mutex::new(Vec::new()), unknowable: Mutex::new(false), crash_after_set: Mutex::new(false), lag: Mutex::new(0), stale: Mutex::new(HashMap::new()), watched: Mutex::new(None), live: Mutex::new(false), reduce: Mutex::new(false), drop_seen: Mutex::new(false), at_once: Mutex::new(false), pointer: Mutex::new(None), button: Mutex::new(false), covered: Mutex::new(false), bad_profile: Mutex::new(false), slow_profile: Mutex::new(Duration::ZERO), saves: Mutex::new(Vec::new()), predicted: Mutex::new(None), leaves: AtomicUsize::new(0), installs: AtomicUsize::new(0), detached: Mutex::new(Vec::new()), offered: Mutex::new(None), hold: Mutex::new(None), events: Arc::new(Mutex::new(Vec::new())), silent: Mutex::new(0) })
         }
 
         pub fn connect(&self, screens: Vec<Screen>) {
@@ -2223,6 +2267,12 @@ pub mod tests {
             if let Some(reason) = self.broken.lock().unwrap().clone() {
                 anyhow::bail!(reason);
             }
+            let mut left = self.silent.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(anyhow::Error::new(crate::platform::linux::Silent("The Wayland display did not answer within 10 seconds, so check that the desktop still runs.".into())));
+            }
+            drop(left);
             let screens = self.screens()?;
             let icons = through(&mut self.hold.lock().unwrap(), self.icons.lock().unwrap().clone(), Instant::now());
             if let Some(later) = self.after_read.lock().unwrap().take() {
