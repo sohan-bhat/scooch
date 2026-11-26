@@ -439,15 +439,13 @@ fn tries_allowed(tries: &[Try], stalls: usize) -> usize {
 const PLAIN_STALLS: usize = 4;
 
 #[cfg(any(target_os = "macos", test))]
-fn plain_stalls(paces: &[Pace], arm: bool) -> Result<String, String> {
+fn plain_stalls(paces: &[Pace], runner: &str) -> Result<String, String> {
     let stalled = paces.iter().filter(|pace| pace.stalled).count();
     let counted = format!("{stalled} of {} glides with no capture stalled", paces.len());
-    if !arm {
-        Ok(format!("{counted}, a count judged against nothing on Intel until the cause of the stalls there is known"))
-    } else if stalled > PLAIN_STALLS {
-        Err(format!("{counted}, more than the {PLAIN_STALLS} allowed on arm64"))
+    if stalled > PLAIN_STALLS {
+        Err(format!("{counted}, more than the {PLAIN_STALLS} allowed on {runner}"))
     } else {
-        Ok(format!("{counted}, within the {PLAIN_STALLS} allowed on arm64"))
+        Ok(format!("{counted}, within the {PLAIN_STALLS} allowed on {runner}"))
     }
 }
 
@@ -772,13 +770,14 @@ mod tests {
     }
 
     #[test]
-    fn plain_slides_on_arm64_fail_past_four_stalls_and_intel_counts_them_for_now() {
+    fn plain_slides_fail_past_four_stalls_on_both_macs() {
         let pace = |stalled: bool| super::Pace { gap: if stalled { 300.0 } else { 40.0 }, moving: if stalled { 0 } else { 9 }, stalled, burst: 1, waited: None, split: None };
         let paces = |stalls: usize| (0..40).map(|index| pace(index < stalls)).collect::<Vec<_>>();
-        assert_eq!(super::plain_stalls(&paces(4), true), Ok("4 of 40 glides with no capture stalled, within the 4 allowed on arm64".to_string()));
-        assert_eq!(super::plain_stalls(&paces(5), true), Err("5 of 40 glides with no capture stalled, more than the 4 allowed on arm64".to_string()));
-        assert_eq!(super::plain_stalls(&paces(0), true), Ok("0 of 40 glides with no capture stalled, within the 4 allowed on arm64".to_string()));
-        assert_eq!(super::plain_stalls(&paces(10), false), Ok("10 of 40 glides with no capture stalled, a count judged against nothing on Intel until the cause of the stalls there is known".to_string()));
+        assert_eq!(super::plain_stalls(&paces(4), "arm64"), Ok("4 of 40 glides with no capture stalled, within the 4 allowed on arm64".to_string()));
+        assert_eq!(super::plain_stalls(&paces(5), "arm64"), Err("5 of 40 glides with no capture stalled, more than the 4 allowed on arm64".to_string()));
+        assert_eq!(super::plain_stalls(&paces(0), "arm64"), Ok("0 of 40 glides with no capture stalled, within the 4 allowed on arm64".to_string()));
+        assert_eq!(super::plain_stalls(&paces(4), "Intel"), Ok("4 of 40 glides with no capture stalled, within the 4 allowed on Intel".to_string()));
+        assert_eq!(super::plain_stalls(&paces(5), "Intel"), Err("5 of 40 glides with no capture stalled, more than the 4 allowed on Intel".to_string()), "Intel passed more than four stalls");
     }
 
     #[test]
@@ -5307,7 +5306,7 @@ mod probe {
         p.line(format!("  - each glide with no capture, its largest gap between presents and its frames between the two places {each:?}"));
         p.line(format!("- gaps with no capture: {}", crate::gap_summary(&gapped)));
         p.line(format!("- first moves with no capture: {}", crate::first_summary(&firsts)));
-        match crate::plain_stalls(&found, cfg!(target_arch = "aarch64")) {
+        match crate::plain_stalls(&found, if cfg!(target_arch = "aarch64") { "arm64" } else { "Intel" }) {
             Ok(said) => p.line(format!("- stalls with no capture: {said}")),
             Err(said) => p.fail(said),
         }
