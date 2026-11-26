@@ -1,0 +1,14 @@
+# test platform::linux::screens::tests::an_x_server_that_never_answers_ends_in_plain_words_at_the_limit
+diff --git a/crates/scooch/src/platform/linux/screens.rs b/crates/scooch/src/platform/linux/screens.rs
+index 53ed0b1..8fbc2e0 100644
+--- a/crates/scooch/src/platform/linux/screens.rs
++++ b/crates/scooch/src/platform/linux/screens.rs
+@@ -41,7 +41,7 @@ pub fn x11_within<T: Send + 'static>(what: &'static str, work: impl FnOnce() ->
+     std::thread::Builder::new().name("scooch-x11".into()).spawn(move || {
+         let _ = sender.send(work());
+     })?;
+-    match receiver.recv_timeout(super::LIMIT) {
++    match receiver.recv().map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected) {
+         Ok(result) => result,
+         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(anyhow::Error::new(super::Silent(format!("The X display did not answer {what} within {} seconds, so check that the desktop still runs.", super::LIMIT.as_secs())))),
+         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!("The X display stopped answering, so try again.")),

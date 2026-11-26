@@ -1,0 +1,13 @@
+# test platform::linux::tests::a_tick_the_desktop_did_not_answer_is_tried_again_with_no_wake_and_the_waits_end_with_a_tick_that_works
+diff --git a/crates/scooch/src/daemon.rs b/crates/scooch/src/daemon.rs
+index 93f0228..e9379a4 100644
+--- a/crates/scooch/src/daemon.rs
++++ b/crates/scooch/src/daemon.rs
+@@ -2052,7 +2052,6 @@ pub fn rearm(worker: &Signal, report: &Report, tries: usize) -> usize {
+     if !report.silent {
+         return 0;
+     }
+-    worker.retry_in(retry_wait(tries));
+     tries + 1
+ }
+ 
