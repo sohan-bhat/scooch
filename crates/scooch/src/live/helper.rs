@@ -41,7 +41,7 @@ pub fn main() -> ExitCode {
 }
 
 #[cfg(any(windows, target_os = "macos"))]
-pub use running::{serve, Build, Platform};
+pub use running::{serve, Build, Platform, Ticks};
 
 #[cfg(any(windows, target_os = "macos"))]
 mod running {
@@ -103,6 +103,9 @@ mod running {
         fn committer(&self) -> Option<Commit> {
             None
         }
+        fn ticks(&self, _layer: &Self::Layer) -> Option<Box<dyn Ticks>> {
+            None
+        }
         fn screen_gpu(&self, _layer: &Self::Layer) -> Option<String> {
             None
         }
@@ -140,8 +143,38 @@ mod running {
         t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
     }
 
-    pub fn begin_at(before: Option<Instant>, now: Instant, interval: Duration) -> Instant {
-        before.map_or(now, |before| now.max(before + interval))
+    pub trait Ticks: Send {
+        fn run(&mut self);
+        fn rest(&mut self);
+        fn last(&self) -> Option<Instant>;
+        fn wait(&self, newer: Option<Instant>, until: Instant);
+    }
+
+    pub fn may_begin(before: Option<Instant>, now: Instant, tick: Option<Instant>, interval: Duration) -> bool {
+        match before {
+            None => true,
+            Some(before) => now >= before + interval || tick.is_some_and(|tick| tick >= before + interval / 2),
+        }
+    }
+
+    fn pace(ticks: &mut Option<Box<dyn Ticks>>, before: Option<Instant>, interval: Duration) {
+        if interval.is_zero() {
+            return;
+        }
+        if let Some(ticks) = ticks.as_mut() {
+            ticks.run();
+        }
+        loop {
+            let tick = ticks.as_ref().and_then(|ticks| ticks.last());
+            if may_begin(before, Instant::now(), tick, interval) {
+                return;
+            }
+            let until = before.map_or_else(Instant::now, |before| before + interval);
+            match ticks.as_ref() {
+                Some(ticks) => ticks.wait(tick, until),
+                None => wait_until(until),
+            }
+        }
     }
 
     const SPIN: Duration = Duration::from_millis(1);
@@ -627,6 +660,7 @@ mod running {
         size: (u32, u32),
         period: Duration,
         commit: Option<Commit>,
+        ticks: Option<Box<dyn Ticks>>,
     }
 
     type Prepared = (PathBuf, (u32, u32, u64), Side);
@@ -655,7 +689,7 @@ mod running {
             let _ = events.send(event);
             waker();
         };
-        let Start { id, gpu, surface, source, stills, size, period, commit } = start;
+        let Start { id, gpu, surface, source, stills, size, period, commit, mut ticks } = start;
         let begun = Instant::now();
         let (variant, latency, paced) = variant();
         let interval = if paced { period } else { Duration::ZERO };
@@ -672,7 +706,10 @@ mod running {
             tell(Event::Kept { path, still: first.clone() });
         }
         let mut reel = Reel::new(first);
-        let head = layer_head(variant, &screen, period, interval);
+        if interval.is_zero() {
+            ticks = None;
+        }
+        let head = layer_head(variant, &screen, period, interval, ticks.is_some());
         let started = Instant::now();
         let mut began = Some(started);
         let result = P::frame(|| screen.show(&looks(&reel.shown)));
@@ -747,9 +784,12 @@ mod running {
                 }
             }
             if !reel.animating() {
+                if let Some(ticks) = ticks.as_mut() {
+                    ticks.rest();
+                }
                 continue;
             }
-            wait_until(begin_at(began, Instant::now(), interval));
+            pace(&mut ticks, began, interval);
             let Some((layers, step)) = reel.next(Instant::now()) else { continue };
             let started = Instant::now();
             began = Some(started);
@@ -770,7 +810,7 @@ mod running {
                 }
                 Step::Settled => {
                     for _ in 0..FLUSH {
-                        wait_until(begin_at(began, Instant::now(), interval));
+                        pace(&mut ticks, began, interval);
                         let started = Instant::now();
                         began = Some(started);
                         if let Err(why) = P::frame(|| screen.show(&looks(&layers))) {
@@ -807,9 +847,10 @@ mod running {
         }
     }
 
-    fn layer_head(variant: &str, screen: &scooch_live::Screen, period: Duration, interval: Duration) -> String {
+    fn layer_head(variant: &str, screen: &scooch_live::Screen, period: Duration, interval: Duration, ticked: bool) -> String {
         let drawables = screen.drawables.map_or("unknown".to_string(), |count| count.to_string());
-        format!("layer {variant} drawables {drawables} latency {} refresh {:.2} pace {:.2}", screen.latency, period.as_secs_f64() * 1000.0, interval.as_secs_f64() * 1000.0)
+        let by = if ticked { "ticks" } else { "clock" };
+        format!("layer {variant} drawables {drawables} latency {} refresh {:.2} pace {:.2} by {by}", screen.latency, period.as_secs_f64() * 1000.0, interval.as_secs_f64() * 1000.0)
     }
 
     fn headed(head: &str, drew: Vec<String>) -> String {
@@ -1217,7 +1258,7 @@ mod running {
                 return;
             };
             let source = Source::start(&stills, self.kept_still(&stills), P::decode);
-            let start = Start { id, gpu, surface: Surface(self.platform.target(&layer)), source, stills, size: self.platform.pixels(&layer), period: self.platform.period(&layer), commit: self.platform.committer() };
+            let start = Start { id, gpu, surface: Surface(self.platform.target(&layer)), source, stills, size: self.platform.pixels(&layer), period: self.platform.period(&layer), commit: self.platform.committer(), ticks: self.platform.ticks(&layer) };
             let (jobs, receiver) = mpsc::channel();
             let (events, waker) = (self.events.clone(), self.waker.clone());
             let spawned = std::thread::Builder::new().name(format!("scooch-live-render-{id}")).spawn(move || render::<P>(start, receiver, events, waker));
@@ -2452,23 +2493,29 @@ mod running {
         }
 
         #[test]
-        fn no_frame_begins_sooner_than_one_refresh_after_the_frame_before_began() {
+        fn a_frame_begins_a_refresh_after_the_one_before_or_on_the_first_display_tick_half_a_refresh_after_it() {
             let start = Instant::now();
             let refresh = Duration::from_micros(16_667);
-            let at = |ms: u64| start + Duration::from_millis(ms);
-            assert_eq!(begin_at(None, at(0), refresh), at(0), "the first frame of a glide waited");
-            assert_eq!(begin_at(Some(at(0)), at(3), refresh), start + refresh, "a frame 3 ms after the one before began at once");
-            assert_eq!(begin_at(Some(at(0)), at(40), refresh), at(40), "a frame already a refresh late waited again");
-            assert_eq!(begin_at(Some(at(0)), at(3), Duration::ZERO), at(3));
-            let (mut began, mut now, mut begun) = (None, start, Vec::new());
-            for _ in 0..8 {
-                let next = begin_at(began, now, refresh);
-                begun.push(next);
-                began = Some(next);
-                now = next + Duration::from_millis(2);
+            let at = |tenths: u64| start + Duration::from_micros(tenths * 100);
+            assert!(may_begin(None, at(0), None, refresh), "the first frame of a glide waited");
+            assert!(!may_begin(Some(at(0)), at(30), None, refresh), "a frame 3 ms after the one before began with no tick");
+            assert!(may_begin(Some(at(0)), at(167), None, refresh), "a frame a refresh after the one before waited for a tick");
+            assert!(!may_begin(Some(at(0)), at(30), Some(at(20)), refresh), "a tick 2 ms after the frame before let the next one begin in the same refresh");
+            assert!(may_begin(Some(at(0)), at(90), Some(at(85)), refresh), "a tick 8.5 ms after the frame before did not let the next one begin");
+            assert!(!may_begin(Some(at(100)), at(120), Some(at(90)), refresh), "a tick from before the frame before let the next one begin");
+            assert!(may_begin(Some(at(0)), at(3), None, Duration::ZERO));
+            let ticks: Vec<Instant> = (1..12).map(|count| start + refresh * count + Duration::from_micros(300)).collect();
+            let mut began = Some(at(50));
+            let mut begun = vec![at(50)];
+            for tick in &ticks {
+                let now = *tick + Duration::from_micros(200);
+                if may_begin(began, now, Some(*tick), refresh) {
+                    began = Some(now);
+                    begun.push(now);
+                }
             }
-            assert!(begun.windows(2).all(|pair| pair[1] - pair[0] >= refresh), "frames drawn in 2 ms came closer than one refresh apart");
-            assert_eq!(begun[7] - begun[0], refresh * 7, "frames drawn in 2 ms were held longer than one refresh each");
+            assert_eq!(begun.len(), ticks.len() + 1, "a display tick passed with no frame begun");
+            assert!(begun.windows(2).all(|pair| pair[1] - pair[0] >= refresh / 2), "two frames began within half a refresh");
         }
 
         #[test]
