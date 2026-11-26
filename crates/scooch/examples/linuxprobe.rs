@@ -555,7 +555,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
 
         fn silence(&self) -> Option<String> {
             match self.linux().and_then(|linux| linux.snapshot()) {
-                Err(error) if scooch::platform::linux::silent(&error) => Some(format!("{error:#}")),
+                Err(error) if scooch::platform::linux::silent(&error) => {
+                    let said = format!("{error:#}");
+                    let said = said.trim_end_matches('.');
+                    let mut letters = said.chars();
+                    Some(letters.next().map(|first| first.to_lowercase().chain(letters).collect()).unwrap_or_default())
+                }
                 _ => None,
             }
         }
