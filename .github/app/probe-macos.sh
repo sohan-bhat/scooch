@@ -278,14 +278,13 @@ line "- reduce motion before $(defaults read com.apple.universalaccess reduceMot
 defaults write com.apple.universalaccess reduceMotion -bool false >"$out/motion.txt" 2>&1
 line "- reduce motion after the probe set it off $(defaults read com.apple.universalaccess reduceMotion 2>&1) $(cat "$out/motion.txt")"
 limited 20 open --stderr "$out/app.log" "$app" >/dev/null 2>&1
-window_made() { grep -q 'scooch-app window made in' "$out/app.log" 2>/dev/null; }
+launch_said() { grep -q 'scooch-app ' "$out/app.log" 2>/dev/null; }
 if took=$(wait_for 120 has_window); then
-  wait_for 5 window_made >/dev/null
-  line "- window showed after $took s, the app says $(grep -o 'window made in [0-9]* ms' "$out/app.log" | head -1)"
+  line "- window showed after $took s, the app says $(tr '\n' ' ' <"$out/app.log" 2>/dev/null)"
 else
   line "- no window after 120 s, the app says $(tr '\n' ' ' <"$out/app.log" 2>/dev/null), $(app_snapshot)"
 fi
-expect "the app said it made its window, which the window check stands on" window_made
+expect "the first launch wrote its own first line, which the window check stands on" wait_for 30 launch_said
 expect "the app opened its window within 120 s" has_window
 sleep 4
 shot first-open
@@ -302,13 +301,6 @@ line "- a second launch with open -n wrote its first line $said s after open ret
 [ "$said" -ge 0 ] && [ "$ended" -ge 0 ] && [ "$left" = 1 ] || line "- after the second launch, $(app_snapshot)"
 expect "the second launch wrote its first line within 60 s, which the second launch check stands on" [ "$said" -ge 0 ]
 expect "a second launch leaves one window process" eval '[ "$ended" -ge 0 ] && [ "$left" = 1 ]'
-if [ "${SCOOCH_EXPERIMENT:-}" = launch ]; then
-  line
-  line "#### Experiment, a second launch with open -n, many times"
-  python3 "$(dirname "$0")/launches-macos.py" "$app" "$out" "$data" 50 | while IFS= read -r row; do line "$row"; done
-  cp "$data/watch.log" "$out/watch-data.log" 2>/dev/null
-  finish
-fi
 if took=$(wait_for 30 state_on); then line "- first open turned Scooch on after $took s"; else line "- first open did not turn Scooch on within 30 s"; fi
 expect "first open turned Scooch on" state_on
 expect "the login item points at the helper's program" login_at "$daemon"

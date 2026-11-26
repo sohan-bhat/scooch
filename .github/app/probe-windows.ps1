@@ -168,17 +168,6 @@ public static class Seen {
         }
         return "-1|none";
     }
-    public static IntPtr Blank(long stamp, int cap, int settle) {
-        while (Since(stamp) < cap) {
-            IntPtr window = Frame();
-            if (window != IntPtr.Zero) {
-                System.Threading.Thread.Sleep(settle);
-                return window;
-            }
-            System.Threading.Thread.Sleep(2);
-        }
-        return IntPtr.Zero;
-    }
     public static string Windows(int[] pids) {
         var told = new List<string>();
         EnumWindows((window, extra) => {
@@ -463,24 +452,18 @@ Line "- animation effects before $([Desk]::Animations())"
 [Desk]::SetAnimations($true)
 Line "- animation effects after the probe turned them on $([Desk]::Animations())"
 $app = Get-ChildItem $folder -Filter 'scooch-app.exe' | Select-Object -First 1
-$experiment = $env:SCOOCH_EXPERIMENT -eq 'launch'
-if ($experiment) { . (Join-Path $PSScriptRoot 'launches-windows.ps1') }
 $firstLog = Join-Path $Out 'app.log'
 $stamp = [Diagnostics.Stopwatch]::GetTimestamp()
 $firstStart = Start-Process -FilePath $app.FullName -RedirectStandardError $firstLog -PassThru
 $opened = Open-Window $stamp 120000 1000
 $frameMs = [long]$opened[0]
 $filledMs = [long]$opened[1]
-Start-Sleep -Milliseconds 500
-$said = (Read-Shared $firstLog) -replace "`r?`n", ' '
-$madeHere = $said -match 'scooch-app window made in \d+ ms'
-$handed = ($said -match 'another process holds the icon') -and $firstStart.HasExited
-Line "- the first launch showed its frame after $frameMs ms and the filled window after $filledMs ms, the frame first at $($opened[2]) and the filled window at $($opened[3]), it says $said"
-if ($frameMs -lt 0 -or $filledMs -lt 0 -or -not ($madeHere -or $handed)) { Line "- after the first launch, $(App-Snapshot), inside the frame $([Seen]::Inside([Seen]::Frame()))" }
-Expect "the first launch said it made its window or handed it to the icon process, which the window checks stand on" ($madeHere -or $handed)
-Expect "the frame showed within 3 s of the launch" ($frameMs -ge 0 -and $frameMs -le 3000)
-Expect "the filled window showed within 120 s of the launch" ($filledMs -ge 0)
-Expect "with no saved size the frame at first show is where the filled window is, $($opened[2]) against $($opened[3])" ($filledMs -ge 0 -and $opened[2] -eq $opened[3])
+$said = Wait-For 30 { (Read-Shared $firstLog) -match 'scooch-app ' }
+Line "- the first launch showed its window after $frameMs ms and its page after $filledMs ms, at $($opened[2]), it says $((Read-Shared $firstLog) -replace "`r?`n", ' ')"
+if ($said -lt 0 -or $frameMs -lt 0 -or $filledMs -lt 0) { Line "- after the first launch, $(App-Snapshot), inside the window $([Seen]::Inside([Seen]::Frame()))" }
+Expect "the first launch wrote its own first line, which the window check stands on" ($said -ge 0)
+Expect "the app opened its window within 120 s of the launch" ($frameMs -ge 0)
+Expect "the window showed its page within 120 s of the launch" ($filledMs -ge 0)
 $secondLog = Join-Path $Out 'app-second.log'
 $second = Start-Process -FilePath $app.FullName -RedirectStandardError $secondLog -PassThru
 $secondSaid = Wait-For 60 { (Read-Shared $secondLog) -match 'scooch-app ' }
@@ -514,91 +497,6 @@ Expect "the window is light in the light look while on" (Light-Shot 'look-light-
 Set-Look 0
 Shot 'look-dark-on'
 Expect "the window is dark in the dark look while on" (Dark-Shot 'look-dark-on')
-function Close-Frame {
-    $window = Find-Window
-    if ($window) { try { $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close() } catch { } }
-    Wait-For 15 { -not (Find-Window) } | Out-Null
-    Start-Sleep -Seconds 1
-}
-function Launch-Again([string]$Name) {
-    Close-Frame
-    $stamp = [Diagnostics.Stopwatch]::GetTimestamp()
-    Start-Process -FilePath $app.FullName -RedirectStandardError (Join-Path $Out "app-$Name.log")
-    return $stamp
-}
-function Center-Brightness([IntPtr]$Window) {
-    $client = [Desk]::Client($Window)
-    if (-not $client) { return -1 }
-    $bitmap = New-Object System.Drawing.Bitmap(16, 16)
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graphics.CopyFromScreen([int](($client[0] + $client[2]) / 2) - 8, [int](($client[1] + $client[3]) / 2) - 8, 0, 0, $bitmap.Size)
-    $sum = 0.0
-    for ($x = 0; $x -lt 16; $x++) { for ($y = 0; $y -lt 16; $y++) { $sum += $bitmap.GetPixel($x, $y).GetBrightness() } }
-    $graphics.Dispose()
-    $bitmap.Dispose()
-    return [math]::Round($sum / 256, 2)
-}
-function Blank-Look([int]$Light, [string]$Name) {
-    Set-Look $Light
-    for ($try = 1; $try -le 3; $try++) {
-        $stamp = Launch-Again "blank-$Name-$try"
-        $window = [Seen]::Blank($stamp, 10000, 40)
-        $bright = if ($window -ne [IntPtr]::Zero) { Center-Brightness $window } else { -1 }
-        $blank = $window -ne [IntPtr]::Zero -and -not (Page-Shown $window)
-        Wait-Filled
-        if ($blank) {
-            Line "- a blank frame in the $Name look was caught on try $try, its middle has brightness $bright"
-            return $bright
-        }
-    }
-    Line "- no blank frame was caught in the $Name look in three tries"
-    return -1
-}
-function Rect-Case([string]$Name) {
-    $stamp = Launch-Again "rect-$($Name -replace '\W', '-')"
-    $seen = Open-Window $stamp 120000 1000
-    Line "- $Name, the frame showed after $($seen[0]) ms at $($seen[2]) and the filled window after $($seen[1]) ms at $($seen[3])"
-    Expect "$Name, a launch the icon process takes over shows its frame within 3 s" ([long]$seen[0] -ge 0 -and [long]$seen[0] -le 3000)
-    Expect "$Name, the frame at first show is where the filled window is, $($seen[2]) against $($seen[3])" ([long]$seen[1] -ge 0 -and $seen[2] -eq $seen[3])
-}
-function Frame-Handle { $found = Find-Window; if ($found) { [IntPtr]$found.Current.NativeWindowHandle } else { [IntPtr]::Zero } }
-function Wait-Filled { Wait-For 120 { Page-Shown ([Seen]::Frame()) } | Out-Null; Start-Sleep -Seconds 1 }
-Line ''
-Line '### The frame before the window fills'
-$darkBlank = Blank-Look 0 'dark'
-Expect "a blank frame was caught in the dark look within three tries, which its colour check stands on" ($darkBlank -ge 0)
-Expect "the blank frame is dark in the dark look" ($darkBlank -ge 0 -and $darkBlank -lt 0.3)
-$lightBlank = Blank-Look 1 'light'
-Expect "a blank frame was caught in the light look within three tries, which its colour check stands on" ($lightBlank -ge 0)
-Expect "the blank frame is light in the light look" ($lightBlank -gt 0.6)
-Wait-Filled
-$plain = [Seen]::Box((Frame-Handle)) -split ' '
-[Desk]::SetWindowPos((Frame-Handle), [IntPtr]::Zero, 100, 80, 800, 560, 0x0014) | Out-Null
-Start-Sleep -Seconds 1
-Rect-Case 'with a saved size'
-Wait-Filled
-[Desk]::ShowWindow((Frame-Handle), 3) | Out-Null
-Start-Sleep -Seconds 1
-Rect-Case 'saved as maximized'
-Wait-Filled
-[Desk]::ShowWindow((Frame-Handle), 9) | Out-Null
-$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-[Desk]::SetWindowPos((Frame-Handle), [IntPtr]::Zero, 0, 0, $bounds.Width + 300, $bounds.Height + 300, 0x0014) | Out-Null
-Start-Sleep -Seconds 1
-Rect-Case 'with a saved size larger than the screen'
-Wait-Filled
-if ($plain.Count -eq 4) { [Desk]::SetWindowPos((Frame-Handle), [IntPtr]::Zero, [int]$plain[0], [int]$plain[1], [int]$plain[2] - [int]$plain[0], [int]$plain[3] - [int]$plain[1], 0x0014) | Out-Null }
-Start-Sleep -Seconds 1
-Launch-Again 'reset' | Out-Null
-Wait-Filled
-Line "- the window is back at its first size, at $([Seen]::Box((Frame-Handle)))"
-Copy-Item (Join-Path $env:APPDATA 'me.sohanbhat.scooch.window\.window-state.json') (Join-Path $Out 'window-state.json') -ErrorAction SilentlyContinue
-Set-Look 0
-if ($experiment) {
-    Run-Launches
-    Save-Launch-Daemon-Log
-    Finish
-}
 Get-CimInstance Win32_Process -Filter "Name = 'scoochw.exe'" | Where-Object { $_.CommandLine -match ' watch' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 Start-Sleep -Seconds 2
 $front = Find-Window

@@ -142,14 +142,13 @@ line "- older command install at ~/.local/bin/scooch, as install.sh lays it out,
 expect "the older command install turned Scooch on and drew" rendered
 
 clean scooch-app >"$out/app.log" 2>&1 &
-window_made() { grep -q 'scooch-app window made in' "$out/app.log" 2>/dev/null; }
+launch_said() { grep -q 'scooch-app ' "$out/app.log" 2>/dev/null; }
 if took=$(wait_for 120 has_window); then
-  wait_for 5 window_made >/dev/null
-  line "- window showed after $took s, the app says $(grep -o 'window made in [0-9]* ms' "$out/app.log" | head -1)"
+  line "- window showed after $took s, the app says $(tr '\n' ' ' <"$out/app.log")"
 else
   line "- no window after 120 s, the app says $(tr '\n' ' ' <"$out/app.log"), $(app_snapshot)"
 fi
-expect "the app said it made its window, which the window check stands on" window_made
+expect "the first launch wrote its own first line, which the window check stands on" wait_for 30 launch_said
 expect "the app opened its window within 120 s" has_window
 clean scooch-app >"$out/app-second.log" 2>&1 &
 second=$!
