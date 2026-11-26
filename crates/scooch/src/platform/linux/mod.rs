@@ -30,7 +30,7 @@ pub mod watch;
 pub mod xfce;
 
 #[cfg(target_os = "linux")]
-pub use system::{bus, decode, desktop, desktop_folder, set_recently, shell, tool, Linux, Shell, Signal, Watches, FileWatch};
+pub use system::{bus, decode, desktop, desktop_folder, pending, set_recently, shell, tool, Linux, Shell, Signal, Watches, FileWatch, LIMIT};
 
 #[cfg(target_os = "linux")]
 mod system {
@@ -45,6 +45,7 @@ mod system {
 
     static LAST_SET: AtomicU64 = AtomicU64::new(0);
     const OWN_ECHO: Duration = Duration::from_secs(1);
+    pub const LIMIT: Duration = Duration::from_secs(10);
 
     fn now_millis() -> u64 {
         SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
@@ -100,11 +101,47 @@ mod system {
         fn tools(&self) -> &'static [&'static str];
     }
 
+    pub mod pending {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Mutex, MutexGuard};
+        use std::time::{Duration, Instant};
+
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        static OPEN: Mutex<Vec<(u64, String, Instant)>> = Mutex::new(Vec::new());
+
+        pub struct Open(u64);
+
+        fn list() -> MutexGuard<'static, Vec<(u64, String, Instant)>> {
+            OPEN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        pub fn open(what: String) -> Open {
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            list().push((id, what, Instant::now()));
+            Open(id)
+        }
+
+        impl Drop for Open {
+            fn drop(&mut self) {
+                list().retain(|(id, _, _)| *id != self.0);
+            }
+        }
+
+        pub fn now() -> Vec<(String, Duration)> {
+            list().iter().map(|(_, what, since)| (what.clone(), since.elapsed())).collect()
+        }
+    }
+
     pub mod tool {
         use anyhow::{anyhow, Result};
         use std::ffi::{OsStr, OsString};
+        use std::io::Read;
         use std::path::PathBuf;
-        use std::process::{Command, Output, Stdio};
+        use std::process::{Child, Command, Output, Stdio};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        pub use super::LIMIT;
 
         pub fn run(program: &str, arguments: &[&str]) -> Result<Output> {
             let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
@@ -112,13 +149,64 @@ mod system {
         }
 
         pub fn run_os(program: &str, arguments: &[OsString]) -> Result<Output> {
-            super::super::children::clean(&mut Command::new(program))
-                .args(arguments)
-                .env("LC_ALL", "C.UTF-8")
-                .env_remove("LANGUAGE")
-                .stdin(Stdio::null())
-                .output()
-                .map_err(|_| anyhow!("Scooch could not run {program}, so install it or check your PATH."))
+            let named: Vec<String> = arguments.iter().map(|argument| argument.to_string_lossy().into_owned()).collect();
+            let _open = super::pending::open(format!("the program {program} {}", named.join(" ").chars().take(160).collect::<String>()));
+            let mut command = Command::new(program);
+            super::super::children::clean(&mut command).args(arguments).env("LC_ALL", "C.UTF-8").env_remove("LANGUAGE");
+            match within(&mut command, LIMIT) {
+                Ok(Some(output)) => Ok(output),
+                Ok(None) => Err(anyhow!("{program} did not finish within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())),
+                Err(_) => Err(anyhow!("Scooch could not run {program}, so install it or check your PATH.")),
+            }
+        }
+
+        pub fn within(command: &mut Command, limit: Duration) -> std::io::Result<Option<Output>> {
+            let deadline = Instant::now() + limit;
+            let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+            let (sender, receiver) = mpsc::channel::<(usize, Vec<u8>)>();
+            let pipes: [Option<Box<dyn Read + Send>>; 2] = [child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>), child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>)];
+            for (index, pipe) in pipes.into_iter().enumerate() {
+                let sender = sender.clone();
+                let Some(mut pipe) = pipe else {
+                    let _ = sender.send((index, Vec::new()));
+                    continue;
+                };
+                let reader = std::thread::Builder::new().name("scooch-tool".into()).spawn(move || {
+                    let mut bytes = Vec::new();
+                    let _ = pipe.read_to_end(&mut bytes);
+                    let _ = sender.send((index, bytes));
+                });
+                if let Err(error) = reader {
+                    stop(child);
+                    return Err(error);
+                }
+            }
+            let mut read = [Vec::new(), Vec::new()];
+            for _ in 0..2 {
+                match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok((index, bytes)) => read[index] = bytes,
+                    Err(_) => {
+                        stop(child);
+                        return Ok(None);
+                    }
+                }
+            }
+            loop {
+                if let Some(status) = child.try_wait()? {
+                    let [stdout, stderr] = read;
+                    return Ok(Some(Output { status, stdout, stderr }));
+                }
+                if Instant::now() >= deadline {
+                    stop(child);
+                    return Ok(None);
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        fn stop(mut child: Child) {
+            let _ = child.kill();
+            let _ = child.wait();
         }
 
         pub fn gtk_scale(schema: &str, key: &str) -> f32 {
@@ -137,18 +225,30 @@ mod system {
         use anyhow::{anyhow, Result};
         use serde::de::DeserializeOwned;
         use serde::Serialize;
+        use std::io::ErrorKind;
         use std::sync::Mutex;
+        use zbus::blocking::connection::Builder;
         use zbus::blocking::Connection;
         use zbus::zvariant::{DynamicType, Type};
 
+        pub use super::LIMIT;
+
         static SESSION: Mutex<Option<Connection>> = Mutex::new(None);
+
+        pub fn connect(address: Option<&str>) -> zbus::Result<Connection> {
+            let builder = match address {
+                Some(address) => Builder::address(address)?,
+                None => Builder::session()?,
+            };
+            builder.method_timeout(LIMIT).build()
+        }
 
         pub fn session() -> Result<Connection> {
             let mut slot = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(connection) = slot.as_ref() {
                 return Ok(connection.clone());
             }
-            let connection = Connection::session().map_err(|_| anyhow!("Scooch could not reach the session bus, so log in to a desktop session first."))?;
+            let connection = connect(None).map_err(|_| anyhow!("Scooch could not reach the session bus, so log in to a desktop session first."))?;
             *slot = Some(connection.clone());
             Ok(connection)
         }
@@ -157,20 +257,50 @@ mod system {
             *SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         }
 
+        pub fn late(error: &zbus::Error) -> bool {
+            matches!(error, zbus::Error::InputOutput(io) if io.kind() == ErrorKind::TimedOut)
+        }
+
+        fn raw<B>(connection: &Connection, destination: &str, path: &str, interface: &str, method: &str, body: &B) -> zbus::Result<zbus::Message>
+        where
+            B: Serialize + DynamicType,
+        {
+            let _open = super::pending::open(format!("the bus call {interface}.{method} to {destination}"));
+            connection.call_method(Some(destination), path, Some(interface), method, body)
+        }
+
+        fn finish<R>(reply: zbus::Result<zbus::Message>, destination: &str, method: &str) -> Result<R>
+        where
+            R: DeserializeOwned + Type,
+        {
+            match reply {
+                Ok(reply) => Ok(reply.body().deserialize()?),
+                Err(error) if late(&error) => Err(anyhow!("{destination} did not answer {method} within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())),
+                Err(error) => Err(error.into()),
+            }
+        }
+
+        pub fn call_on<B, R>(connection: &Connection, destination: &str, path: &str, interface: &str, method: &str, body: &B) -> Result<R>
+        where
+            B: Serialize + DynamicType,
+            R: DeserializeOwned + Type,
+        {
+            finish(raw(connection, destination, path, interface, method, body), destination, method)
+        }
+
         pub fn call<B, R>(destination: &str, path: &str, interface: &str, method: &str, body: &B) -> Result<R>
         where
             B: Serialize + DynamicType,
             R: DeserializeOwned + Type,
         {
-            let reply = match session()?.call_method(Some(destination), path, Some(interface), method, body) {
-                Ok(reply) => reply,
-                Err(zbus::Error::InputOutput(_)) => {
+            let reply = match raw(&session()?, destination, path, interface, method, body) {
+                Err(zbus::Error::InputOutput(io)) if io.kind() != ErrorKind::TimedOut => {
                     forget();
-                    session()?.call_method(Some(destination), path, Some(interface), method, body)?
+                    raw(&session()?, destination, path, interface, method, body)
                 }
-                Err(error) => return Err(error.into()),
+                other => other,
             };
-            Ok(reply.body().deserialize()?)
+            finish(reply, destination, method)
         }
 
         pub fn has_owner(name: &str) -> bool {
@@ -377,5 +507,123 @@ mod system {
             _ => samples.chunks_exact(channels).flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect(),
         };
         RgbImage::from_raw(width, height, rgb).context("The picture did not fit in memory.")
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::{bus, tool, LIMIT};
+    use std::io::{BufRead, BufReader};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    pub const SILENT: &str = "org.scooch.Silent";
+
+    pub struct Private {
+        daemon: Child,
+        pub address: String,
+    }
+
+    impl Drop for Private {
+        fn drop(&mut self) {
+            let _ = self.daemon.kill();
+            let _ = self.daemon.wait();
+        }
+    }
+
+    pub fn private_bus() -> Option<Private> {
+        let started = Command::new("dbus-daemon").args(["--session", "--nofork", "--print-address=1"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
+        let Ok(mut daemon) = started else {
+            assert!(std::env::var_os("SCOOCH_NEED_BUS").is_none(), "no dbus-daemon, and this runner must have one");
+            return None;
+        };
+        let mut line = String::new();
+        if let Some(out) = daemon.stdout.take() {
+            let _ = BufReader::new(out).read_line(&mut line);
+        }
+        let address = line.trim().to_string();
+        let private = Private { daemon, address };
+        assert!(!private.address.is_empty(), "dbus-daemon printed no address");
+        Some(private)
+    }
+
+    pub fn silent_peer(address: &str) -> (zbus::blocking::Connection, mpsc::Receiver<String>) {
+        let peer = bus::connect(Some(address)).unwrap();
+        peer.request_name(SILENT).unwrap();
+        let calls = zbus::blocking::MessageIterator::from(peer.clone());
+        let (took, taken) = mpsc::channel();
+        std::thread::spawn(move || {
+            for message in calls.flatten() {
+                if let Some(member) = message.header().member() {
+                    let _ = took.send(member.to_string());
+                }
+            }
+        });
+        (peer, taken)
+    }
+
+    #[test]
+    fn a_peer_that_takes_the_call_and_never_answers_ends_in_plain_words_at_the_limit() {
+        let Some(private) = private_bus() else { return };
+        let (_peer, taken) = silent_peer(&private.address);
+        let caller = bus::connect(Some(&private.address)).unwrap();
+        let (said, answer) = mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let reply: anyhow::Result<bool> = bus::call_on(&caller, SILENT, "/org/scooch/Silent", "org.gtk.Actions", "Describe", &("desktopGeometry",));
+            let _ = said.send(reply.map_err(|error| error.to_string()));
+        });
+        assert_eq!(taken.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("Describe"), "the silent peer never got the call");
+        let reply = answer.recv_timeout(LIMIT + Duration::from_secs(5)).expect("the call still waited 5 s past the limit");
+        assert!(started.elapsed() >= LIMIT - Duration::from_millis(500), "the call ended before the limit {:?}", started.elapsed());
+        assert_eq!(reply, Err(format!("{SILENT} did not answer Describe within 10 seconds, so check that the desktop still runs.")));
+    }
+
+    #[test]
+    fn a_tick_held_by_a_call_nobody_answers_comes_back_and_the_next_tick_draws() {
+        let Some(private) = private_bus() else { return };
+        let (_peer, taken) = silent_peer(&private.address);
+        let (daemon, fake, _) = crate::daemon::tests::rig("held-tick", vec![crate::daemon::tests::screen("main", 0.0, 1.0)]);
+        let caller = bus::connect(Some(&private.address)).unwrap();
+        let (said, answer) = mpsc::channel();
+        fake.during(move || {
+            let reply: anyhow::Result<bool> = bus::call_on(&caller, SILENT, "/org/scooch/Silent", "org.gtk.Actions", "Describe", &("desktopGeometry",));
+            let _ = said.send(reply.map_err(|error| error.to_string()));
+        });
+        let daemon = std::sync::Arc::new(daemon);
+        let ticking = daemon.clone();
+        let (done, finished) = mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let held = ticking.tick();
+            let after = ticking.tick();
+            let _ = done.send((held.outcomes.len(), after.problem, after.outcomes.len()));
+        });
+        let ticks = finished.recv_timeout(LIMIT + Duration::from_secs(10)).expect("the tick still sat in the call 10 s past the limit");
+        assert!(started.elapsed() >= LIMIT - Duration::from_millis(500), "the tick ended before the limit {:?}", started.elapsed());
+        assert_eq!(taken.try_recv().as_deref(), Ok("Describe"));
+        assert_eq!(answer.try_recv(), Ok(Err(format!("{SILENT} did not answer Describe within 10 seconds, so check that the desktop still runs."))));
+        assert_eq!(ticks, (1, None, 1));
+    }
+
+    #[test]
+    fn a_program_that_never_ends_is_stopped_at_the_limit_in_plain_words() {
+        let (said, answer) = mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let _ = said.send(tool::run("sleep", &["600"]).map(|_| ()).map_err(|error| error.to_string()));
+        });
+        let reply = answer.recv_timeout(LIMIT + Duration::from_secs(5)).expect("the program still ran 5 s past the limit");
+        assert!(started.elapsed() >= LIMIT - Duration::from_millis(500), "the program was stopped before the limit {:?}", started.elapsed());
+        assert_eq!(reply, Err("sleep did not finish within 10 seconds, so check that the desktop still runs.".to_string()));
+        let left = Command::new("pgrep").args(["-f", "^sleep 600$"]).output().map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
+        assert!(left.is_empty(), "the stopped program is still running as {left}");
+    }
+
+    #[test]
+    fn a_program_that_ends_gives_its_output_and_status() {
+        let output = tool::run("sh", &["-c", "echo out; echo error >&2; exit 3"]).unwrap();
+        assert_eq!((String::from_utf8_lossy(&output.stdout).trim(), String::from_utf8_lossy(&output.stderr).trim(), output.status.code()), ("out", "error", Some(3)));
     }
 }

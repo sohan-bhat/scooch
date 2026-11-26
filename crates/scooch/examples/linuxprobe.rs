@@ -182,7 +182,7 @@ mod probe {
     use scooch::platform::linux::parse::geometry::{intersect, Insets};
     use scooch::platform::linux::parse::{caja, ding, gio, gvariant, kde as kde_rules, keyfile, nemo, record, wakes, xfce as xfce_rules};
     use scooch::platform::linux::settings::{self, Gsettings, Plasma, Xfconf};
-    use scooch::platform::linux::{bus, cinnamon, decode, drops, gnome, gvfs, kde, mate, screens, tool, xfce, Linux};
+    use scooch::platform::linux::{bus, cinnamon, decode, drops, gnome, gvfs, kde, mate, pending, screens, tool, xfce, Linux};
     use scooch::platform::{Desktop, Screen};
     use scooch_core::{Rect, RgbImage};
     use std::collections::{BTreeMap, VecDeque};
@@ -215,6 +215,271 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
 
     fn now() -> u128 {
         START.get_or_init(Instant::now).elapsed().as_millis()
+    }
+
+    const STEP_LIMIT: Duration = Duration::from_secs(60);
+
+    struct Step {
+        name: String,
+        since: Instant,
+        limit: Duration,
+    }
+
+    static STEPS: Mutex<Vec<Step>> = Mutex::new(Vec::new());
+    static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    fn held<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    struct Doing;
+
+    impl Drop for Doing {
+        fn drop(&mut self) {
+            let mut steps = held(&STEPS);
+            steps.pop();
+            if let Some(outer) = steps.last_mut() {
+                outer.since = Instant::now();
+            }
+        }
+    }
+
+    #[track_caller]
+    fn doing(what: impl std::fmt::Display, planned: Duration) -> Doing {
+        let at = std::panic::Location::caller().line();
+        held(&STEPS).push(Step { name: format!("{what} at line {at}"), since: Instant::now(), limit: planned + STEP_LIMIT });
+        Doing
+    }
+
+    fn progress() {
+        if let Some(step) = held(&STEPS).last_mut() {
+            step.since = Instant::now();
+        }
+    }
+
+    #[track_caller]
+    fn idle(length: Duration) {
+        let _step = doing(format!("a rest of {} s", length.as_secs()), length);
+        std::thread::sleep(length);
+    }
+
+    fn watchdog(out: PathBuf) {
+        let _ = std::thread::Builder::new().name("probe-watchdog".into()).spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let over = {
+                let steps = held(&STEPS);
+                steps.last().filter(|top| top.since.elapsed() > top.limit).map(|top| (steps.iter().map(|step| step.name.clone()).collect::<Vec<_>>(), top.since.elapsed(), top.limit))
+            };
+            if let Some((names, spent, limit)) = over {
+                stuck(&out, &names, spent, limit);
+            }
+        });
+    }
+
+    struct Seen {
+        pid: u32,
+        parent: u32,
+        name: String,
+        command: String,
+        state: String,
+        cpu: u64,
+        threads: u64,
+    }
+
+    fn seen(pid: u32) -> Option<Seen> {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let (head, rest) = stat.rsplit_once(')')?;
+        let name = head.split_once('(')?.1.to_string();
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+        let cpu = (fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?) * 1000 / ticks;
+        let command = fs::read(format!("/proc/{pid}/cmdline")).map(|bytes| bytes.split(|byte| *byte == 0).map(|part| String::from_utf8_lossy(part).into_owned()).collect::<Vec<_>>().join(" ").trim().chars().take(200).collect()).unwrap_or_default();
+        Some(Seen { pid, parent: fields.get(1)?.parse().ok()?, name, command, state: fields.first()?.to_string(), cpu, threads: fields.get(17)?.parse().ok()? })
+    }
+
+    fn all_seen() -> Vec<Seen> {
+        let mut found: Vec<Seen> = fs::read_dir("/proc").map(|entries| entries.flatten().filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok()).filter_map(seen).collect()).unwrap_or_default();
+        found.sort_by_key(|each| each.pid);
+        found
+    }
+
+    fn session_of(all: &[Seen]) -> Vec<u32> {
+        let own = std::process::id();
+        let parent = |pid: u32| all.iter().find(|each| each.pid == pid).map(|each| each.parent);
+        let root = parent(own).and_then(parent).filter(|pid| *pid > 1).unwrap_or(own);
+        let mut kept = vec![root];
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for each in all {
+                if !kept.contains(&each.pid) && kept.contains(&each.parent) {
+                    kept.push(each.pid);
+                    grew = true;
+                }
+            }
+        }
+        kept.sort_unstable();
+        kept
+    }
+
+    fn quiet(program: &str, arguments: &[&str], limit: u64) -> String {
+        let mut all = vec!["-k".to_string(), "5".into(), limit.to_string(), program.to_string()];
+        all.extend(arguments.iter().map(|argument| argument.to_string()));
+        match Command::new("timeout").args(&all).stdin(Stdio::null()).output() {
+            Ok(out) => format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+            Err(error) => format!("could not run {program}, {error}"),
+        }
+    }
+
+    fn rooted() -> bool {
+        static ROOTED: OnceLock<bool> = OnceLock::new();
+        *ROOTED.get_or_init(|| Command::new("sudo").args(["-n", "true"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success()))
+    }
+
+    fn tasks(pid: u32) -> Vec<String> {
+        let mut rows = Vec::new();
+        let script = format!("cd /proc/{pid}/task 2>/dev/null && for t in *; do echo \"== $t\"; cat $t/syscall 2>/dev/null; cat $t/stack 2>/dev/null | head -n 12; done");
+        let deep = if rooted() { quiet("sudo", &["-n", "sh", "-c", &script], 20) } else { String::new() };
+        let mut blocks: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut current = String::new();
+        for line in deep.lines() {
+            match line.strip_prefix("== ") {
+                Some(tid) => current = tid.to_string(),
+                None => blocks.entry(current.clone()).or_default().push(line.trim().to_string()),
+            }
+        }
+        let Ok(entries) = fs::read_dir(format!("/proc/{pid}/task")) else { return rows };
+        let mut ids: Vec<u32> = entries.flatten().filter_map(|entry| entry.file_name().to_str()?.parse().ok()).collect();
+        ids.sort_unstable();
+        for tid in ids {
+            let folder = format!("/proc/{pid}/task/{tid}");
+            let comm = fs::read_to_string(format!("{folder}/comm")).unwrap_or_default().trim().to_string();
+            let wchan = fs::read_to_string(format!("{folder}/wchan")).unwrap_or_default();
+            let stat = fs::read_to_string(format!("{folder}/stat")).unwrap_or_default();
+            let state = stat.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().next().map(str::to_string)).unwrap_or_default();
+            let own = fs::read_to_string(format!("{folder}/syscall")).ok();
+            let extra = blocks.get(&tid.to_string()).cloned().unwrap_or_default();
+            let syscall = own.map(|text| text.trim().to_string()).or_else(|| extra.first().cloned()).unwrap_or_else(|| "unreadable".into());
+            let call = syscall.split_whitespace().next().and_then(|number| number.parse::<i64>().ok()).map_or_else(String::new, |number| format!(" {}", syscall_name(number)));
+            let stack: Vec<String> = extra.iter().skip(1).map(|frame| frame.split_whitespace().nth(1).unwrap_or(frame).to_string()).collect();
+            rows.push(format!("thread {tid} `{comm}` state {state}, waits in {wchan}, syscall{call} `{}`, kernel stack {stack:?}", syscall.chars().take(60).collect::<String>()));
+        }
+        rows
+    }
+
+    fn syscall_name(number: i64) -> &'static str {
+        match number {
+            -1 => "none, running",
+            0 => "read",
+            1 => "write",
+            7 => "poll",
+            23 => "select",
+            35 => "nanosleep",
+            61 => "wait4",
+            202 => "futex",
+            230 => "clock_nanosleep",
+            232 => "epoll_wait",
+            270 => "pselect6",
+            271 => "ppoll",
+            281 => "epoll_pwait",
+            441 => "epoll_pwait2",
+            _ => "other",
+        }
+    }
+
+    fn pings() -> Vec<String> {
+        let listed = quiet("dbus-send", &["--session", "--print-reply", "--reply-timeout=3000", "--dest=org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus.ListNames"], 6);
+        let names: Vec<String> = listed.lines().filter_map(|line| line.trim().strip_prefix("string \"")?.strip_suffix('"').map(str::to_string)).filter(|name| !name.starts_with(':') && name != "org.freedesktop.DBus").collect();
+        let mut asked: Vec<(String, Vec<String>)> = names.iter().map(|name| (name.clone(), vec![format!("--dest={name}"), "/".into(), "org.freedesktop.DBus.Peer.Ping".into()])).collect();
+        asked.push((format!("{} Describe", ding::BUS_NAME), vec![format!("--dest={}", ding::BUS_NAME), ding::ACTIONS_PATH.into(), "org.gtk.Actions.Describe".into(), "string:desktopGeometry".into()]));
+        let handles: Vec<_> = asked
+            .into_iter()
+            .map(|(name, arguments)| {
+                std::thread::spawn(move || {
+                    let owner = name.split_whitespace().next().unwrap_or_default().to_string();
+                    let process = quiet("dbus-send", &["--session", "--print-reply", "--reply-timeout=3000", "--dest=org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus.GetConnectionUnixProcessID", &format!("string:{owner}")], 6);
+                    let process = process.lines().find_map(|line| line.trim().strip_prefix("uint32 ").map(str::to_string)).unwrap_or_else(|| "unknown".into());
+                    let started = Instant::now();
+                    let mut all: Vec<&str> = vec!["--session", "--print-reply", "--reply-timeout=5000"];
+                    all.extend(arguments.iter().map(String::as_str));
+                    let said = quiet("dbus-send", &all, 8);
+                    let answer = said.lines().next().unwrap_or("nothing").chars().take(120).collect::<String>();
+                    format!("{name} of process {process} after {} ms said `{answer}`", started.elapsed().as_millis())
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|handle| handle.join().ok()).collect()
+    }
+
+    fn stuck(out: &Path, names: &[String], spent: Duration, limit: Duration) -> ! {
+        let top = names.last().cloned().unwrap_or_default();
+        let mut lines = vec![String::new(), "## The probe stopped on a stuck step".to_string(), String::new()];
+        lines.push(format!("- **stuck** {top} ran {} s, over its limit of {} s", spent.as_secs(), limit.as_secs()));
+        lines.push(format!("- the steps it sat in, outermost first {names:?}"));
+        lines.push(format!("- calls of the adapter still open in the probe {:?}", pending::now().iter().map(|(what, since)| format!("{what} for {} ms", since.as_millis())).collect::<Vec<_>>()));
+        let first = all_seen();
+        let members = session_of(&first);
+        let pause = Instant::now();
+        let answers = pings();
+        lines.push("- names on the session bus asked to answer within 5 s".to_string());
+        lines.extend(answers.into_iter().map(|answer| format!("  - {answer}")));
+        let window = pause.elapsed().as_millis().max(1);
+        let later = all_seen();
+        let own = std::process::id();
+        lines.push(format!("- the processes of the session, CPU used over the {window} ms of those questions, and every thread with what it waits in"));
+        for pid in &members {
+            let Some(now) = later.iter().find(|each| each.pid == *pid) else { continue };
+            let before = first.iter().find(|each| each.pid == *pid).map_or(now.cpu, |each| each.cpu);
+            let role = if *pid == own { " the probe" } else if now.parent == own { " started by the probe" } else { "" };
+            lines.push(format!("  - process {pid}{role} `{}` parent {} state {} CPU {} ms in all and {} ms in the window, {} threads, command `{}`", now.name, now.parent, now.state, now.cpu, now.cpu.saturating_sub(before), now.threads, now.command));
+            for row in tasks(*pid) {
+                lines.push(format!("    - {row}"));
+            }
+        }
+        if tool::on_path("gdb").is_some() && rooted() {
+            for pid in &members {
+                let file = out.join(format!("hang-gdb-{pid}.txt"));
+                let script = format!("gdb -p {pid} -batch -nx -ex 'set pagination off' -ex 'thread apply all bt 40' > '{}' 2>&1; chmod a+r '{}'", file.display(), file.display());
+                quiet("sudo", &["-n", "sh", "-c", &script], 90);
+            }
+            lines.push("- user space stacks of every process of the session are in the hang-gdb files beside this report".to_string());
+        } else {
+            lines.push("- gdb or sudo is missing here, so no user space stacks".to_string());
+        }
+        if let Ok(entries) = fs::read_dir(out) {
+            let mut logs: Vec<(std::time::SystemTime, PathBuf)> = entries.flatten().map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|kind| kind == "log") && path.file_name().is_some_and(|name| name != "raw.log")).map(|path| (fs::metadata(&path).and_then(|meta| meta.modified()).unwrap_or(std::time::UNIX_EPOCH), path)).collect();
+            logs.sort();
+            for (_, log) in logs.iter().skip(logs.len().saturating_sub(4)) {
+                let text = fs::read_to_string(log).unwrap_or_default();
+                let all: Vec<&str> = text.lines().collect();
+                lines.push(format!("- the last lines of {}", log.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()));
+                lines.extend(all.iter().skip(all.len().saturating_sub(25)).map(|line| format!("  - `{}`", line.chars().take(300).collect::<String>())));
+            }
+        }
+        lines.push(String::new());
+        lines.push("## Result".to_string());
+        lines.push(String::new());
+        lines.push(format!("- **failed** the probe stopped because {top} ran {} s with no end, past its limit of {} s", spent.as_secs(), limit.as_secs()));
+        let mut report = held(&LINES).clone();
+        report.extend(lines.iter().cloned());
+        let _ = fs::write(out.join("report.md"), report.join("\n") + "\n");
+        if let Ok(mut raw) = fs::OpenOptions::new().append(true).open(out.join("raw.log")) {
+            for line in &lines {
+                let _ = writeln!(raw, "{:>8} {line}", now());
+            }
+        }
+        for line in &lines {
+            println!("{line}");
+        }
+        let children: Vec<u32> = all_seen().iter().filter(|each| each.parent == own).map(|each| each.pid).collect();
+        for pid in &children {
+            unsafe { libc::kill(*pid as libc::pid_t, libc::SIGTERM) };
+        }
+        std::thread::sleep(Duration::from_secs(3));
+        for pid in &children {
+            unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
+        }
+        std::process::exit(3);
     }
 
     type Events = Arc<Mutex<Vec<(u128, String)>>>;
@@ -251,6 +516,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let text = text.into();
             println!("{text}");
             let _ = writeln!(self.log, "{:>8} {text}", now());
+            held(&LINES).push(text.clone());
+            progress();
             self.report.push(text);
         }
 
@@ -267,6 +534,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             self.line(format!("## {title}"));
             self.line(String::new());
             let started = Instant::now();
+            let _step = doing(format!("section {title}"), Duration::ZERO);
             if let Err(error) = check(self) {
                 self.line(format!("- **check failed** {error:#}"));
                 self.failed.push(format!("{title} stopped with {error:#}"));
@@ -313,6 +581,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             eprintln!("linuxprobe could not write its log, so check the disk.");
             return ExitCode::from(2);
         };
+        watchdog(out.clone());
         let kind = scooch::platform::linux::parse::desktop::pick(&std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default());
         let session = scooch::platform::linux::parse::desktop::session(std::env::var("WAYLAND_DISPLAY").ok().as_deref());
         let mut probe = Probe {
@@ -334,6 +603,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             failed: Vec::new(),
             soft: Vec::new(),
         };
+        held(&LINES).extend(probe.report.iter().cloned());
         probe.section("1 Session facts", facts);
         probe.section("2 Read", read);
         probe.section("3 Geometry truth from pixels", geometry);
@@ -627,6 +897,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 if decode(&path).is_err() {
                     failed.entry(kind).or_default().push(path.display().to_string());
                 }
+                progress();
             }
         }
         p.line(format!("- default wallpapers tried {tried}, unreadable by kind {:?}", failed.iter().map(|(kind, list)| (kind.clone(), list.len())).collect::<Vec<_>>()));
@@ -635,12 +906,18 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
     }
 
+    #[track_caller]
     fn icons(linux: &Linux) -> Vec<Rect> {
+        let _step = doing("the adapter's read of the icons", Duration::ZERO);
         linux.snapshot().map(|snapshot| snapshot.icons).unwrap_or_default()
     }
 
+    #[track_caller]
     fn maybe_icons(linux: &Option<Linux>) -> Vec<Rect> {
-        linux.as_ref().map(icons).unwrap_or_default()
+        match linux {
+            Some(linux) => icons(linux),
+            None => Vec::new(),
+        }
     }
 
     fn new_rect(before: &[Rect], after: &[Rect]) -> Option<Rect> {
@@ -672,7 +949,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
     }
 
+    #[track_caller]
     fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> Option<Duration> {
+        let _step = doing(format!("a wait of up to {} ms", limit.as_millis()), limit);
         let started = Instant::now();
         while started.elapsed() < limit {
             if done() {
@@ -748,10 +1027,17 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         Ok(())
     }
 
+    #[track_caller]
     fn capture(session: Session, area: &Rect) -> Result<RgbImage> {
         match session {
-            Session::X11 => capture_x11(area),
-            Session::Wayland => capture_gnome(area),
+            Session::X11 => {
+                let _step = doing("a capture of the X screen", Duration::ZERO);
+                capture_x11(area)
+            }
+            Session::Wayland => {
+                let _step = doing("a screenshot from GNOME Shell", Duration::ZERO);
+                capture_gnome(area)
+            }
         }
     }
 
@@ -771,7 +1057,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     fn screenshot_bus() -> Result<zbus::blocking::Connection> {
         static SHOT: OnceLock<Option<zbus::blocking::Connection>> = OnceLock::new();
         SHOT.get_or_init(|| {
-            let connection = zbus::blocking::Connection::session().ok()?;
+            let connection = bus::connect(None).ok()?;
             connection.request_name("org.gnome.Screenshot").ok()?;
             Some(connection)
         })
@@ -782,8 +1068,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     fn capture_gnome(area: &Rect) -> Result<RgbImage> {
         let connection = screenshot_bus()?;
         let file = std::env::temp_dir().join(format!("scooch-shot-{}-{}.png", std::process::id(), now()));
-        let reply = connection.call_method(Some("org.gnome.Shell.Screenshot"), "/org/gnome/Shell/Screenshot", Some("org.gnome.Shell.Screenshot"), "Screenshot", &(false, false, file.to_string_lossy().as_ref()))?;
-        let (done, used): (bool, String) = reply.body().deserialize()?;
+        let (done, used): (bool, String) = bus::call_on(&connection, "org.gnome.Shell.Screenshot", "/org/gnome/Shell/Screenshot", "org.gnome.Shell.Screenshot", "Screenshot", &(false, false, file.to_string_lossy().as_ref()))?;
         if !done {
             bail!("the shell refused the screenshot");
         }
@@ -918,7 +1203,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         for (rule, name) in [(wakes::GVFS_RULE, "gvfs AttributeChanged"), (wakes::DCONF_RULE, "dconf Notify"), (wakes::XFCONF_RULE, "xfconf PropertyChanged"), (wakes::DING_RULE, "DING geometry Changed")] {
             let push = push.clone();
             std::thread::spawn(move || {
-                let Ok(connection) = zbus::blocking::Connection::session() else { return };
+                let Ok(connection) = bus::connect(None) else { return };
                 let Ok(messages) = zbus::blocking::MessageIterator::for_match_rule(rule, &connection, Some(256)) else { return };
                 for message in messages.flatten() {
                     let detail = describe(&message);
@@ -2392,7 +2677,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         (rect.x + rect.w / 2.0, rect.y + rect.h / 3.0)
     }
 
+    #[track_caller]
     fn move_icon(p: &mut Probe, target: (f32, f32)) -> Result<String> {
+        let _step = doing("the move of the probe icon", Duration::ZERO);
         let name = PROBES[1].0;
         let path = p.desktop.join(name);
         let scale = factor(p);
@@ -2759,6 +3046,29 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         state["screens"].as_object().is_some_and(|screens| !screens.is_empty() && screens.values().all(|screen| !screen["fingerprint"].is_null()))
     }
 
+    const RUN_LIMIT: Duration = Duration::from_secs(30);
+
+    #[track_caller]
+    fn finished(command: &mut Command, what: &str) -> Result<std::process::Output> {
+        let _step = doing(what, RUN_LIMIT);
+        match tool::within(command, RUN_LIMIT) {
+            Ok(Some(output)) => Ok(output),
+            Ok(None) => bail!("{what} did not finish within {} s, so the probe stopped it", RUN_LIMIT.as_secs()),
+            Err(error) => bail!("{what} could not run, {error}"),
+        }
+    }
+
+    #[track_caller]
+    fn status_within(command: &mut Command, what: &str) -> Result<std::process::ExitStatus> {
+        let mut child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().with_context(|| format!("{what} could not run"))?;
+        if wait_until(RUN_LIMIT, || matches!(child.try_wait(), Ok(Some(_)))).is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{what} did not finish within {} s, so the probe stopped it", RUN_LIMIT.as_secs());
+        }
+        Ok(child.wait()?)
+    }
+
     fn scooch_program() -> Result<PathBuf> {
         let exe = std::env::current_exe()?;
         exe.parent().and_then(Path::parent).map(|folder| folder.join("scooch")).filter(|path| path.is_file()).context("the scooch binary is missing, so build with --bins --examples")
@@ -2771,6 +3081,60 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let process = child.id();
         p.daemon = Some(child);
         Ok(process)
+    }
+
+    struct Rounds {
+        times: Vec<u128>,
+        sets: Vec<f64>,
+        each: Vec<Option<f64>>,
+    }
+
+    fn move_rounds(p: &mut Probe, linux: &Linux, screen: &Screen, log: &Path) -> Rounds {
+        let mut rounds = Rounds { times: Vec::new(), sets: Vec::new(), each: Vec::new() };
+        let plasma5 = p.kind == Some(Kind::Kde) && drops::applies(p.kind, p.session);
+        let frame = primary_frame(p).unwrap_or(screen.frame);
+        for round in 1..=5 {
+            let before = {
+                let _step = doing(format!("move {round} reads the wallpaper before"), Duration::ZERO);
+                linux.wallpaper(screen).ok().flatten()
+            };
+            let rects_before = icons(linux);
+            let seen = {
+                let _step = doing(format!("move {round} looks for the subject on screen"), Duration::from_millis(1500));
+                subject_on_screen(p, linux).or_else(|| {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    subject_on_screen(p, linux)
+                })
+            };
+            let target = seen.unwrap_or((frame.x + SUBJECT.0 * frame.w, frame.y + SUBJECT.1 * frame.h));
+            let moved = Instant::now();
+            let mark = log_lines(log).len();
+            let tried = move_icon(p, target);
+            let dropped = wall();
+            let could = tried.is_ok();
+            let detail = tried.unwrap_or_else(|error| format!("failed {error:#}"));
+            let changed = wait_until(Duration::from_secs(10), || linux.wallpaper(screen).ok().flatten() != before);
+            let latency = changed.map(|_| moved.elapsed().as_millis());
+            std::thread::sleep(if plasma5 { Duration::from_millis(2600) } else { Duration::from_millis(1800) });
+            let moved_icons = icons(linux) != rects_before;
+            let place = seen.map_or("not found, so the picture's own spot".to_string(), |(x, y)| format!("{x:.0},{y:.0}"));
+            p.line(format!("- move {round} onto the subject seen at {place}, {detail}, icons moved by the adapter's reading {moved_icons}, new wallpaper after {latency:?} ms"));
+            if !could && p.kde_wayland() {
+                if round == 1 {
+                    p.soft("the moves onto the subject", "KDE on Wayland gives the probe no way to move an icon without a person");
+                }
+            } else if latency.is_none() {
+                p.fail(format!("move {round} onto the subject brought no new wallpaper within 10 s, {detail}"));
+            }
+            rounds.times.extend(latency);
+            let lines = log_lines(log);
+            let (wakes, set) = daemon_after(lines.get(mark..).unwrap_or_default(), dropped);
+            rounds.sets.extend(set);
+            rounds.each.push(set);
+            let woke = if wakes.is_empty() { "none".to_string() } else { wakes.join(", ") };
+            p.line(format!("  - wakes after the drop {woke}, the daemon set the wallpaper at {} ms", shown_ms(set)));
+        }
+        rounds
     }
 
     fn end_to_end(p: &mut Probe) -> Result<()> {
@@ -2790,47 +3154,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             p.fail("the daemon did not render within 60 s of its start");
         }
         std::thread::sleep(Duration::from_secs(2));
-        let mut times = Vec::new();
-        let mut sets = Vec::new();
-        let mut each: Vec<Option<f64>> = Vec::new();
-        let plasma5 = p.kind == Some(Kind::Kde) && drops::applies(p.kind, p.session);
-        let frame = primary_frame(p).unwrap_or(screen.frame);
         let log = p.out.join("watch.log");
-        for round in 1..=5 {
-            let before = linux.wallpaper(&screen).ok().flatten();
-            let rects_before = icons(&linux);
-            let seen = subject_on_screen(p, &linux).or_else(|| {
-                std::thread::sleep(Duration::from_millis(1500));
-                subject_on_screen(p, &linux)
-            });
-            let target = seen.unwrap_or((frame.x + SUBJECT.0 * frame.w, frame.y + SUBJECT.1 * frame.h));
-            let moved = Instant::now();
-            let mark = log_lines(&log).len();
-            let tried = move_icon(p, target);
-            let dropped = wall();
-            let could = tried.is_ok();
-            let detail = tried.unwrap_or_else(|error| format!("failed {error:#}"));
-            let changed = wait_until(Duration::from_secs(10), || linux.wallpaper(&screen).ok().flatten() != before);
-            let latency = changed.map(|_| moved.elapsed().as_millis());
-            std::thread::sleep(if plasma5 { Duration::from_millis(2600) } else { Duration::from_millis(1800) });
-            let moved_icons = icons(&linux) != rects_before;
-            let place = seen.map_or("not found, so the picture's own spot".to_string(), |(x, y)| format!("{x:.0},{y:.0}"));
-            p.line(format!("- move {round} onto the subject seen at {place}, {detail}, icons moved by the adapter's reading {moved_icons}, new wallpaper after {latency:?} ms"));
-            if !could && p.kde_wayland() {
-                if round == 1 {
-                    p.soft("the moves onto the subject", "KDE on Wayland gives the probe no way to move an icon without a person");
-                }
-            } else if latency.is_none() {
-                p.fail(format!("move {round} onto the subject brought no new wallpaper within 10 s, {detail}"));
-            }
-            times.extend(latency);
-            let lines = log_lines(&log);
-            let (wakes, set) = daemon_after(lines.get(mark..).unwrap_or_default(), dropped);
-            sets.extend(set);
-            each.push(set);
-            let woke = if wakes.is_empty() { "none".to_string() } else { wakes.join(", ") };
-            p.line(format!("  - wakes after the drop {woke}, the daemon set the wallpaper at {} ms", shown_ms(set)));
-        }
+        let Rounds { mut times, sets, each } = move_rounds(p, &linux, &screen, &log);
         times.sort_unstable();
         p.line(format!("- median move to new wallpaper {:?} ms", times.get(times.len() / 2)));
         p.line(format!("- the daemon set the wallpaper at a median {} ms after the drop, in {} of 5 moves", shown_ms(median(&sets)), sets.len()));
@@ -2849,7 +3174,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         std::thread::sleep(Duration::from_secs(3));
         let before = proc_numbers(process);
         let threads_before = threads_of(process);
-        std::thread::sleep(Duration::from_secs(60));
+        idle(Duration::from_secs(60));
         let after = proc_numbers(process);
         let threads_after = threads_of(process);
         p.line(format!("- every thread of the daemon over a quiet minute begun 3 s after its render sessions were let go, {rested:?} ms after the last check, as name, id, voluntary and involuntary switches and CPU ms"));
@@ -2925,7 +3250,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         p.line(format!("- the navy picture taken in after {:?} ms, entries {sources:?}, the icon moved onto its subject, {detail}, new wallpaper after {:?} ms", adopted.map(|time| time.as_millis()), swapped.map(|time| time.as_millis())));
         let held = |home: &Path| state_entries(home).into_iter().map(|(id, entry)| (id, entry["placement"].clone(), entry["output"].clone())).collect::<Vec<_>>();
         let answers = |home: &Path| state_entries(home).into_iter().map(|(_, entry)| entry["belongs"]["answer"].clone()).collect::<Vec<_>>();
-        let toggle = || Command::new(program).arg("scenery").env("SCOOCH_HOME", &home).output().map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
+        let toggle = || finished(Command::new(program).arg("scenery").env("SCOOCH_HOME", &home), "scooch scenery").map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
         let log = p.out.join("watch.log");
         let seen = fs::read_to_string(&log).unwrap_or_default().lines().count();
         let (kept, belongs, shown) = (held(&home), answers(&home), linux.wallpaper(screen).ok().flatten());
@@ -3107,7 +3432,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             p.fail("two screens showed the same picture where each has its own");
         }
         let reaper = p.daemon.take().map(|mut child| std::thread::spawn(move || child.wait().ok()));
-        let off = Command::new(&program).arg("off").env("SCOOCH_HOME", &p.home).stdin(Stdio::null()).output();
+        let off = finished(Command::new(&program).arg("off").env("SCOOCH_HOME", &p.home), "scooch off");
         if !off.as_ref().is_ok_and(|result| result.status.success()) {
             p.fail("scooch off did not end cleanly");
         }
@@ -3152,6 +3477,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         before: Option<PathBuf>,
     }
 
+    #[track_caller]
     fn logged_since(log: &Path, mark: usize, started: Instant, limit: Duration, wanted: &str) -> Option<u128> {
         wait_until(limit, || log_lines(log).iter().skip(mark).any(|line| line.contains(wanted))).map(|_| started.elapsed().as_millis())
     }
@@ -3218,7 +3544,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let mark = log_lines(&run.log).len();
         let pid = run.child.id();
         let first = task_switches(pid);
-        std::thread::sleep(Duration::from_secs(60));
+        idle(Duration::from_secs(60));
         let last = task_switches(pid);
         let lines: Vec<String> = log_lines(&run.log).into_iter().skip(mark).collect();
         let events = lines.iter().filter(|line| line.contains(" program event ")).count();
@@ -3282,7 +3608,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
 
     fn thrown_off(p: &mut Probe, run: &mut Thrown) -> Result<()> {
         let started = Instant::now();
-        let out = Command::new(&run.copy).arg("off").env_remove("SCOOCH_HOME").env("SCOOCH_LINK_PLACES", &run.places).stdin(Stdio::null()).output()?;
+        let out = finished(Command::new(&run.copy).arg("off").env_remove("SCOOCH_HOME").env("SCOOCH_LINK_PLACES", &run.places), "scooch off from the copy")?;
         let error = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let exited = wait_until(Duration::from_secs(10), || !still_running(&mut run.child)).map(|_| started.elapsed().as_millis());
         let copy_gone = !run.copy.exists();
@@ -3333,7 +3659,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let home = dirs::home_dir().context("no home folder")?;
         let mark = log_lines(&run.log).len();
         let started = Instant::now();
-        let gio = Command::new("gio").arg("trash").arg(&run.stand_in).output();
+        let gio = finished(Command::new("gio").arg("trash").arg(&run.stand_in), "gio trash");
         let used = match &gio {
             Ok(out) if out.status.success() => "gio trash".to_string(),
             other => {
@@ -3445,7 +3771,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn real_scooch(program: &Path, arguments: &[&str]) -> Result<std::process::Output> {
-        Ok(Command::new(program).args(arguments).env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1").stdin(Stdio::null()).output()?)
+        finished(Command::new(program).args(arguments).env_remove("SCOOCH_HOME").env("SCOOCH_TRACE", "1"), &format!("scooch {}", arguments.join(" ")))
     }
 
     fn real_state(real: &Path) -> serde_json::Value {
@@ -3462,9 +3788,9 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn launched_by_gio(entry: &Path) -> String {
-        match Command::new("gio").arg("launch").arg(entry).env_remove("SCOOCH_HOME").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status() {
+        match status_within(Command::new("gio").arg("launch").arg(entry).env_remove("SCOOCH_HOME"), "gio launch") {
             Ok(status) => format!("gio launch exit {:?}", status.code()),
-            Err(error) => format!("gio launch could not run, {error}"),
+            Err(error) => format!("{error:#}"),
         }
     }
 
