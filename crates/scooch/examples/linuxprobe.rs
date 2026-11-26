@@ -641,7 +641,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             ("7d The final off", final_off_check),
             ("8 Cleanup", cleanup),
         ];
+        let only = std::env::var("SCOOCH_PROBE_SECTIONS").ok().filter(|only| !only.trim().is_empty());
         for (title, check) in sections {
+            if only.as_ref().is_some_and(|only| !only.split(',').any(|wanted| title.starts_with(&format!("{} ", wanted.trim())))) {
+                continue;
+            }
             probe.section(title, check);
             if probe.lost.is_some() {
                 break;
