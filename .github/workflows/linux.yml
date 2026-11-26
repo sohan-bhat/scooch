@@ -12,121 +12,34 @@ permissions:
   contents: read
 
 jobs:
-  writes:
+  other:
     strategy:
       fail-fast: false
       matrix:
-        desktop: [gnome, gnome-dual]
-        variant: [rename, inplace, two]
-        copy: [1, 2, 3, 4, 5, 6, 7, 8, 9]
-        exclude:
-          - variant: two
-            copy: 6
-          - variant: two
-            copy: 7
-          - variant: two
-            copy: 8
-          - variant: two
-            copy: 9
-        include:
-          - packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
-            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli gdb
-          - desktop: gnome-dual
-            monitors: 2
-          - desktop: gnome
-            variant: rename
-            copy: long
-            packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
-            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli gdb
-          - desktop: gnome
-            variant: two
-            copy: long
-            packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
-            extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli gdb
+        image: ["ubuntu:22.04", "fedora:latest"]
     runs-on: ubuntu-24.04
-    timeout-minutes: 140
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Package list
-        id: list
-        env:
-          LIST: ${{ matrix.packages }} ${{ matrix.extras }} ${{ hashFiles('.github/linux/apt.sh') }}
-        run: |
-          prefix="apt-$ImageOS-$(printf '%s' "$LIST" | sha256sum | cut -c1-16)-"
-          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
-          echo "key=$prefix$(date -u +%G%V)" >> "$GITHUB_OUTPUT"
-
-      - name: Package cache
-        id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: /var/tmp/apt-archives
-          key: ${{ steps.list.outputs.key }}
-          restore-keys: ${{ steps.list.outputs.prefix }}
-
       - name: Packages
-        id: apt
-        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
         env:
-          PACKAGES: ${{ matrix.packages }}
-          EXTRAS: ${{ matrix.extras }}
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          on_retry_command: sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
-          command: sudo timeout -k 20s 8m env PACKAGES="$PACKAGES" EXTRAS="$EXTRAS" bash .github/linux/apt.sh /var/tmp/apt-archives
-
-      - name: Writes
-        timeout-minutes: 130
-        env:
-          SCOOCH_MONITORS: ${{ matrix.monitors || 1 }}
-          VARIANT: ${{ matrix.variant }}
-          SETS: ${{ matrix.copy == 'long' && 9000 || 2000 }}
-          SCOOCH_PACE: "0.5"
+          IMAGE: ${{ matrix.image }}
         run: |
-          mkdir -p writes
-          total=0
-          silent=0
-          sessions=0
-          empty=0
-          writes="${VARIANT%-noding}"
-          noding=""
-          if [ "$VARIANT" != "$writes" ]; then noding=1; fi
-          while [ "$total" -lt "$SETS" ] && [ "$empty" -lt 3 ]; do
-            sessions=$((sessions + 1))
-            run="writes/session-$sessions"
-            mkdir -p "$run"
-            home="$(mktemp -d)"
-            runtime="$(mktemp -d)"
-            chmod 700 "$runtime"
-            HOME="$home" XDG_RUNTIME_DIR="$runtime" SCOOCH_WRITES="$writes" SCOOCH_NO_DING="$noding" SCOOCH_SETS_LEFT=$((SETS - total)) \
-              dbus-run-session -- bash .github/linux/gnome.sh "$PWD/.github/linux/writes.sh" "$run" > "$run/console.txt" 2>&1 || true
-            done_here=0
-            gone=0
-            if [ -f "$run/count.txt" ]; then read -r done_here gone < "$run/count.txt"; fi
-            if [ "$done_here" = 0 ]; then empty=$((empty + 1)); fi
-            total=$((total + done_here))
-            silent=$((silent + gone))
-            echo "session $sessions sets $done_here silent $gone total $total" | tee -a writes/sessions.txt
-            for pid in $(pgrep -u "$(id -u)"); do
-              if tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qx "XDG_RUNTIME_DIR=$runtime"; then
-                kill -9 "$pid" 2>/dev/null || true
-              fi
-            done
-            for mount in "$runtime/doc" "$runtime/gvfs"; do
-              fusermount3 -uz "$mount" 2>/dev/null || fusermount -uz "$mount" 2>/dev/null || true
-            done
-            rm -rf "$home" "$runtime" 2>/dev/null || true
-          done
-          echo "desktop ${{ matrix.desktop }} variant $VARIANT sets $total silent $silent sessions $sessions" | tee -a writes/sessions.txt
+          docker run --name packages -v "$PWD:/work" -w /work "$IMAGE" bash .github/linux/other.sh install
+          docker commit packages other:local
+          docker rm packages
+
+      - name: Session
+        timeout-minutes: 130
+        run: docker run --rm --init --cap-add SYS_NICE -v "$PWD:/work" -w /work -e HOST_UID="$(id -u)" -e SETS=3000 -e SCOOCH_REPLACES=100 other:local bash .github/linux/other.sh run
 
       - name: Upload
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: writes-${{ matrix.desktop }}-${{ matrix.variant }}-${{ matrix.copy }}
-          path: writes
+          name: other-${{ strategy.job-index }}
+          path: linuxprobe
           if-no-files-found: warn
