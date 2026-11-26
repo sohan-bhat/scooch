@@ -105,6 +105,130 @@ public static class Desk {
 }
 '@
 [Desk]::SetProcessDPIAware() | Out-Null
+Add-Type @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class Seen {
+    delegate bool EnumProc(IntPtr window, IntPtr extra);
+    [DllImport("user32.dll")]
+    static extern bool EnumWindows(EnumProc callback, IntPtr extra);
+    [DllImport("user32.dll")]
+    static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")]
+    static extern bool GetWindowRect(IntPtr window, out Edge rect);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetWindowTextW(IntPtr window, System.Text.StringBuilder text, int count);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetClassNameW(IntPtr window, System.Text.StringBuilder text, int count);
+    [DllImport("user32.dll")]
+    static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+    [DllImport("dwmapi.dll")]
+    static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out int value, int size);
+    public struct Edge { public int Left; public int Top; public int Right; public int Bottom; }
+    [DllImport("user32.dll")]
+    static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr extra);
+    public static long Since(long stamp) { return (System.Diagnostics.Stopwatch.GetTimestamp() - stamp) * 1000 / System.Diagnostics.Stopwatch.Frequency; }
+    public static IntPtr Frame() {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((window, extra) => {
+            if (!IsWindowVisible(window)) return true;
+            var name = new System.Text.StringBuilder(64);
+            GetWindowTextW(window, name, 64);
+            if (name.ToString() != "Scooch") return true;
+            uint pid;
+            GetWindowThreadProcessId(window, out pid);
+            int cloaked = 0;
+            DwmGetWindowAttribute(window, 14, out cloaked, 4);
+            try { if (cloaked != 0 || System.Diagnostics.Process.GetProcessById((int)pid).ProcessName != "scooch-app") return true; } catch { return true; }
+            found = window;
+            return false;
+        }, IntPtr.Zero);
+        return found;
+    }
+    public static string Inside(IntPtr window) {
+        var told = new List<string>();
+        EnumChildWindows(window, (child, extra) => {
+            var kind = new System.Text.StringBuilder(64);
+            GetClassNameW(child, kind, 64);
+            told.Add(kind.ToString());
+            return true;
+        }, IntPtr.Zero);
+        return told.Count == 0 ? "no child window" : string.Join(", ", told);
+    }
+    public static string Box(IntPtr window) {
+        Edge rect;
+        return GetWindowRect(window, out rect) ? rect.Left + " " + rect.Top + " " + rect.Right + " " + rect.Bottom : "none";
+    }
+    public static string FirstFrame(long stamp, int cap) {
+        while (Since(stamp) < cap) {
+            IntPtr window = Frame();
+            if (window != IntPtr.Zero) return Since(stamp) + "|" + Box(window);
+            System.Threading.Thread.Sleep(2);
+        }
+        return "-1|none";
+    }
+    public static string Windows(int[] pids) {
+        var told = new List<string>();
+        EnumWindows((window, extra) => {
+            uint pid;
+            GetWindowThreadProcessId(window, out pid);
+            if (Array.IndexOf(pids, (int)pid) < 0) return true;
+            var name = new System.Text.StringBuilder(256);
+            var kind = new System.Text.StringBuilder(256);
+            GetWindowTextW(window, name, 256);
+            GetClassNameW(window, kind, 256);
+            int cloaked = 0;
+            DwmGetWindowAttribute(window, 14, out cloaked, 4);
+            Edge rect;
+            GetWindowRect(window, out rect);
+            told.Add(pid + " '" + name + "' of class " + kind + (IsWindowVisible(window) ? " shown" : " hidden") + (cloaked != 0 ? " cloaked" : "") + " at " + rect.Left + " " + rect.Top + " " + rect.Right + " " + rect.Bottom);
+            return true;
+        }, IntPtr.Zero);
+        return told.Count == 0 ? "none" : string.Join("; ", told);
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct Unique { public int Id; public System.Runtime.InteropServices.ComTypes.FILETIME Started; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct User {
+        public Unique Process;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string App;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string Service;
+        public int Kind;
+        public uint Status;
+        public uint Session;
+        [MarshalAs(UnmanagedType.Bool)] public bool Restartable;
+    }
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    static extern int RmStartSession(out uint session, int flags, System.Text.StringBuilder key);
+    [DllImport("rstrtmgr.dll")]
+    static extern int RmEndSession(uint session);
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    static extern int RmRegisterResources(uint session, uint files, string[] names, uint apps, IntPtr applications, uint services, string[] serviceNames);
+    [DllImport("rstrtmgr.dll")]
+    static extern int RmGetList(uint session, out uint needed, ref uint count, [In, Out] User[] users, ref uint reasons);
+    public static string Users(string path) {
+        uint session;
+        int status = RmStartSession(out session, 0, new System.Text.StringBuilder(64));
+        if (status != 0) return "unknown, the restart manager gave " + status;
+        try {
+            status = RmRegisterResources(session, 1, new string[] { path }, 0, IntPtr.Zero, 0, null);
+            if (status != 0) return "unknown, the restart manager gave " + status;
+            uint needed = 0, count = 0, reasons = 0;
+            status = RmGetList(session, out needed, ref count, null, ref reasons);
+            if (status == 0) return "no process";
+            if (status != 234) return "unknown, the restart manager gave " + status;
+            var users = new User[needed];
+            count = needed;
+            status = RmGetList(session, out needed, ref count, users, ref reasons);
+            if (status != 0) return "unknown, the restart manager gave " + status;
+            var told = new List<string>();
+            for (int index = 0; index < count; index++) told.Add(users[index].Process.Id.ToString());
+            return string.Join(" ", told);
+        } finally { RmEndSession(session); }
+    }
+}
+'@
 
 function Line([string]$Text) { Add-Content -Path $report -Value $Text; Write-Host $Text }
 . (Join-Path $PSScriptRoot 'expect.ps1')
@@ -191,6 +315,37 @@ function Shared-Sum([string]$Path) {
 function State-On { (Test-Path "$data\state.json") -and ((Read-Shared "$data\state.json") -match '"on": true') }
 function Run-Value { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Scooch -ErrorAction SilentlyContinue).Scooch }
 function Daemons { @(Get-Process -Name scoochw -ErrorAction SilentlyContinue).Count }
+$script:titleBar = 'Minimize', 'Maximize', 'Restore', 'Close'
+function Page-Shown([IntPtr]$Window) {
+    if ($Window -eq [IntPtr]::Zero) { return $false }
+    try {
+        $kinds = New-Object System.Windows.Automation.OrCondition((New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)), (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::CheckBox)))
+        foreach ($found in [System.Windows.Automation.AutomationElement]::FromHandle($Window).FindAll([System.Windows.Automation.TreeScope]::Descendants, $kinds)) {
+            if ($found.Current.Name -and $script:titleBar -notcontains $found.Current.Name) { return $true }
+        }
+    } catch { }
+    return $false
+}
+function Open-Window([long]$Stamp, [int]$Cap, [int]$Settle) {
+    $first = ([Seen]::FirstFrame($Stamp, $Cap)) -split '\|'
+    $filled = -1
+    $last = 'none'
+    while ([Seen]::Since($Stamp) -lt $Cap) {
+        if (Page-Shown ([Seen]::Frame())) { $filled = [Seen]::Since($Stamp); break }
+        Start-Sleep -Milliseconds 20
+    }
+    if ($filled -ge 0) {
+        Start-Sleep -Milliseconds $Settle
+        $last = [Seen]::Box([Seen]::Frame())
+    }
+    return @([long]$first[0], $filled, $first[1], $last)
+}
+function App-Snapshot {
+    $apps = @(Get-CimInstance Win32_Process -Filter "Name = 'scooch-app.exe'" -ErrorAction SilentlyContinue)
+    $listed = @($apps | ForEach-Object { "$($_.ProcessId) started $($_.CreationDate.ToUniversalTime().ToString('HH:mm:ss.fff')) by $($_.ParentProcessId) as $($_.CommandLine)" }) -join '; '
+    $ids = [int[]]@($apps | ForEach-Object { [int]$_.ProcessId })
+    "app processes $(if ($listed) { $listed } else { 'none' }), icon.lock open in $([Seen]::Users("$data\icon.lock")), which only its holder keeps open, their top level windows $([Seen]::Windows($ids))"
+}
 
 function Screen-Shot([string]$Name) {
     $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -297,14 +452,27 @@ Line "- animation effects before $([Desk]::Animations())"
 [Desk]::SetAnimations($true)
 Line "- animation effects after the probe turned them on $([Desk]::Animations())"
 $app = Get-ChildItem $folder -Filter 'scooch-app.exe' | Select-Object -First 1
-Start-Process -FilePath $app.FullName -RedirectStandardError (Join-Path $Out 'app.log')
-$shown = Wait-For 40 { [bool](Find-Window) }
-Line "- window showed after $shown s"
-Expect "the app opened its window" ($shown -ge 0)
-Start-Process -FilePath $app.FullName
-Start-Sleep -Seconds 6
-Line "- a second launch left $(@(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count) window process"
-Expect "a second launch leaves one window process" (@(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count -eq 1)
+$firstLog = Join-Path $Out 'app.log'
+$stamp = [Diagnostics.Stopwatch]::GetTimestamp()
+$firstStart = Start-Process -FilePath $app.FullName -RedirectStandardError $firstLog -PassThru
+$opened = Open-Window $stamp 120000 1000
+$frameMs = [long]$opened[0]
+$filledMs = [long]$opened[1]
+$said = Wait-For 30 { (Read-Shared $firstLog) -match 'scooch-app ' }
+Line "- the first launch showed its window after $frameMs ms and its page after $filledMs ms, at $($opened[2]), it says $((Read-Shared $firstLog) -replace "`r?`n", ' ')"
+if ($said -lt 0 -or $frameMs -lt 0 -or $filledMs -lt 0) { Line "- after the first launch, $(App-Snapshot), inside the window $([Seen]::Inside([Seen]::Frame()))" }
+Expect "the first launch wrote its own first line, which the window check stands on" ($said -ge 0)
+Expect "the app opened its window within 120 s of the launch" ($frameMs -ge 0)
+Expect "the window showed its page within 120 s of the launch" ($filledMs -ge 0)
+$secondLog = Join-Path $Out 'app-second.log'
+$second = Start-Process -FilePath $app.FullName -RedirectStandardError $secondLog -PassThru
+$secondSaid = Wait-For 60 { (Read-Shared $secondLog) -match 'scooch-app ' }
+$secondEnded = if ($secondSaid -ge 0) { Wait-For 30 { $second.HasExited } } else { -1 }
+$left = @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count
+Line "- a second launch wrote its first line after $secondSaid s and ended $secondEnded s after it, leaving $left window process, it says $((Read-Shared $secondLog) -replace "`r?`n", ' ')"
+if ($secondSaid -lt 0 -or $secondEnded -lt 0 -or $left -ne 1) { Line "- after the second launch, $(App-Snapshot)" }
+Expect "the second launch wrote its first line within 60 s, which the second launch check stands on" ($secondSaid -ge 0)
+Expect "a second launch leaves one window process" ($secondEnded -ge 0 -and $left -eq 1)
 Start-Sleep -Seconds 3
 $on = Wait-For 40 { State-On }
 Line "- first open turned Scooch on after $on s"
