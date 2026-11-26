@@ -36,7 +36,23 @@ pub fn read(session: Session) -> Result<Vec<Found>> {
     Ok(found)
 }
 
+pub fn x11_within<T: Send + 'static>(what: &'static str, work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new().name("scooch-x11".into()).spawn(move || {
+        let _ = sender.send(work());
+    })?;
+    match receiver.recv_timeout(super::LIMIT) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(anyhow::Error::new(super::Silent(format!("The X display did not answer {what} within {} seconds, so check that the desktop still runs.", super::LIMIT.as_secs())))),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!("The X display stopped answering, so try again.")),
+    }
+}
+
 fn x11() -> Result<Vec<Found>> {
+    x11_within("the monitor list", x11_monitors)
+}
+
+fn x11_monitors() -> Result<Vec<Found>> {
     let (conn, number) = x11rb::connect(None).map_err(|_| anyhow!("Scooch could not reach the X display, so check that DISPLAY is set."))?;
     let root = conn.setup().roots.get(number).context("The X display has no screen.")?.root;
     conn.randr_query_version(1, 5)?.reply().map_err(|_| anyhow!("The X display has no RandR, so Scooch cannot see its monitors."))?;
@@ -56,6 +72,11 @@ fn x11() -> Result<Vec<Found>> {
 }
 
 pub fn cardinals(name: &str) -> Result<Vec<u32>> {
+    let name = name.to_string();
+    x11_within("a root property", move || root_cardinals(&name))
+}
+
+fn root_cardinals(name: &str) -> Result<Vec<u32>> {
     let (conn, number) = x11rb::connect(None).map_err(|_| anyhow!("Scooch could not reach the X display, so check that DISPLAY is set."))?;
     let root = conn.setup().roots.get(number).context("The X display has no screen.")?.root;
     let atom = conn.intern_atom(true, name.as_bytes())?.reply()?.atom;
@@ -261,9 +282,9 @@ fn watch_wayland(wake: &Shared) -> bool {
 }
 
 fn watch_x11(wake: &Shared) -> bool {
-    let Ok((conn, number)) = x11rb::connect(None) else { return false };
-    let Some(root) = conn.setup().roots.get(number).map(|screen| screen.root) else { return false };
-    let armed = (|| -> Result<(u32, u32, u32)> {
+    let armed = x11_within("the screen watch", || {
+        let (conn, number) = x11rb::connect(None)?;
+        let root = conn.setup().roots.get(number).map(|screen| screen.root).context("The X display has no screen.")?;
         conn.randr_query_version(1, 5)?.reply()?;
         conn.randr_select_input(root, NotifyMask::SCREEN_CHANGE | NotifyMask::OUTPUT_CHANGE | NotifyMask::CRTC_CHANGE)?;
         conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE))?;
@@ -271,9 +292,9 @@ fn watch_x11(wake: &Shared) -> bool {
         let desktop = conn.intern_atom(false, b"_NET_CURRENT_DESKTOP")?.reply()?.atom;
         let resources = conn.intern_atom(false, b"RESOURCE_MANAGER")?.reply()?.atom;
         conn.flush()?;
-        Ok((workarea, desktop, resources))
-    })();
-    let Ok((workarea, desktop, resources)) = armed else { return false };
+        Ok((conn, (workarea, desktop, resources)))
+    });
+    let Ok((conn, (workarea, desktop, resources))) = armed else { return false };
     while let Ok(event) = conn.wait_for_event() {
         match event {
             Event::RandrScreenChangeNotify(_) | Event::RandrNotify(_) => wake(),
@@ -285,6 +306,10 @@ fn watch_x11(wake: &Shared) -> bool {
 }
 
 pub fn resources() -> Option<String> {
+    x11_within("its resources", || root_resources().context("no resources")).ok()
+}
+
+fn root_resources() -> Option<String> {
     let (conn, number) = x11rb::connect(None).ok()?;
     let root = conn.setup().roots.get(number)?.root;
     let reply = conn.get_property(false, root, AtomEnum::RESOURCE_MANAGER, AtomEnum::STRING, 0, 1 << 20).ok()?.reply().ok()?;
