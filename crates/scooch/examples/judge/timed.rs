@@ -58,7 +58,7 @@ mod tests {
     use super::*;
 
     fn record(frames: &str) -> Vec<String> {
-        vec![format!("1795638386.521 glide drew 3 layer now drawables unknown latency 2 refresh 15.62 pace 0.00, 1795638383.621 first S@1.00 a0.0, {frames}")]
+        vec![format!("1795638386.521 glide drew 3 layer drawables unknown latency 2 paced by the clock at 15.62 ms, 1795638383.621 first S@1.00 a0.0, {frames}")]
     }
 
     #[test]

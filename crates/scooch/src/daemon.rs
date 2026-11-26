@@ -524,7 +524,7 @@ fn spent_line() -> String {
 }
 
 #[cfg(any(unix, windows))]
-const LOG_MOST: u64 = 1 << 24;
+const LOG_MOST: u64 = 1 << 20;
 #[cfg(any(unix, windows))]
 const LOG_KEPT: u64 = 1 << 18;
 

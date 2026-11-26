@@ -4384,12 +4384,7 @@ mod probe {
         if !stalls.is_empty() {
             p.failed.push(crate::timed::never_came(&stalls));
         }
-        for variant in ["now", "latency", "pace", "both"] {
-            let _ = fs::write(p.home.join("pace-variant"), variant);
-            p.line(format!("- many slides with the pace variant {variant}"));
-            many_slides(p, &log, &screen, (name, folder), (centre, aside), &source)?;
-        }
-        let _ = fs::write(p.home.join("pace-variant"), "now");
+        many_slides(p, &log, &screen, (name, folder), (centre, aside), &source)?;
         let scooch = twin()?.with_file_name("scooch.exe");
         let toggle = |home: &Path| Command::new(&scooch).arg("glide").env("SCOOCH_HOME", home).output().map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
         p.line(format!("- scooch glide said {:?}", toggle(&p.home)));

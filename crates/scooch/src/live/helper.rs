@@ -158,9 +158,6 @@ mod running {
     }
 
     fn pace(ticks: &mut Option<Box<dyn Ticks>>, before: Option<Instant>, interval: Duration) {
-        if interval.is_zero() {
-            return;
-        }
         if let Some(ticks) = ticks.as_mut() {
             ticks.run();
         }
@@ -691,9 +688,8 @@ mod running {
         };
         let Start { id, gpu, surface, source, stills, size, period, commit, mut ticks } = start;
         let begun = Instant::now();
-        let (variant, latency, paced) = variant();
-        let interval = if paced { period } else { Duration::ZERO };
-        let made = source.finish(&gpu).and_then(|(first, from)| gpu.screen_with(surface.0, size.0, size.1, latency).map(|screen| (first, from, screen)));
+        let interval = period;
+        let made = source.finish(&gpu).and_then(|(first, from)| gpu.screen(surface.0, size.0, size.1).map(|screen| (first, from, screen)));
         let (first, from, mut screen) = match made {
             Ok(made) => made,
             Err(why) => {
@@ -706,10 +702,7 @@ mod running {
             tell(Event::Kept { path, still: first.clone() });
         }
         let mut reel = Reel::new(first);
-        if interval.is_zero() {
-            ticks = None;
-        }
-        let head = layer_head(variant, &screen, period, interval, ticks.is_some());
+        let head = layer_head(&screen, interval, ticks.is_some());
         let started = Instant::now();
         let mut began = Some(started);
         let result = P::frame(|| screen.show(&looks(&reel.shown)));
@@ -837,20 +830,10 @@ mod running {
         tell(Event::Stopped { id });
     }
 
-    fn variant() -> (&'static str, u32, bool) {
-        let chosen = std::env::var_os("SCOOCH_HOME").and_then(|home| std::fs::read_to_string(PathBuf::from(home).join("pace-variant")).ok()).unwrap_or_default();
-        match chosen.trim() {
-            "latency" => ("latency", 1, false),
-            "pace" => ("pace", scooch_live::LATENCY, true),
-            "both" => ("both", 1, true),
-            _ => ("now", scooch_live::LATENCY, false),
-        }
-    }
-
-    fn layer_head(variant: &str, screen: &scooch_live::Screen, period: Duration, interval: Duration, ticked: bool) -> String {
+    fn layer_head(screen: &scooch_live::Screen, interval: Duration, ticked: bool) -> String {
         let drawables = screen.drawables.map_or("unknown".to_string(), |count| count.to_string());
-        let by = if ticked { "ticks" } else { "clock" };
-        format!("layer {variant} drawables {drawables} latency {} refresh {:.2} pace {:.2} by {by}", screen.latency, period.as_secs_f64() * 1000.0, interval.as_secs_f64() * 1000.0)
+        let by = if ticked { "the display's ticks" } else { "the clock" };
+        format!("layer drawables {drawables} latency {} paced by {by} at {:.2} ms", screen.latency, interval.as_secs_f64() * 1000.0)
     }
 
     fn headed(head: &str, drew: Vec<String>) -> String {

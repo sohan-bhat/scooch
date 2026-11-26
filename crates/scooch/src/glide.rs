@@ -695,7 +695,7 @@ impl Glider {
     }
 
     fn judge(&mut self, frames: u32, slow: u32) {
-        if self.forced || std::env::var_os("SCOOCH_HOME").is_some_and(|home| std::path::Path::new(&home).join("pace-variant").exists()) {
+        if self.forced {
             return;
         }
         if slow * 2 > frames {

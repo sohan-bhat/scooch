@@ -767,6 +767,11 @@ mod tests {
     }
 
     #[test]
+    fn the_windows_timed_glide_gets_as_many_tries_as_the_glide_check_when_every_try_stalled() {
+        assert_eq!(super::timed::TRIES, super::STALLED_TRIES);
+    }
+
+    #[test]
     fn plain_slides_on_arm64_fail_past_four_stalls_and_intel_counts_them_for_now() {
         let pace = |stalled: bool| super::Pace { gap: if stalled { 300.0 } else { 40.0 }, moving: if stalled { 0 } else { 9 }, stalled, burst: 1, waited: None, split: None };
         let paces = |stalls: usize| (0..40).map(|index| pace(index < stalls)).collect::<Vec<_>>();
@@ -806,7 +811,7 @@ mod tests {
     #[test]
     fn each_glide_counts_the_presents_that_came_at_once_at_its_start_and_gives_its_first_move() {
         let log = vec![
-            "1 glide drew 4 layer now drawables 3 latency 2 refresh 16.67 pace 0.00, 10.000 first S@1.00 a0.4 d0.2 p0.3 f1.0, 10.100 move S@1.00 G0.000@0.00 a0.5 d0.2 p0.3 f1.1, 10.103 move S@1.00 G0.000@0.10 a2.0 d0.3 p0.4 f3.0, 10.106 move S@1.00 G0.001@0.20 a2.0 d0.3 p0.4 f3.0, 10.140 move G0.200@1.00 a30.0 d0.3 p0.4 f31.0, 10.145 move G0.500@1.00 a1.0 d0.3 p0.4 f2.0, 10.180 glided G1.000@1.00 a30.0 d0.3 p0.4 f31.0".to_string(),
+            "1 glide drew 4 layer drawables 3 latency 2 paced by the display's ticks at 16.67 ms, 10.000 first S@1.00 a0.4 d0.2 p0.3 f1.0, 10.100 move S@1.00 G0.000@0.00 a0.5 d0.2 p0.3 f1.1, 10.103 move S@1.00 G0.000@0.10 a2.0 d0.3 p0.4 f3.0, 10.106 move S@1.00 G0.001@0.20 a2.0 d0.3 p0.4 f3.0, 10.140 move G0.200@1.00 a30.0 d0.3 p0.4 f31.0, 10.145 move G0.500@1.00 a1.0 d0.3 p0.4 f2.0, 10.180 glided G1.000@1.00 a30.0 d0.3 p0.4 f31.0".to_string(),
             "2 glide slid, on X@, times from the drop, helper parked, glide sent 300 ms, first moving frame 312 ms, set 380 ms".to_string(),
         ];
         let frames = super::drew_frames(&log);
@@ -1385,58 +1390,18 @@ mod probe {
         probe.section("5 Move to new wallpaper", moves);
         probe.section("5b Scenery", scenery_check);
         probe.section("5c Glide", glide_check);
-        probe.section("5g Many slides, variant now", slides_now);
-        probe.section("5h Slides with no capture, variant now", plain_now);
-        probe.section("5g Many slides, variant latency", slides_latency);
-        probe.section("5h Slides with no capture, variant latency", plain_latency);
-        probe.section("5g Many slides, variant pace", slides_pace);
-        probe.section("5h Slides with no capture, variant pace", plain_pace);
-        probe.section("5g Many slides, variant both", slides_both);
-        probe.section("5h Slides with no capture, variant both", plain_both);
-    }
-
-    fn variant(p: &Probe, name: &str) {
-        let _ = fs::write(p.home.join("pace-variant"), name);
-    }
-
-    fn slides_now(p: &mut Probe) -> Result<()> {
-        variant(p, "now");
-        slides_check(p)
-    }
-
-    fn plain_now(p: &mut Probe) -> Result<()> {
-        variant(p, "now");
-        plain_slides_check(p)
-    }
-
-    fn slides_latency(p: &mut Probe) -> Result<()> {
-        variant(p, "latency");
-        slides_check(p)
-    }
-
-    fn plain_latency(p: &mut Probe) -> Result<()> {
-        variant(p, "latency");
-        plain_slides_check(p)
-    }
-
-    fn slides_pace(p: &mut Probe) -> Result<()> {
-        variant(p, "pace");
-        slides_check(p)
-    }
-
-    fn plain_pace(p: &mut Probe) -> Result<()> {
-        variant(p, "pace");
-        plain_slides_check(p)
-    }
-
-    fn slides_both(p: &mut Probe) -> Result<()> {
-        variant(p, "both");
-        slides_check(p)
-    }
-
-    fn plain_both(p: &mut Probe) -> Result<()> {
-        variant(p, "both");
-        plain_slides_check(p)
+        probe.section("5g Many slides", slides_check);
+        probe.section("5h Slides with no capture", plain_slides_check);
+        probe.section("5d Drags after a start", cold_drags_check);
+        probe.section("5e Quiet minutes and a move after them", rest_check);
+        probe.section("5f Finder after the drop", finder_after_drop);
+        probe.section("6 Idle", idle);
+        probe.section("7 Off", off);
+        probe.section("8 Second cycle", second_cycle);
+        probe.section("9 Spaces", spaces_check);
+        probe.section("9b Program moved", program_moved);
+        probe.section("9c Stop", stop_check);
+        probe.section("9d Consent waiter", consent_waiter);
     }
 
     fn show(rect: &Rect) -> String {
