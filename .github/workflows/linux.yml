@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         desktop: [gnome, gnome-dual]
-        variant: [three, two, one, two-noding]
+        variant: [three, two, one, two-noding, none]
         copy: [1, 2, 3]
         include:
           - packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
