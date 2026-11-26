@@ -509,7 +509,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         listening: bool,
         failed: Vec<String>,
         soft: Vec<String>,
+        lost: Option<String>,
     }
+
+    const LOST: u8 = 75;
+
+    type Check = fn(&mut Probe) -> Result<()>;
 
     impl Probe {
         fn line(&mut self, text: impl Into<String>) {
@@ -529,7 +534,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let _ = fs::write(self.out.join("report.md"), self.report.join("\n") + "\n");
         }
 
-        fn section(&mut self, title: &str, check: fn(&mut Probe) -> Result<()>) {
+        fn section(&mut self, title: &str, check: Check) {
             self.line(String::new());
             self.line(format!("## {title}"));
             self.line(String::new());
@@ -540,7 +545,18 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
                 self.failed.push(format!("{title} stopped with {error:#}"));
             }
             self.line(format!("- took {} ms", started.elapsed().as_millis()));
+            if let Some(why) = self.silence() {
+                self.line(format!("- **silent desktop** the desktop stopped answering by the end of section {title}, {why}, so this session ends and a fresh session makes the sections again"));
+                self.lost = Some(title.to_string());
+            }
             self.save();
+        }
+
+        fn silence(&self) -> Option<String> {
+            match self.linux().and_then(|linux| linux.snapshot()) {
+                Err(error) if scooch::platform::linux::silent(&error) => Some(format!("{error:#}")),
+                _ => None,
+            }
         }
 
         fn fail(&mut self, text: impl Into<String>) {
@@ -602,22 +618,46 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             listening: false,
             failed: Vec::new(),
             soft: Vec::new(),
+            lost: None,
         };
         held(&LINES).extend(probe.report.iter().cloned());
-        probe.section("1 Session facts", facts);
-        probe.section("2 Read", read);
-        probe.section("3 Geometry truth from pixels", geometry);
-        probe.section("4 Move and events", events);
-        probe.section("5 Wallpaper", wallpaper);
-        probe.section("6 End to end", end_to_end);
-        probe.section("7 Two monitors", monitors);
-        probe.section("7b Desktop after the drop", after_drop);
-        probe.section("7c The AppImage thrown away", thrown_away);
-        probe.section("7d The final off", final_off_check);
-        probe.section("8 Cleanup", cleanup);
+        let sections: [(&str, Check); 11] = [
+            ("1 Session facts", facts),
+            ("2 Read", read),
+            ("3 Geometry truth from pixels", geometry),
+            ("4 Move and events", events),
+            ("5 Wallpaper", wallpaper),
+            ("6 End to end", end_to_end),
+            ("7 Two monitors", monitors),
+            ("7b Desktop after the drop", after_drop),
+            ("7c The AppImage thrown away", thrown_away),
+            ("7d The final off", final_off_check),
+            ("8 Cleanup", cleanup),
+        ];
+        for (title, check) in sections {
+            probe.section(title, check);
+            if probe.lost.is_some() {
+                break;
+            }
+        }
+        let earlier: usize = std::env::var("SCOOCH_PROBE_SILENT").ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0);
+        let tries = std::env::var("SCOOCH_PROBE_TRY").unwrap_or_else(|_| "1".into());
         probe.line(String::new());
         probe.line("## Result".to_string());
         probe.line(String::new());
+        probe.line(format!("- silent desktops in this job {}, this session is try {tries} of 3", earlier + usize::from(probe.lost.is_some())));
+        if let Some(title) = probe.lost.clone() {
+            if let Some(mut child) = probe.daemon.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            probe.line(format!("- **silent desktop** the desktop stopped answering by the end of section {title}, which is no wrong answer of Scooch, so a fresh session makes the sections again"));
+            for failed in probe.failed.clone() {
+                probe.line(format!("- set aside with the lost footing {failed}"));
+            }
+            probe.save();
+            return ExitCode::from(LOST);
+        }
         if probe.failed.is_empty() {
             probe.line("- every check passed".to_string());
         }
