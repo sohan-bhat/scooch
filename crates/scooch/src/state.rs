@@ -329,6 +329,14 @@ impl Store {
         self.out().join(format!("{}-{counter}.{extension}", file_safe(screen)))
     }
 
+    pub fn fixed(&self, screen: &str, extension: &str) -> PathBuf {
+        self.out().join(format!("{}-shown.{extension}", file_safe(screen)))
+    }
+
+    pub fn staged(&self, screen: &str) -> PathBuf {
+        self.out().join(format!("{}-next", file_safe(screen)))
+    }
+
     pub fn outputs_of(&self, screen: &str) -> Vec<PathBuf> {
         let prefix = format!("{}-", file_safe(screen));
         let Ok(entries) = fs::read_dir(self.out()) else { return Vec::new() };

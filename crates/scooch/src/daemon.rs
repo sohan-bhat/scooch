@@ -1142,6 +1142,7 @@ impl Daemon {
                     report.outcomes.push((screen.id.clone(), outcome));
                 }
                 Err(error) => {
+                    report.silent |= silent(&error);
                     report.outcomes.push((screen.id.clone(), Outcome::Skipped));
                     report.problem.get_or_insert(error.to_string());
                 }
@@ -1502,6 +1503,7 @@ impl Daemon {
             entry.placement = Some(placement);
             entry.placed = Some(placed);
             entry.drawn = Some(drawn);
+            entry.painted = painted;
             return Ok(Outcome::Kept);
         }
         let was = std::mem::replace(&mut entry.painted, painted);
@@ -1654,17 +1656,27 @@ impl Daemon {
     }
 
     fn publish(&self, entry: &mut Entry, screen: &Screen, current: Option<&Path>, seen: Option<&Path>, extension: &str, write: impl FnOnce(&Path) -> Result<()>) -> Result<bool> {
+        let fixed = self.desktop.reloads_picture();
+        let published = self.put(entry, screen, (current, seen), extension, fixed, write);
+        if fixed && !matches!(published, Ok(true)) {
+            (entry.fingerprint, entry.placement) = (None, None);
+        }
+        published
+    }
+
+    fn put(&self, entry: &mut Entry, screen: &Screen, (current, seen): (Option<&Path>, Option<&Path>), extension: &str, fixed: bool, write: impl FnOnce(&Path) -> Result<()>) -> Result<bool> {
         let (counter, path) = self.fresh_name(&screen.id, entry.counter, extension, current);
         std::fs::create_dir_all(self.store.out()).with_context(|| format!("Scooch could not make {}, so check the disk.", self.store.out().display()))?;
-        write(&path)?;
+        let made = [if fixed { self.store.staged(&screen.id) } else { path.clone() }];
+        write(&made[0])?;
         lap("write");
-        let made = [path.clone()];
         if self.picked_meanwhile(screen, seen)? || !self.note(&screen.id, &Entry { output: Some(path.clone()), counter, ..entry.clone() })? {
             discard(self.desktop.as_ref(), &self.store, &made, &made);
             return Ok(false);
         }
         lap("check");
-        if let Err(error) = self.show(screen, &path) {
+        let placed = if fixed { crate::state::replace(&made[0], &path).map_err(|error| crate::state::unwritten(&path, error, true)) } else { Ok(()) };
+        if let Err(error) = placed.and_then(|()| self.show(screen, &path)) {
             let _ = self.note(&screen.id, entry);
             discard(self.desktop.as_ref(), &self.store, &made, &made);
             return Err(error);
@@ -1690,6 +1702,9 @@ impl Daemon {
                 theirs.output.clone_from(&entry.output);
                 theirs.painted = entry.painted;
                 theirs.counter = theirs.counter.max(entry.counter);
+                if self.desktop.reloads_picture() {
+                    (theirs.fingerprint, theirs.placement) = (None, None);
+                }
             }
             None => {
                 state.screens.insert(id.to_string(), entry.clone());
@@ -1708,6 +1723,9 @@ impl Daemon {
     }
 
     fn fresh_name(&self, screen: &str, counter: u64, extension: &str, current: Option<&Path>) -> (u64, PathBuf) {
+        if self.desktop.reloads_picture() {
+            return (counter, self.store.fixed(screen, self.desktop.format().extension()));
+        }
         let mut next = counter + 1;
         loop {
             let path = self.store.output(screen, next, extension);
