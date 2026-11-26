@@ -37,7 +37,12 @@ public static class Launches {
     static extern bool PostMessage(IntPtr window, uint message, IntPtr wide, IntPtr narrow);
     static bool Filled(IntPtr window) {
         bool any = false;
-        EnumChildWindows(window, (child, extra) => { any = true; return false; }, IntPtr.Zero);
+        EnumChildWindows(window, (child, extra) => {
+            var kind = new System.Text.StringBuilder(64);
+            GetClassNameW(child, kind, 64);
+            any = kind.ToString().StartsWith("Chrome_");
+            return !any;
+        }, IntPtr.Zero);
         return any;
     }
     delegate bool EnumProc(IntPtr window, IntPtr extra);
@@ -80,7 +85,7 @@ public static class Launches {
         }
     }
 
-    public static string Watch(string log, int cap, int after, bool close) {
+    public static string Watch(string log, int cap, int after, int close) {
         var clock = Stopwatch.StartNew();
         var told = new List<string>();
         var handles = new Dictionary<uint, IntPtr>();
@@ -139,7 +144,7 @@ public static class Launches {
                 if (Filled(frame)) {
                     filled = Now();
                     told.Add("filled " + filled);
-                } else if (close) {
+                } else if (close >= 0 && Now() >= shown + close) {
                     PostMessage(frame, 0x0010, IntPtr.Zero, IntPtr.Zero);
                     closed = Now();
                     told.Add("closed " + closed + " blank " + !Filled(frame));
@@ -272,7 +277,7 @@ function Run-Launches {
         $clock = [Diagnostics.Stopwatch]::StartNew()
         $daemon = Start-Process -FilePath $daemonProgram -ArgumentList 'watch' -WindowStyle Hidden -PassThru
         if ($quiet) {
-            $text = [Launches]::Watch($appLog, 6000, 0, $false)
+            $text = [Launches]::Watch($appLog, 6000, 0, -1)
             $found = Read-Watch $text 0
             $made = @($found.windows | Where-Object { $_.Name -eq 'Scooch' })
             $starts = @($found.apps | Where-Object { $_.Parent -eq $daemon.Id })
@@ -283,7 +288,7 @@ function Run-Launches {
         }
         while ($clock.ElapsedMilliseconds -lt $delay) { Start-Sleep -Milliseconds 5 }
         $launched = Start-Process -FilePath $appProgram -RedirectStandardError $appLog -PassThru
-        $text = [Launches]::Watch($appLog, 90000, 2000, $close)
+        $text = [Launches]::Watch($appLog, 90000, 2000, $(if ($close) { ($round * 37) % 250 } else { -1 }))
         $found = Read-Watch $text $launched.Id
         $zero = $found.made
         $frameAt = if ($found.shown -ge 0) { $found.shown - $zero } else { -1 }
