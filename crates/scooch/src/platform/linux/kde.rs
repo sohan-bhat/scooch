@@ -26,11 +26,7 @@ pub fn groups(name: &str) -> Vec<keyfile::Group> {
 }
 
 pub fn evaluate(script: &str) -> Result<String> {
-    let connection = super::bus::session()?;
-    let reply = connection
-        .call_method(Some(SHELL_NAME), "/PlasmaShell", Some("org.kde.PlasmaShell"), "evaluateScript", &(script,))
-        .map_err(|_| anyhow!("Plasma did not answer, so check that plasmashell runs."))?;
-    Ok(reply.body().deserialize::<String>().unwrap_or_default())
+    super::bus::call::<_, String>(SHELL_NAME, "/PlasmaShell", "org.kde.PlasmaShell", "evaluateScript", &(script,)).map_err(|_| anyhow!("Plasma did not answer, so check that plasmashell runs."))
 }
 
 pub fn state() -> Result<State> {
