@@ -3176,7 +3176,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         for round in 1..=5 {
             let before = {
                 let _step = doing(format!("move {round} reads the wallpaper before"), Duration::ZERO);
-                linux.wallpaper(screen).ok().flatten()
+                showing_now(linux, screen)
             };
             let rects_before = icons(linux);
             let seen = {
@@ -3193,7 +3193,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let dropped = wall();
             let could = tried.is_ok();
             let detail = tried.unwrap_or_else(|error| format!("failed {error:#}"));
-            let changed = wait_until(Duration::from_secs(10), || linux.wallpaper(screen).ok().flatten() != before);
+            let changed = wait_until(Duration::from_secs(10), || showing_now(linux, screen) != before);
             let latency = changed.map(|_| moved.elapsed().as_millis());
             std::thread::sleep(if plasma5 { Duration::from_millis(2600) } else { Duration::from_millis(1800) });
             let moved_icons = icons(linux) != rects_before;
@@ -3320,11 +3320,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             taken(&home)
         });
         std::thread::sleep(Duration::from_secs(2));
-        let before = linux.wallpaper(screen).ok().flatten();
+        let before = showing_now(linux, screen);
         let moved_icon = move_icon(p, (frame.x + frame.w * 0.5, frame.y + frame.h * 0.5));
         let moved = moved_icon.is_ok();
         let detail = moved_icon.unwrap_or_else(|error| format!("failed {error:#}"));
-        let swapped = wait_until(Duration::from_secs(10), || linux.wallpaper(screen).ok().flatten() != before);
+        let swapped = wait_until(Duration::from_secs(10), || showing_now(linux, screen) != before);
         std::thread::sleep(Duration::from_secs(2));
         let sources: Vec<String> = state_entries(&home).into_iter().map(|(id, entry)| format!("{id} {}", entry["source"].as_str().unwrap_or("none"))).collect();
         p.line(format!("- the navy picture taken in after {:?} ms, entries {sources:?}, the icon moved onto its subject, {detail}, new wallpaper after {:?} ms", adopted.map(|time| time.as_millis()), swapped.map(|time| time.as_millis())));
@@ -3333,10 +3333,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let toggle = || finished(Command::new(program).arg("scenery").env("SCOOCH_HOME", &home), "scooch scenery").map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
         let log = p.out.join("watch.log");
         let seen = fs::read_to_string(&log).unwrap_or_default().lines().count();
-        let (kept, belongs, shown) = (held(&home), answers(&home), linux.wallpaper(screen).ok().flatten());
+        let (kept, belongs, shown) = (held(&home), answers(&home), showing_now(linux, screen));
         let said = toggle();
         std::thread::sleep(Duration::from_secs(3));
-        let (now, showing) = (held(&home), linux.wallpaper(screen).ok().flatten());
+        let (now, showing) = (held(&home), showing_now(linux, screen));
         let window: Vec<String> = fs::read_to_string(&log).unwrap_or_default().lines().skip(seen).filter(|line| line.contains(" tick ") || line.contains(" set ")).map(|line| line.chars().take(200).collect()).collect();
         let sets = window.iter().filter(|line| line.split_whitespace().nth(1) == Some("set")).count();
         let back = toggle();
@@ -3361,6 +3361,19 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             p.fail(line);
         }
         Ok(())
+    }
+
+    fn digest(bytes: &[u8]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn showing_now(linux: &Linux, screen: &Screen) -> Option<(PathBuf, u64)> {
+        let path = linux.wallpaper(screen).ok().flatten()?;
+        let content = fs::read(&path).map_or(0, |bytes| digest(&bytes));
+        Some((path, content))
     }
 
     fn touches(frame: &Rect, icon: &Rect) -> bool {
