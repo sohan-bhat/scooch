@@ -330,7 +330,7 @@ fn made_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>
         if let Some(((x, y), (width, height), scale)) = spot(app, inner, (config.width, config.height)) {
             (config.x, config.y, config.width, config.height) = (Some(x as f64 / scale), Some(y as f64 / scale), width as f64 / scale, height as f64 / scale);
         }
-        (config.maximized, config.visible, config.background_color) = (maximized, true, Some(look::room(light_look()).into()));
+        (config.maximized, config.visible, config.background_color) = (maximized, !maximized, Some(look::room(light_look()).into()));
     }
     let window = tauri::WebviewWindowBuilder::from_config(app, &config)?.build()?;
     if let Ok(theme) = window.theme() {
