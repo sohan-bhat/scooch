@@ -289,11 +289,9 @@ fn spot<R: Runtime>(app: &AppHandle<R>, inner: Option<(u32, u32)>, fallback: (f6
 
 #[cfg(windows)]
 fn place_on_pointer<R: Runtime>(window: &WebviewWindow<R>) {
-    let inner = window.inner_size().ok().map(|size| (size.width, size.height));
-    if let Some(((x, y), ..)) = spot(window.app_handle(), inner, (0.0, 0.0)) {
-        if !window.is_maximized().unwrap_or(false) && window.outer_position().ok() != Some(PhysicalPosition::new(x, y)) {
-            let _ = window.set_position(PhysicalPosition::new(x, y));
-        }
+    let Some(((x, y), ..)) = spot(window.app_handle(), window.inner_size().ok().map(|size| (size.width, size.height)), (0.0, 0.0)) else { return };
+    if !window.is_maximized().unwrap_or(false) && window.outer_position().ok() != Some(PhysicalPosition::new(x, y)) {
+        let _ = window.set_position(PhysicalPosition::new(x, y));
     }
 }
 
@@ -328,8 +326,7 @@ fn made_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>
     {
         use tauri_plugin_window_state::AppHandleExt;
         let _ = app.save_window_state(StateFlags::SIZE | StateFlags::MAXIMIZED);
-        let file = app.path().app_config_dir().map(|folder| folder.join(app.filename()));
-        let (inner, maximized) = look::saved(&file.ok().and_then(|file| std::fs::read_to_string(file).ok()).unwrap_or_default());
+        let (inner, maximized) = look::saved(&app.path().app_config_dir().ok().and_then(|folder| std::fs::read_to_string(folder.join(app.filename())).ok()).unwrap_or_default());
         if let Some(((x, y), (width, height), scale)) = spot(app, inner, (config.width, config.height)) {
             (config.x, config.y, config.width, config.height) = (Some(x as f64 / scale), Some(y as f64 / scale), width as f64 / scale, height as f64 / scale);
         }
@@ -498,10 +495,13 @@ fn main() {
         eprintln!("scooch-app the single instance socket belongs to another account, so this start goes without it");
         builder
     };
+    let window_state = tauri_plugin_window_state::Builder::default().with_state_flags(StateFlags::SIZE | StateFlags::MAXIMIZED);
+    #[cfg(windows)]
+    let window_state = window_state.skip_initial_state("main");
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(StateFlags::SIZE | StateFlags::MAXIMIZED).build());
+        .plugin(window_state.build());
     #[cfg(feature = "updater")]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(target_os = "macos")]

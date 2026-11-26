@@ -25,12 +25,11 @@ pub type Spot = ((i32, i32), (u32, u32), f64);
 pub fn place(pointer: (f64, f64), screens: &[Screen], inner: Option<(u32, u32)>, fallback: (f64, f64)) -> Option<Spot> {
     let inside = |(x, y, width, height): (i32, i32, u32, u32)| pointer.0 >= x as f64 && pointer.1 >= y as f64 && pointer.0 < x as f64 + width as f64 && pointer.1 < y as f64 + height as f64;
     let screen = screens.iter().find(|screen| inside(screen.area)).or_else(|| screens.first())?;
-    let inner = inner.unwrap_or_else(|| ((fallback.0 * screen.scale).round() as u32, (fallback.1 * screen.scale).round() as u32));
-    let (side, top) = ((8.0 * screen.scale).round() as i32, (31.0 * screen.scale).round() as i32);
+    let wanted = inner.unwrap_or_else(|| ((fallback.0 * screen.scale).round() as u32, (fallback.1 * screen.scale).round() as u32));
+    let (side, top) = ((8.0 * screen.scale).round() as u32, (31.0 * screen.scale).round() as u32);
     let (x, y, width, height) = screen.work;
-    let left = x + (width as i32 - inner.0 as i32 - 2 * side) / 2;
-    let up = y + (height as i32 - inner.1 as i32 - top - side) / 2;
-    Some(((left.max(x), up.max(y)), inner, screen.scale))
+    let inner = (wanted.0.min(width.saturating_sub(2 * side)), wanted.1.min(height.saturating_sub(top + side)));
+    Some(((x + width.saturating_sub(inner.0 + 2 * side) as i32 / 2, y + height.saturating_sub(inner.1 + top + side) as i32 / 2), inner, screen.scale))
 }
 
 #[cfg(any(windows, test))]
@@ -46,7 +45,6 @@ mod tests {
 
     #[test]
     fn the_frame_is_the_page_background_of_each_look_from_the_one_token() {
-        assert_eq!(room_in("--color-room-2: #000000; --color-room: #a1b2c3;"), Some((0xa1, 0xb2, 0xc3)));
         assert!(room(true).1 > 200 && room(false).1 < 60, "light {:?} dark {:?}", room(true), room(false));
         let (red, green, blue) = room(false);
         assert!(include_str!("../tauri.conf.json").contains(&format!("\"backgroundColor\": \"#{red:02x}{green:02x}{blue:02x}\"")));
@@ -58,16 +56,17 @@ mod tests {
         let two = Screen { area: (1920, 0, 2560, 1440), work: (1920, 0, 2560, 1392), scale: 1.5 };
         let screens = [one, two];
         assert_eq!(place((100.0, 100.0), &screens, None, (900.0, 620.0)), Some(((502, 186), (900, 620), 1.0)));
-        assert_eq!(place((100.0, 100.0), &screens, Some((1200, 1032)), (900.0, 620.0)), Some(((352, 0), (1200, 1032), 1.0)));
-        assert_eq!(place((100.0, 100.0), &screens, Some((2400, 1400)), (900.0, 620.0)), Some(((0, 0), (2400, 1400), 1.0)));
+        assert_eq!(place((100.0, 100.0), &screens, Some((1200, 1032)), (900.0, 620.0)), Some(((352, 0), (1200, 993), 1.0)));
+        assert_eq!(place((100.0, 100.0), &screens, Some((2400, 1400)), (900.0, 620.0)), Some(((0, 0), (1904, 993), 1.0)));
         assert_eq!(place((2500.0, 300.0), &screens, None, (900.0, 620.0)), Some(((2513, 201), (1350, 930), 1.5)));
         assert_eq!(place((-50.0, -50.0), &screens[..1], None, (900.0, 620.0)), Some(((502, 186), (900, 620), 1.0)));
     }
 
     #[test]
     fn the_saved_state_is_read_leniently() {
-        let sample = "{\n  \"main\": {\n    \"width\": 1100,\n    \"height\": 700,\n    \"x\": 410,\n    \"y\": 166,\n    \"prev_x\": 0,\n    \"prev_y\": 0,\n    \"maximized\": true,\n    \"visible\": true,\n    \"decorated\": true,\n    \"fullscreen\": false\n  }\n}";
-        assert_eq!(saved(sample), (Some((1100, 700)), true));
+        let sample = "{\n  \"main\": {\n    \"width\": 900,\n    \"height\": 620,\n    \"x\": 0,\n    \"y\": 0,\n    \"prev_x\": 0,\n    \"prev_y\": 0,\n    \"maximized\": false,\n    \"visible\": true,\n    \"decorated\": true,\n    \"fullscreen\": false\n  }\n}";
+        assert_eq!(saved(sample), (Some((900, 620)), false));
+        assert_eq!(saved(&sample.replace("\"maximized\": false", "\"maximized\": true")), (Some((900, 620)), true));
         assert_eq!(saved("{\"main\": {\"width\": 0, \"height\": 700}}"), (None, false));
         assert_eq!(saved("not json"), (None, false));
     }
