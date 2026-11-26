@@ -627,6 +627,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             lost: None,
         };
         held(&LINES).extend(probe.report.iter().cloned());
+        if std::env::var_os("SCOOCH_PROBE_REPLACE").is_some() {
+            probe.section("1 Session facts", facts);
+            probe.section("R Replaces", replaces);
+            probe.save();
+            return ExitCode::SUCCESS;
+        }
         let sections: [(&str, Check); 11] = [
             ("1 Session facts", facts),
             ("2 Read", read),
@@ -3291,6 +3297,108 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         for line in trace.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev() {
             p.line(format!("  - `{line}`"));
         }
+        Ok(())
+    }
+
+    const SWATCHES: [[u8; 3]; 2] = [[214, 64, 40], [36, 84, 214]];
+
+    fn swatch(session: Session, frame: &Rect) -> Option<usize> {
+        let shot = capture(session, frame).ok()?;
+        let (w, h) = shot.dimensions();
+        let (mut sum, mut n) = ([0f64; 3], 0f64);
+        for y in (h / 4..3 * h / 4).step_by(4) {
+            for x in (w / 4..3 * w / 4).step_by(4) {
+                let pixel = shot.get_pixel(x, y).0;
+                for c in 0..3 {
+                    sum[c] += f64::from(pixel[c]);
+                }
+                n += 1.0;
+            }
+        }
+        let mean = sum.map(|value| value / n.max(1.0));
+        let distance = |target: [u8; 3]| (0..3).map(|c| (mean[c] - f64::from(target[c])).powi(2)).sum::<f64>().sqrt();
+        let near: Vec<f64> = SWATCHES.iter().map(|target| distance(*target)).collect();
+        let best = if near[0] <= near[1] { 0 } else { 1 };
+        Some(if near[best] < 40.0 { best } else { 2 })
+    }
+
+    fn replaces(p: &mut Probe) -> Result<()> {
+        let way = std::env::var("SCOOCH_PROBE_REPLACE").unwrap_or_default();
+        let count: usize = std::env::var("SCOOCH_PROBE_REPLACES").ok().and_then(|text| text.parse().ok()).unwrap_or(100);
+        let linux = p.linux()?;
+        let screen = linux.screens()?.first().cloned().context("no screen")?;
+        let frame = primary_frame(p).context("no screen")?;
+        let (width, height) = ((screen.frame.w * screen.scale) as u32, (screen.frame.h * screen.scale) as u32);
+        let bytes = SWATCHES.iter().map(|color| jpeg(&RgbImage::from_pixel(width, height, (*color).into()))).collect::<Result<Vec<_>>>()?;
+        let folder = p.home.join("replace");
+        fs::create_dir_all(&folder)?;
+        let fixed = folder.join("picture.jpg");
+        fs::write(&fixed, &bytes[0])?;
+        linux.set_wallpaper(&screen, &fixed)?;
+        let started = Instant::now();
+        let first = wait_until(Duration::from_secs(20), || swatch(p.session, &frame) == Some(0)).map(|_| started.elapsed().as_millis());
+        p.line(format!("- way {way}, the picture set once to {} showed after {first:?} ms", fixed.display()));
+        let (mut shown, mut times, mut between, mut faded) = (0usize, Vec::new(), 0usize, 0usize);
+        for index in 1..=count {
+            let target = index % 2;
+            let began = Instant::now();
+            let done = match way.as_str() {
+                "rename" => {
+                    let fresh = folder.join(format!(".picture-{index}.jpg"));
+                    fs::write(&fresh, &bytes[target])?;
+                    fs::File::open(&fresh)?.sync_all()?;
+                    fs::rename(&fresh, &fixed)
+                }
+                "inplace" => fs::OpenOptions::new().write(true).truncate(true).open(&fixed).and_then(|mut file| {
+                    file.write_all(&bytes[target])?;
+                    file.sync_all()
+                }),
+                _ => {
+                    let path = folder.join(format!("set-{index}.jpg"));
+                    fs::write(&path, &bytes[target])?;
+                    let _ = fs::remove_file(folder.join(format!("set-{}.jpg", index.saturating_sub(3))));
+                    linux.set_wallpaper(&screen, &path).map_err(|error| std::io::Error::other(format!("{error:#}")))
+                }
+            };
+            let made = began.elapsed().as_millis();
+            if let Err(error) = done {
+                p.line(format!("  - change {index} could not be made, {error}"));
+                continue;
+            }
+            let (mut seen, mut mid) = (None, 0usize);
+            let mut captures = 0usize;
+            while began.elapsed() < Duration::from_secs(6) {
+                let look = swatch(p.session, &frame);
+                captures += 1;
+                match look {
+                    Some(found) if found == target => {
+                        seen = Some(began.elapsed().as_millis());
+                        break;
+                    }
+                    Some(2) => mid += 1,
+                    _ => {}
+                }
+                progress();
+            }
+            between += mid;
+            if mid > 0 {
+                faded += 1;
+            }
+            match seen {
+                Some(ms) => {
+                    shown += 1;
+                    times.push(ms);
+                }
+                None => p.line(format!("  - change {index} by {way} showed no new picture within 6 s after {captures} captures")),
+            }
+            p.raw(format!("change {index} {way} made in {made} ms, new picture at {seen:?} ms, captures {captures}, captures between the two pictures {mid}"));
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        times.sort_unstable();
+        let median = times.get(times.len() / 2).copied();
+        p.line(format!("- way {way}: {shown} of {count} changes showed the new picture, from the change to the first capture with it a median of {median:?} ms and at most {:?} ms, {faded} changes had captures between the two pictures, {between} such captures in all", times.last()));
+        let icons = linux.snapshot().map(|snapshot| snapshot.icons.len()).map_err(|error| format!("{error:#}"));
+        p.line(format!("- after the changes the adapter reads {icons:?} icons, DING running {:?}", gnome::running().map_err(|error| error.to_string())));
         Ok(())
     }
 
