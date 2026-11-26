@@ -146,16 +146,6 @@ public static class Seen {
         }, IntPtr.Zero);
         return found;
     }
-    public static bool Filled(IntPtr window) {
-        bool any = false;
-        EnumChildWindows(window, (child, extra) => {
-            var kind = new System.Text.StringBuilder(64);
-            GetClassNameW(child, kind, 64);
-            any = kind.ToString().StartsWith("Chrome_");
-            return !any;
-        }, IntPtr.Zero);
-        return any;
-    }
     public static string Inside(IntPtr window) {
         var told = new List<string>();
         EnumChildWindows(window, (child, extra) => {
@@ -170,31 +160,20 @@ public static class Seen {
         Edge rect;
         return GetWindowRect(window, out rect) ? rect.Left + " " + rect.Top + " " + rect.Right + " " + rect.Bottom : "none";
     }
-    public static string Open(long stamp, int cap, int settle) {
-        long frame = -1, filled = -1;
-        string first = "none", last = "none";
+    public static string FirstFrame(long stamp, int cap) {
         while (Since(stamp) < cap) {
             IntPtr window = Frame();
-            if (window != IntPtr.Zero) {
-                if (frame < 0) { frame = Since(stamp); first = Box(window); }
-                if (Filled(window)) { filled = Since(stamp); break; }
-            }
-            System.Threading.Thread.Sleep(5);
+            if (window != IntPtr.Zero) return Since(stamp) + "|" + Box(window);
+            System.Threading.Thread.Sleep(2);
         }
-        if (filled >= 0) {
-            System.Threading.Thread.Sleep(settle);
-            IntPtr window = Frame();
-            if (window != IntPtr.Zero) last = Box(window);
-        }
-        return frame + "|" + filled + "|" + first + "|" + last;
+        return "-1|none";
     }
     public static IntPtr Blank(long stamp, int cap, int settle) {
         while (Since(stamp) < cap) {
             IntPtr window = Frame();
             if (window != IntPtr.Zero) {
-                if (Filled(window)) return IntPtr.Zero;
                 System.Threading.Thread.Sleep(settle);
-                return Filled(window) ? IntPtr.Zero : window;
+                return window;
             }
             System.Threading.Thread.Sleep(2);
         }
@@ -347,6 +326,31 @@ function Shared-Sum([string]$Path) {
 function State-On { (Test-Path "$data\state.json") -and ((Read-Shared "$data\state.json") -match '"on": true') }
 function Run-Value { (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Scooch -ErrorAction SilentlyContinue).Scooch }
 function Daemons { @(Get-Process -Name scoochw -ErrorAction SilentlyContinue).Count }
+$script:titleBar = 'Minimize', 'Maximize', 'Restore', 'Close'
+function Page-Shown([IntPtr]$Window) {
+    if ($Window -eq [IntPtr]::Zero) { return $false }
+    try {
+        $kinds = New-Object System.Windows.Automation.OrCondition((New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)), (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::CheckBox)))
+        foreach ($found in [System.Windows.Automation.AutomationElement]::FromHandle($Window).FindAll([System.Windows.Automation.TreeScope]::Descendants, $kinds)) {
+            if ($found.Current.Name -and $script:titleBar -notcontains $found.Current.Name) { return $true }
+        }
+    } catch { }
+    return $false
+}
+function Open-Window([long]$Stamp, [int]$Cap, [int]$Settle) {
+    $first = ([Seen]::FirstFrame($Stamp, $Cap)) -split '\|'
+    $filled = -1
+    $last = 'none'
+    while ([Seen]::Since($Stamp) -lt $Cap) {
+        if (Page-Shown ([Seen]::Frame())) { $filled = [Seen]::Since($Stamp); break }
+        Start-Sleep -Milliseconds 20
+    }
+    if ($filled -ge 0) {
+        Start-Sleep -Milliseconds $Settle
+        $last = [Seen]::Box([Seen]::Frame())
+    }
+    return @([long]$first[0], $filled, $first[1], $last)
+}
 function App-Snapshot {
     $apps = @(Get-CimInstance Win32_Process -Filter "Name = 'scooch-app.exe'" -ErrorAction SilentlyContinue)
     $listed = @($apps | ForEach-Object { "$($_.ProcessId) started $($_.CreationDate.ToUniversalTime().ToString('HH:mm:ss.fff')) by $($_.ParentProcessId) as $($_.CommandLine)" }) -join '; '
@@ -464,7 +468,7 @@ if ($experiment) { . (Join-Path $PSScriptRoot 'launches-windows.ps1') }
 $firstLog = Join-Path $Out 'app.log'
 $stamp = [Diagnostics.Stopwatch]::GetTimestamp()
 $firstStart = Start-Process -FilePath $app.FullName -RedirectStandardError $firstLog -PassThru
-$opened = ([Seen]::Open($stamp, 120000, 1000)) -split '\|'
+$opened = Open-Window $stamp 120000 1000
 $frameMs = [long]$opened[0]
 $filledMs = [long]$opened[1]
 Start-Sleep -Milliseconds 500
@@ -540,7 +544,7 @@ function Blank-Look([int]$Light, [string]$Name) {
         $stamp = Launch-Again "blank-$Name-$try"
         $window = [Seen]::Blank($stamp, 10000, 40)
         $bright = if ($window -ne [IntPtr]::Zero) { Center-Brightness $window } else { -1 }
-        $blank = $window -ne [IntPtr]::Zero -and -not [Seen]::Filled($window)
+        $blank = $window -ne [IntPtr]::Zero -and -not (Page-Shown $window)
         Wait-Filled
         if ($blank) {
             Line "- a blank frame in the $Name look was caught on try $try, its middle has brightness $bright"
@@ -552,13 +556,13 @@ function Blank-Look([int]$Light, [string]$Name) {
 }
 function Rect-Case([string]$Name) {
     $stamp = Launch-Again "rect-$($Name -replace '\W', '-')"
-    $seen = ([Seen]::Open($stamp, 120000, 1000)) -split '\|'
+    $seen = Open-Window $stamp 120000 1000
     Line "- $Name, the frame showed after $($seen[0]) ms at $($seen[2]) and the filled window after $($seen[1]) ms at $($seen[3])"
     Expect "$Name, a launch the icon process takes over shows its frame within 3 s" ([long]$seen[0] -ge 0 -and [long]$seen[0] -le 3000)
     Expect "$Name, the frame at first show is where the filled window is, $($seen[2]) against $($seen[3])" ([long]$seen[1] -ge 0 -and $seen[2] -eq $seen[3])
 }
 function Frame-Handle { $found = Find-Window; if ($found) { [IntPtr]$found.Current.NativeWindowHandle } else { [IntPtr]::Zero } }
-function Wait-Filled { Wait-For 120 { $frame = [Seen]::Frame(); $frame -ne [IntPtr]::Zero -and [Seen]::Filled($frame) } | Out-Null; Start-Sleep -Seconds 1 }
+function Wait-Filled { Wait-For 120 { Page-Shown ([Seen]::Frame()) } | Out-Null; Start-Sleep -Seconds 1 }
 Line ''
 Line '### The frame before the window fills'
 $darkBlank = Blank-Look 0 'dark'
@@ -569,7 +573,7 @@ Expect "a blank frame was caught in the light look within three tries, which its
 Expect "the blank frame is light in the light look" ($lightBlank -gt 0.6)
 Wait-Filled
 $plain = [Seen]::Box((Frame-Handle)) -split ' '
-[Desk]::SetWindowPos((Frame-Handle), [IntPtr]::Zero, 100, 80, 1100, 760, 0x0014) | Out-Null
+[Desk]::SetWindowPos((Frame-Handle), [IntPtr]::Zero, 100, 80, 800, 560, 0x0014) | Out-Null
 Start-Sleep -Seconds 1
 Rect-Case 'with a saved size'
 Wait-Filled
