@@ -60,6 +60,9 @@ def look():
     return best if near[best] < 40 else 2
 
 
+calm = bus.call_sync("org.scooch.Capture", "/org/scooch/Capture", "org.scooch.Capture", "Calm", None, GLib.VariantType("(b)"), Gio.DBusCallFlags.NONE, 10000, None)
+time.sleep(2)
+log("the overview asked to hide, still shown %s" % calm.unpack()[0])
 data = [picture(color, os.path.join(folder, "swatch-%d.%s" % (index, "png" if index else "jpg"))) for index, color in enumerate(swatches)]
 log("the shown file is picture.jpg, swatch 0 is a JPEG starting %s and swatch 1 a PNG starting %s" % (data[0][:4].hex(), data[1][:4].hex()))
 fixed = os.path.join(folder, "picture.jpg")

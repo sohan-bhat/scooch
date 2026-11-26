@@ -33,6 +33,7 @@ export XDG_SESSION_TYPE=wayland
 gsettings set org.gnome.shell disable-user-extensions false
 gsettings set org.gnome.shell enabled-extensions "['capture@scooch']"
 gsettings set org.gnome.desktop.interface enable-animations false
+gsettings set org.gnome.shell welcome-dialog-last-shown-version '9999'
 gnome-shell --headless --wayland --no-x11 --virtual-monitor 1920x1080 >"$out/shell.log" 2>&1 &
 owned() {
     dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner "string:$1" 2>/dev/null | grep -q "boolean true"

@@ -2,8 +2,9 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Shell from 'gi://Shell';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-const IFACE = '<node><interface name="org.scooch.Capture"><method name="Capture"><arg type="s" direction="in" name="path"/><arg type="b" direction="out" name="done"/></method></interface></node>';
+const IFACE = '<node><interface name="org.scooch.Capture"><method name="Calm"><arg type="b" direction="out" name="shown"/></method><method name="Capture"><arg type="s" direction="in" name="path"/><arg type="b" direction="out" name="done"/></method></interface></node>';
 
 export default class CaptureExtension extends Extension {
     enable() {
@@ -18,6 +19,11 @@ export default class CaptureExtension extends Extension {
         if (this._owner)
             Gio.bus_unown_name(this._owner);
         this._owner = 0;
+    }
+
+    Calm() {
+        Main.overview.hide();
+        return Main.overview.visible;
     }
 
     CaptureAsync(params, invocation) {
