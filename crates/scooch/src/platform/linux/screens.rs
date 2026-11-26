@@ -200,7 +200,7 @@ fn roundtrip_within(conn: &Connection, queue: &mut EventQueue<State>, state: &mu
         let mut ready = [libc::pollfd { fd: guard.connection_fd().as_raw_fd(), events: libc::POLLIN, revents: 0 }];
         let found = if left.is_zero() { 0 } else { unsafe { libc::poll(ready.as_mut_ptr(), 1, left.as_millis().min(i32::MAX as u128) as i32) } };
         if found == 0 {
-            bail!("The Wayland display did not answer within {} seconds, so check that the desktop still runs.", super::LIMIT.as_secs());
+            return Err(anyhow::Error::new(super::Silent(format!("The Wayland display did not answer within {} seconds, so check that the desktop still runs.", super::LIMIT.as_secs()))));
         }
         if found < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {

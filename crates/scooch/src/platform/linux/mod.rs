@@ -4,6 +4,21 @@ pub mod saves;
 
 pub use children::child_env;
 
+#[derive(Debug)]
+pub struct Silent(pub String);
+
+impl std::fmt::Display for Silent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Silent {}
+
+pub fn silent(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<Silent>())
+}
+
 #[cfg(target_os = "linux")]
 pub mod autostart;
 #[cfg(target_os = "linux")]
@@ -155,7 +170,7 @@ mod system {
             super::super::children::clean(&mut command).args(arguments).env("LC_ALL", "C.UTF-8").env_remove("LANGUAGE");
             match within(&mut command, LIMIT) {
                 Ok(Some(output)) => Ok(output),
-                Ok(None) => Err(anyhow!("{program} did not finish within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())),
+                Ok(None) => Err(anyhow::Error::new(super::super::Silent(format!("{program} did not finish within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())))),
                 Err(_) => Err(anyhow!("Scooch could not run {program}, so install it or check your PATH.")),
             }
         }
@@ -275,7 +290,7 @@ mod system {
         {
             match reply {
                 Ok(reply) => Ok(reply.body().deserialize()?),
-                Err(error) if late(&error) => Err(anyhow!("{destination} did not answer {method} within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())),
+                Err(error) if late(&error) => Err(anyhow::Error::new(super::super::Silent(format!("{destination} did not answer {method} within {} seconds, so check that the desktop still runs.", LIMIT.as_secs())))),
                 Err(error) => Err(error.into()),
             }
         }
