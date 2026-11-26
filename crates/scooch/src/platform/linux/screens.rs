@@ -337,4 +337,23 @@ mod tests {
         assert!(started.elapsed() >= super::super::LIMIT - Duration::from_millis(500), "the roundtrip ended before the limit {:?}", started.elapsed());
         assert_eq!(reply, Err("The Wayland display did not answer within 10 seconds, so check that the desktop still runs.".to_string()));
     }
+
+    #[test]
+    fn an_x_server_that_never_answers_ends_in_plain_words_at_the_limit() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (said, answer) = mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let reply = super::x11_within("the monitor list", move || {
+                let (stream, _) = x11rb::rust_connection::DefaultStream::from_unix_stream(client)?;
+                let conn = x11rb::rust_connection::RustConnection::connect_to_stream(stream, 0)?;
+                Ok(x11rb::connection::Connection::setup(&conn).roots.len())
+            });
+            let _ = said.send(reply.map_err(|error| (super::super::silent(&error), error.to_string())));
+        });
+        let reply = answer.recv_timeout(super::super::LIMIT + Duration::from_secs(5)).expect("the X read still waited 5 s past the limit");
+        drop(server);
+        assert!(started.elapsed() >= super::super::LIMIT - Duration::from_millis(500), "the X read ended before the limit {:?}", started.elapsed());
+        assert_eq!(reply, Err((true, "The X display did not answer the monitor list within 10 seconds, so check that the desktop still runs.".to_string())));
+    }
 }
