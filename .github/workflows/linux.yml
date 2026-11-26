@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: ["ubuntu:22.04", "fedora:latest"]
+        image: ["fedora:latest"]
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:

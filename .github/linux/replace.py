@@ -18,6 +18,7 @@ swatches = [(214, 64, 40), (36, 84, 214)]
 bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 owned = []
 Gio.bus_own_name_on_connection(bus, "org.gnome.Screenshot", Gio.BusNameOwnerFlags.NONE, lambda *a: owned.append(True), None)
+Gio.bus_own_name_on_connection(bus, "org.freedesktop.impl.portal.desktop.gnome", Gio.BusNameOwnerFlags.NONE, None, None)
 context = GLib.MainContext.default()
 deadline = time.time() + 5
 while not owned and time.time() < deadline:
