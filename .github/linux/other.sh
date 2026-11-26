@@ -16,6 +16,8 @@ if [ "$step" = install ]; then
     exit 0
 fi
 if [ "$step" = run ]; then
+    ls -la /run/systemd >"$out/run-systemd-before.txt" 2>&1 || true
+    rm -rf /run/systemd
     dbus-uuidgen --ensure 2>/dev/null || true
     mkdir -p /run/dbus
     dbus-daemon --system --fork >/dev/null 2>&1 || true
