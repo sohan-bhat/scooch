@@ -18,28 +18,90 @@ jobs:
       matrix:
         include:
           - desktop: gnome
-            runner: ubuntu-24.04
-            more: 300
-            sections: ""
             packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
             extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli
+          - desktop: kde
+            packages: xvfb x11-utils plasma-desktop plasma-workspace kwin-x11
+            extras: kde-cli-tools plasma-workspace-wallpapers breeze-icon-theme
+          - desktop: xfce
+            packages: xvfb x11-utils xfdesktop4 xfwm4 xfce4-panel xfconf
+            extras: xfce4-settings xfdesktop4-data gvfs gvfs-daemons
+          - desktop: xfce-scale2
+            script: xfce
+            scale: 2
+            packages: xvfb x11-utils xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings
+            extras: xfdesktop4-data gvfs gvfs-daemons
+          - desktop: cinnamon
+            packages: xvfb x11-utils cinnamon cinnamon-settings-daemon nemo gvfs gvfs-daemons libglib2.0-bin python3-gi
+            extras: cinnamon-desktop-data
+          - desktop: mate
+            packages: xvfb x11-utils caja marco mate-panel gvfs gvfs-daemons libglib2.0-bin
+            extras: mate-desktop-environment-core mate-backgrounds
+          - desktop: xfce-dual
+            script: xfce
+            monitors: 2
+            packages: xvfb x11-utils x11-xserver-utils xfdesktop4 xfwm4 xfce4-panel xfconf
+            extras: xfce4-settings xfdesktop4-data gvfs gvfs-daemons
+          - desktop: kde-dual
+            script: kde
+            monitors: 2
+            packages: xvfb x11-utils x11-xserver-utils plasma-desktop plasma-workspace kwin-x11
+            extras: kde-cli-tools plasma-workspace-wallpapers breeze-icon-theme
           - desktop: gnome-dual
             script: gnome
             monitors: 2
-            runner: ubuntu-24.04
-            more: 300
-            sections: ""
             packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
             extras: gnome-shell-extension-prefs gnome-backgrounds ubuntu-wallpapers fonts-cantarell adwaita-icon-theme dconf-cli
-          - desktop: gnome-42
-            script: gnome
-            runner: ubuntu-22.04
-            more: 0
-            sections: "1,2,6b,8"
-            packages: gnome-shell gnome-shell-extension-desktop-icons-ng gvfs gvfs-daemons dconf-service libglib2.0-bin
-            extras: gnome-backgrounds fonts-cantarell adwaita-icon-theme dconf-cli
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 110
+          - desktop: mate-dual
+            script: mate
+            monitors: 2
+            packages: xvfb x11-utils x11-xserver-utils caja marco mate-panel gvfs gvfs-daemons libglib2.0-bin
+            extras: mate-desktop-environment-core mate-backgrounds
+          - desktop: kde-arch
+            script: kde-wayland
+            container: archlinux:latest
+            packages: plasma-desktop plasma-workspace kwin breeze-icons
+            extras: plasma-workspace-wallpapers
+          - desktop: kde-arch-dual
+            script: kde-wayland
+            container: archlinux:latest
+            monitors: 2
+            packages: plasma-desktop plasma-workspace kwin breeze-icons
+            extras: plasma-workspace-wallpapers
+          - desktop: kde-debian
+            script: kde
+            container: debian:testing
+            packages: plasma-desktop plasma-workspace kwin-x11 breeze-icon-theme
+            extras: plasma-workspace-wallpapers kio-extras
+          - desktop: kde-debian-dual
+            script: kde
+            container: debian:testing
+            monitors: 2
+            packages: plasma-desktop plasma-workspace kwin-x11 breeze-icon-theme
+            extras: plasma-workspace-wallpapers kio-extras
+          - desktop: xfce-arch
+            script: xfce
+            container: archlinux:latest
+            packages: xfdesktop xfwm4 xfce4-panel xfconf xfce4-settings
+            extras: adwaita-icon-theme
+          - desktop: xfce-arch-dual
+            script: xfce
+            container: archlinux:latest
+            monitors: 2
+            packages: xfdesktop xfwm4 xfce4-panel xfconf xfce4-settings
+            extras: adwaita-icon-theme
+          - desktop: cinnamon-arch
+            script: cinnamon
+            container: archlinux:latest
+            packages: cinnamon nemo python-gobject
+            extras: cinnamon-translations
+          - desktop: mate-arch
+            script: mate
+            container: archlinux:latest
+            packages: caja marco mate-panel mate-desktop
+            extras: mate-backgrounds mate-icon-theme
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,6 +111,7 @@ jobs:
 
       - name: Package list
         id: list
+        if: ${{ !matrix.container }}
         env:
           LIST: ${{ matrix.packages }} ${{ matrix.extras }} ${{ hashFiles('.github/linux/apt.sh') }}
         run: |
@@ -58,6 +121,7 @@ jobs:
 
       - name: Package cache
         id: cache
+        if: ${{ !matrix.container }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: /var/tmp/apt-archives
@@ -66,6 +130,7 @@ jobs:
 
       - name: Packages
         id: apt
+        if: ${{ !matrix.container }}
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
         env:
           PACKAGES: ${{ matrix.packages }}
@@ -76,23 +141,60 @@ jobs:
           on_retry_command: sudo env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
           command: sudo timeout -k 20s 8m env PACKAGES="$PACKAGES" EXTRAS="$EXTRAS" bash .github/linux/apt.sh /var/tmp/apt-archives
 
-      - name: Versions
-        run: dpkg-query -W -f '${Package} ${Version}\n' gnome-shell mutter-common gnome-shell-extension-desktop-icons-ng libglib2.0-0t64 libglib2.0-0 dconf-service gjs 2>/dev/null | tee versions.txt || true
+      - name: Package cache owner
+        if: ${{ !cancelled() && !matrix.container && steps.cache.outputs.cache-hit != 'true' }}
+        run: sudo chown -R "$(id -u):$(id -g)" /var/tmp/apt-archives || true
+
+      - name: Package cache save
+        if: ${{ !cancelled() && !matrix.container && steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: /var/tmp/apt-archives
+          key: ${{ steps.apt.outcome == 'success' && steps.list.outputs.key || format('{0}-part-{1}-{2}', steps.list.outputs.key, github.run_id, github.run_attempt) }}
+
+      - name: Packages
+        id: image
+        if: ${{ matrix.container }}
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
+        env:
+          PACKAGES: ${{ matrix.packages }}
+          EXTRAS: ${{ matrix.extras }}
+          IMAGE: ${{ matrix.container }}
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          on_retry_command: docker rm -f packages
+          command: |
+            set -e
+            docker run --name packages -v "$PWD:/work" -w /work -v "$RUNNER_TEMP/packages:/var/cache/pacman/pkg" -v "$RUNNER_TEMP/packages:/var/cache/apt/archives" -e PACKAGES -e EXTRAS "$IMAGE" bash .github/linux/container.sh install
+            docker commit packages scooch-probe:local
+            docker rm packages
 
       - name: Build
         run: cargo build --release -p scooch --bins --examples
 
-      - name: Probe
-        timeout-minutes: 90
+      - name: Test
+        if: ${{ !matrix.container }}
         env:
+          SCOOCH_NEED_BUS: "1"
+        run: cargo test --release -p scooch
+
+      - name: Probe
+        if: ${{ !cancelled() && steps.apt.outcome != 'failure' && steps.image.outcome != 'failure' }}
+        timeout-minutes: 30
+        env:
+          SCOOCH_SCALE: ${{ matrix.scale || 1 }}
           SCOOCH_MONITORS: ${{ matrix.monitors || 1 }}
-          SCOOCH_PROBE_MORE: ${{ matrix.more }}
-          SCOOCH_PROBE_SECTIONS: ${{ matrix.sections }}
+          PACKAGES: ${{ matrix.packages }}
+          EXTRAS: ${{ matrix.extras }}
+          IMAGE: ${{ matrix.container }}
           SCRIPT: ${{ matrix.script || matrix.desktop }}
         run: |
-          mkdir -p linuxprobe
-          cp versions.txt linuxprobe/ || true
-          bash .github/linux/tries.sh "$SCRIPT"
+          if [ -n "$IMAGE" ]; then
+            docker run --rm --init --pull never --cap-add SYS_NICE -v "$PWD:/work" -w /work -e SCOOCH_SCALE -e SCOOCH_MONITORS -e PACKAGES -e EXTRAS -e HOST_UID="$(id -u)" scooch-probe:local bash .github/linux/container.sh "$SCRIPT"
+          else
+            bash .github/linux/tries.sh "$SCRIPT"
+          fi
 
       - name: Upload
         if: ${{ always() }}
@@ -101,3 +203,10 @@ jobs:
           name: linuxprobe-${{ matrix.desktop }}
           path: linuxprobe
           if-no-files-found: warn
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          if [ -f linuxprobe/report.md ]; then
+            cat linuxprobe/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
