@@ -6120,10 +6120,13 @@ pub mod tests {
             fake.place(Vec::new());
             assert_eq!(outcome(&daemon.tick()), Outcome::Plain, "{round}");
             assert_eq!(std::fs::read(&fixed).unwrap(), source, "{round}");
+            assert!(daemon.store.load().screens["main"].placement.as_ref().is_some_and(scene::is_identity), "{round}");
             fake.place(vec![subject()]);
             assert_eq!(outcome(&daemon.tick()), Outcome::Rendered, "{round}");
             assert!(jpeg(&fixed), "{round}");
         }
+        assert!(named_for("main", &fixed) && named_for("main", &daemon.store.staged("main")));
+        assert_eq!(daemon.store.outputs_of("main"), vec![fixed.clone()]);
         assert_eq!((fake.showing("main"), writes(&fake), fake.sets.load(Ordering::SeqCst)), (fixed.clone(), 1, 7));
         let entry = daemon.store.load().screens["main"].clone();
         assert_eq!((entry.output, entry.counter), (Some(fixed.clone()), 0));
