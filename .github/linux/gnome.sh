@@ -7,7 +7,9 @@ export XDG_SESSION_DESKTOP=gnome
 dbus-update-activation-environment XDG_CURRENT_DESKTOP XDG_SESSION_TYPE >/dev/null 2>&1 || true
 
 gsettings set org.gnome.shell disable-user-extensions false
-gsettings set org.gnome.shell enabled-extensions "['ding@rastersoft.com']"
+if [ -z "${SCOOCH_NO_DING:-}" ]; then
+    gsettings set org.gnome.shell enabled-extensions "['ding@rastersoft.com']"
+fi
 gsettings set org.gnome.desktop.interface enable-animations false
 
 monitors=(--virtual-monitor 1920x1080)
@@ -23,5 +25,7 @@ wayland_socket() {
 ready "Wayland socket" 60 wayland_socket
 export WAYLAND_DISPLAY=wayland-0
 ready "GNOME Shell" 60 owned org.gnome.Shell
-ready "Desktop Icons NG" 90 owned com.rastersoft.dingextension || gnome-extensions info ding@rastersoft.com >>"$out/shell.log" 2>&1
+if [ -z "${SCOOCH_NO_DING:-}" ]; then
+    ready "Desktop Icons NG" 90 owned com.rastersoft.dingextension || gnome-extensions info ding@rastersoft.com >>"$out/shell.log" 2>&1
+fi
 run_probe 8
