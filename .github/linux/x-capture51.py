@@ -27,7 +27,10 @@ def log(text):
 def picture(color, path):
     pixbuf = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 1920, 1080)
     pixbuf.fill((color[0] << 24) | (color[1] << 16) | (color[2] << 8) | 0xFF)
-    pixbuf.savev(path, "jpeg", ["quality"], ["95"])
+    if path.endswith(".png"):
+        pixbuf.savev(path, "png", [], [])
+    else:
+        pixbuf.savev(path, "jpeg", ["quality"], ["95"])
     with open(path, "rb") as file:
         return file.read()
 
@@ -57,7 +60,8 @@ def look():
     return best if near[best] < 40 else 2
 
 
-data = [picture(color, os.path.join(folder, "swatch-%d.jpg" % index)) for index, color in enumerate(swatches)]
+data = [picture(color, os.path.join(folder, "swatch-%d.%s" % (index, "png" if index else "jpg"))) for index, color in enumerate(swatches)]
+log("the shown file is picture.jpg, swatch 0 is a JPEG starting %s and swatch 1 a PNG starting %s" % (data[0][:4].hex(), data[1][:4].hex()))
 fixed = os.path.join(folder, "picture.jpg")
 with open(fixed, "wb") as file:
     file.write(data[0])
