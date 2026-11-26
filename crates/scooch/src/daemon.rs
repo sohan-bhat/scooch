@@ -6420,6 +6420,27 @@ pub mod tests {
     }
 
     #[test]
+    fn a_set_with_no_answer_on_a_desktop_with_counted_names_is_tried_again_and_a_refusal_is_not() {
+        let (daemon, fake, _) = rig("counted-silent", vec![screen("main", 0.0, 1.0)]);
+        *fake.unknowable.lock().unwrap() = true;
+        fake.place(vec![subject()]);
+        *fake.silent_set.lock().unwrap() = 1;
+        let held = daemon.tick();
+        assert!(held.silent, "{:?}", held.problem);
+        assert_eq!((held.outcomes[0].1, writes(&fake)), (Outcome::Skipped, 0));
+        let worker = Signal::default();
+        assert_eq!(rearm(&worker, &held, 0), 1);
+        let back = daemon.tick();
+        assert_eq!((back.silent, back.problem.clone(), back.outcomes[0].1), (false, None, Outcome::Rendered));
+        assert_eq!((fake.showing("main"), writes(&fake)), (daemon.store.load().screens["main"].output.clone().unwrap(), 1));
+        fake.refuse.lock().unwrap().push("main".into());
+        fake.place(Vec::new());
+        let refused = daemon.tick();
+        assert!(!refused.silent && refused.problem.is_some());
+        assert_eq!(rearm(&worker, &refused, 1), 0);
+    }
+
+    #[test]
     fn a_gnome_retry_that_finds_its_picture_already_in_place_records_whether_it_is_painted() {
         let (daemon, fake, _) = gnome_rig("fixed-painted");
         set_scenery(&daemon, true);
