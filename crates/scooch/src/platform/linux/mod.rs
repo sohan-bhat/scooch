@@ -112,6 +112,9 @@ mod system {
         fn wallpaper(&self, screen: &Screen) -> Result<Option<PathBuf>>;
         fn set_wallpaper(&self, screen: &Screen, path: &Path) -> Result<()>;
         fn watches(&self) -> Watches;
+        fn reloads_picture(&self) -> bool {
+            false
+        }
         fn per_screen(&self) -> bool;
         fn tools(&self) -> &'static [&'static str];
     }
@@ -489,6 +492,10 @@ mod system {
             Format::Jpeg
         }
 
+        fn reloads_picture(&self) -> bool {
+            self.shell.reloads_picture()
+        }
+
         fn decode(&self, path: &Path) -> Result<RgbImage> {
             decode(path)
         }
@@ -667,6 +674,18 @@ mod tests {
         assert_eq!(reply, Err("sleep did not finish within 10 seconds, so check that the desktop still runs.".to_string()));
         let left = Command::new("pgrep").args(["-f", "^sleep 600$"]).output().map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
         assert!(left.is_empty(), "the stopped program is still running as {left}");
+    }
+
+    #[test]
+    fn only_gnome_loads_the_picture_again_when_its_file_changes() {
+        use super::parse::desktop::{Kind, Session};
+        use super::system::{shell, Linux};
+        use crate::platform::Desktop;
+        let folder = std::path::Path::new("/tmp");
+        for kind in [Kind::Gnome, Kind::Kde, Kind::Xfce, Kind::Cinnamon, Kind::Mate] {
+            let linux = Linux { kind, session: Session::Wayland, desktop: folder.to_path_buf(), shell: shell(kind, Session::Wayland, folder).unwrap() };
+            assert_eq!(linux.reloads_picture(), kind == Kind::Gnome, "{kind:?}");
+        }
     }
 
     #[test]

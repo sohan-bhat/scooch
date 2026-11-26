@@ -203,6 +203,10 @@ impl Shell for Gnome {
         Watches { files: Vec::new(), signals: vec![Signal::Metadata(desktop_in_home), Signal::Dconf(&wakes::GNOME_KEYS), Signal::Ding], pointer: false }
     }
 
+    fn reloads_picture(&self) -> bool {
+        true
+    }
+
     fn per_screen(&self) -> bool {
         false
     }
@@ -215,3 +219,4 @@ impl Shell for Gnome {
         &["gio", "gsettings"]
     }
 }
+
