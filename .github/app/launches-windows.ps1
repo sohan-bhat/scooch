@@ -35,16 +35,7 @@ public static class Launches {
     static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr extra);
     [DllImport("user32.dll")]
     static extern bool PostMessage(IntPtr window, uint message, IntPtr wide, IntPtr narrow);
-    static bool Filled(IntPtr window) {
-        bool any = false;
-        EnumChildWindows(window, (child, extra) => {
-            var kind = new System.Text.StringBuilder(64);
-            GetClassNameW(child, kind, 64);
-            any = kind.ToString().StartsWith("Chrome_");
-            return !any;
-        }, IntPtr.Zero);
-        return any;
-    }
+    public static void Close(IntPtr window) { PostMessage(window, 0x0010, IntPtr.Zero, IntPtr.Zero); }
     delegate bool EnumProc(IntPtr window, IntPtr extra);
     [DllImport("user32.dll")]
     static extern bool EnumWindows(EnumProc callback, IntPtr extra);
@@ -85,7 +76,7 @@ public static class Launches {
         }
     }
 
-    public static string Watch(string log, int cap, int after, int close) {
+    public static string Watch(string log, int cap, int after) {
         var clock = Stopwatch.StartNew();
         var told = new List<string>();
         var handles = new Dictionary<uint, IntPtr>();
@@ -98,9 +89,10 @@ public static class Launches {
         long shown = -1;
         long read = 0;
         long polls = 0;
-        long filled = -1, closed = -1;
         IntPtr frame = IntPtr.Zero;
-        while (clock.ElapsedMilliseconds < cap && (filled < 0 || Now() < filled + after) && (closed < 0 || Now() < closed + 3000)) {
+        var children = new HashSet<IntPtr>();
+        var shownChildren = new HashSet<IntPtr>();
+        while (clock.ElapsedMilliseconds < cap && (shown < 0 || Now() < shown + after)) {
             polls++;
             long now = Now();
             IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
@@ -140,21 +132,17 @@ public static class Launches {
                 }
                 return true;
             }, IntPtr.Zero);
-            if (frame != IntPtr.Zero && filled < 0 && closed < 0) {
-                if (Filled(frame)) {
-                    filled = Now();
-                    told.Add("filled " + filled);
-                } else if (close >= 0 && Now() >= shown + close) {
-                    PostMessage(frame, 0x0010, IntPtr.Zero, IntPtr.Zero);
-                    closed = Now();
-                    told.Add("closed " + closed + " blank " + !Filled(frame));
-                }
+            if (frame != IntPtr.Zero) {
+                EnumChildWindows(frame, (child, extra) => {
+                    var kind = new System.Text.StringBuilder(64);
+                    GetClassNameW(child, kind, 64);
+                    if (children.Add(child)) told.Add("child " + kind + " made " + now);
+                    if (IsWindowVisible(child) && shownChildren.Add(child)) told.Add("child " + kind + " shown " + now);
+                    return true;
+                }, IntPtr.Zero);
             }
-            if (now >= read) {
-                read = now + 40;
-                tail.Read(now, told);
-            }
-            System.Threading.Thread.Sleep(10);
+            tail.Read(now, told);
+            System.Threading.Thread.Sleep(5);
         }
         tail.Read(Now(), told);
         foreach (var pair in handles) {
@@ -182,7 +170,7 @@ $script:launchFolder = Join-Path $Out 'launches'
 New-Item -ItemType Directory -Force $script:launchFolder | Out-Null
 
 function Read-Watch([string]$Text, [int]$Launched) {
-    $found = @{ apps = @(); lines = @(); windows = @(); views = @(); shown = -1; made = 0; filled = -1; closed = -1; blank = $false }
+    $found = @{ apps = @(); lines = @(); windows = @(); views = @(); children = @(); shown = -1; made = 0 }
     foreach ($row in ($Text -split "`n")) {
         if ($row -match '^app (\d+) of (\d+) made (\d+|unknown) seen (\d+) ended (\d+|running|unknown)$') {
             $found.apps += [pscustomobject]@{ Id = [int]$Matches[1]; Parent = [int]$Matches[2]; Made = $(if ($Matches[3] -eq 'unknown') { [long]$Matches[4] } else { [long]$Matches[3] }); Ended = $Matches[5] }
@@ -194,11 +182,8 @@ function Read-Watch([string]$Text, [int]$Launched) {
             $found.views += [pscustomobject]@{ Id = [int]$Matches[1]; Parent = [int]$Matches[2]; At = [long]$Matches[3] }
         } elseif ($row -match '^shown (-?\d+)$') {
             $found.shown = [long]$Matches[1]
-        } elseif ($row -match '^filled (\d+)$') {
-            $found.filled = [long]$Matches[1]
-        } elseif ($row -match '^closed (\d+) blank (True|False)$') {
-            $found.closed = [long]$Matches[1]
-            $found.blank = $Matches[2] -eq 'True'
+        } elseif ($row -match '^child (.*) (made|shown) (\d+)$') {
+            $found.children += [pscustomobject]@{ Kind = $Matches[1]; What = $Matches[2]; At = [long]$Matches[3] }
         }
     }
     $mine = $found.apps | Where-Object { $_.Id -eq $Launched } | Select-Object -First 1
@@ -217,16 +202,8 @@ function Timeline($Found, [int]$Launched, [int]$Daemon) {
     foreach ($window in $Found.windows) { $parts += "$($window.Id) '$($window.Name)' $($window.Kind) $($window.What) at $($window.At - $zero)" }
     foreach ($view in $Found.views) { $parts += "webview $($view.Id) of $($view.Parent) at $($view.At - $zero)" }
     foreach ($said in $Found.lines) { $parts += "said '$($said.Text)' at $($said.At - $zero)" }
+    foreach ($child in $Found.children) { $parts += "child $($child.Kind) $($child.What) at $($child.At - $zero)" }
     return $parts -join '; '
-}
-
-function UIA-Lag {
-    $clock = [Diagnostics.Stopwatch]::StartNew()
-    while ($clock.ElapsedMilliseconds -lt 10000) {
-        if (Find-Window) { return [int]$clock.ElapsedMilliseconds }
-        Start-Sleep -Milliseconds 100
-    }
-    return -1
 }
 
 function Stop-Scooch {
@@ -255,14 +232,13 @@ function Run-Launches {
     $daemonProgram = Join-Path $folder 'scoochw.exe'
     $appProgram = Join-Path $folder 'scooch-app.exe'
     $webviewData = Join-Path $env:LOCALAPPDATA 'me.sohanbhat.scooch.window\EBWebView'
-    $tally = @{ noWindow = 0; uiaLate = 0; stayed = 0; noIcon = 0; unclean = 0; byLaunch = 0; byDaemon = 0; byNone = 0; quiet = 0; noisy = 0; closes = 0; blankCloses = 0; closeBad = 0; slowFrame = 0 }
+    $tally = @{ noWindow = 0; stayed = 0; noIcon = 0; unclean = 0; byLaunch = 0; byDaemon = 0; byNone = 0; quiet = 0; noisy = 0; closes = 0; blankCloses = 0; closeBad = 0; slowFrame = 0 }
     $frames = @()
-    $fills = @()
     $coldFrames = @()
-    $coldFills = @()
+    $madeFills = @()
+    $builds = @()
     $offsets = @()
     $lives = @()
-    $lags = @()
     for ($round = 1; $round -le $rounds; $round++) {
         $clean = Stop-Scooch
         if ($clean -lt 0) { $tally.unclean++ }
@@ -271,86 +247,96 @@ function Run-Launches {
         $close = -not $quiet -and ($round % 4) -eq 2
         if ($cold) { Remove-Item -Recurse -Force $webviewData -ErrorAction SilentlyContinue }
         $delay = if ($round -le 80) { ($round - 1) * 20 } else { 2000 + ($round - 81) * 300 }
-        $from = (Get-Item "$data\watch.log" -ErrorAction SilentlyContinue).Length
-        if (-not $from) { $from = 0 }
         $appLog = Join-Path $script:launchFolder "app-$round.log"
         $clock = [Diagnostics.Stopwatch]::StartNew()
         $daemon = Start-Process -FilePath $daemonProgram -ArgumentList 'watch' -WindowStyle Hidden -PassThru
         if ($quiet) {
-            $text = [Launches]::Watch($appLog, 6000, 0, -1)
+            $text = [Launches]::Watch($appLog, 6000, 0)
             $found = Read-Watch $text 0
             $made = @($found.windows | Where-Object { $_.Name -eq 'Scooch' })
             $starts = @($found.apps | Where-Object { $_.Parent -eq $daemon.Id })
-            if ($made.Count -eq 0 -and $starts.Count -gt 0) { $tally.quiet++ } else { $tally.noisy++ }
-            Line "- round $round $(if ($made.Count -eq 0 -and $starts.Count -gt 0) { 'fine' } else { 'MISS a background start made a window or none was seen' }), a daemon start and no launch, the daemon's background starts $(@($starts | ForEach-Object Id) -join ' '), windows named Scooch it made shown or hidden $($made.Count), icon.lock held by $([Seen]::Users("$data\icon.lock"))"
+            $fine = $made.Count -eq 0 -and $starts.Count -gt 0
+            if ($fine) { $tally.quiet++ } else { $tally.noisy++ }
+            Line "- round $round $(if ($fine) { 'fine' } else { 'MISS a background start made a window or none was seen' }), a daemon start and no launch, the daemon's background starts $(@($starts | ForEach-Object Id) -join ' '), windows named Scooch it made shown or hidden $($made.Count), icon.lock held by $([Seen]::Users("$data\icon.lock"))"
             Add-Content -Path $script:launchLog -Value "== round $round quiet daemon $($daemon.Id)`n$text"
             continue
         }
         while ($clock.ElapsedMilliseconds -lt $delay) { Start-Sleep -Milliseconds 5 }
+        $misses = @()
+        if ($close) {
+            $stamp = [Diagnostics.Stopwatch]::GetTimestamp()
+            $launched = Start-Process -FilePath $appProgram -RedirectStandardError $appLog -PassThru
+            $first = ([Seen]::FirstFrame($stamp, 30000)) -split '\|'
+            $wait = ($round * 37) % 250
+            Start-Sleep -Milliseconds $wait
+            $frame = [Seen]::Frame()
+            $blank = $frame -ne [IntPtr]::Zero -and -not (Page-Shown $frame)
+            if ($frame -ne [IntPtr]::Zero) { [Launches]::Close($frame) }
+            $closedAt = [Seen]::Since($stamp)
+            $tally.closes++
+            if ($blank) { $tally.blankCloses++ }
+            Start-Sleep -Seconds 2
+            $holders = [Seen]::Users("$data\icon.lock")
+            $alive = @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue)
+            $lost = @($alive | Where-Object { "$($_.Id)" -ne $holders })
+            $again = [Diagnostics.Stopwatch]::GetTimestamp()
+            Start-Process -FilePath $appProgram -RedirectStandardError (Join-Path $script:launchFolder "again-$round.log") | Out-Null
+            $seen = Open-Window $again 30000 500
+            $left = @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count
+            if ($lost.Count -gt 0 -or $holders -eq 'no process' -or $seen[1] -lt 0 -or $left -ne 1) { $misses += 'a close while blank left the app out of order'; $tally.closeBad++ }
+            if ($holders -eq 'no process') { $tally.noIcon++ }
+            $verdict = if ($misses.Count -eq 0) { 'fine' } else { "MISS $($misses -join ', ')" }
+            Line "- round $round $verdict, delay $delay ms, the launch $($launched.Id) showed its frame at $($first[0]) ms, closed it $(if ($blank) { 'while blank' } else { 'after the page showed' }) at $closedAt ms, then app processes $($alive.Count) with icon.lock in $holders, others without the lock $($lost.Count), the next launch showed its frame after $($seen[0]) ms and its page after $($seen[1]) ms leaving $left"
+            Add-Content -Path $script:launchLog -Value "== round $round $verdict close delay $delay wait $wait blank $blank launch $($launched.Id) holders $holders said $((Get-Content -Raw $appLog -ErrorAction SilentlyContinue) -replace "`r?`n", ' | ')"
+            if ($misses.Count -gt 0) { Line "  - $(App-Snapshot)" }
+            continue
+        }
         $launched = Start-Process -FilePath $appProgram -RedirectStandardError $appLog -PassThru
-        $text = [Launches]::Watch($appLog, 90000, 2000, $(if ($close) { ($round * 37) % 250 } else { -1 }))
+        $text = [Launches]::Watch($appLog, 90000, 2000)
         $found = Read-Watch $text $launched.Id
         $zero = $found.made
         $frameAt = if ($found.shown -ge 0) { $found.shown - $zero } else { -1 }
-        $fillAt = if ($found.filled -ge 0) { $found.filled - $zero } else { -1 }
+        $madeLine = $found.lines | Where-Object { $_.Text -match 'window made in (\d+) ms' } | Select-Object -First 1
+        $fillAt = if ($madeLine) { $madeLine.At - $zero } else { -1 }
+        if ($madeLine -and $madeLine.Text -match 'window made in (\d+) ms') { $builds += [int]$Matches[1] }
+        $pageWait = Wait-For 30 { Page-Shown ([Seen]::Frame()) }
         $shower = ($found.windows | Where-Object { $_.What -eq 'shown' -and $_.Name -eq 'Scooch' } | Select-Object -First 1).Id
         $byDaemon = @($found.apps | Where-Object { $_.Parent -eq $daemon.Id })
         $offset = if ($byDaemon.Count -gt 0) { $byDaemon[0].Made - $zero } else { $null }
         $holders = [Seen]::Users("$data\icon.lock")
         $holder = if ($holders -eq "$($launched.Id)") { 'the launch' } elseif ($byDaemon.Count -gt 0 -and $holders -eq "$($byDaemon[0].Id)") { 'the daemon''s start' } elseif ($holders -eq 'no process') { 'no process' } else { "other $holders" }
-        $misses = @()
-        $lag = -1
-        $afterClose = ''
-        if ($close) {
-            $tally.closes++
-            if ($found.blank) { $tally.blankCloses++ }
-            Start-Sleep -Seconds 2
-            $alive = @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue)
-            $lost = @($alive | Where-Object { "$($_.Id)" -ne $holders })
-            $again = Start-Process -FilePath $appProgram -RedirectStandardError (Join-Path $script:launchFolder "again-$round.log") -PassThru
-            $seen = ([Seen]::Open([Diagnostics.Stopwatch]::GetTimestamp(), 30000, 500)) -split '\|'
+        if ($pageWait -lt 0) { $misses += 'no page in the window'; $tally.noWindow++ }
+        if ($frameAt -lt 0 -or $frameAt -gt 3000) { $misses += 'no frame within 3 s'; $tally.slowFrame++ }
+        if ($cold) { if ($frameAt -ge 0) { $coldFrames += $frameAt } } else { if ($frameAt -ge 0) { $frames += $frameAt }; if ($fillAt -ge 0) { $madeFills += $fillAt } }
+        $life = -1
+        $left = -1
+        if ($pageWait -ge 0) {
+            $second = Start-Process -FilePath $appProgram -RedirectStandardError (Join-Path $script:launchFolder "second-$round.log") -PassThru
+            if ($second.WaitForExit(30000)) { $life = [int]($second.ExitTime - $second.StartTime).TotalMilliseconds }
             Start-Sleep -Milliseconds 500
             $left = @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count
-            $afterClose = ", closed $(if ($found.blank) { 'while blank' } else { 'after it filled' }) at $($found.closed - $zero) ms, then app processes $($alive.Count) with icon.lock in $holders, others left without the lock $($lost.Count), the next launch showed its frame after $($seen[0]) ms and filled after $($seen[1]) ms leaving $left"
-            if ($lost.Count -gt 0 -or $holders -eq 'no process' -or [long]$seen[1] -lt 0 -or $left -ne 1) { $misses += 'a close while blank left the app out of order'; $tally.closeBad++ }
-        } else {
-            if ($found.filled -ge 0) { $lag = UIA-Lag }
-            if ($found.filled -lt 0) { $misses += 'no filled window'; $tally.noWindow++ }
-            if ($found.filled -ge 0 -and $lag -lt 0) { $misses += 'UI Automation never saw the window'; $tally.uiaLate++ }
-            if ($frameAt -lt 0 -or $frameAt -gt 3000) { $misses += 'no frame within 3 s'; $tally.slowFrame++ }
-            if ($cold) { if ($frameAt -ge 0) { $coldFrames += $frameAt }; if ($fillAt -ge 0) { $coldFills += $fillAt } } else { if ($frameAt -ge 0) { $frames += $frameAt }; if ($fillAt -ge 0) { $fills += $fillAt } }
-            if ($found.filled -ge 0) {
-                $secondLog = Join-Path $script:launchFolder "second-$round.log"
-                $second = Start-Process -FilePath $appProgram -RedirectStandardError $secondLog -PassThru
-                $life = -1
-                if ($second.WaitForExit(30000)) { $life = [int]($second.ExitTime - $second.StartTime).TotalMilliseconds }
-                Start-Sleep -Milliseconds 500
-                $left = @(Get-Process -Name 'scooch-app' -ErrorAction SilentlyContinue).Count
-                if ($life -ge 0) { $lives += $life }
-                if ($life -lt 0 -or $left -ne 1) { $misses += 'the second launch stayed'; $tally.stayed++ }
-                $afterClose = ", a second launch lived $life ms and left $left"
-            }
+            if ($life -ge 0) { $lives += $life }
+            if ($life -lt 0 -or $left -ne 1) { $misses += 'the second launch stayed'; $tally.stayed++ }
         }
         if ($holder -eq 'no process') { $misses += 'no icon'; $tally.noIcon++ }
         switch -Wildcard ($holder) { 'the launch' { $tally.byLaunch++ } 'the daemon*' { $tally.byDaemon++ } 'no process' { $tally.byNone++ } }
         if ($null -ne $offset) { $offsets += $offset }
-        if ($lag -ge 0) { $lags += $lag }
         $verdict = if ($misses.Count -eq 0) { 'fine' } else { "MISS $($misses -join ', ')" }
-        Line "- round $round $verdict, delay $delay ms, profile $(if ($cold) { 'removed' } else { 'kept' }), the launch $($launched.Id), the daemon's start $(if ($byDaemon.Count) { "$($byDaemon[0].Id) made at $offset ms" } else { 'not seen' }), icon.lock held by $holder, the frame showed at $frameAt ms and filled at $fillAt ms from $shower, UI Automation $lag ms after the fill$afterClose, the clean up took $clean ms"
-        Add-Content -Path $script:launchLog -Value "== round $round $verdict delay $delay cold $cold close $close launch $($launched.Id) daemon $($daemon.Id) holders $holders`n$(Timeline $found $launched.Id $daemon.Id)`n$text"
+        Line "- round $round $verdict, delay $delay ms, profile $(if ($cold) { 'removed' } else { 'kept' }), the launch $($launched.Id), the daemon's start $(if ($byDaemon.Count) { "$($byDaemon[0].Id) made at $offset ms" } else { 'not seen' }), icon.lock held by $holder, the frame showed at $frameAt ms from $shower, the launch's own window made line at $fillAt ms, the page found $pageWait s after the watch, a second launch lived $life ms and left $left"
+        Add-Content -Path $script:launchLog -Value "== round $round $verdict delay $delay cold $cold launch $($launched.Id) daemon $($daemon.Id) holders $holders`n$(Timeline $found $launched.Id $daemon.Id)`n$text"
         if ($misses.Count -gt 0) {
             Line "  - $(Timeline $found $launched.Id $daemon.Id)"
             Line "  - $(App-Snapshot)"
         }
     }
     Stop-Scooch | Out-Null
-    Line "- experiment, $rounds rounds: $($rounds - 10 - $tally.closes) launches with a second launch, $($tally.closes) launches closed at their first show, 10 daemon starts with no launch"
-    Line "- no filled window $($tally.noWindow), no frame within 3 s $($tally.slowFrame), UI Automation late $($tally.uiaLate), a second launch stayed $($tally.stayed), no icon after a launch $($tally.noIcon), clean ups over 15 s $($tally.unclean)"
+    Line "- experiment, $rounds rounds: $($rounds - 10 - $tally.closes) launches with a second launch, $($tally.closes) launches closed while the frame showed, 10 daemon starts with no launch"
+    Line "- no page in the window $($tally.noWindow), no frame within 3 s $($tally.slowFrame), a second launch stayed $($tally.stayed), no icon after a launch $($tally.noIcon), clean ups over 15 s $($tally.unclean)"
     Line "- closes while blank $($tally.blankCloses) of $($tally.closes), closes that left the app out of order $($tally.closeBad), background starts that made no window $($tally.quiet) of 10, that made one or were not seen $($tally.noisy)"
     Line "- the icon lock went to the launch $($tally.byLaunch) times, to the daemon's start $($tally.byDaemon) times, to nobody $($tally.byNone) times"
-    Line "- warm, in ms from the launch, the frame showed $(Spread $frames), the window filled $(Spread $fills)"
-    Line "- with the profile removed, the frame showed $(Spread $coldFrames), the window filled $(Spread $coldFills)"
-    Line "- the daemon's start was made in ms from the launch $(Spread $offsets), UI Automation saw the filled window in ms $(Spread $lags), a second launch lived in ms $(Spread $lives)"
+    Line "- warm, in ms from the launch, the frame showed $(Spread $frames), the launch's own window made line came $(Spread $madeFills), the build inside it took $(Spread $builds)"
+    Line "- with the profile removed, the frame showed $(Spread $coldFrames)"
+    Line "- the daemon's start was made in ms from the launch $(Spread $offsets), a second launch lived in ms $(Spread $lives)"
 }
 
 function Save-Launch-Daemon-Log { [System.IO.File]::WriteAllText((Join-Path $Out 'daemon-watch.log'), (Read-Shared "$data\watch.log")) }
