@@ -3459,7 +3459,8 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let before = showing_now(linux, screen);
         let earlier = before.as_ref().and_then(|(path, _)| scooch_core::open(path).ok());
         let held_at = earlier.as_ref().and_then(|old| warm_spot(old, &icon_skip(p, linux, &at.frame))).map(|(x, y)| (at.frame.x + x, at.frame.y + y));
-        let moved = move_icon(p, if painted { at.painted_at } else { held_at.unwrap_or(at.calm_at) }).map_err(|error| format!("{error:#}"));
+        let beyond = held_at.map(|(x, y)| (x + 0.6 * (x - at.painted_at.0), y + 0.6 * (y - at.painted_at.1)));
+        let moved = move_icon(p, if painted { at.painted_at } else { beyond.unwrap_or(at.calm_at) }).map_err(|error| format!("{error:#}"));
         let started = Instant::now();
         let changed = wait_until(Duration::from_secs(10), || showing_now(linux, screen) != before).map(|_| started.elapsed().as_millis());
         let now = showing_now(linux, screen);
@@ -3474,7 +3475,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let line = format!(
             "{} with the icon moved onto the subject {}, {moved:?}: the file changed after {changed:?} ms, named the shown file {named}, a {kind}, the screen matched it after {seen:?} ms, {:?}% within 12 levels, the subject on screen at {:?} and in the file at {:?}, {shifted:?} px from where the earlier file held it",
             if painted { "painted" } else { "plain" },
-            if painted { "where the person's picture holds it" } else { "where the shown file held it" },
+            if painted { "where the person's picture holds it" } else { "where the shown file held it, on its side away from the picture's own spot" },
             last.as_ref().map(|last| (last.share * 10.0).round() / 10.0),
             last.as_ref().and_then(|last| last.screen).map(|(x, y)| (x.round(), y.round())),
             last.as_ref().and_then(|last| last.file).map(|(x, y)| (x.round(), y.round())),
