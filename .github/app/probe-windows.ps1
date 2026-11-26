@@ -148,8 +148,23 @@ public static class Seen {
     }
     public static bool Filled(IntPtr window) {
         bool any = false;
-        EnumChildWindows(window, (child, extra) => { any = true; return false; }, IntPtr.Zero);
+        EnumChildWindows(window, (child, extra) => {
+            var kind = new System.Text.StringBuilder(64);
+            GetClassNameW(child, kind, 64);
+            any = kind.ToString().StartsWith("Chrome_");
+            return !any;
+        }, IntPtr.Zero);
         return any;
+    }
+    public static string Inside(IntPtr window) {
+        var told = new List<string>();
+        EnumChildWindows(window, (child, extra) => {
+            var kind = new System.Text.StringBuilder(64);
+            GetClassNameW(child, kind, 64);
+            told.Add(kind.ToString());
+            return true;
+        }, IntPtr.Zero);
+        return told.Count == 0 ? "no child window" : string.Join(", ", told);
     }
     public static string Box(IntPtr window) {
         Edge rect;
@@ -457,7 +472,7 @@ $said = (Read-Shared $firstLog) -replace "`r?`n", ' '
 $madeHere = $said -match 'scooch-app window made in \d+ ms'
 $handed = ($said -match 'another process holds the icon') -and $firstStart.HasExited
 Line "- the first launch showed its frame after $frameMs ms and the filled window after $filledMs ms, the frame first at $($opened[2]) and the filled window at $($opened[3]), it says $said"
-if ($frameMs -lt 0 -or $filledMs -lt 0 -or -not ($madeHere -or $handed)) { Line "- after the first launch, $(App-Snapshot)" }
+if ($frameMs -lt 0 -or $filledMs -lt 0 -or -not ($madeHere -or $handed)) { Line "- after the first launch, $(App-Snapshot), inside the frame $([Seen]::Inside([Seen]::Frame()))" }
 Expect "the first launch said it made its window or handed it to the icon process, which the window checks stand on" ($madeHere -or $handed)
 Expect "the frame showed within 3 s of the launch" ($frameMs -ge 0 -and $frameMs -le 3000)
 Expect "the filled window showed within 120 s of the launch" ($filledMs -ge 0)
@@ -526,7 +541,7 @@ function Blank-Look([int]$Light, [string]$Name) {
         $window = [Seen]::Blank($stamp, 10000, 40)
         $bright = if ($window -ne [IntPtr]::Zero) { Center-Brightness $window } else { -1 }
         $blank = $window -ne [IntPtr]::Zero -and -not [Seen]::Filled($window)
-        Wait-For 30 { [bool](Find-Window) } | Out-Null
+        Wait-Filled
         if ($blank) {
             Line "- a blank frame in the $Name look was caught on try $try, its middle has brightness $bright"
             return $bright
@@ -543,6 +558,7 @@ function Rect-Case([string]$Name) {
     Expect "$Name, the frame at first show is where the filled window is, $($seen[2]) against $($seen[3])" ([long]$seen[1] -ge 0 -and $seen[2] -eq $seen[3])
 }
 function Frame-Handle { $found = Find-Window; if ($found) { [IntPtr]$found.Current.NativeWindowHandle } else { [IntPtr]::Zero } }
+function Wait-Filled { Wait-For 120 { $frame = [Seen]::Frame(); $frame -ne [IntPtr]::Zero -and [Seen]::Filled($frame) } | Out-Null; Start-Sleep -Seconds 1 }
 Line ''
 Line '### The frame before the window fills'
 $darkBlank = Blank-Look 0 'dark'
@@ -551,23 +567,26 @@ Expect "the blank frame is dark in the dark look" ($darkBlank -ge 0 -and $darkBl
 $lightBlank = Blank-Look 1 'light'
 Expect "a blank frame was caught in the light look within three tries, which its colour check stands on" ($lightBlank -ge 0)
 Expect "the blank frame is light in the light look" ($lightBlank -gt 0.6)
+Wait-Filled
 $plain = [Seen]::Box((Frame-Handle)) -split ' '
 [Desk]::SetWindowPos((Frame-Handle), [IntPtr]::Zero, 100, 80, 1100, 760, 0x0014) | Out-Null
 Start-Sleep -Seconds 1
 Rect-Case 'with a saved size'
+Wait-Filled
 [Desk]::ShowWindow((Frame-Handle), 3) | Out-Null
 Start-Sleep -Seconds 1
 Rect-Case 'saved as maximized'
+Wait-Filled
 [Desk]::ShowWindow((Frame-Handle), 9) | Out-Null
 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 [Desk]::SetWindowPos((Frame-Handle), [IntPtr]::Zero, 0, 0, $bounds.Width + 300, $bounds.Height + 300, 0x0014) | Out-Null
 Start-Sleep -Seconds 1
 Rect-Case 'with a saved size larger than the screen'
+Wait-Filled
 if ($plain.Count -eq 4) { [Desk]::SetWindowPos((Frame-Handle), [IntPtr]::Zero, [int]$plain[0], [int]$plain[1], [int]$plain[2] - [int]$plain[0], [int]$plain[3] - [int]$plain[1], 0x0014) | Out-Null }
 Start-Sleep -Seconds 1
 Launch-Again 'reset' | Out-Null
-Wait-For 30 { [bool](Find-Window) } | Out-Null
-Start-Sleep -Seconds 2
+Wait-Filled
 Line "- the window is back at its first size, at $([Seen]::Box((Frame-Handle)))"
 Copy-Item (Join-Path $env:APPDATA 'me.sohanbhat.scooch.window\.window-state.json') (Join-Path $Out 'window-state.json') -ErrorAction SilentlyContinue
 Set-Look 0
