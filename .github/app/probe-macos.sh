@@ -301,6 +301,13 @@ line "- a second launch with open -n wrote its first line $said s after open ret
 [ "$said" -ge 0 ] && [ "$ended" -ge 0 ] && [ "$left" = 1 ] || line "- after the second launch, $(app_snapshot)"
 expect "the second launch wrote its first line within 60 s, which the second launch check stands on" [ "$said" -ge 0 ]
 expect "a second launch leaves one window process" eval '[ "$ended" -ge 0 ] && [ "$left" = 1 ]'
+if [ "${SCOOCH_EXPERIMENT:-}" = launch ]; then
+  line
+  line "#### Experiment, a second launch with open -n, many times"
+  python3 "$(dirname "$0")/launches-macos.py" "$app" "$out" "$data" 50 | while IFS= read -r row; do line "$row"; done
+  cp "$data/watch.log" "$out/watch-data.log" 2>/dev/null
+  finish
+fi
 if took=$(wait_for 30 state_on); then line "- first open turned Scooch on after $took s"; else line "- first open did not turn Scooch on within 30 s"; fi
 expect "first open turned Scooch on" state_on
 expect "the login item points at the helper's program" login_at "$daemon"

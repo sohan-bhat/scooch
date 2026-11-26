@@ -473,6 +473,12 @@ Line "- a second launch wrote its first line after $secondSaid s and ended $seco
 if ($secondSaid -lt 0 -or $secondEnded -lt 0 -or $left -ne 1) { Line "- after the second launch, $(App-Snapshot)" }
 Expect "the second launch wrote its first line within 60 s, which the second launch check stands on" ($secondSaid -ge 0)
 Expect "a second launch leaves one window process" ($secondEnded -ge 0 -and $left -eq 1)
+if ($env:SCOOCH_EXPERIMENT -eq 'launch') {
+    . (Join-Path $PSScriptRoot 'launches-windows.ps1')
+    Run-Launches
+    Save-Launch-Daemon-Log
+    Finish
+}
 Start-Sleep -Seconds 3
 $on = Wait-For 40 { State-On }
 Line "- first open turned Scooch on after $on s"
