@@ -23,6 +23,10 @@ fn woke_more(woke: (u64, u64), baseline: Option<(u64, u64)>, events: usize) -> b
 #[path = "judge/skips.rs"]
 mod skips;
 
+#[cfg(test)]
+#[path = "judge/timed.rs"]
+mod timed;
+
 #[cfg(any(target_os = "macos", test))]
 use skips::{glide_try, parked_in, slide_skip, Try};
 

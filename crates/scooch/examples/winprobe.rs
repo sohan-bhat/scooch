@@ -17,6 +17,10 @@ mod slides;
 mod skips;
 
 #[cfg(windows)]
+#[path = "judge/timed.rs"]
+mod timed;
+
+#[cfg(windows)]
 mod probe {
     use anyhow::{anyhow, bail, Context, Result};
     use scooch::platform::windows::layout::{self, Cell, Label, SPACING};
@@ -3646,16 +3650,16 @@ mod probe {
         warmed: bool,
     }
 
-    fn judge_daemon_glide(p: &mut Probe, watched: &Watched, screen: &Screen, given: &Judged, label: &str, strip_name: Option<&str>) -> bool {
+    fn judge_daemon_glide(p: &mut Probe, watched: &Watched, screen: &Screen, given: &Judged, label: &str, strip_name: Option<&str>) -> Vec<String> {
         let Judged { source, old_tables, before, still_icons, warmed } = *given;
         let (Some(old_path), Some(new_path)) = (&watched.kept, &watched.new) else {
             p.line(format!("- {label}: the wallpaper before {:?}, kept as {:?}, or after {:?} is unknown", watched.old, watched.kept, watched.new));
-            return false;
+            return vec!["the pictures before and after the drag are unknown".to_string()];
         };
         let (old, new) = (picture::decode(old_path), picture::decode(new_path));
         let (Ok(old), Ok(new)) = (old, new) else {
             p.line(format!("- {label}: the two stills could not be read, old kept as {} and new {}", old_path.display(), new_path.display()));
-            return false;
+            return vec!["the two stills could not be read".to_string()];
         };
         let (width, height) = old.dimensions();
         let icons_now: Vec<Rect> = icon_rects().unwrap_or_default().into_iter().map(|rect| Rect { x: rect.x - screen.frame.x, y: rect.y - screen.frame.y, ..rect }).collect();
@@ -3795,7 +3799,16 @@ mod probe {
             }
         }
         let landing = settled.is_some() || (given_up.is_some() && budget.is_some());
-        returned == 0 && steady && distinct >= 3 && hidden * 100 <= total(&mask).max(1) && hand_over.is_some_and(|d| d.1 <= 2) && in_order && landing
+        let checks = [
+            (returned == 0, "the old picture came back after the new one"),
+            (steady, "the captures went back along the glide"),
+            (distinct >= 3, crate::timed::MOTION),
+            (hidden * 100 <= total(&mask).max(1), "icons were covered"),
+            (hand_over.is_some_and(|d| d.1 <= 2), "the picture after the close differs from the new one"),
+            (in_order, "the daemon's steps came out of order"),
+            (landing, "the glide never settled"),
+        ];
+        checks.iter().filter(|(held, _)| !held).map(|(_, said)| said.to_string()).collect()
     }
 
     const SLIDES: usize = 36;
@@ -4323,23 +4336,53 @@ mod probe {
         if !wrote_tables {
             p.failed.push("the setup drags wrote no tables, so the timed drag could not glide".into());
         }
-        quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
-        let still_icons = icons_except(&screen, &shown_name(name, folder));
-        let old_tables = desktop.wallpaper(&screen).ok().flatten().and_then(|old| tables_file(&p.home, &old));
-        park_cursor();
-        let before = settle(area, Duration::from_secs(3))?;
-        let from = icon_spot(name, folder);
-        let warmed = log_lines(&log).iter().any(|line| line.contains(" glide ready"));
-        let watched = watch_change(&log, &screen, || drag_icon(name, folder, centre), true);
-        p.line(format!("- the timed drag from {from:?} to {},{}, icon now at {:?}", centre.x, centre.y, icon_spot(name, folder)));
-        decisions(p, &watched);
-        let given = Judged { source: &source, old_tables: old_tables.as_deref(), before: &before, still_icons: &still_icons, warmed };
-        let good = judge_daemon_glide(p, &watched, &screen, &given, "glide on, a real drag onto the subject", Some("daemon-glide-strip"));
-        pump(Duration::from_millis(1000));
-        let left = layer::ours_left();
-        p.line(format!("- helper processes under the daemon {:?}, layer windows left {left}", helper_children(daemon)));
-        if !good || left > 0 {
-            p.failed.push("the daemon's glide did not move steadily under the icons and hand over cleanly".into());
+        let mut stalls = Vec::new();
+        for attempt in 1..=crate::timed::TRIES {
+            if attempt > 1 {
+                quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
+                let watched = watch_change(&log, &screen, || drag_icon(name, folder, aside), false);
+                p.line(format!("- attempt {attempt} begins with the icon dragged aside again, new wallpaper {}", watched.new != watched.old));
+            }
+            quiet_log(&log, Duration::from_millis(1000), Duration::from_secs(10));
+            let still_icons = icons_except(&screen, &shown_name(name, folder));
+            let old_tables = desktop.wallpaper(&screen).ok().flatten().and_then(|old| tables_file(&p.home, &old));
+            park_cursor();
+            let before = settle(area, Duration::from_secs(3))?;
+            let from = icon_spot(name, folder);
+            let warmed = log_lines(&log).iter().any(|line| line.contains(" glide ready"));
+            let watched = watch_change(&log, &screen, || drag_icon(name, folder, centre), true);
+            p.line(format!("- the timed drag, attempt {attempt}, from {from:?} to {},{}, icon now at {:?}", centre.x, centre.y, icon_spot(name, folder)));
+            decisions(p, &watched);
+            let given = Judged { source: &source, old_tables: old_tables.as_deref(), before: &before, still_icons: &still_icons, warmed };
+            let mut failed = judge_daemon_glide(p, &watched, &screen, &given, "glide on, a real drag onto the subject", Some("daemon-glide-strip"));
+            pump(Duration::from_millis(1000));
+            let left = layer::ours_left();
+            let closed = watched.log.iter().find(|line| line.contains(" glide closed ")).and_then(|line| stamp_of(line));
+            let primed = closed.and_then(|closed| log_lines(&log).into_iter().find(|line| line.contains(" glide primed ") && stamp_of(line).is_some_and(|at| at >= closed)));
+            p.line(format!("- helper processes under the daemon {:?}, layer windows left {left}, a prime logged after the close {:?}", helper_children(daemon), primed.as_ref().map(|line| line.chars().take(120).collect::<String>())));
+            if crate::timed::left_over(left, primed.is_some()) {
+                failed.push(format!("a layer window was left after the close, {left} windows"));
+            }
+            let stall = crate::timed::stalled(&watched.log);
+            match crate::timed::verdict(&failed, stall.is_some()) {
+                crate::timed::Verdict::Good => {
+                    stalls.clear();
+                    break;
+                }
+                crate::timed::Verdict::Again => {
+                    let (distinct, gap) = stall.unwrap_or_default();
+                    p.line(format!("  - attempt {attempt} has no footing, the helper presented {distinct} distinct moving frames with a {gap:.0} ms gap between them, so there was nothing to judge and the drag is tried again"));
+                    stalls.push((distinct, gap));
+                }
+                crate::timed::Verdict::Bad(why) => {
+                    p.failed.push(format!("the daemon's glide did not move steadily under the icons and hand over cleanly, attempt {attempt} failed because {}", why.join(", ")));
+                    stalls.clear();
+                    break;
+                }
+            }
+        }
+        if !stalls.is_empty() {
+            p.failed.push(crate::timed::never_came(&stalls));
         }
         for variant in ["now", "latency", "pace", "both"] {
             let _ = fs::write(p.home.join("pace-variant"), variant);
