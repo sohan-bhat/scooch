@@ -71,7 +71,6 @@ jobs:
           updater-pubkey: ${{ vars.TAURI_UPDATER_PUBKEY }}
 
   build-linux:
-    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -253,7 +252,7 @@ jobs:
       matrix:
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 80
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -263,9 +262,7 @@ jobs:
           name: app-macos
           path: built
       - name: Probe
-        timeout-minutes: 60
-        env:
-          SCOOCH_EXPERIMENT: launch
+        timeout-minutes: 30
         run: bash .github/app/probe-macos.sh built appprobe
       - name: Upload
         if: always()
@@ -290,7 +287,7 @@ jobs:
           - name: windows-arm64
             runner: windows-11-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 80
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -304,10 +301,8 @@ jobs:
           name: compiled-${{ matrix.name }}
           path: programs
       - name: Probe
-        timeout-minutes: 60
+        timeout-minutes: 30
         shell: pwsh
-        env:
-          SCOOCH_EXPERIMENT: launch
         run: ./.github/app/probe-windows.ps1 -Built built -Out appprobe -Programs programs
       - name: Upload
         if: always()
@@ -420,7 +415,7 @@ jobs:
         run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
 
   tray-watcher:
-    if: false
+    if: ${{ github.workflow == 'app' }}
     strategy:
       fail-fast: false
       matrix:
