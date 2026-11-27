@@ -1,0 +1,206 @@
+name: lab
+
+on:
+  push:
+    branches: [lab-fresh]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          key: ${{ matrix.name }}
+          save-if: false
+          workspaces: |
+            . -> target
+            crates/scooch-app -> target
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Linux packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf file libayatana-appindicator3-dev
+      - name: Scooch program
+        run: |
+          cargo build --release -p scooch --bin scooch --target ${{ matrix.target }}
+          mkdir -p crates/scooch-app/binaries
+          cp "target/${{ matrix.target }}/release/scooch" "crates/scooch-app/binaries/scooch-${{ matrix.target }}"
+      - name: Window packages
+        working-directory: crates/scooch-app/ui
+        run: npm ci
+      - name: Shell clippy
+        working-directory: crates/scooch-app
+        run: |
+          npm --prefix ui run build
+          cargo clippy --all-targets --locked -- -D warnings
+      - name: Shell tests
+        working-directory: crates/scooch-app
+        run: cargo test --locked
+      - name: Compile
+        working-directory: crates/scooch-app
+        run: node ui/node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle --target ${{ matrix.target }}
+      - name: Compiled programs
+        run: |
+          mkdir -p compiled
+          cp "crates/scooch-app/target/${{ matrix.target }}/release/scooch-app" compiled/scooch-app
+          cp "crates/scooch-app/binaries/scooch-${{ matrix.target }}" compiled/scooch
+          ls -l compiled
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: compiled-${{ matrix.name }}
+          path: compiled
+          if-no-files-found: error
+
+  bundle-linux:
+    needs: build-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: compiled-${{ matrix.name }}
+          path: ${{ runner.temp }}/compiled
+      - name: Bundle
+        run: bash .github/app/bundle-linux.sh "$RUNNER_TEMP/compiled" ${{ matrix.target }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: app-${{ matrix.name }}
+          path: dist
+          if-no-files-found: error
+
+  probe-linux:
+    needs: bundle-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-24.04
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: app-${{ matrix.name }}
+          path: built
+      - name: Install the desktop packages
+        timeout-minutes: 30
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y xvfb xauth x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11 libglib2.0-bin file gnome-themes-extra python3-pyatspi at-spi2-core dconf-gsettings-backend dconf-service rpm
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --download-only ./built/*.deb
+      - name: Probe
+        timeout-minutes: 35
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ./built/*.deb
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          XAUTHORITY="$RUNNER_TEMP/x-cookie/display.auth"
+          mkdir -p "$RUNNER_TEMP/x-cookie" "$RUNNER_TEMP/x-server"
+          xauth -q -f "$XAUTHORITY" add :99 . "$(mcookie)"
+          printf '#!/bin/sh\nexec /usr/bin/Xvfb "$@" -auth "%s"\n' "$XAUTHORITY" >"$RUNNER_TEMP/x-server/Xvfb"
+          chmod +x "$RUNNER_TEMP/x-server/Xvfb"
+          export XAUTHORITY
+          PATH="$RUNNER_TEMP/x-server:$PATH" dbus-run-session -- bash .github/linux/xfce.sh .github/app/probe-linux.sh appprobe
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: appprobe-${{ matrix.name }}
+          path: appprobe
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+  probe-gnome:
+    needs: bundle-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: app-linux-x64
+          path: built
+      - name: Install the desktop packages
+        timeout-minutes: 30
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y gnome-shell gvfs gvfs-daemons dconf-service libglib2.0-bin gnome-shell-extension-prefs fonts-cantarell adwaita-icon-theme dconf-cli xdg-user-dirs python3-pyatspi at-spi2-core
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --download-only ./built/*.deb gnome-shell-extension-desktop-icons-ng
+      - name: Probe
+        timeout-minutes: 35
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ./built/*.deb
+          sudo apt-get remove -y gnome-shell-extension-desktop-icons-ng || true
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          failed=0
+          PASS=missing dbus-run-session -- bash .github/linux/gnome.sh .github/app/probe-gnome.sh appprobe || failed=1
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y gnome-shell-extension-desktop-icons-ng
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          PASS=off dbus-run-session -- bash .github/linux/gnome.sh .github/app/probe-gnome.sh appprobe || failed=1
+          exit "$failed"
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: appprobe-gnome
+          path: appprobe
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
