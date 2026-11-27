@@ -204,3 +204,285 @@ jobs:
       - name: Summary
         if: always()
         run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+  tray-watcher:
+    needs: bundle-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - desktop: xfce
+            packages: xvfb x11-utils dbus-x11 xfwm4 xfce4-panel xfconf
+            session: xauth xdotool wmctrl xfdesktop4 xfdesktop4-data xfce4-settings gvfs gvfs-daemons libglib2.0-bin python3-gi
+          - desktop: kde
+            packages: xvfb x11-utils dbus-x11 plasma-desktop plasma-workspace kwin-x11
+            session: xauth xdotool wmctrl libglib2.0-bin python3-gi kde-cli-tools plasma-workspace-wallpapers breeze-icon-theme
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install the desktop packages
+        timeout-minutes: 30
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ${{ matrix.packages }}
+      - name: Measure
+        timeout-minutes: 30
+        run: |
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          dbus-run-session -- bash .github/app/watcher-time.sh ${{ matrix.desktop }} watcher
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: app-linux-x64
+          path: built
+      - name: Install the app
+        timeout-minutes: 30
+        run: sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ${{ matrix.session }} ./built/*.deb
+      - name: Tray gap at the close
+        timeout-minutes: 20
+        run: |
+          pkill -x plasmashell || true
+          pkill -f kded || true
+          pkill -x xfce4-panel || true
+          pkill -x xfwm4 || true
+          pkill -x kwin_x11 || true
+          pkill -x Xvfb || true
+          sleep 2
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          dbus-run-session -- bash .github/linux/${{ matrix.desktop }}.sh .github/app/tray-gap.sh gap
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tray-watcher-${{ matrix.desktop }}
+          path: |
+            watcher
+            gap
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat watcher/report.md gap/report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+  mutation:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: never
+            says: the close never starts a fresh process on Linux
+            test: linux_gives_the_icon_to_a_fresh_process_at_the_close
+          - name: every
+            says: the close starts a fresh process on every system
+            test: the_other_systems_keep_the_icon_in_the_same_process
+          - name: update
+            says: the close starts a fresh process with an update waiting
+            test: an_update_waiting_still_ends_the_process_on_linux
+          - name: failed
+            says: a failed start still ends the old process
+            test: a_failed_start_keeps_the_icon
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: linux-x64-build-linux
+          save-if: false
+          workspaces: |
+            . -> target
+            crates/scooch-app -> target
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Linux packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf file libayatana-appindicator3-dev
+      - name: Window page and a stand in for the scooch program
+        working-directory: crates/scooch-app
+        run: |
+          mkdir -p binaries
+          printf '#!/bin/sh\n' > binaries/scooch-x86_64-unknown-linux-gnu
+          chmod +x binaries/scooch-x86_64-unknown-linux-gnu
+          npm --prefix ui ci
+          npm --prefix ui run build
+      - name: The tests pass before the mutation
+        working-directory: crates/scooch-app
+        run: cargo test --locked ${{ matrix.test }}
+      - name: Mutation
+        run: bash .github/lab/mutate.sh ${{ matrix.name }}
+      - name: The tests must fail
+        working-directory: crates/scooch-app
+        run: |
+          set +e
+          cargo test --locked > "$RUNNER_TEMP/test.txt" 2>&1
+          code=$?
+          tail -40 "$RUNNER_TEMP/test.txt"
+          if [ "$code" = 0 ]; then
+            echo "The mutation ${{ matrix.name }} passed every test."
+            exit 1
+          fi
+          if ! grep -q "^test life::tests::${{ matrix.test }} \.\.\. FAILED" "$RUNNER_TEMP/test.txt"; then
+            echo "The tests failed, but not in ${{ matrix.test }}."
+            exit 1
+          fi
+          {
+            echo "## Mutation ${{ matrix.name }}, ${{ matrix.says }}"
+            echo
+            echo "- cargo test ended with $code"
+            grep -E '^test .* FAILED$' "$RUNNER_TEMP/test.txt" | sed 's/^/- /'
+            grep -E '^test result' "$RUNNER_TEMP/test.txt" | sed 's/^/- /'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  mutant-build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: linux-x64-build-linux
+          save-if: false
+          workspaces: |
+            . -> target
+            crates/scooch-app -> target
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Linux packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf file libayatana-appindicator3-dev
+      - name: Mutation
+        run: bash .github/lab/mutate.sh unwired
+      - name: Scooch program
+        run: |
+          cargo build --release -p scooch --bin scooch --target x86_64-unknown-linux-gnu
+          mkdir -p crates/scooch-app/binaries
+          cp target/x86_64-unknown-linux-gnu/release/scooch crates/scooch-app/binaries/scooch-x86_64-unknown-linux-gnu
+      - name: Window packages
+        working-directory: crates/scooch-app/ui
+        run: npm ci
+      - name: Compile
+        working-directory: crates/scooch-app
+        run: node ui/node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle --target x86_64-unknown-linux-gnu
+      - name: Compiled programs
+        run: |
+          mkdir -p compiled
+          cp crates/scooch-app/target/x86_64-unknown-linux-gnu/release/scooch-app compiled/scooch-app
+          cp crates/scooch-app/binaries/scooch-x86_64-unknown-linux-gnu compiled/scooch
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: compiled-mutant
+          path: compiled
+          if-no-files-found: error
+
+  mutant-bundle:
+    needs: mutant-build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: compiled-mutant
+          path: ${{ runner.temp }}/compiled
+      - name: Bundle
+        run: bash .github/app/bundle-linux.sh "$RUNNER_TEMP/compiled" x86_64-unknown-linux-gnu
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: app-mutant
+          path: dist
+          if-no-files-found: error
+
+  mutant-probe:
+    needs: mutant-bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: app-mutant
+          path: built
+      - name: Install the desktop packages
+        timeout-minutes: 30
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y xvfb xauth x11-utils xdotool wmctrl imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11 libglib2.0-bin file gnome-themes-extra python3-pyatspi python3-gi at-spi2-core dconf-gsettings-backend dconf-service rpm
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ./built/*.deb
+      - name: The probe must fail at the gates of the fresh icon
+        timeout-minutes: 45
+        run: |
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          XAUTHORITY="$RUNNER_TEMP/x-cookie/display.auth"
+          mkdir -p "$RUNNER_TEMP/x-cookie" "$RUNNER_TEMP/x-server"
+          xauth -q -f "$XAUTHORITY" add :99 . "$(mcookie)"
+          printf '#!/bin/sh\nexec /usr/bin/Xvfb "$@" -auth "%s"\n' "$XAUTHORITY" >"$RUNNER_TEMP/x-server/Xvfb"
+          chmod +x "$RUNNER_TEMP/x-server/Xvfb"
+          export XAUTHORITY
+          code=0
+          PATH="$RUNNER_TEMP/x-server:$PATH" dbus-run-session -- bash .github/linux/xfce.sh .github/app/probe-linux.sh appprobe || code=$?
+          pkill -x Xvfb || true
+          sleep 2
+          gap=0
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          env -u XAUTHORITY dbus-run-session -- bash .github/linux/xfce.sh .github/app/tray-gap.sh gap || gap=$?
+          {
+            echo "## The probes on an app whose close never starts a fresh process"
+            echo
+            echo "- probe-linux.sh ended with $code and tray-gap.sh with $gap"
+            grep -h '^- NO: ' appprobe/report.md gap/report.md | sed 's/^- NO: /- failed gate: /'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          missed=0
+          for gate in \
+            "within 3 s of the close one fresh process holds the icon, with another process id and no process below" \
+            "the quiet minute after the close holds at most 10 MB more private memory than an icon that never had a window" \
+            "the quiet minute after the close had no wake" \
+            "the icon after the close runs as many threads as an icon that never had a window" \
+            "each of twenty closes gave the icon to a fresh process" \
+            "after twenty closes the icon holds at most 10 MB more private memory than an icon that never had a window" \
+            "five closes of the AppImage window gave the icon to another process" \
+            "each of ten closes gave the tray's item to another process"; do
+            if ! grep -q -h -F -- "- NO: $gate" appprobe/report.md gap/report.md; then
+              echo "The gate \"$gate\" did not fail on the mutant." | tee -a "$GITHUB_STEP_SUMMARY"
+              missed=$((missed + 1))
+            fi
+          done
+          if [ "$code" = 0 ] || [ "$gap" = 0 ] || [ "$missed" != 0 ]; then exit 1; fi
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: appprobe-mutant
+          path: |
+            appprobe
+            gap
+          if-no-files-found: warn

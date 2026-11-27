@@ -15,14 +15,68 @@ cpu_ms() { awk -v tick="$(getconf CLK_TCK)" '{ print int(($14 + $15) * 1000 / ti
 memory() { awk '/^Rss:/ { r = $2 } /^Pss:/ { p = $2 } /^Private_(Clean|Dirty):/ { u += $2 } END { printf "%.1f MB resident, %.1f MB proportional, %.1f MB private", r / 1024, p / 1024, u / 1024 }' "/proc/$1/smaps_rollup" 2>/dev/null; }
 no_zombie() { [ -n "$watcher_pid" ] && kill -0 "$watcher_pid" 2>/dev/null && ! ps -o stat= --ppid "$watcher_pid" | grep -q Z; }
 not_child() { [ -n "$icon" ] && [ -n "$watcher_pid" ] && [ "$(ps -o ppid= -p "$icon" | tr -d ' ')" != "$watcher_pid" ]; }
+now_ms() { date +%s%3N; }
+private_mb() { awk '/^Private_(Clean|Dirty):/ { u += $2 } END { printf "%.1f", u / 1024 }' "/proc/$1/smaps_rollup" 2>/dev/null; }
+below() { ps -o pid=,comm= --ppid "$1" 2>/dev/null | tr -s ' ' | tr '\n' ';'; }
+live_apps() { ps -o pid=,stat= -C scooch-app 2>/dev/null | awk '$2 !~ /^Z/ { print $1 }'; }
+single_app() { [ "$(live_apps | wc -l)" = 1 ]; }
+lock_pids() {
+  local inode
+  inode=$(stat -c %i "$data/icon.lock" 2>/dev/null) || return 0
+  awk -v inode="$inode" '$2 == "FLOCK" { n = split($6, at, ":"); if (at[n] == inode) print $5 }' /proc/locks 2>/dev/null
+}
+scooch_items() {
+  local pid count=0
+  for pid in $(tray items | tr ';' '\n' | sed -n 's/.* pid \([0-9][0-9]*\) *$/\1/p'); do
+    [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = scooch-app ] && count=$((count + 1))
+  done
+  echo "$count"
+}
+one_icon() {
+  local held
+  held=$(lock_pids)
+  [ "$(echo $held | wc -w)" = 1 ] && [ "$(scooch_items)" = 1 ] && tray menu "$held" | grep -q '^Open Scooch'
+}
+shown_windows() { xdotool search --onlyvisible --name '^Scooch$' 2>/dev/null; }
+has_shown() { [ -n "$(shown_windows)" ]; }
+icon_only() { [ -z "$(shown_windows)" ] && one_icon; }
+settle() {
+  local limit="$1" from
+  shift
+  from=$(now_ms)
+  while [ $(( $(now_ms) - from )) -lt "$limit" ]; do
+    if "$@"; then
+      echo $(( $(now_ms) - from ))
+      return 0
+    fi
+    sleep 0.05
+  done
+  return 1
+}
+within_ten() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a != "" && b != "" && a + 0 <= b + 10) }'; }
+fresh_icon() {
+  local now
+  now=$(live_apps)
+  [ "$(echo $now | wc -w)" = 1 ] && [ "$now" != "$1" ] && [ -z "$(below "$now")" ]
+}
 
+handed=""
+while [ $(( $(now_ms) - pressed_at )) -lt 3000 ]; do
+  if fresh_icon "$before_close"; then
+    handed=$(( $(now_ms) - pressed_at ))
+    break
+  fi
+  sleep 0.05
+done
 line "- the session bus holds org.kde.StatusNotifierWatcher $(tray watcher), items $(tray items)"
 wait_for 15 window_gone >/dev/null
 sleep 3
 line "- closed the window, window $(has_window && echo open || echo closed), app processes $(app_count), its menu $(tray menu "$(app_pid)")"
+line "- the icon process was $before_close before the close and is $(live_apps | tr '\n' ' ')after, alone with no process below $([ -n "$handed" ] && echo "$handed ms after the close keys" || echo "not within 3 s"), processes below now $(below "$(app_pid)")"
 expect "closing the window while Scooch is on leaves the app process on a desktop with a tray" app_alive
 expect "closing the window removes the window" window_gone
 expect "the app's icon is registered with the tray" registered
+expect "within 3 s of the close one fresh process holds the icon, with another process id and no process below" [ -n "$handed" ]
 snap() { for task in /proc/"$1"/task/*; do echo "$(basename "$task") $(cat "$task/comm" 2>/dev/null | tr ' ' '_') $(awk '/ctxt_switches/ { s += $2 } END { print s + 0 }' "$task/status" 2>/dev/null)"; done; }
 quiet_minute() {
   local pid before after cpu
@@ -35,7 +89,9 @@ quiet_minute() {
   after=$(snap "$pid")
   quiet=$(awk 'NR == FNR { was[$1] = $3; next } { total += $3 - ($1 in was ? was[$1] : 0) } END { print total + 0 }' <(echo "$before") <(echo "$after"))
   woken=$(awk 'NR == FNR { was[$1] = $3; next } { d = $3 - ($1 in was ? was[$1] : 0); if (d > 0) printf "%s:%d ", $2, d }' <(echo "$before") <(echo "$after"))
-  line "- over a quiet minute, $1, the icon process $pid woke its $(echo "$after" | wc -l) threads $quiet times, ${woken:-none of them}, used $(( $(cpu_ms "$pid") - cpu )) ms of CPU, and holds $(memory "$pid")"
+  quiet_threads=$(echo "$after" | wc -l)
+  quiet_private=$(private_mb "$pid")
+  line "- over a quiet minute, $1, the icon process $pid woke its $quiet_threads threads $quiet times, ${woken:-none of them}, used $(( $(cpu_ms "$pid") - cpu )) ms of CPU, and holds $(memory "$pid")"
 }
 quiet_minutes() {
   local pid before after counts="" least="" woke cpu
@@ -53,9 +109,14 @@ quiet_minutes() {
     before=$after
   done
   quiet_least=$least
-  line "- over five quiet minutes, $1, the icon process $pid woke its $(echo "$after" | wc -l) threads$counts times, one count a minute, used $(( $(cpu_ms "$pid") - cpu )) ms of CPU in all, and holds $(memory "$pid")"
+  quiet_threads=$(echo "$after" | wc -l)
+  quiet_private=$(private_mb "$pid")
+  line "- over five quiet minutes, $1, the icon process $pid woke its $quiet_threads threads$counts times, one count a minute, used $(( $(cpu_ms "$pid") - cpu )) ms of CPU in all, and holds $(memory "$pid")"
 }
 quiet_minute "after the window closed"
+closed_wakes=$quiet
+closed_threads=$quiet_threads
+closed_private=$quiet_private
 
 line
 line "#### The panel restarts with accessibility"
@@ -194,6 +255,120 @@ wait_for 15 window_gone >/dev/null
 sleep 2
 
 line
+line "#### Twenty openings and closes in a row"
+opens=""
+second=""
+handovers=0
+for round in $(seq 1 20); do
+  settle 15000 icon_only >/dev/null
+  from=$(now_ms)
+  clean /usr/bin/scooch-app >>"$out/fresh-opens.log" 2>&1 &
+  took=""
+  while [ $(( $(now_ms) - from )) -lt 20000 ]; do
+    if has_shown; then
+      took=$(( $(now_ms) - from ))
+      break
+    fi
+    sleep 0.02
+  done
+  opens="$opens ${took:-none}"
+  [ "$round" = 2 ] && second=$took
+  sleep 1
+  holder=$(lock_pids)
+  press_pill alt+F4
+  moved() { icon_only && [ "$(lock_pids)" != "$holder" ]; }
+  settle 8000 moved >/dev/null && handovers=$((handovers + 1))
+done
+settle 15000 single_app >/dev/null
+sleep 2
+twenty_icon=$(lock_pids)
+twenty_private=$(private_mb "$twenty_icon")
+line "- twenty openings, each as ms from the start of scooch-app until the window was mapped:$opens"
+line "- $handovers of the twenty closes gave the icon to another process, then app processes $(live_apps | wc -l), Scooch items in the tray $(scooch_items), the icon process $twenty_icon with $(below "$twenty_icon" | grep -c .) processes below holds $(memory "$twenty_icon")"
+expect "each of twenty closes gave the icon to a fresh process" [ "$handovers" = 20 ]
+expect "after twenty openings and closes one app process runs" single_app
+expect "after twenty openings and closes the tray lists one Scooch item" [ "$(scooch_items)" = 1 ]
+expect "the second opening of the window is mapped within 1 s" eval '[ -n "$second" ] && [ "$second" -lt 1000 ]'
+
+line
+line "#### A start of Scooch during the hand over"
+lost=0
+strays=0
+for delay in 0 30 60 120 250 500; do
+  for trial in 1 2 3; do
+    settle 15000 single_app >/dev/null || strays=$((strays + 1))
+    settle 15000 icon_only >/dev/null
+    clean /usr/bin/scooch-app >>"$out/fresh-race.log" 2>&1 &
+    settle 20000 has_shown >/dev/null
+    sleep 1.5
+    old=$(shown_windows | head -1)
+    holder=$(lock_pids)
+    timeout 5 xdotool windowactivate --sync "$old" >/dev/null 2>&1
+    timeout 5 xdotool windowfocus --sync "$old" >/dev/null 2>&1
+    sleep 0.3
+    xdotool key --delay 0 alt+F4
+    asked=$(now_ms)
+    [ "$delay" = 0 ] || sleep "0.$(printf '%03d' "$delay")"
+    from=$(now_ms)
+    clean /usr/bin/scooch-app >>"$out/fresh-race.log" 2>&1 &
+    new=""
+    took=""
+    while [ $(( $(now_ms) - from )) -lt 8000 ]; do
+      new=$(shown_windows | grep -vx "$old" | head -1)
+      if [ -n "$new" ]; then
+        took=$(( $(now_ms) - from ))
+        break
+      fi
+      sleep 0.03
+    done
+    sleep 1.5
+    held=$(lock_pids)
+    one=$(one_icon && echo yes || echo no)
+    left=no
+    if [ -n "$new" ]; then
+      timeout 5 xdotool windowactivate --sync "$new" >/dev/null 2>&1
+      timeout 5 xdotool windowfocus --sync "$new" >/dev/null 2>&1
+      sleep 0.3
+      xdotool key --delay 0 alt+F4
+      settle 8000 icon_only >/dev/null && left=yes
+    fi
+    line "- a start $(( from - asked )) ms after the close keys, the window was mapped after ${took:-more than 8000} ms, the icon went from process ${holder:-none} to ${held:-none}, one process holds the icon $one, the next close left the icon $left, app processes then $(live_apps | wc -l)"
+    if [ -z "$took" ] || [ "$took" -gt 5000 ] || [ "$one" != yes ] || [ "$left" != yes ]; then lost=$((lost + 1)); fi
+  done
+done
+settle 15000 single_app >/dev/null || strays=$((strays + 1))
+line "- the starts said $(sort "$out/fresh-race.log" | uniq -c | sed 's/^ *//' | paste -sd '|' - | sed 's/|/ | /g')"
+expect "each of eighteen starts during the hand over got a window within 5 s, left one process holding the icon and kept the icon at the next close" [ "$lost" = 0 ]
+expect "after each start during the hand over one app process was left within 15 s" [ "$strays" = 0 ]
+
+line
+line "#### On in the menu after a hand over"
+settle 15000 icon_only >/dev/null
+fresh=$(lock_pids)
+press_item On
+wait_for 30 state_off >/dev/null
+if took=$(wait_for 15 gone_app); then line "- On in the menu of the fresh icon process $fresh turned Scooch off and the process ended $took s later"; else line "- On in the menu of the fresh icon process $fresh left app processes $(app_count)"; fi
+line "- after that, wallpaper $(wallpaper), login item $(login), daemons $(daemons)"
+expect "On in the menu of a fresh icon process turned Scooch off" state_off
+expect "off from the menu of a fresh icon process put the photo back" [ "$(wallpaper)" = "$photo" ]
+expect "off from the menu of a fresh icon process removed the login item" [ ! -f "$autostart" ]
+expect "off from the menu of a fresh icon process ended the daemon" no_daemon
+expect "the fresh icon process ended when Scooch went off" gone_app
+clean /usr/bin/scooch >"$out/on-after-menu-off.txt" 2>&1
+wait_for 30 state_on >/dev/null
+wait_for 40 rendered >/dev/null
+wait_for 30 registered >/dev/null
+clean /usr/bin/scooch-app >>"$out/fresh-opens.log" 2>&1 &
+settle 20000 has_shown >/dev/null
+sleep 2
+holder=$(lock_pids)
+press_pill alt+F4
+settle 8000 moved >/dev/null
+sleep 2
+line "- Scooch on again, a window opened and closed, the icon went from process $holder to $(lock_pids), registered $(registered && echo yes || echo no), so Quit Scooch below is pressed on a fresh icon process"
+expect "the icon is with a fresh process before Quit Scooch" eval 'single_app && registered && [ "$(lock_pids)" != "$holder" ]'
+
+line
 line "#### Quit Scooch"
 sentences=$(python3 -c 'import json, sys; copy = json.load(open(sys.argv[1])); print("\n".join(list(copy["failure"].values()) + [copy["problem"]["stopped"]["line"]]))' crates/scooch-app/ui/src/copy/en.json)
 stopped_line=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["problem"]["stopped"]["line"])' crates/scooch-app/ui/src/copy/en.json)
@@ -264,6 +439,11 @@ if [ "$quiet_least" != 0 ]; then
   quiet_minutes "started at the login, a second time"
 fi
 expect "the icon started at the login had a minute with no wake of its threads, so no timer of 60 s or less runs in it" [ "$quiet_least" = 0 ]
+line "- the minute after the first close held $closed_private MB private in $closed_threads threads with $closed_wakes wakes, after twenty closes the icon held $twenty_private MB private, and this icon that never had a window holds $quiet_private MB private in $quiet_threads threads"
+expect "the quiet minute after the close holds at most 10 MB more private memory than an icon that never had a window" within_ten "$closed_private" "$quiet_private"
+expect "the quiet minute after the close had no wake" [ "$closed_wakes" = 0 ]
+expect "the icon after the close runs as many threads as an icon that never had a window" [ "$closed_threads" = "$quiet_threads" ]
+expect "after twenty closes the icon holds at most 10 MB more private memory than an icon that never had a window" within_ten "$twenty_private" "$quiet_private"
 line "- a minute later the daemon's children are $(ps -o pid=,stat=,comm= --ppid "$watcher_pid" | tr '\n' ';' | tr -s ' ')"
 expect "a minute after the login the daemon runs with no defunct child" no_zombie
 pkill -x scooch >/dev/null 2>&1
