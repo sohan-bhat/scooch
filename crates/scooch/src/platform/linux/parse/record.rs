@@ -71,7 +71,11 @@ pub fn should_restore(settings: &dyn Settings, saved: &Saved, request: &Request,
     Ok(true)
 }
 
-pub fn write(settings: &dyn Settings, path: &Path, request: &Request, original: impl Fn(Option<&str>) -> bool, ours: impl Fn(Option<&str>) -> bool) -> Result<Outcome> {
+pub fn outside(current: Option<&str>, read: impl Fn(&str) -> Option<PathBuf>, owns: impl Fn(&Path) -> bool) -> Option<&str> {
+    current.filter(|text| read(text).is_some_and(|path| !owns(&path)))
+}
+
+pub fn write(settings: &dyn Settings, path: &Path, request: &Request, original: impl Fn(Option<&str>) -> bool, ours: impl Fn(Option<&str>) -> bool, follow: impl Fn(Option<&str>, Option<&str>) -> Option<String>) -> Result<Outcome> {
     let mut record = load(path);
     let mut saved = record.desktops.get(request.desktop).cloned().unwrap_or_default();
     if should_restore(settings, &saved, request, &original, &ours)? {
@@ -84,8 +88,13 @@ pub fn write(settings: &dyn Settings, path: &Path, request: &Request, original: 
         if current.as_deref() == Some(value.as_str()) {
             continue;
         }
-        if !saved.contains_key(key) && !ours(current.as_deref()) {
-            saved.insert(key.clone(), current.clone());
+        let held = match saved.get(key) {
+            None => (!ours(current.as_deref())).then(|| current.clone()),
+            Some(old) if request.pictures.contains(key) => follow(old.as_deref(), current.as_deref()).map(Some),
+            Some(_) => None,
+        };
+        if let Some(held) = held {
+            saved.insert(key.clone(), held);
         }
         changes.push((key, value, current));
     }
@@ -117,6 +126,7 @@ pub fn restore(settings: &dyn Settings, path: &Path, desktop: &str) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    use super::super::{gvariant, nemo};
     use super::*;
     use std::cell::RefCell;
 
@@ -138,6 +148,13 @@ mod tests {
 
         fn value(&self, key: &str) -> Option<String> {
             self.values.borrow().get(key).cloned()
+        }
+
+        fn pick(&self, key: &str, value: Option<&str>) {
+            match value {
+                Some(value) => self.values.borrow_mut().insert(key.to_string(), value.to_string()),
+                None => self.values.borrow_mut().remove(key),
+            };
         }
     }
 
@@ -171,11 +188,21 @@ mod tests {
         value.is_some_and(|value| value.contains("/out/"))
     }
 
-    fn set(fake: &Fake, path: &Path, desktop: &str, wanted: &[(&str, &str)], pictures: &[&str], target: &str) -> Result<Outcome> {
+    fn read(text: &str) -> Option<PathBuf> {
+        let text = text.trim_matches('\'');
+        let text = text.strip_prefix("file://").unwrap_or(text);
+        (text.ends_with(".jpg") || text.ends_with(".png")).then(|| PathBuf::from(text))
+    }
+
+    fn owns(path: &Path) -> bool {
+        path.starts_with("/d/out")
+    }
+
+    fn set(settings: &dyn Settings, path: &Path, desktop: &str, wanted: &[(&str, &str)], pictures: &[&str], target: &str) -> Result<Outcome> {
         let wanted = pairs(wanted);
         let pictures = keys(pictures);
         let request = Request { desktop, wanted: &wanted, pictures: &pictures, target_is_ours: ours(Some(target)) };
-        write(fake, path, &request, |old| old == Some(target), ours)
+        write(settings, path, &request, |old| old == Some(target), ours, |_, current| outside(current, read, owns).map(str::to_string))
     }
 
     #[test]
@@ -284,6 +311,154 @@ mod tests {
         let wanted = pairs(&[("uri", "/d/out/1.jpg")]);
         let pictures = keys(&["uri"]);
         let request = Request { desktop: "gnome", wanted: &wanted, pictures: &pictures, target_is_ours: true };
-        write(&watching, &path, &request, |_| false, ours).unwrap();
+        write(&watching, &path, &request, |_| false, ours, |_, _| None).unwrap();
+    }
+
+    const PICK: &str = "'file:///p/a%20pick.jpg'";
+
+    #[test]
+    fn a_pick_is_followed_and_off_gives_the_pick_back_with_the_first_values_of_the_other_keys() {
+        let path = file(&crate::state::scratch("record-pick"));
+        let fake = Fake::with(&[("uri", "'file:///p/first.jpg'"), ("options", "'scaled'"), ("shade", "'solid'")]);
+        let on = [("uri", "'file:///d/out/1.jpg'"), ("options", "'zoom'"), ("shade", "'solid'")];
+        set(&fake, &path, "gnome", &on, &["uri"], "'file:///d/out/1.jpg'").unwrap();
+        fake.pick("uri", Some(PICK));
+        let again = [("uri", "'file:///d/out/2.jpg'"), ("options", "'zoom'"), ("shade", "'solid'")];
+        assert_eq!(set(&fake, &path, "gnome", &again, &["uri"], "'file:///d/out/2.jpg'").unwrap(), Outcome::Set);
+        let saved = load(&path).desktops["gnome"].clone();
+        assert_eq!((saved.len(), saved["uri"].as_deref(), saved["options"].as_deref()), (2, Some(PICK), Some("'scaled'")));
+        assert_eq!(fake.value("uri").as_deref(), Some("'file:///d/out/2.jpg'"));
+        let off = [("uri", PICK), ("options", "'zoom'"), ("shade", "'solid'")];
+        assert_eq!(set(&fake, &path, "gnome", &off, &["uri"], PICK).unwrap(), Outcome::Restored);
+        assert_eq!((fake.value("uri").as_deref(), fake.value("options").as_deref(), fake.value("shade").as_deref()), (Some(PICK), Some("'scaled'"), Some("'solid'")));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_pick_of_one_picture_key_leaves_the_other_picture_key_with_its_first_saved_value() {
+        let path = file(&crate::state::scratch("record-one"));
+        let fake = Fake::with(&[("uri", "/p/light.jpg"), ("dark", "/p/dark.jpg"), ("options", "scaled")]);
+        set(&fake, &path, "gnome", &[("uri", "/d/out/1.jpg"), ("dark", "/d/out/1.jpg"), ("options", "zoom")], &["uri", "dark"], "/d/out/1.jpg").unwrap();
+        fake.pick("uri", Some("/p/pick.jpg"));
+        set(&fake, &path, "gnome", &[("uri", "/d/out/2.jpg"), ("dark", "/d/out/2.jpg"), ("options", "zoom")], &["uri", "dark"], "/d/out/2.jpg").unwrap();
+        let saved = load(&path).desktops["gnome"].clone();
+        assert_eq!((saved["uri"].as_deref(), saved["dark"].as_deref(), saved["options"].as_deref()), (Some("/p/pick.jpg"), Some("/p/dark.jpg"), Some("scaled")));
+        assert_eq!(set(&fake, &path, "gnome", &[("uri", "/p/pick.jpg"), ("dark", "/p/pick.jpg"), ("options", "zoom")], &["uri", "dark"], "/p/pick.jpg").unwrap(), Outcome::Restored);
+        assert_eq!((fake.value("uri").as_deref(), fake.value("dark").as_deref(), fake.value("options").as_deref()), (Some("/p/pick.jpg"), Some("/p/dark.jpg"), Some("scaled")));
+    }
+
+    #[test]
+    fn a_missing_value_and_a_value_that_is_no_picture_replace_nothing() {
+        let path = file(&crate::state::scratch("record-unread"));
+        let fake = Fake::with(&[("uri", "/p/first.jpg")]);
+        set(&fake, &path, "gnome", &[("uri", "/d/out/1.jpg")], &["uri"], "/d/out/1.jpg").unwrap();
+        for (round, gone) in [None, Some("''"), Some("'#204a87'")].into_iter().enumerate() {
+            fake.pick("uri", gone);
+            let output = format!("/d/out/{}.jpg", round + 2);
+            set(&fake, &path, "gnome", &[("uri", &output)], &["uri"], &output).unwrap();
+            assert_eq!(load(&path).desktops["gnome"]["uri"].as_deref(), Some("/p/first.jpg"), "{gone:?}");
+        }
+    }
+
+    #[test]
+    fn a_value_inside_the_output_folder_replaces_nothing() {
+        let path = file(&crate::state::scratch("record-inside"));
+        let fake = Fake::with(&[("uri", "/p/first.jpg")]);
+        set(&fake, &path, "gnome", &[("uri", "/d/out/1.jpg")], &["uri"], "/d/out/1.jpg").unwrap();
+        set(&fake, &path, "gnome", &[("uri", "/d/out/2.jpg")], &["uri"], "/d/out/2.jpg").unwrap();
+        fake.pick("uri", Some("'file:///d/out/left-by-an-older-run.jpg'"));
+        set(&fake, &path, "gnome", &[("uri", "/d/out/3.jpg")], &["uri"], "/d/out/3.jpg").unwrap();
+        assert_eq!(load(&path).desktops["gnome"]["uri"].as_deref(), Some("/p/first.jpg"));
+    }
+
+    #[test]
+    fn a_key_that_is_no_picture_key_keeps_its_first_saved_value_through_a_pick() {
+        let path = file(&crate::state::scratch("record-other"));
+        let fake = Fake::with(&[("uri", "/p/first.jpg"), ("lock", "/p/lock.jpg"), ("options", "scaled")]);
+        set(&fake, &path, "gnome", &[("uri", "/d/out/1.jpg"), ("lock", "/d/out/1.jpg"), ("options", "zoom")], &["uri"], "/d/out/1.jpg").unwrap();
+        for (key, value) in [("uri", "/p/pick.jpg"), ("lock", "/p/other.jpg"), ("options", "centered")] {
+            fake.pick(key, Some(value));
+        }
+        set(&fake, &path, "gnome", &[("uri", "/d/out/2.jpg"), ("lock", "/d/out/2.jpg"), ("options", "zoom")], &["uri"], "/d/out/2.jpg").unwrap();
+        let saved = load(&path).desktops["gnome"].clone();
+        assert_eq!((saved["uri"].as_deref(), saved["lock"].as_deref(), saved["options"].as_deref()), (Some("/p/pick.jpg"), Some("/p/lock.jpg"), Some("scaled")));
+    }
+
+    #[test]
+    fn the_followed_record_is_on_disk_before_any_setting_changes() {
+        struct Watching<'a> {
+            inner: Fake,
+            path: &'a Path,
+        }
+        impl Settings for Watching<'_> {
+            fn get(&self, key: &str) -> Result<Option<String>> {
+                self.inner.get(key)
+            }
+            fn set(&self, key: &str, value: Option<&str>) -> Result<()> {
+                assert_eq!(load(self.path).desktops["gnome"]["uri"].as_deref(), Some("/p/pick.jpg"));
+                self.inner.set(key, value)
+            }
+        }
+        let path = file(&crate::state::scratch("record-follow-order"));
+        let fake = Fake::with(&[("uri", "/p/first.jpg"), ("options", "scaled")]);
+        set(&fake, &path, "gnome", &[("uri", "/d/out/1.jpg"), ("options", "zoom")], &["uri"], "/d/out/1.jpg").unwrap();
+        fake.pick("uri", Some("/p/pick.jpg"));
+        fake.pick("options", Some("centered"));
+        let watching = Watching { inner: fake, path: &path };
+        set(&watching, &path, "gnome", &[("uri", "/d/out/2.jpg"), ("options", "zoom")], &["uri"], "/d/out/2.jpg").unwrap();
+        assert_eq!(watching.inner.writes.borrow().len(), 4);
+    }
+
+    #[test]
+    fn on_then_off_with_a_pick_left_alone_then_on_and_off_again_ends_on_the_pick() {
+        let path = file(&crate::state::scratch("record-twice"));
+        let fake = Fake::with(&[("uri", "/p/first.jpg"), ("options", "scaled")]);
+        set(&fake, &path, "gnome", &[("uri", "/d/out/1.jpg"), ("options", "zoom")], &["uri"], "/d/out/1.jpg").unwrap();
+        fake.pick("uri", Some("/p/pick.jpg"));
+        let left = load(&path).desktops["gnome"].clone();
+        assert_eq!((left["uri"].as_deref(), left["options"].as_deref(), fake.value("options").as_deref()), (Some("/p/first.jpg"), Some("scaled"), Some("zoom")));
+        set(&fake, &path, "gnome", &[("uri", "/d/out/2.jpg"), ("options", "zoom")], &["uri"], "/d/out/2.jpg").unwrap();
+        let kept = load(&path).desktops["gnome"].clone();
+        assert_eq!((kept["uri"].as_deref(), kept["options"].as_deref()), (Some("/p/pick.jpg"), Some("scaled")));
+        assert_eq!(set(&fake, &path, "gnome", &[("uri", "/p/pick.jpg"), ("options", "zoom")], &["uri"], "/p/pick.jpg").unwrap(), Outcome::Restored);
+        assert_eq!((fake.value("uri").as_deref(), fake.value("options").as_deref()), (Some("/p/pick.jpg"), Some("scaled")));
+        assert!(!path.exists());
+    }
+
+    const LIST: &str = "list";
+
+    fn list(text: &str, connector: &str) -> Option<PathBuf> {
+        nemo::listed_picture(&gvariant::dicts(text), "independent", connector).as_deref().and_then(read)
+    }
+
+    fn set_listed(fake: &Fake, path: &Path, connector: &str, target: &str) -> Result<Outcome> {
+        let now = gvariant::dicts(&fake.value(LIST).unwrap_or_default());
+        let wanted = vec![(LIST.to_string(), gvariant::write_dicts(&nemo::with_picture(&now, "independent", connector, &format!("file://{target}"))))];
+        let pictures = keys(&[LIST]);
+        let request = Request { desktop: "cinnamon", wanted: &wanted, pictures: &pictures, target_is_ours: owns(Path::new(target)) };
+        let shown = |value: Option<&str>| value.and_then(|text| list(text, connector));
+        let merge = |saved: Option<&str>, current: &str| gvariant::write_dicts(&nemo::with_entry(&gvariant::dicts(saved.unwrap_or_default()), &gvariant::dicts(current), "independent", connector));
+        write(fake, path, &request, |old| shown(old).as_deref() == Some(Path::new(target)), |value| shown(value).is_some_and(|path| owns(&path)), |saved, current| outside(current, |text| list(text, connector), owns).map(|current| merge(saved, current)))
+    }
+
+    #[test]
+    fn a_pick_on_one_screen_of_the_cinnamon_list_is_followed_and_the_other_screen_keeps_its_first_picture() {
+        let path = file(&crate::state::scratch("record-list"));
+        let first = "[{'connector': <'DP-1'>, 'index': <0>, 'picture-uri': <'file:///p/a.jpg'>, 'picture-options': <'scaled'>}, {'connector': <'HDMI-1'>, 'index': <1>, 'picture-uri': <'file:///p/b.jpg'>, 'picture-options': <'centered'>}]";
+        let fake = Fake::with(&[(LIST, first)]);
+        set_listed(&fake, &path, "DP-1", "/d/out/a-1.jpg").unwrap();
+        set_listed(&fake, &path, "HDMI-1", "/d/out/b-1.jpg").unwrap();
+        assert_eq!(load(&path).desktops["cinnamon"][LIST].as_deref(), Some(first));
+        let picked = "[{'connector': <'DP-1'>, 'index': <0>, 'picture-uri': <'file:///p/a%20pick.jpg'>, 'picture-options': <'stretched'>}, {'connector': <'HDMI-1'>, 'index': <1>, 'picture-uri': <'file:///d/out/b-1.jpg'>, 'picture-options': <'zoom'>}]";
+        fake.pick(LIST, Some(picked));
+        assert_eq!(set_listed(&fake, &path, "DP-1", "/d/out/a-2.jpg").unwrap(), Outcome::Set);
+        let followed = "[{'connector': <'DP-1'>, 'index': <0>, 'picture-uri': <'file:///p/a%20pick.jpg'>, 'picture-options': <'stretched'>}, {'connector': <'HDMI-1'>, 'index': <1>, 'picture-uri': <'file:///p/b.jpg'>, 'picture-options': <'centered'>}]";
+        assert_eq!(load(&path).desktops["cinnamon"][LIST].as_deref(), Some(followed));
+        assert_eq!((list(&fake.value(LIST).unwrap(), "DP-1"), list(&fake.value(LIST).unwrap(), "HDMI-1")), (Some(PathBuf::from("/d/out/a-2.jpg")), Some(PathBuf::from("/d/out/b-1.jpg"))));
+        assert_eq!(set_listed(&fake, &path, "HDMI-1", "/d/out/b-2.jpg").unwrap(), Outcome::Set);
+        assert_eq!(load(&path).desktops["cinnamon"][LIST].as_deref(), Some(followed));
+        assert_eq!(set_listed(&fake, &path, "DP-1", "/p/a%20pick.jpg").unwrap(), Outcome::Restored);
+        assert_eq!(fake.value(LIST).as_deref(), Some(followed));
+        assert!(!path.exists());
     }
 }

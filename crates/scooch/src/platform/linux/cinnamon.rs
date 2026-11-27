@@ -155,7 +155,9 @@ impl Shell for Cinnamon {
             let (mode, connector) = (background_mode(), screen.id.clone());
             let key = format!("{BACKGROUND} {}", nemo::LIST_KEY);
             let wanted = vec![(key.clone(), gvariant::write_dicts(&nemo::with_picture(&list, &mode, &connector, &gio::path_uri(path))))];
-            settings::write(&Gsettings, "cinnamon", &wanted, std::slice::from_ref(&key), path, move |text| nemo::listed_picture(&gvariant::dicts(text), &mode, &connector).and_then(|uri| gio::location(&uri)))?;
+            let read = |text: &str| nemo::listed_picture(&gvariant::dicts(text), &mode, &connector).and_then(|uri| gio::location(&uri));
+            let merge = |saved: Option<&str>, current: &str| gvariant::write_dicts(&nemo::with_entry(&gvariant::dicts(saved.unwrap_or_default()), &gvariant::dicts(current), &mode, &connector));
+            settings::write_shared(&Gsettings, "cinnamon", &wanted, std::slice::from_ref(&key), path, read, merge)?;
             return Ok(());
         }
         let wanted = vec![(format!("{BACKGROUND} picture-uri"), gvariant::quote(&gio::path_uri(path))), (format!("{BACKGROUND} picture-options"), "'zoom'".to_string())];
