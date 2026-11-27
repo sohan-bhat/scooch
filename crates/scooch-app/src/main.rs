@@ -3,6 +3,8 @@
 mod appimage;
 #[cfg(target_os = "linux")]
 mod children;
+#[cfg(target_os = "linux")]
+mod lab;
 mod life;
 mod lock;
 mod pictures;
@@ -294,6 +296,8 @@ fn made_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>
         config.theme = session::portal_theme();
     }
     let window = tauri::WebviewWindowBuilder::from_config(app, &config)?.build()?;
+    #[cfg(target_os = "linux")]
+    lab::opened(&window);
     if let Ok(theme) = window.theme() {
         paint(&window, theme);
     }
@@ -420,6 +424,8 @@ fn app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R
 
 fn main() {
     #[cfg(target_os = "linux")]
+    lab::started();
+    #[cfg(target_os = "linux")]
     facade::child_env(appimage::changes());
     let arguments: Vec<String> = std::env::args_os().map(|argument| argument.to_string_lossy().into_owned()).collect();
     let background = tray::background(&arguments);
@@ -526,6 +532,11 @@ fn main() {
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { code: None, api, .. } => match life::at_close(facade::is_on(), tray::made(app), update_waiting(app), own_change(app)) {
                 life::Close::Keep => {
+                    #[cfg(target_os = "linux")]
+                    if lab::ends_at_close(app) {
+                        life::mark(life::Exit::Replaced);
+                        return;
+                    }
                     api.prevent_exit();
                     #[cfg(target_os = "macos")]
                     let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
