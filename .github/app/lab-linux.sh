@@ -91,21 +91,29 @@ wakes() {
 
 opens=0
 open_window() {
-  local started took=-1 before
+  local started took=-1 before id="" painter page picture most
   opens=$((opens + 1))
   wait_for 20 registered >/dev/null
   before=$(icon_pid)
+  rm -f "$out/window-id"
   started=$(now_ms)
+  python3 "$here/lab-paint.py" "$out/window-id" "$started" 12000 >"$out/paint-$opens.txt" 2>"$out/paint-$opens.err" &
+  painter=$!
   clean /usr/bin/scooch-app >>"$out/open-$opens.log" 2>&1 &
   while [ $(( $(now_ms) - started )) -lt 60000 ]; do
-    if has_window; then
+    id=$(window)
+    if [ -n "$id" ]; then
       took=$(( $(now_ms) - started ))
       break
     fi
     sleep 0.02
   done
-  line "- opening $opens: the window was mapped $took ms after the request, a start of scooch-app while the icon process $before runs"
-  echo "{\"what\": \"open\", \"number\": $opens, \"ms\": $took, \"pid\": ${before:-0}}" >>"$out/data.jsonl"
+  echo "$id" >"$out/window-id.new"
+  mv "$out/window-id.new" "$out/window-id"
+  wait "$painter"
+  read -r page picture most <"$out/paint-$opens.txt"
+  line "- opening $opens: the window was mapped $took ms after the request, a start of scooch-app while the icon process $before runs, its page showed after ${page:--1} ms and its picture after ${picture:--1} ms, with ${most:-0} colours on three rows at most"
+  echo "{\"what\": \"open\", \"number\": $opens, \"ms\": $took, \"page\": ${page:--1}, \"picture\": ${picture:--1}, \"pid\": ${before:-0}}" >>"$out/data.jsonl"
 }
 
 closes=0
@@ -164,11 +172,20 @@ line "## Memory lab, leg $leg, mode ${SCOOCH_LAB:-unchanged}, on $(. /etc/os-rel
 line
 line "- scooch $(dpkg-query -W -f '${Version}' scooch 2>/dev/null), libwebkit2gtk-4.1-0 $(dpkg-query -W -f '${Version}' libwebkit2gtk-4.1-0 2>/dev/null), libayatana-appindicator3-1 $(dpkg-query -W -f '${Version}' libayatana-appindicator3-1 2>/dev/null), kernel $(uname -r), $(nproc) processors"
 line "- WebKit's compositing mode is $([ -n "${WEBKIT_DISABLE_COMPOSITING_MODE:-}" ] && echo 'disabled and GL is software, as in the probe' || echo 'left as WebKit chooses')"
+plasma_answers() {
+  dbus-send --session --print-reply --dest=org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "string:print(desktops().length)" 2>/dev/null | grep -q 'string "[1-9]'
+}
 if [ "${XDG_CURRENT_DESKTOP:-}" = KDE ] && ! watcher_there; then
   kded=$(command -v kded5 || command -v kded6 || echo /usr/lib/x86_64-linux-gnu/libexec/kf5/kded5)
+  pkill -x plasmashell >/dev/null 2>&1
+  pkill -x "$(basename "$kded")" >/dev/null 2>&1
+  sleep 2
   "$kded" >"$out/kded.log" 2>&1 &
+  plasmashell >"$out/plasmashell-again.log" 2>&1 &
   took=$(wait_for 60 watcher_there) || took=never
-  line "- started $kded so the session has a tray watcher, there after $took s"
+  plasma=$(wait_for 60 plasma_answers) || plasma=never
+  line "- started $kded and plasmashell together, as the tray watcher job does, the watcher was there after $took s and the desktop answered after $plasma s, $(plasmashell --version 2>/dev/null | head -1)"
+  sleep 5
 fi
 set_wallpaper "$photo"
 clean /usr/bin/scooch use "$photo" >"$out/use.txt" 2>&1
