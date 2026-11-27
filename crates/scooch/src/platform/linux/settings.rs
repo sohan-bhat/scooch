@@ -100,11 +100,16 @@ pub fn record_file() -> PathBuf {
 }
 
 pub fn write(settings: &dyn Settings, desktop: &str, wanted: &[(String, String)], pictures: &[String], target: &Path, read: impl Fn(&str) -> Option<PathBuf>) -> Result<Outcome> {
+    write_shared(settings, desktop, wanted, pictures, target, read, |_, current| current.to_string())
+}
+
+pub fn write_shared(settings: &dyn Settings, desktop: &str, wanted: &[(String, String)], pictures: &[String], target: &Path, read: impl Fn(&str) -> Option<PathBuf>, merge: impl Fn(Option<&str>, &str) -> String) -> Result<Outcome> {
     let store = crate::state::Store::open();
     let owned = |value: Option<&str>| value.and_then(&read).is_some_and(|path| store.owns(&path));
     let original = |value: Option<&str>| value.and_then(&read).is_some_and(|old| crate::state::same(&old, target));
+    let follow = |saved: Option<&str>, current: Option<&str>| record::outside(current, &read, |path| store.owns(path)).map(|current| merge(saved, current));
     let request = record::Request { desktop, wanted, pictures, target_is_ours: store.owns(target) };
-    record::write(settings, &record_file(), &request, original, owned)
+    record::write(settings, &record_file(), &request, original, owned, follow)
 }
 
 pub fn scale_setting(schema: &str, key: &str) -> Option<i64> {
