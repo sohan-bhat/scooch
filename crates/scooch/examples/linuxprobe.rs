@@ -3604,8 +3604,17 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     }
 
     fn spawn_watch(p: &mut Probe, program: &Path, log_name: &str) -> Result<u32> {
+        spawn_watch_on(p, program, log_name, None)
+    }
+
+    fn spawn_watch_on(p: &mut Probe, program: &Path, log_name: &str, path: Option<&OsString>) -> Result<u32> {
         let log = fs::OpenOptions::new().create(true).append(true).open(p.out.join(log_name))?;
-        let child = Command::new(program).arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn()?;
+        let mut command = Command::new(program);
+        command.arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let child = command.spawn()?;
         let process = child.id();
         p.daemon = Some(child);
         Ok(process)
@@ -3632,7 +3641,6 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
 
     struct Fixed {
         program: PathBuf,
-        fixed: PathBuf,
         frame: Rect,
         painted_at: (f32, f32),
         calm_at: (f32, f32),
@@ -3652,13 +3660,16 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let moved = move_icon(p, if painted { at.painted_at } else { beyond.unwrap_or(at.calm_at) }).map_err(|error| format!("{error:#}"));
         let started = Instant::now();
         let changed = wait_until(Duration::from_secs(10), || showing_now(linux, screen) != before).map(|_| started.elapsed().as_millis());
-        let now = showing_now(linux, screen);
-        let kind = kind_of(&at.fixed);
-        let named = now.as_ref().is_some_and(|(path, _)| *path == at.fixed);
+        let shown = shown_file(p, linux, screen);
+        let kind = shown.as_deref().map_or("missing", kind_of);
+        let named = shown.is_some();
         if !pixels {
             return (changed.is_some() && named, format!("changed after {changed:?} ms, named the shown file {named}, a {kind}"), kind);
         }
-        let (seen, last) = proven(p, linux, &at.frame, &at.fixed, Duration::from_secs(8));
+        let (seen, last) = match shown.as_deref() {
+            Some(file) => proven(p, linux, &at.frame, file, Duration::from_secs(8)),
+            None => (None, None),
+        };
         let skip = icon_skip(p, linux, &at.frame);
         let shifted = apart(earlier.as_ref().and_then(|old| warm_spot(old, &skip)), last.as_ref().and_then(|last| last.file));
         let line = format!(
@@ -3686,7 +3697,6 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         fs::write(&person, scooch_core::encode_png(&photo_at(width, height, SUBJECT))?)?;
         let mut at = Fixed {
             program: scooch_program()?,
-            fixed: out_folder(p).join(format!("{}-shown.jpg", file_safe(&screen.id))),
             frame,
             painted_at: (frame.x + SUBJECT.0 * frame.w, frame.y + SUBJECT.1 * frame.h),
             calm_at: (frame.x + 0.85 * frame.w, frame.y + 0.25 * frame.h),
@@ -3713,7 +3723,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let (held, line, kind) = fixed_set(p, &linux, &screen, &at, index % 2 == 1, true);
             proofs += usize::from(held);
             kinds.push(kind);
-            if first.is_none() && showing_now(&linux, &screen).is_some_and(|(path, _)| path == at.fixed) {
+            if first.is_none() && shown_file(p, &linux, &screen).is_some() {
                 first = Some((index, dconf_lines(&p.out)));
             }
             p.raw(format!("fixed set {index} {line}"));
@@ -3766,9 +3776,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     fn fixed_cases(p: &mut Probe, linux: &Linux, screen: &Screen, at: &Fixed) -> Result<()> {
         stop_watch(p);
         let id = screen.id.clone();
-        let kind = kind_of(&at.fixed);
-        let counted = at.fixed.with_file_name(format!("{}-7.{}", file_safe(&id), if kind == "png" { "png" } else { "jpg" }));
-        fs::rename(&at.fixed, &counted)?;
+        let shown = shown_file(p, linux, screen).context("the keys and state.json name no shown file after the sets")?;
+        let kind = kind_of(&shown);
+        let counted = shown.with_file_name(format!("{}-7.{}", file_safe(&id), if kind == "png" { "png" } else { "jpg" }));
+        fs::rename(&shown, &counted)?;
         let mut state: serde_json::Value = serde_json::from_slice(&fs::read(p.home.join("state.json"))?)?;
         state["screens"][id.as_str()]["output"] = serde_json::json!(counted);
         state["screens"][id.as_str()]["counter"] = serde_json::json!(7);
@@ -3787,27 +3798,48 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         if !held || !gone || quiet_start != 0 || !still || printed.is_empty() {
             p.fail("the upgrade from a counted name did not move the keys to the shown file with one write");
         }
+        let upgraded = shown_file(p, linux, screen);
+        let stamped = upgraded.as_deref().is_some_and(|path| stamped_name(&id, path));
+        p.line(format!("- upgrade, the name: the shown file after the upgrade is {:?}, a name of the form `{}-shown-<stamp>.jpg` {stamped}", file_name(upgraded.as_deref()), file_safe(&id)));
+        if !stamped {
+            p.fail("the upgrade from a counted name did not take a shown file name of the new form");
+        }
         let navy = p.home.join("probe-navy-picked.jpg");
         let frame = at.frame;
         fs::write(&navy, jpeg(&navy_picture(frame.w as u32, frame.h as u32))?)?;
         let mark = dconf_lines(&p.out).len();
         let uri = format!("'file://{}'", navy.display());
+        let earlier = shown_file(p, linux, screen);
         let picked: Vec<bool> = ["picture-uri", "picture-uri-dark"].iter().map(|key| status_within(Command::new("gsettings").args(["set", gnome::BACKGROUND, key, &uri]), "gsettings set").is_ok_and(|status| status.success())).collect();
         let started = Instant::now();
         let back = wait_until(Duration::from_secs(30), || {
             let _ = scooch::poke::send(process);
             std::thread::sleep(Duration::from_millis(300));
-            showing_now(linux, screen).is_some_and(|(path, _)| path == at.fixed) && state_entries(&p.home).iter().any(|(_, entry)| entry["source"].as_str().is_some_and(|source| source.ends_with("probe-navy-picked.jpg")))
+            shown_file(p, linux, screen).is_some() && state_entries(&p.home).iter().any(|(_, entry)| entry["source"].as_str().is_some_and(|source| source.ends_with("probe-navy-picked.jpg")))
         })
         .map(|_| started.elapsed().as_millis());
-        let (seen, last) = proven(p, linux, &frame, &at.fixed, Duration::from_secs(8));
+        let later = shown_file(p, linux, screen);
+        let (seen, last) = match later.as_deref() {
+            Some(file) => proven(p, linux, &frame, file, Duration::from_secs(8)),
+            None => (None, None),
+        };
         let printed: Vec<String> = dconf_lines(&p.out).into_iter().skip(mark).collect();
-        let ours = printed.iter().filter(|line| line.contains("-shown.jpg")).count();
+        let ours = printed.iter().filter(|line| file_name(later.as_deref()).is_some_and(|name| line.contains(&name))).count();
         p.line(format!("- a picture picked through gsettings as a person would, set {picked:?}: Scooch took it in and named the shown file again after {back:?} ms, the screen matched the file after {seen:?} ms at {:?}%, the watch printed {} lines, {ours} of them naming the shown file, {printed:?}", last.as_ref().map(|last| (last.share * 10.0).round() / 10.0), printed.len()));
         if back.is_none() || seen.is_none() || ours == 0 {
             p.fail("a picture the person picked did not come back as the shown file");
         }
+        let renamed = earlier.is_some() && later.is_some() && earlier != later;
+        let gone = renamed && wait_until(Duration::from_secs(5), || earlier.as_deref().is_some_and(|file| !file.exists())).is_some();
+        p.line(format!("- the pick, the name: the shown file was {:?} before the pick and {:?} after, another name {renamed}, the older file gone within 5 s {gone}", file_name(earlier.as_deref()), file_name(later.as_deref())));
+        if !renamed || !gone {
+            p.fail("a picture the person picked came back under the name the shell had loaded before, or the older shown file stayed");
+        }
+        if let Err(error) = slow_checks(p, linux, screen, at, &navy) {
+            p.fail(format!("the checks with the key write held back stopped, {error:#}"));
+        }
         let mark = dconf_lines(&p.out).len();
+        let shown = shown_file(p, linux, screen);
         let reaper = p.daemon.take().map(|mut child| std::thread::spawn(move || child.wait().ok()));
         let off = finished(Command::new(&at.program).arg("off").env("SCOOCH_HOME", &p.home), "scooch off");
         if let Some(reaper) = reaper {
@@ -3815,7 +3847,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         std::thread::sleep(Duration::from_secs(2));
         let after_off = linux.wallpaper(screen).ok().flatten();
-        let left = at.fixed.exists();
+        let left = shown.as_deref().is_none_or(Path::exists);
         let (seen_off, last_off) = match after_off.as_deref() {
             Some(path) => proven(p, linux, &frame, path, Duration::from_secs(8)),
             None => (None, None),
@@ -3834,8 +3866,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
         let mark = dconf_lines(&p.out).len();
         let on = finished(Command::new(&at.program).env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1"), "scooch on");
-        let back_on = wait_until(Duration::from_secs(60), || showing_now(linux, screen).is_some_and(|(path, _)| path == at.fixed)).map(|time| time.as_millis());
-        let (seen_on, last_on) = proven(p, linux, &frame, &at.fixed, Duration::from_secs(8));
+        let back_on = wait_until(Duration::from_secs(60), || shown_file(p, linux, screen).is_some()).map(|time| time.as_millis());
+        let (seen_on, last_on) = match shown_file(p, linux, screen).as_deref() {
+            Some(file) => proven(p, linux, &frame, file, Duration::from_secs(8)),
+            None => (None, None),
+        };
         let printed_on: Vec<String> = dconf_lines(&p.out).into_iter().skip(mark).collect();
         p.line(format!("- on again: scooch exit {:?}, the shown file named after {back_on:?} ms, the screen matched it after {seen_on:?} ms at {:?}%, the watch printed {printed_on:?}", on.as_ref().map(|out| out.status.code()).map_err(|error| error.to_string()), last_on.as_ref().map(|last| (last.share * 10.0).round() / 10.0)));
         if back_on.is_none() || seen_on.is_none() || printed_on.is_empty() {
@@ -3846,6 +3881,155 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         p.line(format!("- turned off again to end the section, exit {:?}, a login item left {}", stopped.as_ref().map(|out| out.status.code()).map_err(|error| error.to_string()), entry.as_ref().is_some_and(|entry| entry.exists())));
         if let Some(entry) = entry {
             let _ = fs::remove_file(entry);
+        }
+        Ok(())
+    }
+
+    const SLOW_MS: u64 = 150;
+    const SLOW_LOG: &str = "watch-slow.log";
+    const SLOW_PROOF: Duration = Duration::from_secs(20);
+
+    fn slow_path(p: &Probe) -> Result<OsString> {
+        use std::os::unix::fs::PermissionsExt;
+        let real = tool::on_path("gsettings").context("gsettings is not on the PATH")?;
+        let folder = p.home.join("slow");
+        fs::create_dir_all(&folder)?;
+        let script = folder.join("gsettings");
+        fs::write(&script, format!("#!/bin/sh\nsleep {}\nexec '{}' \"$@\"\n", SLOW_MS as f64 / 1000.0, real.display()))?;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+        let mut folders = vec![folder];
+        folders.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+        Ok(std::env::join_paths(folders)?)
+    }
+
+    fn shown_file(p: &Probe, linux: &Linux, screen: &Screen) -> Option<PathBuf> {
+        let named = linux.wallpaper(screen).ok().flatten()?;
+        let recorded = state_entries(&p.home).into_iter().find(|(id, _)| *id == screen.id).and_then(|(_, entry)| entry["output"].as_str().map(PathBuf::from))?;
+        (named == recorded && named.starts_with(out_folder(p))).then_some(named)
+    }
+
+    fn pick_as_person(picture: &Path) -> Vec<bool> {
+        let uri = format!("'file://{}'", picture.display());
+        ["picture-uri", "picture-uri-dark"].iter().map(|key| status_within(Command::new("gsettings").args(["set", gnome::BACKGROUND, key, &uri]), "gsettings set").is_ok_and(|status| status.success())).collect()
+    }
+
+    fn taken_in(p: &Probe, linux: &Linux, screen: &Screen, picture: &str) -> bool {
+        shown_file(p, linux, screen).is_some() && state_entries(&p.home).iter().any(|(_, entry)| entry["source"].as_str().is_some_and(|source| source.ends_with(picture)) && !entry["fingerprint"].is_null())
+    }
+
+    fn file_name(path: Option<&Path>) -> Option<String> {
+        path.and_then(Path::file_name).map(|name| name.to_string_lossy().into_owned())
+    }
+
+    fn stamped_name(screen: &str, path: &Path) -> bool {
+        let stamp = file_name(Some(path)).and_then(|name| name.strip_prefix(&format!("{}-shown-", file_safe(screen))).and_then(|rest| rest.strip_suffix(".jpg")).map(str::to_string));
+        stamp.is_some_and(|stamp| !stamp.is_empty() && stamp.bytes().all(|digit| digit.is_ascii_digit()))
+    }
+
+    fn slow_laps(log: &Path, mark: usize) -> Vec<String> {
+        log_lines(log).into_iter().skip(mark).filter(|line| line.contains(" tick ") && line.contains(", check ")).map(|line| line.split(", sessions hold").next().unwrap_or_default().to_string()).collect()
+    }
+
+    fn slow_proof(p: &Probe, linux: &Linux, frame: &Rect, file: Option<&Path>, others: &[Option<&RgbImage>], shot: &str) -> (Option<u128>, Option<f64>, Vec<Option<f64>>) {
+        let (seen, last) = match file {
+            Some(file) => proven(p, linux, frame, file, SLOW_PROOF),
+            None => (None, None),
+        };
+        let shares = others.iter().map(|other| other.and_then(|other| look(p, linux, frame, other)).map(|seen| (seen.share * 10.0).round() / 10.0)).collect();
+        if seen.is_none() {
+            if let Some(bytes) = capture(p.session, frame).ok().and_then(|shot| scooch_core::encode_png(&shot).ok()) {
+                let _ = fs::write(p.out.join(shot), bytes);
+            }
+        }
+        (seen, last.map(|last| (last.share * 10.0).round() / 10.0), shares)
+    }
+
+    fn slow_checks(p: &mut Probe, linux: &Linux, screen: &Screen, at: &Fixed, navy: &Path) -> Result<()> {
+        stop_watch(p);
+        let path = slow_path(p)?;
+        let (log, frame, home) = (p.out.join(SLOW_LOG), at.frame, p.home.clone());
+        let mark = log_lines(&log).len();
+        let process = spawn_watch_on(p, &at.program, SLOW_LOG, Some(&path))?;
+        let drawn = wait_until(Duration::from_secs(30), || rendered(&home) && log_lines(&log).iter().skip(mark).any(|line| line.contains(" tick "))).map(|time| time.as_millis());
+        let before = shown_file(p, linux, screen);
+        let first = before.as_deref().and_then(|path| scooch_core::open(path).ok());
+        let green = p.home.join("probe-green-picked.jpg");
+        let plain = checker_picture(frame.w as u32, frame.h as u32, GREEN);
+        fs::write(&green, jpeg(&plain)?)?;
+        let mark = log_lines(&log).len();
+        let picked = pick_as_person(&green);
+        let started = Instant::now();
+        let back = wait_until(Duration::from_secs(30), || {
+            let _ = scooch::poke::send(process);
+            std::thread::sleep(Duration::from_millis(300));
+            taken_in(p, linux, screen, "probe-green-picked.jpg")
+        })
+        .map(|_| started.elapsed().as_millis());
+        let after = shown_file(p, linux, screen);
+        let (seen, share, others) = slow_proof(p, linux, &frame, after.as_deref(), &[first.as_ref(), Some(&plain)], "slow-pick-screen.png");
+        let laps = slow_laps(&log, mark);
+        p.line(format!(
+            "- the key write held back, the pick: Scooch runs as {process} with a `gsettings` of its own at the front of its PATH that waits {SLOW_MS} ms and then runs the real tool, and drew after {drawn:?} ms. A second picture, green where every earlier picture is not, picked through gsettings as a person would, set {picked:?}: Scooch took it in and named a shown file again after {back:?} ms, the shown file was {:?} before the pick and {:?} after, the screen matched the file after {seen:?} ms at {share:?}%, the screen then matched the shown file from before the pick at {:?}% and the picture as picked at {:?}%, the laps of that set {laps:?}",
+            file_name(before.as_deref()),
+            file_name(after.as_deref()),
+            others[0],
+            others[1],
+        ));
+        if back.is_none() || seen.is_none() {
+            p.fail("with the key write held back, the picture a person picked was not the picture on screen within 20 s");
+        }
+        let second = after.as_deref().and_then(|path| scooch_core::open(path).ok());
+        let reaper = p.daemon.take().map(|mut child| std::thread::spawn(move || child.wait().ok()));
+        let off = finished(Command::new(&at.program).arg("off").env("SCOOCH_HOME", &p.home), "scooch off");
+        if let Some(reaper) = reaper {
+            let _ = wait_until(Duration::from_secs(10), || reaper.is_finished());
+        }
+        let removed = wait_until(Duration::from_secs(5), || after.as_deref().is_none_or(|file| !file.exists())).is_some();
+        let paper = p.home.join("probe-paper-picked.jpg");
+        let plain = checker_picture(frame.w as u32, frame.h as u32, PAPER);
+        fs::write(&paper, jpeg(&plain)?)?;
+        let picked = pick_as_person(&paper);
+        let (seen_off, _) = proven(p, linux, &frame, &paper, Duration::from_secs(8));
+        let mut state: serde_json::Value = serde_json::from_slice(&fs::read(p.home.join("state.json"))?)?;
+        state["on"] = serde_json::json!(true);
+        fs::write(p.home.join("state.json"), serde_json::to_vec_pretty(&state)?)?;
+        let mark = log_lines(&log).len();
+        let process = spawn_watch_on(p, &at.program, SLOW_LOG, Some(&path))?;
+        let started = Instant::now();
+        let back = wait_until(Duration::from_secs(60), || taken_in(p, linux, screen, "probe-paper-picked.jpg")).map(|_| started.elapsed().as_millis());
+        let again = shown_file(p, linux, screen);
+        let (seen, share, others) = slow_proof(p, linux, &frame, again.as_deref(), &[first.as_ref(), second.as_ref(), Some(&plain)], "slow-on-screen.png");
+        let laps = slow_laps(&log, mark);
+        p.line(format!(
+            "- the key write held back, off and on again in the same session: scooch off exit {:?}, the shown file {:?} removed {removed}, a third picture, pale where every earlier picture is not, picked through gsettings while Scooch was off, set {picked:?}, on screen after {seen_off:?} ms. Scooch turned on again by `on` in its state file and a watch of its own as {process} with the slow `gsettings`: a shown file named after {back:?} ms, {:?}, the screen matched the file after {seen:?} ms at {share:?}%, the screen then matched the shown file from before the first slow pick at {:?}%, the shown file from before the off at {:?}% and the picture as picked at {:?}%, the laps of that set {laps:?}",
+            off.as_ref().map(|out| out.status.code()).map_err(|error| error.to_string()),
+            file_name(after.as_deref()),
+            file_name(again.as_deref()),
+            others[0],
+            others[1],
+            others[2],
+        ));
+        if !off.as_ref().is_ok_and(|out| out.status.success()) || back.is_none() || seen.is_none() {
+            p.fail("with the key write held back, Scooch turned off and on again did not put the shown file on screen within 20 s");
+        }
+        let renamed = after.is_some() && again.is_some() && after != again;
+        p.line(format!("- off and on again, the name: the shown file was {:?} before the off and {:?} after the on, another name {renamed}", file_name(after.as_deref()), file_name(again.as_deref())));
+        if !renamed {
+            p.fail("Scooch turned off and on again named the shown file as before the off");
+        }
+        stop_watch(p);
+        let process = spawn_watch(p, &at.program, "watch-fixed.log")?;
+        let picked = pick_as_person(navy);
+        let started = Instant::now();
+        let back = wait_until(Duration::from_secs(30), || {
+            let _ = scooch::poke::send(process);
+            std::thread::sleep(Duration::from_millis(300));
+            taken_in(p, linux, screen, "probe-navy-picked.jpg")
+        })
+        .map(|_| started.elapsed().as_millis());
+        p.line(format!("- the navy picture picked again through gsettings, set {picked:?}, with Scooch at its own pace again as {process}, so the checks from here on stand where they stood: taken in after {back:?} ms, the shown file {:?}", file_name(shown_file(p, linux, screen).as_deref())));
+        if back.is_none() {
+            p.fail("the navy picture picked again after the checks with the key write held back was not taken in");
         }
         Ok(())
     }
@@ -3862,11 +4046,19 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         p.home.join("person.png")
     }
 
+    const NAVY: [[u8; 3]; 2] = [[30, 42, 70], [24, 34, 58]];
+    const GREEN: [[u8; 3]; 2] = [[34, 120, 52], [28, 108, 44]];
+    const PAPER: [[u8; 3]; 2] = [[206, 210, 214], [196, 200, 204]];
+
     fn navy_picture(width: u32, height: u32) -> RgbImage {
+        checker_picture(width, height, NAVY)
+    }
+
+    fn checker_picture(width: u32, height: u32, ground: [[u8; 3]; 2]) -> RgbImage {
         let (w, h) = (width.max(1) as f32, height.max(1) as f32);
         RgbImage::from_fn(width, height, |x, y| {
             let distance = ((x as f32 - 0.5 * w).powi(2) + (y as f32 - 0.5 * h).powi(2)).sqrt();
-            if distance < h / 7.0 { [245, 196, 92].into() } else if (x / 24 + y / 24) % 2 == 0 { [30, 42, 70].into() } else { [24, 34, 58].into() }
+            if distance < h / 7.0 { [245, 196, 92].into() } else { ground[((x / 24 + y / 24) % 2) as usize].into() }
         })
     }
 
