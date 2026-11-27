@@ -6118,6 +6118,12 @@ pub mod tests {
         fake.writes.load(Ordering::SeqCst)
     }
 
+    fn pick(fake: &Fake, original: &Path, name: &str) -> PathBuf {
+        let picked = picture(original.parent().unwrap(), name);
+        fake.show("main", &picked);
+        picked
+    }
+
     fn stamped(daemon: &Daemon, shown: &Path) -> bool {
         daemon.store.shown_stamp("main", shown).is_some_and(|stamp| stamp > 0)
     }
@@ -6535,5 +6541,178 @@ pub mod tests {
         assert_eq!(outcome(&daemon.tick()), Outcome::Kept);
         assert_eq!(std::fs::read(&fixed).unwrap(), painted);
         assert!(daemon.store.load().screens["main"].painted);
+    }
+
+    #[test]
+    fn a_set_while_the_desktop_names_the_shown_file_keeps_the_name_and_writes_no_key() {
+        let (daemon, fake, original) = gnome_rig("shown-kept");
+        let source = std::fs::read(&original).unwrap();
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let shown = fixed_of(&daemon);
+        assert!(stamped(&daemon, &shown) && jpeg(&shown));
+        for (icons, wanted) in [(Vec::new(), Outcome::Plain), (vec![subject()], Outcome::Rendered), (Vec::new(), Outcome::Plain)] {
+            fake.place(icons);
+            assert_eq!(outcome(&daemon.tick()), wanted);
+            assert_eq!((fixed_of(&daemon), fake.showing("main"), writes(&fake)), (shown.clone(), shown.clone(), 1));
+            assert_eq!(files_in(&daemon.store.out()), vec![shown.clone()]);
+            assert_eq!(std::fs::read(&shown).unwrap() == source, wanted == Outcome::Plain);
+        }
+    }
+
+    #[test]
+    fn a_set_after_the_desktop_named_another_picture_takes_a_name_no_earlier_set_used_and_the_older_file_goes_once_the_keys_moved() {
+        let (daemon, fake, original) = gnome_rig("shown-fresh");
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let mut used = vec![fixed_of(&daemon)];
+        for round in 0..3 {
+            let picked = pick(&fake, &original, &format!("picked-{round}.png"));
+            let seen = Arc::new(Mutex::new(None));
+            let (noted, older) = (seen.clone(), used[round].clone());
+            *fake.on_set.lock().unwrap() = Some(Box::new(move || *noted.lock().unwrap() = Some(older.is_file())));
+            assert_eq!(outcome(&daemon.tick()), Outcome::Rendered, "{round}");
+            let shown = fixed_of(&daemon);
+            assert!(!used.contains(&shown) && stamped(&daemon, &shown), "{round} took {} after {used:?}", shown.display());
+            assert_eq!((fake.showing("main"), writes(&fake), daemon.store.load().screens["main"].source.clone()), (shown.clone(), round + 2, picked), "{round}");
+            assert_eq!(*seen.lock().unwrap(), Some(true), "{round} the older shown file was gone before the keys moved");
+            assert_eq!(files_in(&daemon.store.out()), vec![shown.clone()], "{round} the older shown file stayed");
+            used.push(shown);
+        }
+    }
+
+    #[test]
+    fn off_and_on_again_gives_a_new_name_also_when_the_state_lost_the_screen() {
+        let (daemon, fake, _) = gnome_rig("shown-off-on");
+        *daemon.clock.lock().unwrap() = Some(1_700_000_000_000);
+        fake.place(vec![subject()]);
+        let mut used: Vec<PathBuf> = Vec::new();
+        for lost in [false, true, false] {
+            assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+            let shown = fixed_of(&daemon);
+            assert!(!used.contains(&shown) && stamped(&daemon, &shown), "took {} after {used:?}", shown.display());
+            assert_eq!(fake.showing("main"), shown);
+            assert!(matches!(crate::commands::wind_down(fake.as_ref(), &daemon.store).unwrap(), crate::commands::Off::Done(_)));
+            assert!(!shown.exists() && daemon.store.load().screens.is_empty());
+            used.push(shown);
+            if lost {
+                std::fs::remove_file(daemon.store.state_file()).unwrap();
+            }
+            let mut state = daemon.store.load();
+            (state.on, state.options.pads) = (true, 0.0);
+            daemon.store.save(&state).unwrap();
+        }
+        assert_eq!((used.len(), writes(&fake)), (3, 6));
+    }
+
+    #[test]
+    fn two_key_writing_sets_inside_one_millisecond_give_two_names() {
+        let (daemon, fake, original) = gnome_rig("shown-one-ms");
+        *daemon.clock.lock().unwrap() = Some(1_700_000_000_000);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let mut used = vec![fixed_of(&daemon)];
+        for round in 0..3 {
+            pick(&fake, &original, &format!("picked-{round}.png"));
+            assert_eq!(outcome(&daemon.tick()), Outcome::Rendered, "{round}");
+            let shown = fixed_of(&daemon);
+            assert!(!used.contains(&shown) && stamped(&daemon, &shown), "{round} took {} after {used:?}", shown.display());
+            used.push(shown);
+        }
+        assert_eq!(writes(&fake), 4);
+    }
+
+    #[test]
+    fn the_two_calls_for_a_name_inside_one_set_agree_and_the_set_takes_that_name() {
+        let (daemon, fake, original) = gnome_rig("shown-agree");
+        let (entry, person) = (Entry::new(&original), (Some(original.as_path()), Some(original.as_path())));
+        let (_, first) = daemon.fresh_name("main", &entry, "jpg", person);
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(daemon.fresh_name("main", &entry, "jpg", person).1, first);
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert_eq!((fixed_of(&daemon), fake.showing("main")), (first.clone(), first.clone()));
+        let entry = daemon.store.load().screens["main"].clone();
+        assert_eq!(daemon.fresh_name("main", &entry, "jpg", (Some(first.as_path()), Some(first.as_path()))).1, first);
+        let picked = pick(&fake, &original, "picked.png");
+        let after = (Some(picked.as_path()), Some(picked.as_path()));
+        let (_, second) = daemon.fresh_name("main", &entry, "jpg", after);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(second != first && stamped(&daemon, &second));
+        assert_eq!(daemon.fresh_name("main", &entry, "jpg", after).1, second);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        assert_eq!((fixed_of(&daemon), fake.showing("main")), (second.clone(), second));
+    }
+
+    #[test]
+    fn an_install_whose_keys_name_the_old_fixed_file_keeps_that_name_through_an_icon_move_and_leaves_it_at_the_next_key_write() {
+        let (daemon, fake, original) = gnome_rig("shown-old-name");
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let old = daemon.store.out().join("main-shown.jpg");
+        std::fs::rename(fixed_of(&daemon), &old).unwrap();
+        let mut state = daemon.store.load();
+        state.screens.get_mut("main").unwrap().output = Some(old.clone());
+        daemon.store.save(&state).unwrap();
+        fake.show("main", &old);
+        let mut upgraded = Daemon::new(fake.clone(), daemon.store.clone());
+        upgraded.grace = Duration::ZERO;
+        assert_eq!(outcome(&upgraded.tick()), Outcome::Unchanged);
+        fake.place(Vec::new());
+        assert_eq!(outcome(&upgraded.tick()), Outcome::Plain);
+        assert_eq!((fixed_of(&upgraded), fake.showing("main"), writes(&fake)), (old.clone(), old.clone(), 1));
+        assert_eq!(std::fs::read(&old).unwrap(), std::fs::read(&original).unwrap());
+        assert_eq!(files_in(&upgraded.store.out()), vec![old.clone()]);
+        fake.place(vec![subject()]);
+        pick(&fake, &original, "picked.png");
+        assert_eq!(outcome(&upgraded.tick()), Outcome::Rendered);
+        let shown = fixed_of(&upgraded);
+        assert!(stamped(&upgraded, &shown) && !old.exists());
+        assert_eq!((fake.showing("main"), writes(&fake), files_in(&upgraded.store.out())), (shown.clone(), 2, vec![shown]));
+    }
+
+    #[test]
+    fn a_set_that_fails_after_the_rename_leaves_no_stray_shown_file_and_no_fingerprint() {
+        let (daemon, fake, original) = gnome_rig("shown-fail");
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let first = fixed_of(&daemon);
+        let picked = pick(&fake, &original, "picked.png");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (noted, out) = (seen.clone(), daemon.store.out());
+        *fake.on_set.lock().unwrap() = Some(Box::new(move || *noted.lock().unwrap() = files_in(&out)));
+        *fake.silent_set.lock().unwrap() = 1;
+        let failed = daemon.tick();
+        assert!(failed.silent, "{:?}", failed.problem);
+        let renamed = seen.lock().unwrap().clone();
+        assert!(renamed.len() == 2 && renamed.contains(&first) && renamed.iter().all(|path| stamped(&daemon, path)), "{renamed:?}");
+        let entry = daemon.store.load().screens["main"].clone();
+        assert_eq!((entry.fingerprint, entry.placement, entry.output), (None, None, Some(first.clone())));
+        assert_eq!((fake.showing("main"), files_in(&daemon.store.out()), writes(&fake)), (picked, vec![first.clone()], 1));
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let shown = fixed_of(&daemon);
+        assert!(!renamed.contains(&shown) && stamped(&daemon, &shown));
+        assert_eq!((fake.showing("main"), files_in(&daemon.store.out()), writes(&fake)), (shown.clone(), vec![shown], 2));
+    }
+
+    #[test]
+    fn a_key_write_that_landed_without_an_answer_keeps_the_file_the_keys_name() {
+        let (daemon, fake, original) = gnome_rig("shown-landed");
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let first = fixed_of(&daemon);
+        pick(&fake, &original, "picked.png");
+        let (desk, store) = (fake.clone(), daemon.store.clone());
+        *fake.on_set.lock().unwrap() = Some(Box::new(move || desk.show("main", &store.load().screens["main"].output.clone().unwrap())));
+        *fake.silent_set.lock().unwrap() = 1;
+        assert!(daemon.tick().silent);
+        let landed = fake.showing("main");
+        assert!(landed != first && stamped(&daemon, &landed) && jpeg(&landed) && jpeg(&first));
+        let entry = daemon.store.load().screens["main"].clone();
+        assert_eq!((entry.fingerprint, entry.placement), (None, None));
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let shown = fixed_of(&daemon);
+        assert!(shown != first && shown != landed);
+        assert_eq!((fake.showing("main"), files_in(&daemon.store.out())), (shown.clone(), vec![shown]));
     }
 }
