@@ -32,23 +32,23 @@ window() { xdotool search --onlyvisible --name '^Scooch$' 2>/dev/null | head -1;
 has_window() { [ -n "$(window)" ]; }
 icon_only() { ! has_window && registered; }
 other_there() { tray items | grep -q 'probe-other'; }
+tray_spots() { panel buttons | tr ';' '\n' | grep ' push button||$' | cut -d' ' -f1 | awk -F, '$2 < 40 && $3 > 0 && $3 < 60 { printf "%d,%d\n", $1 + $3 / 2, $2 + $4 / 2 }'; }
+shot() { import -window root -crop "20x20+$(( $1 - 10 ))+$(( $2 - 10 ))" +repage "$3" 2>/dev/null; }
+far() { compare -metric RMSE "$1" "$2" null: 2>&1 | sed -n 's/.*(\([0-9.e-]*\)).*/\1/p'; }
+shots=0
 places() {
-  local entry spot shown told=""
-  for entry in $(panel buttons | tr ';' '\n' | grep ' push button||$' | cut -d' ' -f1); do
-    spot=$(echo "$entry" | awk -F, '$3 > 0 && $3 < 60 { printf "%d %d", $1 + $3 / 2, $2 + $4 / 2 }')
-    [ -n "$spot" ] || continue
-    xdotool mousemove $spot click 1
-    sleep 1.5
-    shown=$(panel menu)
-    xdotool key Escape
-    sleep 0.5
-    case "$shown" in
-      *"Open Scooch"*) told="$told Scooch at x ${spot% *};" ;;
-      *"Probe other"*) told="$told the other item at x ${spot% *};" ;;
-      *) told="$told an item with the menu $shown at x ${spot% *};" ;;
-    esac
+  local spot x y told="" d
+  xdotool mousemove 300 300
+  sleep 1
+  for spot in $(tray_spots); do
+    x=${spot%,*}
+    y=${spot#*,}
+    shots=$((shots + 1))
+    shot "$x" "$y" "$out/button-$shots.png"
+    d=$(far "$out/scooch-alone.png" "$out/button-$shots.png")
+    told="$told the button at x $x differs from the picture of the Scooch icon by ${d:-an unread share};"
   done
-  echo "${told:- no small button of the panel answered}"
+  echo "${told:- no button of the tray found} known items $(xfconf-query -c xfce4-panel -p "$(xfconf-query -c xfce4-panel -l 2>/dev/null | grep 'known-items$' | head -1)" 2>/dev/null | grep -v '^Value\|^$' | tr '\n' ',')"
 }
 hand_over() {
   local before
@@ -96,6 +96,11 @@ scooch use "$photo" >"$out/use.txt" 2>&1
 wait_for 40 registered
 sleep 3
 line "- $(xfce4-panel --version 2>/dev/null | head -1), Scooch on, the tray's items $(tray items)"
+xdotool mousemove 300 300
+sleep 1
+alone=$(tray_spots | head -1)
+shot "${alone%,*}" "${alone#*,}" "$out/scooch-alone.png"
+line "- with Scooch as the only item the tray holds $(tray_spots | wc -l) button at x ${alone%,*}, kept as scooch-alone.png, and a later button is the Scooch icon where the share of difference is near 0"
 
 line
 line "### Scooch registered first, another item second"

@@ -515,7 +515,8 @@ jobs:
           XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
           export XDG_RUNTIME_DIR
-          PASS=missing dbus-run-session -- bash .github/lab/gnome-indicator.sh .github/app/probe-gnome.sh seen || echo "probe-gnome.sh ended with $?" | tee -a seen/report.md
+          timeout --signal=KILL 150 env PASS=missing dbus-run-session -- bash .github/lab/gnome-indicator.sh .github/app/probe-gnome.sh seen || echo "- probe-gnome.sh did not end by itself and the lab ended the probe after 150 s with $?, app processes then $(ps -o pid=,args= -C scooch-app | tr -s ' ' | tr '\n' ';')" | tee -a seen/report.md
+          pkill -x dbus-daemon || true
           pkill -x scooch-app || true
           pkill -x gnome-shell || true
           sleep 3
