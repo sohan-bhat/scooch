@@ -9,6 +9,10 @@ on:
       - ".github/linux/**"
   workflow_dispatch:
 
+concurrency:
+  group: linux-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'push' }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
