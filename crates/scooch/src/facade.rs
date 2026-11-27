@@ -1,6 +1,6 @@
 use crate::commands::{self, FirstRun, Off};
 use crate::platform::{self, Desktop, Screen};
-use crate::state::{self, Entry, Store};
+use crate::state::{self, Entry, State, Store};
 use crate::{daemon, poke, scene};
 use anyhow::{anyhow, bail, Result};
 use scooch_core::{Options, Rect, Scene};
@@ -387,6 +387,35 @@ fn problem_of(view: &View, layout: Option<&Layout>, desktop: &dyn Desktop, store
     None
 }
 
+fn monitors(state: &State, layout: &Layout, desktop: &dyn Desktop) -> (Vec<Monitor>, Counted, bool, Option<PathBuf>) {
+    let snapshot_icons = if state.on || cfg!(target_os = "macos") { None } else { desktop.snapshot().ok().map(|snapshot| snapshot.icons) };
+    let lead = layout.arranged.first().and_then(|id| state.screens.get(id)).map(|entry| entry.shown().to_path_buf());
+    let (mut monitors, mut counted, mut flip_helps, mut current) = (Vec::new(), Counted { icons: 0, screens: 0 }, false, None);
+    for screen in &layout.all {
+        let entry = state.screens.get(&screen.id).filter(|_| state.on);
+        let picture = match entry {
+            Some(entry) => Some(entry.shown().to_path_buf()),
+            None if state.on => lead.clone(),
+            None => desktop.wallpaper(screen).ok().flatten(),
+        };
+        let places = match (&snapshot_icons, entry) {
+            (Some(icons), _) => Some(local(screen, icons)),
+            (None, Some(entry)) => places_of(Some(entry), state.on),
+            (None, None) => None,
+        };
+        if let Some(entry) = entry {
+            counted.icons += entry.icons;
+            counted.screens += 1;
+            flip_helps |= entry.flip_helps && !state.options.mirror;
+            if current.is_none() {
+                current = Some(entry.source.clone());
+            }
+        }
+        monitors.push(monitor(screen, picture, places));
+    }
+    (monitors, counted, flip_helps, current)
+}
+
 pub fn view() -> View {
     let store = Store::open();
     let state = store.load();
@@ -421,31 +450,8 @@ pub fn view() -> View {
     };
     let layout = layout(desktop.as_ref()).ok();
     if let Some(layout) = &layout {
-        let snapshot_icons = if state.on || cfg!(target_os = "macos") { None } else { desktop.snapshot().ok().map(|snapshot| snapshot.icons) };
-        let lead = layout.arranged.first().and_then(|id| state.screens.get(id)).map(|entry| entry.shown().to_path_buf());
-        let mut counted = Counted { icons: 0, screens: 0 };
-        for screen in &layout.all {
-            let entry = state.screens.get(&screen.id).filter(|_| state.on);
-            let picture = match entry {
-                Some(entry) => Some(entry.shown().to_path_buf()),
-                None if state.on => lead.clone(),
-                None => desktop.wallpaper(screen).ok().flatten(),
-            };
-            let places = match (&snapshot_icons, entry) {
-                (Some(icons), _) => Some(local(screen, icons)),
-                (None, Some(entry)) => places_of(Some(entry), state.on),
-                (None, None) => None,
-            };
-            if let Some(entry) = entry {
-                counted.icons += entry.icons;
-                counted.screens += 1;
-                view.flip_helps |= entry.flip_helps && !state.options.mirror;
-                if view.current.is_none() {
-                    view.current = Some(entry.source.clone());
-                }
-            }
-            view.monitors.push(monitor(screen, picture, places));
-        }
+        let counted;
+        (view.monitors, counted, view.flip_helps, view.current) = monitors(&state, layout, desktop.as_ref());
         if view.current.is_none() {
             view.current = view.monitors.iter().filter_map(|monitor| monitor.picture.clone()).find(|path| !store.owns(path));
         }
@@ -831,6 +837,38 @@ mod tests {
         assert_eq!((missing.picture.as_deref(), missing.stamp), (Some(gone.as_path()), None));
         let sent = serde_json::to_value(&missing).unwrap();
         assert_eq!((&sent["picture"], &sent["stamp"]), (&serde_json::json!(gone), &serde_json::Value::Null));
+    }
+
+    fn seen(monitors: &[Monitor]) -> Vec<(&str, Option<&Path>, Option<u64>)> {
+        monitors.iter().map(|monitor| (monitor.id.as_str(), monitor.picture.as_deref(), monitor.stamp)).collect()
+    }
+
+    #[test]
+    fn a_screen_that_is_off_gives_a_monitor_with_the_desktops_picture_and_its_stamp() {
+        let main = crate::daemon::tests::screen("main", 0.0, 1.0);
+        let (daemon, fake, original) = crate::daemon::tests::rig("facade-off", vec![main.clone()]);
+        touch(&original, 1_700_000_000_123);
+        let state = State { on: false, ..daemon.store.load() };
+        let layout = Layout { all: vec![main], arranged: vec!["main".into()] };
+        let (shown, counted, flip_helps, current) = monitors(&state, &layout, fake.as_ref());
+        assert_eq!(seen(&shown), [("main", Some(original.as_path()), Some(1_700_000_000_123))]);
+        assert_eq!((counted, flip_helps, current), (Counted { icons: 0, screens: 0 }, false, None));
+    }
+
+    #[test]
+    fn a_screen_that_is_on_gives_a_monitor_with_its_shown_file_and_that_files_stamp() {
+        let (main, side) = (crate::daemon::tests::screen("main", 0.0, 1.0), crate::daemon::tests::screen("side", 160.0, 1.0));
+        let (daemon, fake, original) = crate::daemon::tests::rig("facade-on", vec![main.clone(), side.clone()]);
+        let made = original.with_file_name("main-shown.jpg");
+        std::fs::write(&made, b"made").unwrap();
+        touch(&made, 1_700_000_000_456);
+        touch(&original, 1_700_000_000_123);
+        let mut state = daemon.store.load();
+        state.screens.insert("main".into(), Entry { output: Some(made.clone()), icons: 3, flip_helps: true, ..Entry::new(&original) });
+        let layout = Layout { all: vec![main, side], arranged: vec!["main".into()] };
+        let (shown, counted, flip_helps, current) = monitors(&state, &layout, fake.as_ref());
+        assert_eq!(seen(&shown), [("main", Some(made.as_path()), Some(1_700_000_000_456)), ("side", Some(made.as_path()), Some(1_700_000_000_456))]);
+        assert_eq!((counted, flip_helps, current.as_deref()), (Counted { icons: 3, screens: 1 }, true, Some(original.as_path())));
     }
 
     #[test]
