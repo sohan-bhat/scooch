@@ -198,6 +198,7 @@ mod tests {
     fn a_limited_run_names_its_sections_and_says_what_left_the_others_out() {
         assert_eq!(limited(Some("1, 6b"), &TITLES).as_deref(), Some("- **limited run** this run holds only the sections 1 Session facts, 6b The shown file stays, and the others were left out by `SCOOCH_PROBE_SECTIONS`"));
         assert_eq!(TITLES.map(|title| chosen(Some("1, 6b"), title)), [true, false, true]);
+        assert_eq!(TITLES.map(|title| chosen(Some("6"), title)), [false, true, false]);
         assert_eq!(limited(Some("9"), &TITLES).as_deref(), Some("- **limited run** this run holds no section, and the others were left out by `SCOOCH_PROBE_SECTIONS`"));
     }
 }
