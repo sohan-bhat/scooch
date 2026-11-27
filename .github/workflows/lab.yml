@@ -449,7 +449,11 @@ jobs:
           code=0
           PATH="$RUNNER_TEMP/x-server:$PATH" dbus-run-session -- bash .github/linux/xfce.sh .github/app/probe-linux.sh appprobe || code=$?
           pkill -x Xvfb || true
+          pkill -x scooch-app || true
+          pkill -x scooch || true
           sleep 2
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ./built/*.deb
+          rm -rf "$HOME/.local/share/scooch" "$HOME/.local/share/me.sohanbhat.scooch.window" "$HOME/.config/autostart/scooch.desktop"
           gap=0
           XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
