@@ -627,20 +627,25 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             lost: None,
         };
         held(&LINES).extend(probe.report.iter().cloned());
-        let sections: [(&str, Check); 11] = [
+        let sections: [(&str, Check); 12] = [
             ("1 Session facts", facts),
             ("2 Read", read),
             ("3 Geometry truth from pixels", geometry),
             ("4 Move and events", events),
             ("5 Wallpaper", wallpaper),
             ("6 End to end", end_to_end),
+            ("6b The shown file stays", fixed_file),
             ("7 Two monitors", monitors),
             ("7b Desktop after the drop", after_drop),
             ("7c The AppImage thrown away", thrown_away),
             ("7d The final off", final_off_check),
             ("8 Cleanup", cleanup),
         ];
+        let only = std::env::var("SCOOCH_PROBE_SECTIONS").ok().filter(|only| !only.trim().is_empty());
         for (title, check) in sections {
+            if only.as_ref().is_some_and(|only| !only.split(',').any(|wanted| title.starts_with(&format!("{} ", wanted.trim())))) {
+                continue;
+            }
             probe.section(title, check);
             if probe.lost.is_some() {
                 break;
@@ -3176,7 +3181,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         for round in 1..=5 {
             let before = {
                 let _step = doing(format!("move {round} reads the wallpaper before"), Duration::ZERO);
-                linux.wallpaper(screen).ok().flatten()
+                showing_now(linux, screen)
             };
             let rects_before = icons(linux);
             let seen = {
@@ -3193,7 +3198,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             let dropped = wall();
             let could = tried.is_ok();
             let detail = tried.unwrap_or_else(|error| format!("failed {error:#}"));
-            let changed = wait_until(Duration::from_secs(10), || linux.wallpaper(screen).ok().flatten() != before);
+            let changed = wait_until(Duration::from_secs(10), || showing_now(linux, screen) != before);
             let latency = changed.map(|_| moved.elapsed().as_millis());
             std::thread::sleep(if plasma5 { Duration::from_millis(2600) } else { Duration::from_millis(1800) });
             let moved_icons = icons(linux) != rects_before;
@@ -3294,6 +3299,371 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         Ok(())
     }
 
+    const FIXED_SETS: usize = 50;
+    const FIXED_BAR: f64 = 90.0;
+    const KEY_WATCHES: [(&str, &str); 2] = [("/org/gnome/desktop/background/", "dconf-background.txt"), ("/org/gnome/desktop/interface/", "dconf-interface.txt")];
+
+    struct Watching(Vec<Child>);
+
+    impl Drop for Watching {
+        fn drop(&mut self) {
+            for child in &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn watch_keys(out: &Path) -> Result<Watching> {
+        let mut children = Vec::new();
+        for (path, name) in KEY_WATCHES {
+            let file = fs::File::create(out.join(name))?;
+            children.push(Command::new("stdbuf").args(["-oL", "-eL", "dconf", "watch", path]).stdin(Stdio::null()).stdout(file.try_clone()?).stderr(file).spawn()?);
+        }
+        Ok(Watching(children))
+    }
+
+    fn dconf_lines(out: &Path) -> Vec<String> {
+        KEY_WATCHES.iter().flat_map(|(_, name)| log_lines(&out.join(name))).filter(|line| !line.trim().is_empty()).collect()
+    }
+
+    fn warm_spot(image: &RgbImage, skip: &[Rect]) -> Option<(f32, f32)> {
+        let (mut sx, mut sy, mut weight) = (0.0f64, 0.0f64, 0.0f64);
+        for (x, y, pixel) in image.enumerate_pixels() {
+            let (fx, fy) = (x as f32, y as f32);
+            if skip.iter().any(|rect| fx >= rect.x && fx < rect.x + rect.w && fy >= rect.y && fy < rect.y + rect.h) {
+                continue;
+            }
+            let [r, _, b] = pixel.0;
+            let warmth = f64::from(r) - f64::from(b);
+            if r > 150 && warmth > 60.0 {
+                sx += f64::from(fx) * warmth;
+                sy += f64::from(fy) * warmth;
+                weight += warmth;
+            }
+        }
+        (weight > 2000.0).then(|| ((sx / weight) as f32, (sy / weight) as f32))
+    }
+
+    fn apart(a: Option<(f32, f32)>, b: Option<(f32, f32)>) -> Option<f32> {
+        let (a, b) = (a?, b?);
+        Some((a.0 - b.0).hypot(a.1 - b.1))
+    }
+
+    struct Look {
+        share: f64,
+        screen: Option<(f32, f32)>,
+        file: Option<(f32, f32)>,
+    }
+
+    impl Look {
+        fn holds(&self) -> bool {
+            self.share >= FIXED_BAR && apart(self.screen, self.file).is_some_and(|gap| gap <= 16.0)
+        }
+    }
+
+    fn look(p: &Probe, linux: &Linux, frame: &Rect, file: &RgbImage) -> Option<Look> {
+        let shot = capture(p.session, frame).ok()?;
+        let scale = factor(p);
+        let mut skip: Vec<Rect> = icons(linux).iter().map(|rect| grown(&physical(rect, scale), 8.0)).map(|rect| Rect { x: rect.x - frame.x, y: rect.y - frame.y, ..rect }).collect();
+        skip.push(Rect { x: 0.0, y: 0.0, w: frame.w, h: 64.0 * scale });
+        skip.push(Rect { x: 0.0, y: frame.h - 64.0 * scale, w: frame.w, h: 64.0 * scale });
+        Some(Look { share: matching(&shot, file, &skip)?, screen: warm_spot(&shot, &skip), file: warm_spot(file, &skip) })
+    }
+
+    fn proven(p: &Probe, linux: &Linux, frame: &Rect, file: &Path, limit: Duration) -> (Option<u128>, Option<Look>) {
+        let Ok(picture) = scooch_core::open(file) else { return (None, None) };
+        let started = Instant::now();
+        let mut last = None;
+        while started.elapsed() < limit {
+            if let Some(seen) = look(p, linux, frame, &picture) {
+                let holds = seen.holds();
+                last = Some(seen);
+                if holds {
+                    return (Some(started.elapsed().as_millis()), last);
+                }
+            }
+            progress();
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        (None, last)
+    }
+
+    fn kind_of(path: &Path) -> &'static str {
+        match fs::read(path) {
+            Ok(bytes) if bytes.starts_with(&[0x89, b'P', b'N', b'G']) => "png",
+            Ok(bytes) if bytes.starts_with(&[0xff, 0xd8]) => "jpeg",
+            Ok(_) => "other",
+            Err(_) => "missing",
+        }
+    }
+
+    fn shell_answers() -> bool {
+        (0..2).any(|_| status_within(Command::new("dbus-send").args(["--session", "--print-reply", "--reply-timeout=3000", "--dest=org.gnome.Shell", "/org/gnome/Shell", "org.freedesktop.DBus.Properties.Get", "string:org.gnome.Shell", "string:ShellVersion"]), "a call to GNOME Shell").is_ok_and(|status| status.success()))
+    }
+
+    fn shell_numbers() -> String {
+        let Some(shell) = all_seen().into_iter().find(|each| each.name == "gnome-shell") else { return "no gnome-shell process".into() };
+        let rss = fs::read_to_string(format!("/proc/{}/status", shell.pid)).ok().and_then(|status| status.lines().find_map(|line| line.strip_prefix("VmRSS:")).map(|rest| rest.trim().to_string())).unwrap_or_default();
+        let worker = fs::read_dir(format!("/proc/{}/task", shell.pid)).ok().and_then(|tasks| {
+            tasks.flatten().find_map(|task| {
+                let name = fs::read_to_string(task.path().join("comm")).ok()?;
+                let stat = fs::read_to_string(task.path().join("stat")).ok()?;
+                (name.trim() == "dconf worker").then(|| stat.rsplit_once(')').map(|(_, rest)| rest.split_whitespace().next().unwrap_or("?").to_string()).unwrap_or_default())
+            })
+        });
+        format!("gnome-shell {} resident {rss}, its dconf worker in state {}", shell.pid, worker.unwrap_or_else(|| "unknown".into()))
+    }
+
+    fn spawn_watch(p: &mut Probe, program: &Path, log_name: &str) -> Result<u32> {
+        let log = fs::OpenOptions::new().create(true).append(true).open(p.out.join(log_name))?;
+        let child = Command::new(program).arg("watch").env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn()?;
+        let process = child.id();
+        p.daemon = Some(child);
+        Ok(process)
+    }
+
+    fn stop_watch(p: &mut Probe) {
+        if let Some(mut child) = p.daemon.take() {
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+            if wait_until(Duration::from_secs(10), || matches!(child.try_wait(), Ok(Some(_)))).is_none() {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+    }
+
+    fn set_as_person(p: &Probe, linux: &Linux, screen: &Screen, picture: &Path) -> Result<()> {
+        let person = p.home.join("person");
+        fs::create_dir_all(&person)?;
+        std::env::set_var("SCOOCH_HOME", &person);
+        let set = linux.set_wallpaper(screen, picture);
+        std::env::set_var("SCOOCH_HOME", &p.home);
+        set
+    }
+
+    struct Fixed {
+        program: PathBuf,
+        fixed: PathBuf,
+        frame: Rect,
+        painted_at: (f32, f32),
+        calm_at: (f32, f32),
+    }
+
+    fn icon_skip(p: &Probe, linux: &Linux, frame: &Rect) -> Vec<Rect> {
+        let scale = factor(p);
+        icons(linux).iter().map(|rect| grown(&physical(rect, scale), 8.0)).map(|rect| Rect { x: rect.x - frame.x, y: rect.y - frame.y, ..rect }).collect()
+    }
+
+    fn fixed_set(p: &mut Probe, linux: &Linux, screen: &Screen, at: &Fixed, painted: bool, pixels: bool) -> (bool, String, &'static str) {
+        let before = showing_now(linux, screen);
+        let earlier = before.as_ref().and_then(|(path, _)| scooch_core::open(path).ok());
+        let held_at = earlier.as_ref().and_then(|old| warm_spot(old, &icon_skip(p, linux, &at.frame))).map(|(x, y)| (at.frame.x + x, at.frame.y + y));
+        let beyond = held_at.map(|(x, y)| (x + 0.6 * (x - at.painted_at.0), y + 0.6 * (y - at.painted_at.1)));
+        let moved = move_icon(p, if painted { at.painted_at } else { beyond.unwrap_or(at.calm_at) }).map_err(|error| format!("{error:#}"));
+        let started = Instant::now();
+        let changed = wait_until(Duration::from_secs(10), || showing_now(linux, screen) != before).map(|_| started.elapsed().as_millis());
+        let now = showing_now(linux, screen);
+        let kind = kind_of(&at.fixed);
+        let named = now.as_ref().is_some_and(|(path, _)| *path == at.fixed);
+        if !pixels {
+            return (changed.is_some() && named, format!("changed after {changed:?} ms, named the shown file {named}, a {kind}"), kind);
+        }
+        let (seen, last) = proven(p, linux, &at.frame, &at.fixed, Duration::from_secs(8));
+        let skip = icon_skip(p, linux, &at.frame);
+        let shifted = apart(earlier.as_ref().and_then(|old| warm_spot(old, &skip)), last.as_ref().and_then(|last| last.file));
+        let line = format!(
+            "{} with the icon moved onto the subject {}, {moved:?}: the file changed after {changed:?} ms, named the shown file {named}, a {kind}, the screen matched it after {seen:?} ms, {:?}% within 12 levels, the subject on screen at {:?} and in the file at {:?}, {shifted:?} px from where the earlier file held it",
+            if painted { "painted" } else { "plain" },
+            if painted { "where the person's picture holds it" } else { "where the shown file held it, on its side away from the picture's own spot" },
+            last.as_ref().map(|last| (last.share * 10.0).round() / 10.0),
+            last.as_ref().and_then(|last| last.screen).map(|(x, y)| (x.round(), y.round())),
+            last.as_ref().and_then(|last| last.file).map(|(x, y)| (x.round(), y.round())),
+        );
+        (changed.is_some() && named && seen.is_some() && shifted.is_some_and(|gap| gap > 24.0), line, kind)
+    }
+
+    fn fixed_file(p: &mut Probe) -> Result<()> {
+        if p.kind != Some(Kind::Gnome) {
+            p.line("- this section runs on GNOME, whose shell loads its picture again when the file changes".to_string());
+            return Ok(());
+        }
+        stop_watch(p);
+        let linux = p.linux()?;
+        let screen = linux.screens()?.first().cloned().context("no screen")?;
+        let frame = primary_frame(p).context("no screen")?;
+        let (width, height) = ((screen.frame.w * screen.scale) as u32, (screen.frame.h * screen.scale) as u32);
+        let person = p.home.join("person.png");
+        fs::write(&person, scooch_core::encode_png(&photo_at(width, height, SUBJECT))?)?;
+        let at = Fixed {
+            program: scooch_program()?,
+            fixed: out_folder(p).join(format!("{}-shown.jpg", file_safe(&screen.id))),
+            frame,
+            painted_at: (frame.x + SUBJECT.0 * frame.w, frame.y + SUBJECT.1 * frame.h),
+            calm_at: (frame.x + 0.85 * frame.w, frame.y + 0.25 * frame.h),
+        };
+        let _ = fs::remove_file(p.home.join("state.json"));
+        let _ = fs::remove_file(record::file(&p.home));
+        let _ = fs::remove_dir_all(p.home.join("out"));
+        set_as_person(p, &linux, &screen, &person)?;
+        let parked = move_icon(p, at.calm_at).map_err(|error| format!("{error:#}"));
+        std::thread::sleep(Duration::from_secs(2));
+        let watching = watch_keys(&p.out)?;
+        std::thread::sleep(Duration::from_secs(1));
+        let shell_before = shell_numbers();
+        fs::write(p.home.join("state.json"), br#"{"version":1,"on":true,"options":{"pads":0.0,"scenery":"off"}}"#)?;
+        let process = spawn_watch(p, &at.program, "watch-fixed.log")?;
+        let home = p.home.clone();
+        let ready = wait_until(Duration::from_secs(60), || rendered(&home)).map(|time| time.as_millis());
+        p.line(format!("- the person's picture is the PNG {}, set the way a person would, scenery off and pads at 0 so a set can be the plain picture, the probe icon parked on calm ground {parked:?}, `dconf watch` runs on {} and {}, Scooch started as {process} and drew after {ready:?} ms, the desktop names {:?}, the watch printed {} lines", person.display(), KEY_WATCHES[0].0, KEY_WATCHES[1].0, linux.wallpaper(&screen).ok().flatten(), dconf_lines(&p.out).len()));
+        let (mut proofs, mut kinds, mut first) = (0usize, Vec::new(), None);
+        for index in 1..=FIXED_SETS {
+            let _step = doing(format!("fixed set {index}"), Duration::from_secs(30));
+            let (held, line, kind) = fixed_set(p, &linux, &screen, &at, index % 2 == 1, true);
+            proofs += usize::from(held);
+            kinds.push(kind);
+            if first.is_none() && showing_now(&linux, &screen).is_some_and(|(path, _)| path == at.fixed) {
+                first = Some((index, dconf_lines(&p.out)));
+            }
+            p.raw(format!("fixed set {index} {line}"));
+            if index <= 2 || !held {
+                p.line(format!("- set {index} {line}"));
+            }
+        }
+        let crossings = kinds.windows(2).filter(|pair| pair[0] != pair[1]).count();
+        let (first_index, first_lines) = first.clone().unwrap_or((0, Vec::new()));
+        let after_first: Vec<String> = dconf_lines(&p.out).into_iter().skip(first_lines.len()).collect();
+        p.line(format!("- {proofs} of {FIXED_SETS} sets proven by pixels, the shown file was a PNG at {} sets and a JPEG at {}, {crossings} crossings between them", kinds.iter().filter(|kind| **kind == "png").count(), kinds.iter().filter(|kind| **kind == "jpeg").count()));
+        p.line(format!("- the first set that named the shown file was set {first_index}, the watch printed {} lines up to it {first_lines:?}, and {} lines after it {after_first:?}", first_lines.len(), after_first.len()));
+        if proofs < FIXED_SETS || crossings < 10 || !after_first.is_empty() || first.is_none() {
+            p.fail(format!("the shown file did not hold: {proofs} of {FIXED_SETS} sets proven by pixels, {crossings} crossings, {} lines from dconf after the first set", after_first.len()));
+        }
+        let more: usize = std::env::var("SCOOCH_PROBE_MORE").ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0);
+        if more > 0 {
+            let (mut held_more, mut pixels_more, mut sampled) = (0usize, 0usize, 0usize);
+            for index in 1..=more {
+                let _step = doing(format!("fixed set {} of the longer run", FIXED_SETS + index), Duration::from_secs(30));
+                let sample = index % 25 == 0;
+                let (held, line, _) = fixed_set(p, &linux, &screen, &at, (FIXED_SETS + index) % 2 == 1, sample);
+                held_more += usize::from(held || sample);
+                if sample {
+                    sampled += 1;
+                    pixels_more += usize::from(held);
+                }
+                p.raw(format!("fixed set {} {line}", FIXED_SETS + index));
+                if !held {
+                    p.line(format!("- set {} {line}", FIXED_SETS + index));
+                }
+            }
+            let later: Vec<String> = dconf_lines(&p.out).into_iter().skip(first_lines.len()).collect();
+            p.line(format!("- {more} more sets by icon moves: {held_more} changed the shown file and kept its name, {pixels_more} of {sampled} sampled sets proven by pixels, the watch printed {} lines after the first set in all {later:?}", later.len()));
+            if held_more < more || pixels_more < sampled || !later.is_empty() {
+                p.fail(format!("the longer run did not hold, {held_more} of {more} sets, {pixels_more} of {sampled} pixel samples, {} lines from dconf", later.len()));
+            }
+        }
+        let answered = shell_answers();
+        p.line(format!("- the freeze check of round 5 after the sets: the shell answered {answered}, before the sets {shell_before}, after them {}", shell_numbers()));
+        if !answered {
+            p.fail("GNOME Shell stopped answering during the sets of the shown file");
+        }
+        fixed_cases(p, &linux, &screen, &at)?;
+        stop_watch(p);
+        drop(watching);
+        Ok(())
+    }
+
+    fn fixed_cases(p: &mut Probe, linux: &Linux, screen: &Screen, at: &Fixed) -> Result<()> {
+        stop_watch(p);
+        let id = screen.id.clone();
+        let kind = kind_of(&at.fixed);
+        let counted = at.fixed.with_file_name(format!("{}-7.{}", file_safe(&id), if kind == "png" { "png" } else { "jpg" }));
+        fs::rename(&at.fixed, &counted)?;
+        let mut state: serde_json::Value = serde_json::from_slice(&fs::read(p.home.join("state.json"))?)?;
+        state["screens"][id.as_str()]["output"] = serde_json::json!(counted);
+        state["screens"][id.as_str()]["counter"] = serde_json::json!(7);
+        fs::write(p.home.join("state.json"), serde_json::to_vec_pretty(&state)?)?;
+        let old_set = linux.set_wallpaper(screen, &counted).map_err(|error| format!("{error:#}"));
+        std::thread::sleep(Duration::from_secs(1));
+        let mark = dconf_lines(&p.out).len();
+        let process = spawn_watch(p, &at.program, "watch-fixed.log")?;
+        std::thread::sleep(Duration::from_secs(4));
+        let quiet_start = dconf_lines(&p.out).len() - mark;
+        let still = showing_now(linux, screen).is_some_and(|(path, _)| path == counted);
+        let (held, line, _) = fixed_set(p, linux, screen, at, true, true);
+        let gone = wait_until(Duration::from_secs(5), || !counted.exists()).is_some();
+        let printed: Vec<String> = dconf_lines(&p.out).into_iter().skip(mark).collect();
+        p.line(format!("- upgrade: the state and the keys held the counted name {} as an older Scooch left them {old_set:?}, Scooch started again as {process} and printed {quiet_start} lines at its start with the counted file still shown {still}, then an icon move {line}, the counted file removed {gone}, the watch printed {printed:?}", counted.display()));
+        if !held || !gone || quiet_start != 0 || !still || printed.is_empty() {
+            p.fail("the upgrade from a counted name did not move the keys to the shown file with one write");
+        }
+        let navy = p.home.join("probe-navy-picked.jpg");
+        let frame = at.frame;
+        fs::write(&navy, jpeg(&navy_picture(frame.w as u32, frame.h as u32))?)?;
+        let mark = dconf_lines(&p.out).len();
+        let uri = format!("'file://{}'", navy.display());
+        let picked: Vec<bool> = ["picture-uri", "picture-uri-dark"].iter().map(|key| status_within(Command::new("gsettings").args(["set", gnome::BACKGROUND, key, &uri]), "gsettings set").is_ok_and(|status| status.success())).collect();
+        let started = Instant::now();
+        let back = wait_until(Duration::from_secs(30), || {
+            let _ = scooch::poke::send(process);
+            std::thread::sleep(Duration::from_millis(300));
+            showing_now(linux, screen).is_some_and(|(path, _)| path == at.fixed) && state_entries(&p.home).iter().any(|(_, entry)| entry["source"].as_str().is_some_and(|source| source.ends_with("probe-navy-picked.jpg")))
+        })
+        .map(|_| started.elapsed().as_millis());
+        let (seen, last) = proven(p, linux, &frame, &at.fixed, Duration::from_secs(8));
+        let printed: Vec<String> = dconf_lines(&p.out).into_iter().skip(mark).collect();
+        let ours = printed.iter().filter(|line| line.contains("-shown.jpg")).count();
+        p.line(format!("- a picture picked through gsettings as a person would, set {picked:?}: Scooch took it in and named the shown file again after {back:?} ms, the screen matched the file after {seen:?} ms at {:?}%, the watch printed {} lines, {ours} of them naming the shown file, {printed:?}", last.as_ref().map(|last| (last.share * 10.0).round() / 10.0), printed.len()));
+        if back.is_none() || seen.is_none() || ours == 0 {
+            p.fail("a picture the person picked did not come back as the shown file");
+        }
+        let mark = dconf_lines(&p.out).len();
+        let reaper = p.daemon.take().map(|mut child| std::thread::spawn(move || child.wait().ok()));
+        let off = finished(Command::new(&at.program).arg("off").env("SCOOCH_HOME", &p.home), "scooch off");
+        if let Some(reaper) = reaper {
+            let _ = wait_until(Duration::from_secs(10), || reaper.is_finished());
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        let after_off = linux.wallpaper(screen).ok().flatten();
+        let left = at.fixed.exists();
+        let (seen_off, last_off) = match after_off.as_deref() {
+            Some(path) => proven(p, linux, &frame, path, Duration::from_secs(8)),
+            None => (None, None),
+        };
+        let printed_off: Vec<String> = dconf_lines(&p.out).into_iter().skip(mark).collect();
+        p.line(format!("- off: scooch off exit {:?}, the keys now name {after_off:?}, the person's PNG {}, the picked navy {}, the shown file left {left}, the screen matched that picture after {seen_off:?} ms at {:?}%, the watch printed {printed_off:?}", off.as_ref().map(|out| out.status.code()).map_err(|error| error.to_string()), after_off.as_deref() == Some(person_png(p).as_path()), after_off.as_deref() == Some(navy.as_path()), last_off.as_ref().map(|last| (last.share * 10.0).round() / 10.0)));
+        if !off.as_ref().is_ok_and(|out| out.status.success()) || left || seen_off.is_none() || after_off.as_deref().is_none_or(|path| path.starts_with(out_folder(p))) || printed_off.is_empty() {
+            p.fail("scooch off did not give the person's picture back and then remove the shown file");
+        }
+        let mark = dconf_lines(&p.out).len();
+        let on = finished(Command::new(&at.program).env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1"), "scooch on");
+        let back_on = wait_until(Duration::from_secs(60), || showing_now(linux, screen).is_some_and(|(path, _)| path == at.fixed)).map(|time| time.as_millis());
+        let (seen_on, last_on) = proven(p, linux, &frame, &at.fixed, Duration::from_secs(8));
+        let printed_on: Vec<String> = dconf_lines(&p.out).into_iter().skip(mark).collect();
+        p.line(format!("- on again: scooch exit {:?}, the shown file named after {back_on:?} ms, the screen matched it after {seen_on:?} ms at {:?}%, the watch printed {printed_on:?}", on.as_ref().map(|out| out.status.code()).map_err(|error| error.to_string()), last_on.as_ref().map(|last| (last.share * 10.0).round() / 10.0)));
+        if back_on.is_none() || seen_on.is_none() || printed_on.is_empty() {
+            p.fail("turning Scooch on again did not name the shown file");
+        }
+        let stopped = finished(Command::new(&at.program).arg("off").env("SCOOCH_HOME", &p.home), "scooch off");
+        let entry = scooch::platform::linux::autostart::path().ok();
+        p.line(format!("- turned off again to end the section, exit {:?}, a login item left {}", stopped.as_ref().map(|out| out.status.code()).map_err(|error| error.to_string()), entry.as_ref().is_some_and(|entry| entry.exists())));
+        if let Some(entry) = entry {
+            let _ = fs::remove_file(entry);
+        }
+        Ok(())
+    }
+
+    fn out_folder(p: &Probe) -> PathBuf {
+        fs::canonicalize(&p.home).unwrap_or_else(|_| p.home.clone()).join("out")
+    }
+
+    fn file_safe(name: &str) -> String {
+        name.chars().map(|letter| if letter.is_ascii_alphanumeric() || letter == '-' || letter == '_' { letter } else { '_' }).collect()
+    }
+
+    fn person_png(p: &Probe) -> PathBuf {
+        p.home.join("person.png")
+    }
+
     fn navy_picture(width: u32, height: u32) -> RgbImage {
         let (w, h) = (width.max(1) as f32, height.max(1) as f32);
         RgbImage::from_fn(width, height, |x, y| {
@@ -3320,11 +3690,11 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             taken(&home)
         });
         std::thread::sleep(Duration::from_secs(2));
-        let before = linux.wallpaper(screen).ok().flatten();
+        let before = showing_now(linux, screen);
         let moved_icon = move_icon(p, (frame.x + frame.w * 0.5, frame.y + frame.h * 0.5));
         let moved = moved_icon.is_ok();
         let detail = moved_icon.unwrap_or_else(|error| format!("failed {error:#}"));
-        let swapped = wait_until(Duration::from_secs(10), || linux.wallpaper(screen).ok().flatten() != before);
+        let swapped = wait_until(Duration::from_secs(10), || showing_now(linux, screen) != before);
         std::thread::sleep(Duration::from_secs(2));
         let sources: Vec<String> = state_entries(&home).into_iter().map(|(id, entry)| format!("{id} {}", entry["source"].as_str().unwrap_or("none"))).collect();
         p.line(format!("- the navy picture taken in after {:?} ms, entries {sources:?}, the icon moved onto its subject, {detail}, new wallpaper after {:?} ms", adopted.map(|time| time.as_millis()), swapped.map(|time| time.as_millis())));
@@ -3333,10 +3703,10 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let toggle = || finished(Command::new(program).arg("scenery").env("SCOOCH_HOME", &home), "scooch scenery").map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
         let log = p.out.join("watch.log");
         let seen = fs::read_to_string(&log).unwrap_or_default().lines().count();
-        let (kept, belongs, shown) = (held(&home), answers(&home), linux.wallpaper(screen).ok().flatten());
+        let (kept, belongs, shown) = (held(&home), answers(&home), showing_now(linux, screen));
         let said = toggle();
         std::thread::sleep(Duration::from_secs(3));
-        let (now, showing) = (held(&home), linux.wallpaper(screen).ok().flatten());
+        let (now, showing) = (held(&home), showing_now(linux, screen));
         let window: Vec<String> = fs::read_to_string(&log).unwrap_or_default().lines().skip(seen).filter(|line| line.contains(" tick ") || line.contains(" set ")).map(|line| line.chars().take(200).collect()).collect();
         let sets = window.iter().filter(|line| line.split_whitespace().nth(1) == Some("set")).count();
         let back = toggle();
@@ -3361,6 +3731,19 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             p.fail(line);
         }
         Ok(())
+    }
+
+    fn digest(bytes: &[u8]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn showing_now(linux: &Linux, screen: &Screen) -> Option<(PathBuf, u64)> {
+        let path = linux.wallpaper(screen).ok().flatten()?;
+        let content = fs::read(&path).map_or(0, |bytes| digest(&bytes));
+        Some((path, content))
     }
 
     fn touches(frame: &Rect, icon: &Rect) -> bool {

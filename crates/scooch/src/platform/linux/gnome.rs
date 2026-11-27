@@ -1,4 +1,5 @@
 use super::parse::ding::{self, Grid, Item, Mode, Monitor, Prefs};
+use super::parse::record::Settings;
 use super::parse::{gio, gvariant, wakes};
 use super::settings::{self, gsetting, Gsettings};
 use super::{bus, gvfs, Shell, Signal, Watches};
@@ -156,6 +157,10 @@ fn read_value(text: &str) -> Option<PathBuf> {
     gvariant::string(text).and_then(|uri| gio::location(&uri))
 }
 
+fn shown(read: Result<Option<String>>) -> Result<Option<PathBuf>> {
+    Ok(read?.and_then(|text| gvariant::string(&text)).and_then(|uri| picture(&uri)))
+}
+
 fn picture(uri: &str) -> Option<PathBuf> {
     let path = gio::location(uri)?;
     let xml = path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("xml"));
@@ -183,8 +188,7 @@ impl Shell for Gnome {
     }
 
     fn wallpaper(&self, _screen: &Screen) -> Result<Option<PathBuf>> {
-        let key = self.in_effect();
-        Ok(gsetting(BACKGROUND, key).and_then(|text| gvariant::string(&text)).and_then(|uri| picture(&uri)))
+        shown(Gsettings.get(&format!("{BACKGROUND} {}", self.in_effect())))
     }
 
     fn set_wallpaper(&self, _screen: &Screen, path: &Path) -> Result<()> {
@@ -203,6 +207,10 @@ impl Shell for Gnome {
         Watches { files: Vec::new(), signals: vec![Signal::Metadata(desktop_in_home), Signal::Dconf(&wakes::GNOME_KEYS), Signal::Ding], pointer: false }
     }
 
+    fn reloads_picture(&self) -> bool {
+        true
+    }
+
     fn per_screen(&self) -> bool {
         false
     }
@@ -213,5 +221,19 @@ impl Shell for Gnome {
 
     fn tools(&self) -> &'static [&'static str] {
         &["gio", "gsettings"]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shown;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_read_of_the_picture_that_got_no_answer_stays_an_error() {
+        assert!(shown(Err(anyhow::anyhow!("gsettings did not finish within 10 seconds, so check that the desktop still runs."))).is_err());
+        assert_eq!(shown(Ok(Some("'file:///home/a/.local/share/scooch/out/main-shown.jpg'".into()))).unwrap(), Some(PathBuf::from("/home/a/.local/share/scooch/out/main-shown.jpg")));
+        assert_eq!(shown(Ok(Some("'file:///usr/share/backgrounds/a.xml'".into()))).unwrap(), None);
+        assert_eq!(shown(Ok(None)).unwrap(), None);
     }
 }

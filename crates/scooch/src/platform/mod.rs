@@ -120,6 +120,9 @@ pub trait Desktop: Send + Sync {
     fn live(&self) -> bool {
         cfg!(windows)
     }
+    fn reloads_picture(&self) -> bool {
+        false
+    }
     fn reduce_motion(&self) -> bool {
         false
     }
