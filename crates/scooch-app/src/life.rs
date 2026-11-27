@@ -13,6 +13,8 @@ const SETTLE: Duration = Duration::from_secs(5);
 pub const ANSWER: Duration = Duration::from_secs(3);
 #[cfg(target_os = "linux")]
 pub const PAUSE: Duration = Duration::from_millis(50);
+#[cfg(target_os = "linux")]
+pub const LAG: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
@@ -90,14 +92,16 @@ pub fn runs(pid: u32) -> bool {
 }
 
 #[cfg(any(target_os = "linux", test))]
-pub fn succeed<H>(patience: Duration, pause: Duration, mut take: impl FnMut() -> Option<H>, mut alive: impl FnMut() -> bool) -> Option<H> {
-    let deadline = std::time::Instant::now() + patience;
+pub fn succeed<H>(patience: Duration, pause: Duration, lag: Duration, mut take: impl FnMut() -> Option<H>, mut alive: impl FnMut() -> bool) -> Option<H> {
+    let mut deadline = std::time::Instant::now() + patience;
+    let mut gone = false;
     loop {
         if let Some(held) = take() {
             return Some(held);
         }
-        if !alive() {
-            return take();
+        if !gone && !alive() {
+            gone = true;
+            deadline = deadline.min(std::time::Instant::now() + lag);
         }
         if std::time::Instant::now() >= deadline {
             return None;
@@ -564,24 +568,44 @@ mod tests {
 
     #[test]
     fn a_waiting_start_ends_once_the_old_process_is_gone_and_another_holds_the_lock() {
+        let lag = Duration::from_millis(60);
         let started = std::time::Instant::now();
-        assert_eq!(succeed(Duration::from_secs(10), Duration::from_millis(1), || None::<u8>, || false), None);
+        assert_eq!(succeed(Duration::from_secs(10), Duration::from_millis(1), lag, || None::<u8>, || false), None);
+        assert!(started.elapsed() >= lag);
         assert!(started.elapsed() < Duration::from_secs(2));
         let mut tries = 0;
-        let freed = succeed(Duration::from_secs(5), Duration::from_millis(1), || {
+        let freed = succeed(Duration::from_secs(5), Duration::from_millis(1), lag, || {
             tries += 1;
             (tries == 4).then_some(tries)
         }, || true);
         assert_eq!(freed, Some(4));
-        let mut last = 0;
-        let at_the_end = succeed(Duration::from_secs(5), Duration::from_millis(1), || {
-            last += 1;
-            (last == 2).then_some(last)
-        }, || false);
-        assert_eq!(at_the_end, Some(2));
         let started = std::time::Instant::now();
-        assert_eq!(succeed(Duration::from_millis(120), Duration::from_millis(10), || None::<u8>, || true), None);
+        assert_eq!(succeed(Duration::from_millis(120), Duration::from_millis(10), lag, || None::<u8>, || true), None);
         assert!(started.elapsed() >= Duration::from_millis(120));
+        let started = std::time::Instant::now();
+        assert_eq!(succeed(Duration::from_millis(60), Duration::from_millis(5), Duration::from_secs(10), || None::<u8>, || false), None);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_lock_freed_a_moment_after_the_old_process_ended_goes_to_the_fresh_process() {
+        let lag = Duration::from_secs(5);
+        let mut tries = 0;
+        let late = succeed(Duration::from_secs(10), Duration::from_millis(1), lag, || {
+            tries += 1;
+            (tries == 6).then_some(tries)
+        }, || false);
+        assert_eq!(late, Some(6));
+        let (mut tries, mut asked) = (0, 0);
+        let after_the_end = succeed(Duration::from_secs(10), Duration::from_millis(1), lag, || {
+            tries += 1;
+            (tries == 8).then_some(tries)
+        }, || {
+            asked += 1;
+            asked < 3
+        });
+        assert_eq!(after_the_end, Some(8));
+        assert_eq!(asked, 3);
     }
 
     #[test]
