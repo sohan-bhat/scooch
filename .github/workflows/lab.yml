@@ -490,3 +490,88 @@ jobs:
             appprobe
             gap
           if-no-files-found: warn
+
+  gnome-indicator:
+    needs: bundle-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: app-linux-x64
+          path: built
+      - name: Install the desktop packages
+        timeout-minutes: 30
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y gnome-shell gnome-shell-extension-appindicator gvfs gvfs-daemons dconf-service libglib2.0-bin gnome-shell-extension-prefs fonts-cantarell adwaita-icon-theme dconf-cli xdg-user-dirs python3-pyatspi python3-gi at-spi2-core
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ./built/*.deb
+      - name: What probe-gnome and tray-gnome.sh see with a tray
+        timeout-minutes: 15
+        run: |
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          PASS=missing dbus-run-session -- bash .github/lab/gnome-indicator.sh .github/app/probe-gnome.sh seen || echo "probe-gnome.sh ended with $?" | tee -a seen/report.md
+          pkill -x scooch-app || true
+          pkill -x gnome-shell || true
+          sleep 3
+      - name: A closed window with a tray
+        timeout-minutes: 15
+        run: |
+          rm -rf "$HOME/.local/share/scooch"
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          dbus-run-session -- bash .github/lab/gnome-indicator.sh .github/lab/gnome-handover.sh handover
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lab-gnome-indicator
+          path: |
+            seen
+            handover
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat seen/report.md handover/report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+  tray-place:
+    needs: bundle-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: app-linux-x64
+          path: built
+      - name: Install the desktop packages
+        timeout-minutes: 30
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y xvfb xauth x11-utils xdotool imagemagick xfdesktop4 xfwm4 xfce4-panel xfconf xfce4-settings xfdesktop4-data gvfs gvfs-daemons dbus-x11 libglib2.0-bin python3-pyatspi python3-gi at-spi2-core gir1.2-ayatanaappindicator3-0.1 gir1.2-gtk-3.0 dconf-gsettings-backend dconf-service
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ./built/*.deb
+      - name: The place of the icon
+        timeout-minutes: 15
+        run: |
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          dbus-run-session -- bash .github/linux/xfce.sh .github/lab/tray-place.sh place
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lab-tray-place
+          path: place
+          if-no-files-found: warn
+      - name: Summary
+        if: always()
+        run: cat place/report.md >> "$GITHUB_STEP_SUMMARY" || true
