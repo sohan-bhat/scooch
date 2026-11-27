@@ -4,6 +4,7 @@ use crate::platform::Screen;
 use anyhow::{anyhow, bail, Context, Result};
 use scooch_core::Rect;
 use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use wayland_client::backend::WaylandError;
@@ -36,10 +37,45 @@ pub fn read(session: Session) -> Result<Vec<Found>> {
     Ok(found)
 }
 
+static OUT: AtomicUsize = AtomicUsize::new(0);
+const CAP: usize = 4;
+
+struct Place(&'static AtomicUsize);
+
+impl Place {
+    fn take(out: &'static AtomicUsize) -> Option<Self> {
+        let mut held = out.load(Ordering::SeqCst);
+        while held < CAP {
+            match out.compare_exchange(held, held + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Some(Self(out)),
+                Err(now) => held = now,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub fn x11_within<T: Send + 'static>(what: &'static str, work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    within(&OUT, what, work)
+}
+
+fn within<T: Send + 'static>(out: &'static AtomicUsize, what: &'static str, work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    let Some(place) = Place::take(out) else {
+        return Err(anyhow::Error::new(super::Silent("The X display still has not answered an earlier read, so check that the desktop still runs.".into())));
+    };
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::Builder::new().name("scooch-x11".into()).spawn(move || {
-        let _ = sender.send(work());
+        let result = {
+            let _place = place;
+            work()
+        };
+        let _ = sender.send(result);
     })?;
     match receiver.recv_timeout(super::LIMIT) {
         Ok(result) => result,
@@ -320,7 +356,8 @@ fn root_resources() -> Option<String> {
 mod tests {
     use super::open_on;
     use std::os::unix::net::UnixStream;
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -355,5 +392,72 @@ mod tests {
         drop(server);
         assert!(started.elapsed() >= super::super::LIMIT - Duration::from_millis(500), "the X read ended before the limit {:?}", started.elapsed());
         assert_eq!(reply, Err((true, "The X display did not answer the monitor list within 10 seconds, so check that the desktop still runs.".to_string())));
+    }
+
+    fn told(reply: anyhow::Result<u32>) -> Result<u32, (bool, String)> {
+        reply.map_err(|error| (super::super::silent(&error), error.to_string()))
+    }
+
+    #[test]
+    fn four_x_reads_that_never_return_end_at_the_limit_and_a_fifth_ends_at_once_until_they_return() {
+        static OUT: AtomicUsize = AtomicUsize::new(0);
+        let (running, ran) = mpsc::channel();
+        let started = Instant::now();
+        let held = (0..4).map(|_| {
+            let (release, gate) = mpsc::channel::<()>();
+            let running = running.clone();
+            let reply = std::thread::spawn(move || {
+                told(super::within(&OUT, "a held read", move || {
+                    let _ = running.send(());
+                    let _ = gate.recv();
+                    Ok(0)
+                }))
+            });
+            (release, reply)
+        });
+        let (releases, replies): (Vec<_>, Vec<_>) = held.unzip();
+        for _ in 0..4 {
+            ran.recv_timeout(Duration::from_secs(5)).expect("a held read did not start");
+        }
+        let worked = Arc::new(AtomicBool::new(false));
+        let seen = worked.clone();
+        let asked = Instant::now();
+        let fifth = told(super::within(&OUT, "a fifth read", move || {
+            seen.store(true, Ordering::SeqCst);
+            Ok(5)
+        }));
+        let took = asked.elapsed();
+        assert_eq!(fifth, Err((true, "The X display still has not answered an earlier read, so check that the desktop still runs.".to_string())));
+        assert!(took < Duration::from_millis(500), "the fifth read took {took:?}");
+        for reply in replies {
+            assert_eq!(reply.join().unwrap(), Err((true, "The X display did not answer a held read within 10 seconds, so check that the desktop still runs.".to_string())));
+        }
+        assert!(started.elapsed() >= super::super::LIMIT - Duration::from_millis(500), "the held reads ended before the limit {:?}", started.elapsed());
+        assert_eq!(OUT.load(Ordering::SeqCst), 4);
+        drop(releases);
+        let freed = Instant::now();
+        while OUT.load(Ordering::SeqCst) > 0 {
+            assert!(freed.elapsed() < Duration::from_secs(5), "the reads that returned kept {} places", OUT.load(Ordering::SeqCst));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(told(super::within(&OUT, "a new read", || Ok(7))), Ok(7));
+        assert!(!worked.load(Ordering::SeqCst), "the fifth read ran its work");
+    }
+
+    #[test]
+    fn an_x_read_that_panics_frees_its_place() {
+        static OUT: AtomicUsize = AtomicUsize::new(0);
+        for _ in 0..=super::CAP {
+            let reply = told(super::within(&OUT, "a read that panics", || panic!("the read broke")));
+            assert_eq!(reply, Err((false, "The X display stopped answering, so try again.".to_string())));
+        }
+        assert_eq!(OUT.load(Ordering::SeqCst), 0);
+        assert_eq!(told(super::within(&OUT, "a read after the panics", || Ok(7))), Ok(7));
+    }
+
+    #[test]
+    fn an_x_read_holds_a_place_of_the_process_wide_count_while_its_work_runs() {
+        let during = super::x11_within("the count", || Ok(super::OUT.load(Ordering::SeqCst))).unwrap();
+        assert!(during >= 1, "the count during the read was {during}");
     }
 }
