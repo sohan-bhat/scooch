@@ -2,6 +2,7 @@ name: macos
 
 on:
   push:
+    branches-ignore: [probe-water]
     paths:
       - "crates/**"
       - "Cargo.toml"
