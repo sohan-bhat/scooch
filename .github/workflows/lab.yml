@@ -71,7 +71,8 @@ jobs:
           npm --prefix ui run build
       - name: The tests pass before the mutation
         working-directory: crates/scooch-app
-        run: cargo test --locked life::
+        run: |
+          cargo test --locked life::
       - name: Mutation
         run: bash .github/app/lab-mutate.sh ${{ matrix.name }}
       - name: The tests must fail
