@@ -170,7 +170,7 @@ Windows builds two programs from the same code. `scooch.exe` is the console comm
 
 On macOS every picture is decoded with its color profile and matched into sRGB, and outputs carry the sRGB profile. Colors outside sRGB are clipped.
 
-Linux uses pure Rust libraries only, so one static program runs on every distribution. On GNOME, Cinnamon and MATE one picture covers every monitor, so Scooch arranges it for the main one.
+Linux uses pure Rust libraries only, so one static program runs on every distribution. On GNOME, Cinnamon and MATE one picture covers every monitor, so Scooch arranges it for the main one. A read of the X display that gets no answer ends after 10 s and leaves its thread blocked, so while four reads are still out each further read ends at once and starts no thread.
 
 ## Daemon
 
