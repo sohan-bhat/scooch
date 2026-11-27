@@ -22,7 +22,17 @@ pub struct Monitor {
     pub id: String,
     pub frame: Rect,
     pub picture: Option<PathBuf>,
+    pub stamp: Option<u64>,
     pub places: Option<Places>,
+}
+
+pub fn stamp(picture: Option<&Path>) -> Option<u64> {
+    let modified = std::fs::metadata(picture?).and_then(|meta| meta.modified()).ok()?;
+    u64::try_from(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()
+}
+
+fn monitor(screen: &Screen, picture: Option<PathBuf>, places: Option<Places>) -> Monitor {
+    Monitor { id: screen.id.clone(), frame: screen.frame, stamp: stamp(picture.as_deref()), picture, places }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,7 +444,7 @@ pub fn view() -> View {
                     view.current = Some(entry.source.clone());
                 }
             }
-            view.monitors.push(Monitor { id: screen.id.clone(), frame: screen.frame, picture, places });
+            view.monitors.push(monitor(screen, picture, places));
         }
         if view.current.is_none() {
             view.current = view.monitors.iter().filter_map(|monitor| monitor.picture.clone()).find(|path| !store.owns(path));
@@ -783,6 +793,44 @@ mod tests {
         assert_eq!(saved_problem(daemon::ORPHAN), Problem::Wallpaper { what: Wallpaper::Made });
         assert_eq!(saved_problem(commands::NO_SCREEN), Problem::Screen);
         assert_eq!(saved_problem("anything else"), Problem::Other);
+    }
+
+    fn screen() -> Screen {
+        Screen { id: "main".into(), frame: Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 }, scale: 1.0 }
+    }
+
+    fn touch(path: &Path, millis: u64) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis)).unwrap();
+    }
+
+    #[test]
+    fn a_picture_replaced_at_the_same_path_gives_its_monitor_a_new_stamp() {
+        let folder = state::scratch("facade-stamp");
+        let (shown, next) = (folder.join("main-shown.jpg"), folder.join("main-next"));
+        std::fs::write(&shown, b"first").unwrap();
+        touch(&shown, 1_700_000_000_123);
+        let before = monitor(&screen(), Some(shown.clone()), None);
+        std::fs::write(&next, b"second").unwrap();
+        touch(&next, 1_700_000_000_456);
+        std::fs::rename(&next, &shown).unwrap();
+        let after = monitor(&screen(), Some(shown.clone()), None);
+        let _ = std::fs::remove_dir_all(&folder);
+        assert_eq!((before.picture.as_deref(), after.picture.as_deref()), (Some(shown.as_path()), Some(shown.as_path())));
+        assert_eq!((before.stamp, after.stamp), (Some(1_700_000_000_123), Some(1_700_000_000_456)));
+    }
+
+    #[test]
+    fn a_monitor_with_no_picture_or_an_unreadable_one_has_no_stamp_and_keeps_its_picture() {
+        let folder = state::scratch("facade-gone");
+        let gone = folder.join("gone.jpg");
+        let none = monitor(&screen(), None, None);
+        let missing = monitor(&screen(), Some(gone.clone()), None);
+        let _ = std::fs::remove_dir_all(&folder);
+        assert_eq!((none.picture, none.stamp, stamp(None)), (None, None, None));
+        assert_eq!((missing.picture.as_deref(), missing.stamp), (Some(gone.as_path()), None));
+        let sent = serde_json::to_value(&missing).unwrap();
+        assert_eq!((&sent["picture"], &sent["stamp"]), (&serde_json::json!(gone), &serde_json::Value::Null));
     }
 
     #[test]
