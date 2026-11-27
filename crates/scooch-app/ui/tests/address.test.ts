@@ -1,20 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-const answers = {};
-globalThis.window = {
+const answers: Record<string, unknown> = {};
+(globalThis as { window?: unknown }).window = {
   __TAURI_INTERNALS__: {
-    convertFileSrc: (path, protocol) => `${protocol}://localhost/${encodeURIComponent(path)}`,
-    invoke: async (command) => answers[command],
+    convertFileSrc: (path: string, protocol: string) => `${protocol}://localhost/${encodeURIComponent(path)}`,
+    invoke: async (command: string) => answers[command],
   },
 };
-const { tauri } = await import('./tauri.ts');
+const { tauri } = await import('../src/backend/tauri.ts');
 
 const path = '/home/ada/.local/share/scooch/out/main-shown.jpg';
 const bare = `scooch://localhost/${encodeURIComponent(path)}`;
 const frame = { x: 0, y: 0, w: 1920, h: 1080 };
 
-async function seen(picture, stamp) {
+async function seen(picture: string | null, stamp: number | null) {
   answers.view = { system: 'linux', on: true, running: true, restoring: false, pending: 0, monitors: [{ id: 'main', frame, picture, places: null, stamp }], switches: { scenery: true, flip: false }, problem: null, flipHelps: false, current: null, counted: null, reduceMotion: false, live: false, textScale: 1 };
   return (await tauri.view()).monitors[0];
 }
