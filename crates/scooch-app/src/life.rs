@@ -165,6 +165,7 @@ pub fn at_close(on: bool, icon: bool, update: bool, change: Change, fresh: bool)
 
 struct Wanted {
     opening: usize,
+    working: usize,
     closes: usize,
     closing: bool,
     leaving: bool,
@@ -177,7 +178,7 @@ pub struct Door {
 
 impl Door {
     pub const fn new() -> Self {
-        Self { wanted: Mutex::new(Wanted { opening: 0, closes: 0, closing: false, leaving: false }), settled: Condvar::new() }
+        Self { wanted: Mutex::new(Wanted { opening: 0, working: 0, closes: 0, closing: false, leaving: false }), settled: Condvar::new() }
     }
 
     fn held(&self) -> MutexGuard<'_, Wanted> {
@@ -215,9 +216,14 @@ impl Door {
         held.opening = held.opening.saturating_sub(1);
     }
 
+    pub fn works(&self) -> Working<'_> {
+        self.held().working += 1;
+        Working(self)
+    }
+
     fn leaves(&self) -> bool {
         let mut held = self.held();
-        if held.opening > 0 {
+        if held.opening > 0 || held.working > 0 {
             return false;
         }
         held.leaving = true;
@@ -229,16 +235,25 @@ impl Door {
     }
 }
 
+pub struct Working<'a>(&'a Door);
+
+impl Drop for Working<'_> {
+    fn drop(&mut self) {
+        let mut held = self.0.held();
+        held.working = held.working.saturating_sub(1);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Leave {
     Gone,
-    Opening,
+    Busy,
     Failed,
 }
 
 pub fn leave(door: &Door, start: impl FnOnce() -> bool) -> Leave {
     if !door.leaves() {
-        return Leave::Opening;
+        return Leave::Busy;
     }
     if start() {
         return Leave::Gone;
@@ -422,8 +437,20 @@ mod tests {
     fn a_close_while_a_window_opens_starts_nothing() {
         let door = Door::new();
         assert!(door.opens());
-        assert_eq!(leave(&door, || panic!("a fresh process was started")), Leave::Opening);
+        assert_eq!(leave(&door, || panic!("a fresh process was started")), Leave::Busy);
         door.opened();
+        assert_eq!(leave(&door, || true), Leave::Gone);
+    }
+
+    #[test]
+    fn a_close_while_work_runs_starts_nothing() {
+        let door = Door::new();
+        let turning_off = door.works();
+        let saving = door.works();
+        assert_eq!(leave(&door, || panic!("a fresh process was started")), Leave::Busy);
+        drop(turning_off);
+        assert_eq!(leave(&door, || panic!("a fresh process was started")), Leave::Busy);
+        drop(saving);
         assert_eq!(leave(&door, || true), Leave::Gone);
     }
 

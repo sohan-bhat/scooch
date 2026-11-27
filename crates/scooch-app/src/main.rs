@@ -119,6 +119,7 @@ fn ready() -> anyhow::Result<PathBuf> {
 async fn off_main<T: Send + 'static>(code: &'static str, work: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
     #[cfg(target_os = "linux")]
     appimage::seal();
+    let _working = DOOR.works();
     said(code, tauri::async_runtime::spawn_blocking(work).await.map_err(|error| anyhow::anyhow!(error.to_string())).and_then(|done| done))
 }
 
@@ -146,6 +147,7 @@ async fn view<R: Runtime>(app: AppHandle<R>) -> Result<View, String> {
 }
 
 fn switch_on(folder: &std::path::Path) -> anyhow::Result<Started> {
+    let _working = DOOR.works();
     let program = ready()?;
     match pictures::selected(folder).filter(|_| !facade::is_on()) {
         Some(selection) => {
@@ -158,10 +160,12 @@ fn switch_on(folder: &std::path::Path) -> anyhow::Result<Started> {
 }
 
 fn switch_off() -> anyhow::Result<Tally> {
+    let _working = DOOR.works();
     adopted(facade::turn_off(&place::program()?))
 }
 
 pub fn restart_daemon() -> anyhow::Result<()> {
+    let _working = DOOR.works();
     adopted(facade::turn_on(&ready()?)).map(drop)
 }
 
@@ -205,6 +209,7 @@ async fn pictures<R: Runtime>(app: AppHandle<R>) -> Result<Vec<String>, String> 
 
 #[tauri::command]
 async fn pick<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
+    let _working = DOOR.works();
     let chosen = app.dialog().file().add_filter("Pictures", &KINDS).blocking_pick_file();
     Ok(chosen.and_then(|file| file.into_path().ok()).map(|path| path.to_string_lossy().into_owned()))
 }
@@ -355,6 +360,7 @@ fn first_window<R: Runtime>(app: &AppHandle<R>) {
     update::fetch(app);
     let handle = app.clone();
     std::thread::spawn(move || {
+        let _working = DOOR.works();
         #[cfg(target_os = "linux")]
         appimage::seal();
         let _ = facade::set_origin(std::env::var_os("APPIMAGE").map(PathBuf::from).as_deref());
@@ -622,9 +628,9 @@ fn main() {
                             life::mark(life::Exit::Fresh);
                             eprintln!("scooch-app window closed, a fresh process takes over the icon");
                         }
-                        life::Leave::Opening => {
+                        life::Leave::Busy => {
                             api.prevent_exit();
-                            eprintln!("scooch-app window closed while another opens, the icon stays");
+                            eprintln!("scooch-app window closed while a window opens or work runs, the icon stays");
                         }
                         life::Leave::Failed => {
                             api.prevent_exit();
