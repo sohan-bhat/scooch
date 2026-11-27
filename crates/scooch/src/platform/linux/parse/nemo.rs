@@ -234,6 +234,25 @@ pub fn with_picture(list: &[Dict], mode: &str, connector: &str, uri: &str) -> Ve
     out
 }
 
+pub fn with_entry(saved: &[Dict], current: &[Dict], mode: &str, connector: &str) -> Vec<Dict> {
+    let mut out = saved.to_vec();
+    let Some(mut entry) = entry_for(current, mode, connector).map(|at| current[at].clone()) else { return out };
+    let named = |dict: &Dict| mode == "independent" && get(dict, "connector").and_then(string).as_deref() == Some(connector);
+    match entry_for(&out, mode, connector) {
+        Some(at) if named(&out[at]) || !named(&entry) => {
+            for key in ["connector", "index"] {
+                match get(&out[at], key).map(str::to_string) {
+                    Some(value) => put(&mut entry, key, value),
+                    None => entry.retain(|(name, _)| name != key),
+                }
+            }
+            out[at] = entry;
+        }
+        _ => out.push(entry),
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +348,23 @@ mod tests {
         let fresh = with_picture(&[], "mirror", "screen", "file:///out.jpg");
         assert_eq!(super::super::gvariant::write_dicts(&fresh), "[{'picture-uri': <'file:///out.jpg'>, 'picture-options': <'zoom'>}]");
         assert_eq!(listed_picture(&[], "mirror", "screen"), None);
+    }
+
+    #[test]
+    fn a_followed_list_takes_only_the_entry_of_its_own_screen() {
+        use super::super::gvariant::{dicts, write_dicts};
+        let saved = dicts("[{'connector': <'DP-1'>, 'index': <0>, 'picture-uri': <'file:///a.jpg'>, 'picture-options': <'scaled'>}, {'connector': <'HDMI-1'>, 'index': <1>, 'picture-uri': <'file:///b.jpg'>}]");
+        let current = dicts("[{'connector': <'DP-1'>, 'index': <0>, 'picture-uri': <'file:///out/a.jpg'>, 'picture-options': <'zoom'>}, {'connector': <'HDMI-1'>, 'index': <1>, 'picture-uri': <'file:///pick.jpg'>, 'picture-options': <'centered'>}]");
+        let followed = with_entry(&saved, &current, "independent", "HDMI-1");
+        assert_eq!(write_dicts(&followed), "[{'connector': <'DP-1'>, 'index': <0>, 'picture-uri': <'file:///a.jpg'>, 'picture-options': <'scaled'>}, {'connector': <'HDMI-1'>, 'index': <1>, 'picture-uri': <'file:///pick.jpg'>, 'picture-options': <'centered'>}]");
+        let mirrored = with_entry(&dicts("[{'picture-uri': <'file:///a.jpg'>, 'slideshow': <true>}]"), &dicts("[{'picture-uri': <'file:///pick.jpg'>, 'picture-options': <'zoom'>}]"), "mirror", "HDMI-1");
+        assert_eq!(write_dicts(&mirrored), "[{'picture-uri': <'file:///pick.jpg'>, 'picture-options': <'zoom'>}]");
+        let fresh = with_entry(&[], &current, "independent", "HDMI-1");
+        assert_eq!(write_dicts(&fresh), "[{'connector': <'HDMI-1'>, 'index': <1>, 'picture-uri': <'file:///pick.jpg'>, 'picture-options': <'centered'>}]");
+        let added = with_entry(&saved[..1], &current, "independent", "HDMI-1");
+        assert_eq!((added.len(), listed_picture(&added, "independent", "DP-1").as_deref(), listed_picture(&added, "independent", "HDMI-1").as_deref()), (2, Some("file:///a.jpg"), Some("file:///pick.jpg")));
+        let shared = with_entry(&saved, &dicts("[{'connector': <'DP-1'>, 'index': <0>, 'picture-uri': <'file:///both.jpg'>}]"), "independent", "HDMI-1");
+        assert_eq!(write_dicts(&shared), "[{'connector': <'DP-1'>, 'index': <0>, 'picture-uri': <'file:///a.jpg'>, 'picture-options': <'scaled'>}, {'connector': <'HDMI-1'>, 'index': <1>, 'picture-uri': <'file:///both.jpg'>}]");
+        assert_eq!(with_entry(&saved, &[], "independent", "HDMI-1"), saved);
     }
 }

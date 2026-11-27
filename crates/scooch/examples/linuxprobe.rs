@@ -3010,6 +3010,51 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         }
     }
 
+    fn picture_key(p: &Probe, key: &str) -> bool {
+        match p.kind {
+            Some(Kind::Gnome) => key.ends_with(" picture-uri") || key.ends_with(" picture-uri-dark"),
+            Some(Kind::Xfce) => key.ends_with("/last-image"),
+            Some(Kind::Mate) => key.ends_with(" picture-filename"),
+            Some(Kind::Cinnamon) => key.ends_with(if cinnamon::background_list().is_some() { " picture-uri-list" } else { " picture-uri" }),
+            _ => true,
+        }
+    }
+
+    fn unlike_scooch(p: &mut Probe, screen: &Screen) -> Vec<(String, Option<String>)> {
+        let listed = p.kind == Some(Kind::Cinnamon) && cinnamon::background_list().is_some();
+        for (store, key) in keys(p, screen) {
+            let value = if key.ends_with("/image-style") {
+                "4"
+            } else if key.ends_with(" picture-options") && !listed {
+                "'scaled'"
+            } else {
+                continue;
+            };
+            let set = store.set(&key, Some(value)).map_err(|error| error.to_string());
+            p.line(format!("- `{key}` set to {value} the way a person would before Scooch writes any setting, so the value from before Scooch is not the value Scooch writes, {set:?}"));
+        }
+        let firsts: Vec<String> = keys(p, screen).into_iter().map(|(_, key)| key).filter(|key| !picture_key(p, key)).collect();
+        values_of(p, screen, &firsts)
+    }
+
+    fn values_of(p: &Probe, screen: &Screen, wanted: &[String]) -> Vec<(String, Option<String>)> {
+        keys(p, screen)
+            .into_iter()
+            .filter(|(_, key)| wanted.contains(key))
+            .map(|(store, key)| {
+                let value = store.get(&key).ok().flatten();
+                (key, value)
+            })
+            .collect()
+    }
+
+    fn others_now(p: &Probe, screen: &Screen, firsts: &[(String, Option<String>)]) -> (Vec<(String, Option<String>)>, bool) {
+        let named: Vec<String> = firsts.iter().map(|(key, _)| key.clone()).collect();
+        let now = values_of(p, screen, &named);
+        let held = now == firsts;
+        (now, held)
+    }
+
     fn wallpaper(p: &mut Probe) -> Result<()> {
         let linux = p.linux()?;
         let screen = linux.screens()?.first().cloned().context("no screen")?;
@@ -3259,6 +3304,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let linux = p.linux()?;
         let screen = linux.screens()?.first().cloned().context("no screen")?;
         let program = scooch_program()?;
+        let firsts = if p.kind == Some(Kind::Gnome) { None } else { Some(unlike_scooch(p, &screen)) };
         if let Some(picture) = p.pictures.first().cloned() {
             linux.set_wallpaper(&screen, &picture)?;
             p.line(format!("- wallpaper set to {}", picture.display()));
@@ -3328,6 +3374,60 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         p.line(format!("- trace lines {}", trace.lines().count()));
         for line in trace.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev() {
             p.line(format!("  - `{line}`"));
+        }
+        if let Some(firsts) = firsts {
+            off_after_pick(p, &linux, &screen, &program, &firsts)?;
+        }
+        Ok(())
+    }
+
+    fn off_after_pick(p: &mut Probe, linux: &Linux, screen: &Screen, program: &Path, firsts: &[(String, Option<String>)]) -> Result<()> {
+        let navy = p.home.join("probe-navy.jpg");
+        let frame = primary_frame(p).unwrap_or(screen.frame);
+        let before = linux.wallpaper(screen).ok().flatten();
+        let ours = before.as_deref().is_some_and(|path| path.starts_with(out_folder(p)));
+        let reaper = p.daemon.take().map(|mut child| std::thread::spawn(move || child.wait().ok()));
+        let off = finished(Command::new(program).arg("off").env("SCOOCH_HOME", &p.home), "scooch off");
+        if let Some(reaper) = reaper {
+            let _ = wait_until(Duration::from_secs(10), || reaper.is_finished());
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        let named = linux.wallpaper(screen).ok().flatten();
+        let picked = named.as_deref() == Some(navy.as_path());
+        let (seen, last) = proven(p, linux, &frame, &navy, Duration::from_secs(8));
+        let (others, held) = others_now(p, screen, firsts);
+        let left = record::file(&p.home).exists();
+        p.line(format!(
+            "- off after the pick: the desktop showed {before:?} before it, a picture of Scooch's {ours}, scooch off exit {:?}, the desktop's own setting now names {named:?}, the picked navy {picked}, the screen matched that picture after {seen:?} ms at {:?}%, the keys that are no picture keys now hold {others:?}, their values from before Scooch {held}, the record file left {left}",
+            off.as_ref().map(|out| out.status.code()).map_err(|error| error.to_string()),
+            last.as_ref().map(|last| (last.share * 10.0).round() / 10.0)
+        ));
+        if !picked || !held {
+            p.fail("scooch off after a pick did not name the picked picture with the other keys at their values from before Scooch");
+        }
+        if seen.is_none() && p.kde_wayland() {
+            p.soft("the pixels of the picked picture after scooch off", "KDE on Wayland gives the probe no picture of the screen");
+        } else if seen.is_none() {
+            p.fail("the screen did not show the picked picture after scooch off");
+        }
+        if !ours && p.kde_wayland() {
+            p.soft("the off after a pick", "KDE on Wayland gives the probe no way to move an icon without a person, so the desktop showed no picture of Scooch's for the off to take away");
+        } else if !ours {
+            p.fail("the desktop showed no picture of Scooch's before the off after a pick, so that off proved nothing");
+        }
+        let process = start_daemon(p, program, "watch-again.log")?;
+        let home = p.home.clone();
+        let drawn = wait_until(Duration::from_secs(60), || rendered(&home)).map(|time| time.as_millis());
+        std::thread::sleep(Duration::from_secs(2));
+        let showing = linux.wallpaper(screen).ok().flatten();
+        let stopped = unsafe { libc::kill(process as libc::pid_t, libc::SIGTERM) } == 0;
+        let ended = p.daemon.as_mut().is_some_and(|child| wait_until(Duration::from_secs(5), || matches!(child.try_wait(), Ok(Some(_)))).is_some());
+        if ended {
+            p.daemon = None;
+        }
+        p.line(format!("- on again, so the sections after this one start as before: Scooch started as {process} and drew after {drawn:?} ms, the desktop now names {showing:?}, SIGTERM sent {stopped}, the daemon ended {ended}"));
+        if drawn.is_none() || !ended {
+            p.fail("Scooch did not draw and end again after the off that followed a pick");
         }
         Ok(())
     }
@@ -3481,6 +3581,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         frame: Rect,
         painted_at: (f32, f32),
         calm_at: (f32, f32),
+        others: Vec<(String, Option<String>)>,
     }
 
     fn icon_skip(p: &Probe, linux: &Linux, frame: &Rect) -> Vec<Rect> {
@@ -3528,17 +3629,19 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         let (width, height) = ((screen.frame.w * screen.scale) as u32, (screen.frame.h * screen.scale) as u32);
         let person = p.home.join("person.png");
         fs::write(&person, scooch_core::encode_png(&photo_at(width, height, SUBJECT))?)?;
-        let at = Fixed {
+        let mut at = Fixed {
             program: scooch_program()?,
             fixed: out_folder(p).join(format!("{}-shown.jpg", file_safe(&screen.id))),
             frame,
             painted_at: (frame.x + SUBJECT.0 * frame.w, frame.y + SUBJECT.1 * frame.h),
             calm_at: (frame.x + 0.85 * frame.w, frame.y + 0.25 * frame.h),
+            others: Vec::new(),
         };
         let _ = fs::remove_file(p.home.join("state.json"));
         let _ = fs::remove_file(record::file(&p.home));
         let _ = fs::remove_dir_all(p.home.join("out"));
         set_as_person(p, &linux, &screen, &person)?;
+        at.others = unlike_scooch(p, &screen);
         let parked = move_icon(p, at.calm_at).map_err(|error| format!("{error:#}"));
         std::thread::sleep(Duration::from_secs(2));
         let watching = watch_keys(&p.out)?;
@@ -3666,6 +3769,13 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
         p.line(format!("- off: scooch off exit {:?}, the keys now name {after_off:?}, the person's PNG {}, the picked navy {}, the shown file left {left}, the screen matched that picture after {seen_off:?} ms at {:?}%, the watch printed {printed_off:?}", off.as_ref().map(|out| out.status.code()).map_err(|error| error.to_string()), after_off.as_deref() == Some(person_png(p).as_path()), after_off.as_deref() == Some(navy.as_path()), last_off.as_ref().map(|last| (last.share * 10.0).round() / 10.0)));
         if !off.as_ref().is_ok_and(|out| out.status.success()) || left || seen_off.is_none() || after_off.as_deref().is_none_or(|path| path.starts_with(out_folder(p))) || printed_off.is_empty() {
             p.fail("scooch off did not give the person's picture back and then remove the shown file");
+        }
+        let named: Vec<Option<String>> = ["picture-uri", "picture-uri-dark"].iter().map(|key| settings::gsetting(gnome::BACKGROUND, key)).collect();
+        let both = named.iter().all(|value| value.as_deref() == Some(uri.as_str()));
+        let (others, held) = others_now(p, screen, &at.others);
+        p.line(format!("- off after the pick: `picture-uri` and `picture-uri-dark` now hold {named:?}, the value the person wrote in both {both}, the keys that are no picture keys now hold {others:?}, their values from before Scooch {held}"));
+        if !both || !held {
+            p.fail("scooch off after a pick did not name the picked picture in both keys with the other keys at their values from before Scooch");
         }
         let mark = dconf_lines(&p.out).len();
         let on = finished(Command::new(&at.program).env("SCOOCH_HOME", &p.home).env("SCOOCH_TRACE", "1"), "scooch on");
