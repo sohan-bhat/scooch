@@ -6159,6 +6159,24 @@ pub mod tests {
         assert_eq!(writes(&fake), 1);
     }
 
+    #[test]
+    fn a_gnome_set_gives_the_window_a_new_stamp_for_the_same_shown_path() {
+        let (daemon, fake, _) = gnome_rig("fixed-stamp");
+        let fixed = fixed_of(&daemon);
+        let shown = || daemon.store.load().screens["main"].shown().to_path_buf();
+        fake.place(vec![subject()]);
+        assert_eq!(outcome(&daemon.tick()), Outcome::Rendered);
+        let earlier = std::time::UNIX_EPOCH + Duration::from_millis(1_700_000_000_000);
+        std::fs::File::options().write(true).open(&fixed).unwrap().set_modified(earlier).unwrap();
+        let (path, before) = (shown(), crate::facade::stamp(Some(&shown())));
+        fake.place(Vec::new());
+        assert_eq!(outcome(&daemon.tick()), Outcome::Plain);
+        let (again, after) = (shown(), crate::facade::stamp(Some(&shown())));
+        assert_eq!((path.as_path(), again.as_path()), (fixed.as_path(), fixed.as_path()));
+        assert_eq!(before, Some(1_700_000_000_000));
+        assert!(after.is_some_and(|after| after > 1_700_000_000_000), "{after:?}");
+    }
+
     fn fail_at(daemon: &Daemon, fake: &Fake, step: &str) {
         let staged = daemon.store.staged("main");
         let second = |turn: Turn| *fake.on_read.lock().unwrap() = vec![pass(), turn].into();
