@@ -329,8 +329,20 @@ impl Store {
         self.out().join(format!("{}-{counter}.{extension}", file_safe(screen)))
     }
 
-    pub fn fixed(&self, screen: &str, extension: &str) -> PathBuf {
-        self.out().join(format!("{}-shown.{extension}", file_safe(screen)))
+    pub fn shown(&self, screen: &str, stamp: u64, extension: &str) -> PathBuf {
+        self.out().join(format!("{}-shown-{stamp}.{extension}", file_safe(screen)))
+    }
+
+    pub fn shown_stamp(&self, screen: &str, path: &Path) -> Option<u64> {
+        let stem = path.file_stem()?.to_str()?;
+        let rest = stem.strip_prefix(&format!("{}-shown", file_safe(screen)))?;
+        if !self.owns(path) {
+            return None;
+        }
+        if rest.is_empty() {
+            return Some(0);
+        }
+        rest.strip_prefix('-').filter(|digits| digits.bytes().all(|digit| digit.is_ascii_digit()))?.parse().ok()
     }
 
     pub fn staged(&self, screen: &str) -> PathBuf {
@@ -827,6 +839,38 @@ mod tests {
         let store = Store::at("/data");
         assert_eq!(store.output("AB-12", 4, "jpg"), PathBuf::from("/data/out/AB-12-4.jpg"));
         assert_eq!(store.output("odd/name:1", 1, "png"), PathBuf::from("/data/out/odd_name_1-1.png"));
+    }
+
+    #[test]
+    fn a_shown_file_is_known_by_its_screen_and_stamp_under_the_old_name_and_the_new() {
+        let store = Store::at(scratch("shown-names"));
+        fs::create_dir_all(store.out()).unwrap();
+        let stamped = store.shown("odd/name:1", 1_795_806_865_836, "jpg");
+        assert_eq!(stamped, store.out().join("odd_name_1-shown-1795806865836.jpg"));
+        assert_eq!(store.shown_stamp("odd/name:1", &stamped), Some(1_795_806_865_836));
+        assert_eq!(store.shown_stamp("main", &store.out().join("main-shown.jpg")), Some(0));
+        assert_eq!(store.shown_stamp("main", &store.shown("main", 7, "png")), Some(7));
+        for other in [store.output("main", 7, "jpg"), store.staged("main"), store.shown("side", 7, "jpg"), store.out().join("main-shown-7b.jpg"), store.out().join("main-shown-.jpg"), store.out().join("main-shown-+7.jpg"), store.root.join("main-shown-7.jpg")] {
+            assert_eq!(store.shown_stamp("main", &other), None, "{}", other.display());
+        }
+    }
+
+    #[test]
+    fn every_shown_file_of_a_screen_is_one_of_its_outputs_and_ours() {
+        let store = Store::at(scratch("shown-outputs"));
+        fs::create_dir_all(store.out()).unwrap();
+        let mine = [store.out().join("main-shown.jpg"), store.shown("main", 5, "jpg"), store.shown("main", 6, "jpg"), store.staged("main")];
+        let theirs = store.shown("side", 5, "jpg");
+        for path in mine.iter().chain([&theirs]) {
+            fs::write(path, b"picture").unwrap();
+        }
+        let mut found = store.outputs_of("main");
+        found.sort();
+        let mut wanted = mine.to_vec();
+        wanted.sort();
+        assert_eq!(found, wanted);
+        assert!(mine.iter().chain([&theirs]).all(|path| store.owns(path)));
+        assert!(mine[..3].iter().all(|path| path.extension().is_some_and(|extension| extension == "jpg")));
     }
 
     #[test]
