@@ -28,3 +28,71 @@ jobs:
           uname -r
           nproc
           python3 .github/app/lab-lock.py
+
+  mutation:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: once
+            says: the fresh process gives up at the first failed try after the old process ended
+            test: a_lock_freed_a_moment_after_the_old_process_ended_goes_to_the_fresh_process
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: linux-x64-build-linux
+          save-if: false
+          workspaces: |
+            . -> target
+            crates/scooch-app -> target
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Linux packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf file libayatana-appindicator3-dev
+      - name: Window page and a stand in for the scooch program
+        working-directory: crates/scooch-app
+        run: |
+          mkdir -p binaries
+          printf '#!/bin/sh\n' > binaries/scooch-x86_64-unknown-linux-gnu
+          chmod +x binaries/scooch-x86_64-unknown-linux-gnu
+          npm --prefix ui ci
+          npm --prefix ui run build
+      - name: The tests pass before the mutation
+        working-directory: crates/scooch-app
+        run: cargo test --locked life::
+      - name: Mutation
+        run: bash .github/app/lab-mutate.sh ${{ matrix.name }}
+      - name: The tests must fail
+        working-directory: crates/scooch-app
+        run: |
+          set +e
+          cargo test --locked > "$RUNNER_TEMP/test.txt" 2>&1
+          code=$?
+          tail -40 "$RUNNER_TEMP/test.txt"
+          if [ "$code" = 0 ]; then
+            echo "The mutation ${{ matrix.name }} passed every test."
+            exit 1
+          fi
+          if ! grep -q "^test life::tests::${{ matrix.test }} \.\.\. FAILED" "$RUNNER_TEMP/test.txt"; then
+            echo "The tests failed, but not in ${{ matrix.test }}."
+            exit 1
+          fi
+          {
+            echo "## Mutation ${{ matrix.name }}, ${{ matrix.says }}"
+            echo
+            echo "- cargo test ended with $code"
+            grep -E '^test .* FAILED$' "$RUNNER_TEMP/test.txt" | sed 's/^/- /'
+            grep -E '^test result' "$RUNNER_TEMP/test.txt" | sed 's/^/- /'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
