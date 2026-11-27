@@ -415,6 +415,7 @@ jobs:
         run: cat appprobe/report.md >> "$GITHUB_STEP_SUMMARY" || true
 
   tray-watcher:
+    needs: bundle-linux
     if: ${{ github.workflow == 'app' }}
     strategy:
       fail-fast: false
@@ -422,8 +423,10 @@ jobs:
         include:
           - desktop: xfce
             packages: xvfb x11-utils dbus-x11 xfwm4 xfce4-panel xfconf
+            session: xauth xdotool wmctrl xfdesktop4 xfdesktop4-data xfce4-settings gvfs gvfs-daemons libglib2.0-bin python3-gi
           - desktop: kde
             packages: xvfb x11-utils dbus-x11 plasma-desktop plasma-workspace kwin-x11
+            session: xauth xdotool wmctrl libglib2.0-bin python3-gi kde-cli-tools plasma-workspace-wallpapers breeze-icon-theme
     runs-on: ubuntu-24.04
     timeout-minutes: 70
     steps:
@@ -442,16 +445,39 @@ jobs:
           chmod 700 "$XDG_RUNTIME_DIR"
           export XDG_RUNTIME_DIR
           dbus-run-session -- bash .github/app/watcher-time.sh ${{ matrix.desktop }} watcher
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: app-linux-x64
+          path: built
+      - name: Install the app
+        timeout-minutes: 30
+        run: sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ${{ matrix.session }} ./built/*.deb
+      - name: Tray gap at the close
+        timeout-minutes: 20
+        run: |
+          pkill -x plasmashell || true
+          pkill -f kded || true
+          pkill -x xfce4-panel || true
+          pkill -x xfwm4 || true
+          pkill -x kwin_x11 || true
+          pkill -x Xvfb || true
+          sleep 2
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          dbus-run-session -- bash .github/linux/${{ matrix.desktop }}.sh .github/app/tray-gap.sh gap
       - name: Upload
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: tray-watcher-${{ matrix.desktop }}
-          path: watcher
+          path: |
+            watcher
+            gap
           if-no-files-found: warn
       - name: Summary
         if: always()
-        run: cat watcher/report.md >> "$GITHUB_STEP_SUMMARY" || true
+        run: cat watcher/report.md gap/report.md >> "$GITHUB_STEP_SUMMARY" || true
 
   rpm-fedora:
     needs: bundle-linux
