@@ -38,7 +38,7 @@ struct Kept(Mutex<Option<watch::Watch>>);
 
 struct Icon(Mutex<Option<lock::Held>>);
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 const IDENTIFIER: &str = "me.sohanbhat.scooch.window";
 
 fn let_go<R: Runtime>(app: &AppHandle<R>) {
@@ -57,6 +57,26 @@ fn plugin_usable() -> bool {
 #[cfg(not(target_os = "macos"))]
 fn plugin_usable() -> bool {
     true
+}
+
+#[cfg(target_os = "linux")]
+fn handed(arguments: &[String]) -> bool {
+    use glib::ToVariant;
+    let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else { return false };
+    let name = format!("{IDENTIFIER}.SingleInstance");
+    let path = format!("/{}", name.replace('.', "/").replace('-', "_"));
+    let folder = std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned();
+    let asked = glib::Variant::tuple_from_iter([arguments.to_variant(), folder.to_variant()]);
+    bus.call_sync(Some(&name), &path, "org.SingleInstance.DBus", "ExecuteCallback", Some(&asked), None, gio::DBusCallFlags::NO_AUTO_START, 1000, gio::Cancellable::NONE).is_ok()
+}
+
+#[cfg(target_os = "linux")]
+fn entered(folder: &std::path::Path, arguments: &[String]) -> life::Entry<lock::Held> {
+    if let Some(held) = lock::take(folder) {
+        return life::Entry::Holds(held);
+    }
+    let patience = if session::watcher_now() { life::ANSWER } else { std::time::Duration::ZERO };
+    life::enter(patience, life::PAUSE, || lock::take(folder), || handed(arguments))
 }
 
 const SAVES: [(&str, &str); 3] = [("so try again in a moment.", "held"), ("so check that the disk has room.", "full"), ("so check that its folder can be written.", "unwritable")];
@@ -285,6 +305,7 @@ fn place_on_pointer<R: Runtime>(window: &WebviewWindow<R>) {
 
 static PRESENTING: Mutex<()> = Mutex::new(());
 static SHOWN: life::Gate = life::Gate::new();
+static DOOR: life::Door = life::Door::new();
 
 fn made_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
     #[allow(unused_mut)]
@@ -305,19 +326,25 @@ fn present<R: Runtime>(app: &AppHandle<R>) {
     let _presenting = PRESENTING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-    let window = match app.get_webview_window("main") {
-        Some(window) => window,
-        None => match made_window(app) {
-            Ok(window) => window,
-            Err(error) => {
-                eprintln!("scooch-app window failed: {error}");
-                return;
-            }
-        },
-    };
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_focus();
+    loop {
+        let closes = DOOR.quiet();
+        let window = match app.get_webview_window("main") {
+            Some(window) => window,
+            None => match made_window(app) {
+                Ok(window) => window,
+                Err(error) => {
+                    eprintln!("scooch-app window failed: {error}");
+                    return;
+                }
+            },
+        };
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        if DOOR.quiet() == closes {
+            break;
+        }
+    }
     if SHOWN.first() {
         first_window(app);
     }
@@ -365,6 +392,11 @@ fn own_change<R: Runtime>(app: &AppHandle<R>) -> life::Change {
     app.try_state::<life::Program>().map_or(life::Change::Same, |program| program.change())
 }
 
+fn decided<R: Runtime>(app: &AppHandle<R>) -> life::Close {
+    DOOR.settle();
+    life::at_close(facade::is_on(), tray::made(app), update_waiting(app), own_change(app), fresh_at_close())
+}
+
 fn ended<R: Runtime>(app: &AppHandle<R>) {
     if let Some(kept) = app.try_state::<Kept>() {
         kept.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
@@ -391,8 +423,17 @@ fn ended<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn show_window<R: Runtime>(app: &AppHandle<R>) {
+    if !DOOR.opens() {
+        let program = app.try_state::<life::Program>().map(|program| program.path.clone());
+        let started = program.is_some_and(|path| life::reopen(&path).is_ok());
+        eprintln!("scooch-app a start reached this process as it ends, started again {started}");
+        return;
+    }
     let app = app.clone();
-    std::thread::spawn(move || present(&app));
+    std::thread::spawn(move || {
+        present(&app);
+        DOOR.opened();
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -403,6 +444,16 @@ fn tray_offered(background: bool) -> bool {
 #[cfg(not(target_os = "linux"))]
 fn tray_offered(_background: bool) -> bool {
     true
+}
+
+#[cfg(target_os = "linux")]
+fn fresh_at_close() -> bool {
+    session::watcher_now()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn fresh_at_close() -> bool {
+    false
 }
 
 #[cfg(target_os = "macos")]
@@ -429,6 +480,20 @@ fn main() {
         return;
     }
     let folder = facade::folder();
+    #[cfg(target_os = "linux")]
+    let entry = if background { None } else { Some(entered(&folder, &arguments)) };
+    #[cfg(target_os = "linux")]
+    let held = match entry {
+        Some(life::Entry::Holds(held)) => Some(held),
+        Some(life::Entry::Alone) => None,
+        Some(life::Entry::Sent) => {
+            eprintln!("scooch-app another process holds the icon and shows the window");
+            return;
+        }
+        None if life::waits(&arguments) => lock::wait(&folder, life::HANDOVER),
+        None => lock::take(&folder),
+    };
+    #[cfg(not(target_os = "linux"))]
     let held = if life::waits(&arguments) { lock::wait(&folder, life::HANDOVER) } else { lock::take(&folder) };
     let start = life::start(background, held.is_some());
     if start == life::Start::End {
@@ -445,7 +510,9 @@ fn main() {
     }
     let program = held.as_ref().and_then(|_| life::Program::own());
     let builder = tauri::Builder::default();
-    let builder = if plugin_usable() {
+    let builder = if !life::answers(held.is_some(), cfg!(target_os = "linux")) {
+        builder
+    } else if plugin_usable() {
         builder.plugin(tauri_plugin_single_instance::init(|app, arguments, _folder| {
             if !tray::background(&arguments) {
                 show_window(app);
@@ -469,6 +536,10 @@ fn main() {
             std::thread::spawn(move || responder.respond(pictures::answer(&request)));
         })
         .on_window_event(|window, event| {
+            #[cfg(target_os = "linux")]
+            if let WindowEvent::CloseRequested { .. } = event {
+                DOOR.closes();
+            }
             if let WindowEvent::ThemeChanged(theme) = event {
                 if let Some(webview) = window.app_handle().get_webview_window(window.label()) {
                     paint(&webview, *theme);
@@ -524,7 +595,7 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("the Scooch window failed to start")
         .run(|app, event| match event {
-            tauri::RunEvent::ExitRequested { code: None, api, .. } => match life::at_close(facade::is_on(), tray::made(app), update_waiting(app), own_change(app)) {
+            tauri::RunEvent::ExitRequested { code: None, api, .. } => match decided(app) {
                 life::Close::Keep => {
                     api.prevent_exit();
                     #[cfg(target_os = "macos")]
@@ -539,6 +610,26 @@ fn main() {
                     } else {
                         api.prevent_exit();
                         eprintln!("scooch-app window closed, the replaced program did not start, the icon stays");
+                    }
+                }
+                life::Close::Fresh => {
+                    #[cfg(target_os = "linux")]
+                    appimage::seal();
+                    let program = app.try_state::<life::Program>().map(|program| program.path.clone());
+                    match life::leave(&DOOR, || program.is_some_and(|path| life::relaunch(&path).is_ok())) {
+                        life::Leave::Gone => {
+                            tauri_plugin_single_instance::destroy(app);
+                            life::mark(life::Exit::Fresh);
+                            eprintln!("scooch-app window closed, a fresh process takes over the icon");
+                        }
+                        life::Leave::Opening => {
+                            api.prevent_exit();
+                            eprintln!("scooch-app window closed while another opens, the icon stays");
+                        }
+                        life::Leave::Failed => {
+                            api.prevent_exit();
+                            eprintln!("scooch-app window closed, a fresh process did not start, the icon stays");
+                        }
                     }
                 }
                 life::Close::End(exit) => life::mark(exit),
