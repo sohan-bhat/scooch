@@ -5,6 +5,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Runtime};
 
 pub const WAIT: &str = "--wait";
+#[cfg(any(target_os = "linux", test))]
+pub const FROM: &str = "--from=";
 pub const HANDOVER: Duration = Duration::from_secs(10);
 const SETTLE: Duration = Duration::from_secs(5);
 #[cfg(target_os = "linux")]
@@ -70,6 +72,38 @@ pub fn start(background: bool, held: bool) -> Start {
 
 pub fn waits(arguments: &[String]) -> bool {
     arguments.iter().skip(1).any(|argument| argument == WAIT)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn left_by(arguments: &[String]) -> Option<u32> {
+    arguments.iter().skip(1).find_map(|argument| argument.strip_prefix(FROM)).and_then(|pid| pid.parse().ok())
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn state_runs(stat: &str) -> bool {
+    stat.rsplit_once(") ").and_then(|(_, rest)| rest.chars().next()).is_some_and(|state| !matches!(state, 'Z' | 'X'))
+}
+
+#[cfg(target_os = "linux")]
+pub fn runs(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| state_runs(&stat))
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn succeed<H>(patience: Duration, pause: Duration, mut take: impl FnMut() -> Option<H>, mut alive: impl FnMut() -> bool) -> Option<H> {
+    let deadline = std::time::Instant::now() + patience;
+    loop {
+        if let Some(held) = take() {
+            return Some(held);
+        }
+        if !alive() {
+            return take();
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(pause);
+    }
 }
 
 pub fn ends_without_icon(background: bool, made: bool) -> bool {
@@ -327,8 +361,18 @@ impl Program {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn handing() -> [String; 3] {
+    [crate::tray::BACKGROUND.to_string(), WAIT.to_string(), format!("{FROM}{}", std::process::id())]
+}
+
+#[cfg(not(target_os = "linux"))]
+fn handing() -> [String; 2] {
+    [crate::tray::BACKGROUND.to_string(), WAIT.to_string()]
+}
+
 pub fn relaunch(program: &Path) -> std::io::Result<()> {
-    started(program, &[crate::tray::BACKGROUND, WAIT])
+    started(program, &handing())
 }
 
 pub fn reopen(program: &Path) -> std::io::Result<()> {
@@ -336,7 +380,7 @@ pub fn reopen(program: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn started(program: &Path, arguments: &[&str]) -> std::io::Result<()> {
+fn started(program: &Path, arguments: &[String]) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let mut command = Command::new(program);
@@ -359,7 +403,7 @@ fn started(program: &Path, arguments: &[&str]) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn started(program: &Path, arguments: &[&str]) -> std::io::Result<()> {
+fn started(program: &Path, arguments: &[String]) -> std::io::Result<()> {
     use std::process::{Command, Stdio};
     Command::new(program).args(arguments).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map(drop)
 }
@@ -506,6 +550,47 @@ mod tests {
         let started = std::time::Instant::now();
         assert_eq!(enter(Duration::from_millis(120), Duration::from_millis(10), || None::<u8>, || false), Entry::Alone);
         assert!(started.elapsed() >= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn the_fresh_process_reads_which_process_hands_over() {
+        let list = |items: &[&str]| items.iter().map(|item| item.to_string()).collect::<Vec<_>>();
+        assert_eq!(left_by(&list(&["scooch-app", "--background", "--wait", "--from=4242"])), Some(4242));
+        assert_eq!(left_by(&list(&["scooch-app", "--background", "--wait"])), None);
+        assert_eq!(left_by(&list(&["scooch-app", "--from=soon"])), None);
+        assert_eq!(left_by(&list(&["--from=4242"])), None);
+        assert!(waits(&list(&["scooch-app", "--background", "--wait", "--from=4242"])));
+    }
+
+    #[test]
+    fn a_waiting_start_ends_once_the_old_process_is_gone_and_another_holds_the_lock() {
+        let started = std::time::Instant::now();
+        assert_eq!(succeed(Duration::from_secs(10), Duration::from_millis(1), || None::<u8>, || false), None);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let mut tries = 0;
+        let freed = succeed(Duration::from_secs(5), Duration::from_millis(1), || {
+            tries += 1;
+            (tries == 4).then_some(tries)
+        }, || true);
+        assert_eq!(freed, Some(4));
+        let mut last = 0;
+        let at_the_end = succeed(Duration::from_secs(5), Duration::from_millis(1), || {
+            last += 1;
+            (last == 2).then_some(last)
+        }, || false);
+        assert_eq!(at_the_end, Some(2));
+        let started = std::time::Instant::now();
+        assert_eq!(succeed(Duration::from_millis(120), Duration::from_millis(10), || None::<u8>, || true), None);
+        assert!(started.elapsed() >= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn a_process_that_ended_and_was_not_collected_counts_as_gone() {
+        assert!(state_runs("4242 (scooch-app) S 1 4242 4242 0 -1"));
+        assert!(state_runs("4242 (odd) name) R 1 4242 4242 0 -1"));
+        assert!(!state_runs("4242 (scooch-app) Z 1 4242 4242 0 -1"));
+        assert!(!state_runs("4242 (scooch-app) X 1 4242 4242 0 -1"));
+        assert!(!state_runs(""));
     }
 
     #[test]

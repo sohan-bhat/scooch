@@ -505,7 +505,10 @@ fn main() {
             eprintln!("scooch-app another process holds the icon and shows the window");
             return;
         }
-        None if life::waits(&arguments) => lock::wait(&folder, life::HANDOVER),
+        None if life::waits(&arguments) => match life::left_by(&arguments) {
+            Some(old) => life::succeed(life::HANDOVER, life::PAUSE, || lock::take(&folder), || life::runs(old)),
+            None => lock::wait(&folder, life::HANDOVER),
+        },
         None => lock::take(&folder),
     };
     #[cfg(not(target_os = "linux"))]
