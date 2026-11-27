@@ -117,6 +117,7 @@ press_pill() {
   xdotool windowactivate --sync "$id" >/dev/null 2>&1
   xdotool windowfocus --sync "$id" >/dev/null 2>&1
   sleep 0.5
+  pressed_at=$(date +%s%3N)
   xdotool key --delay 120 "$@"
 }
 
@@ -215,6 +216,7 @@ expect "off removed the login item" [ ! -f "$autostart" ]
 press_pill Return
 if took=$(wait_for 30 state_on); then line "- on again after $took s"; else line "- not on again within 30 s"; fi
 wait_for 30 rendered >/dev/null
+before_close=$(pgrep -x scooch-app | head -1)
 press_pill alt+F4
 . "$PWD/.github/app/tray-linux.sh"
 
@@ -514,6 +516,24 @@ sleep 3
 line "- closed the AppImage window while on, app processes $(pgrep -xc scooch-app), left running $(pgrep -fa 'AppImage|scooch' | grep -v probe | cut -c1-120 | tr '\n' ';')"
 only_icon() { [ "$(pgrep -xc scooch-app)" = 1 ] && ! has_window; }
 expect "closing the AppImage window while on leaves only its icon" only_icon
+mounted() { awk '$2 ~ /\/\.mount_/ { print $2 }' /proc/mounts; }
+first_icon=$(pgrep -x scooch-app | head -1)
+line "- after the first close the icon process is $first_icon, the AppImage is mounted at $(mounted | tr '\n' ' ')"
+for round in 2 3 4 5; do
+  clean "$appimage" >>"$out/appimage.log" 2>&1 &
+  wait_for 40 has_window >/dev/null
+  sleep 2
+  press_pill alt+F4
+  wait_for 15 sh -c '! xdotool search --name "^Scooch$" >/dev/null 2>&1' >/dev/null
+  sleep 3
+done
+wait_for 15 only_icon >/dev/null
+sleep 2
+fifth_icon=$(pgrep -x scooch-app | head -1)
+line "- after five closes of the AppImage window the icon process is ${fifth_icon:-none}, app processes $(pgrep -xc scooch-app), the AppImage is mounted at $(mounted | tr '\n' ' '), the starts in between said $(grep -c 'shows the window' "$out/appimage.log") times that the icon's process shows the window"
+expect "after five closes of the AppImage window only its icon is left" only_icon
+expect "five closes of the AppImage window gave the icon to another process" eval '[ -n "$fifth_icon" ] && [ "$fifth_icon" != "$first_icon" ]'
+expect "after five closes exactly one mount of the AppImage exists" [ "$(mounted | wc -l)" = 1 ]
 for daemon in $(pgrep -f '.local/bin/scooch watch'); do
   line "- the daemon holds $(ls -l "/proc/$daemon/fd" 2>/dev/null | grep -c '.mount_') files inside the AppImage $(ls -l "/proc/$daemon/fd" 2>/dev/null | grep '.mount_' | awk '{ print $NF }' | head -3 | tr '\n' ' ')"
 done
