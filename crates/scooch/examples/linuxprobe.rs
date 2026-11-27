@@ -85,9 +85,22 @@ fn footings(drags: &[(bool, bool)], window: usize) -> Vec<Drag> {
         .collect()
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn chosen(only: Option<&str>, title: &str) -> bool {
+    only.is_none_or(|only| only.split(',').any(|wanted| title.starts_with(&format!("{} ", wanted.trim()))))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn limited(only: Option<&str>, titles: &[&str]) -> Option<String> {
+    let only = only?;
+    let ran: Vec<&str> = titles.iter().copied().filter(|title| chosen(Some(only), title)).collect();
+    let kept = if ran.is_empty() { "no section".to_string() } else { format!("only the sections {}", ran.join(", ")) };
+    Some(format!("- **limited run** this run holds {kept}, and the others were left out by `SCOOCH_PROBE_SECTIONS`"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{footing, footings, unfooted, Drag, Footing, TRIES};
+    use super::{chosen, footing, footings, limited, unfooted, Drag, Footing, TRIES};
 
     fn lines(list: &[&str]) -> Vec<String> {
         list.iter().map(|line| line.to_string()).collect()
@@ -172,11 +185,26 @@ mod tests {
         assert_eq!(footing(1, true, false), Footing::Wrong);
         assert_eq!(footing(TRIES, true, false), Footing::Wrong);
     }
+
+    const TITLES: [&str; 3] = ["1 Session facts", "6 End to end", "6b The shown file stays"];
+
+    #[test]
+    fn a_run_with_no_section_limit_adds_no_line_and_keeps_every_section() {
+        assert_eq!(limited(None, &TITLES), None);
+        assert_eq!(TITLES.map(|title| chosen(None, title)), [true; 3]);
+    }
+
+    #[test]
+    fn a_limited_run_names_its_sections_and_says_what_left_the_others_out() {
+        assert_eq!(limited(Some("1, 6b"), &TITLES).as_deref(), Some("- **limited run** this run holds only the sections 1 Session facts, 6b The shown file stays, and the others were left out by `SCOOCH_PROBE_SECTIONS`"));
+        assert_eq!(TITLES.map(|title| chosen(Some("1, 6b"), title)), [true, false, true]);
+        assert_eq!(limited(Some("9"), &TITLES).as_deref(), Some("- **limited run** this run holds no section, and the others were left out by `SCOOCH_PROBE_SECTIONS`"));
+    }
 }
 
 #[cfg(target_os = "linux")]
 mod probe {
-    use super::{footing, footings, unfooted, untaught, Drag, Footing, TRIES};
+    use super::{chosen, footing, footings, limited, unfooted, untaught, Drag, Footing, TRIES};
     use anyhow::{anyhow, bail, Context, Result};
     use scooch::platform::linux::parse::desktop::{Kind, Session};
     use scooch::platform::linux::parse::geometry::{intersect, Insets};
@@ -642,8 +670,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             ("8 Cleanup", cleanup),
         ];
         let only = std::env::var("SCOOCH_PROBE_SECTIONS").ok().filter(|only| !only.trim().is_empty());
+        if let Some(limited) = limited(only.as_deref(), &sections.map(|(title, _)| title)) {
+            probe.line(String::new());
+            probe.line(limited);
+        }
         for (title, check) in sections {
-            if only.as_ref().is_some_and(|only| !only.split(',').any(|wanted| title.starts_with(&format!("{} ", wanted.trim())))) {
+            if !chosen(only.as_deref(), title) {
                 continue;
             }
             probe.section(title, check);
