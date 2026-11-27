@@ -119,8 +119,11 @@ fn ready() -> anyhow::Result<PathBuf> {
 async fn off_main<T: Send + 'static>(code: &'static str, work: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
     #[cfg(target_os = "linux")]
     appimage::seal();
-    let _working = DOOR.works();
     said(code, tauri::async_runtime::spawn_blocking(work).await.map_err(|error| anyhow::anyhow!(error.to_string())).and_then(|done| done))
+}
+
+fn working() -> anyhow::Result<life::Working<'static>> {
+    DOOR.works().ok_or_else(|| anyhow::anyhow!("this process hands the icon to a fresh one"))
 }
 
 fn data_folder<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
@@ -147,7 +150,7 @@ async fn view<R: Runtime>(app: AppHandle<R>) -> Result<View, String> {
 }
 
 fn switch_on(folder: &std::path::Path) -> anyhow::Result<Started> {
-    let _working = DOOR.works();
+    let _working = working()?;
     let program = ready()?;
     match pictures::selected(folder).filter(|_| !facade::is_on()) {
         Some(selection) => {
@@ -160,12 +163,12 @@ fn switch_on(folder: &std::path::Path) -> anyhow::Result<Started> {
 }
 
 fn switch_off() -> anyhow::Result<Tally> {
-    let _working = DOOR.works();
+    let _working = working()?;
     adopted(facade::turn_off(&place::program()?))
 }
 
 pub fn restart_daemon() -> anyhow::Result<()> {
-    let _working = DOOR.works();
+    let _working = working()?;
     adopted(facade::turn_on(&ready()?)).map(drop)
 }
 
@@ -182,13 +185,18 @@ async fn turn_off() -> Result<Tally, String> {
 
 #[tauri::command]
 async fn set(switch: Switch, on: bool) -> Result<(), String> {
-    off_main("set", move || facade::set(switch, on)).await
+    off_main("set", move || {
+        let _working = working()?;
+        facade::set(switch, on)
+    })
+    .await
 }
 
 #[tauri::command]
 async fn use_picture<R: Runtime>(app: AppHandle<R>, path: PathBuf) -> Result<(), String> {
     let folder = data_folder(&app);
     off_main("use", move || {
+        let _working = working()?;
         if facade::is_on() {
             adopted(facade::use_picture(&ready()?, &path))?;
             pictures::select(&folder, None);
@@ -272,8 +280,8 @@ async fn fix<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
             life::end(&app, life::Exit::Moving);
             Ok(())
         }
-        Problem::Gnome { icons: Icons::Off } => off_main("gnome-icons", gnome_icons).await,
-        Problem::Stopped | Problem::Other => off_main("start", || adopted(facade::turn_on(&ready()?)).map(drop)).await,
+        Problem::Gnome { icons: Icons::Off } => off_main("gnome-icons", || working().and_then(|_working| gnome_icons())).await,
+        Problem::Stopped | Problem::Other => off_main("start", restart_daemon).await,
         Problem::Asking | Problem::Screen | Problem::Wallpaper { .. } | Problem::Gnome { .. } => Ok(()),
     }
 }
@@ -360,7 +368,7 @@ fn first_window<R: Runtime>(app: &AppHandle<R>) {
     update::fetch(app);
     let handle = app.clone();
     std::thread::spawn(move || {
-        let _working = DOOR.works();
+        let Some(working) = DOOR.works() else { return };
         #[cfg(target_os = "linux")]
         appimage::seal();
         let _ = facade::set_origin(std::env::var_os("APPIMAGE").map(PathBuf::from).as_deref());
@@ -379,6 +387,7 @@ fn first_window<R: Runtime>(app: &AppHandle<R>) {
                 taken_over(&program);
             }
         }
+        drop(working);
         let view = facade::view();
         eprintln!("scooch-app live {} reduce motion {} problem {}", view.live, view.reduce_motion, serde_json::to_string(&view.problem).unwrap_or_default());
     });
