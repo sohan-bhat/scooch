@@ -98,9 +98,25 @@ fn limited(only: Option<&str>, titles: &[&str]) -> Option<String> {
     Some(format!("- **limited run** this run holds {kept}, and the others were left out by `SCOOCH_PROBE_SECTIONS`"))
 }
 
+#[cfg(any(target_os = "linux", test))]
+const UNJUDGED: &str = "nothing to judge";
+
+#[cfg(any(target_os = "linux", test))]
+fn awaited(moved: bool, patience: std::time::Duration, pause: std::time::Duration, mut read: impl FnMut() -> (bool, &'static str)) -> (bool, &'static str) {
+    let until = std::time::Instant::now() + patience;
+    loop {
+        let (guessed, verdict) = read();
+        if !(moved && guessed) || verdict != UNJUDGED || std::time::Instant::now() >= until {
+            return (guessed, verdict);
+        }
+        std::thread::sleep(pause);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{chosen, footing, footings, limited, unfooted, Drag, Footing, TRIES};
+    use super::{awaited, chosen, footing, footings, limited, unfooted, Drag, Footing, TRIES, UNJUDGED};
+    use std::time::{Duration, Instant};
 
     fn lines(list: &[&str]) -> Vec<String> {
         list.iter().map(|line| line.to_string()).collect()
@@ -128,6 +144,44 @@ mod tests {
         let plain = lines(&["1795301492.415 predicted drop agreed with the file"]);
         let hook = lines(&["1795301517.100 drop key went down, desktop active true"]);
         assert_eq!(unfooted(&plain, true, &hook, 1795301517.9, true), Some("a key went down during the drag"));
+    }
+
+    #[test]
+    fn a_verdict_written_after_the_first_read_is_still_found() {
+        let mut reads = 0;
+        let found = awaited(true, Duration::from_secs(10), Duration::from_millis(1), || {
+            reads += 1;
+            (true, if reads < 4 { UNJUDGED } else { "agreed" })
+        });
+        assert_eq!(found, (true, "agreed"));
+        assert_eq!(reads, 4);
+    }
+
+    #[test]
+    fn a_drag_with_no_guess_or_no_move_is_read_once() {
+        for (moved, guessed) in [(false, true), (true, false), (false, false)] {
+            let mut reads = 0;
+            let found = awaited(moved, Duration::from_secs(10), Duration::from_millis(1), || {
+                reads += 1;
+                (guessed, UNJUDGED)
+            });
+            assert_eq!(found, (guessed, UNJUDGED));
+            assert_eq!(reads, 1);
+        }
+    }
+
+    #[test]
+    fn a_guess_the_daemon_never_judges_ends_unjudged_after_the_wait() {
+        let began = Instant::now();
+        let mut reads = 0;
+        let found = awaited(true, Duration::from_millis(60), Duration::from_millis(5), || {
+            reads += 1;
+            (true, UNJUDGED)
+        });
+        assert_eq!(found, (true, UNJUDGED));
+        assert!(reads > 1);
+        assert!(began.elapsed() >= Duration::from_millis(60));
+        assert!(began.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
@@ -205,7 +259,7 @@ mod tests {
 
 #[cfg(target_os = "linux")]
 mod probe {
-    use super::{chosen, footing, footings, limited, unfooted, untaught, Drag, Footing, TRIES};
+    use super::{awaited, chosen, footing, footings, limited, unfooted, untaught, Drag, Footing, TRIES, UNJUDGED};
     use anyhow::{anyhow, bail, Context, Result};
     use scooch::platform::linux::parse::desktop::{Kind, Session};
     use scooch::platform::linux::parse::geometry::{intersect, Insets};
@@ -1526,6 +1580,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     const OFFSETS: [u64; 16] = [0, 20, 40, 60, 80, 120, 160, 200, 300, 400, 600, 800, 1000, 1300, 1600, 2000];
     const STEADY: Duration = Duration::from_millis(400);
     const TRUTH: Duration = Duration::from_millis(2500);
+    const VERDICT: Duration = Duration::from_millis(3000);
     const SINGLES: usize = 10;
     const MOST_SINGLES: usize = 16;
     const WINDOW: usize = scooch::platform::linux::parse::drops::SHADOWS + 1;
@@ -1777,12 +1832,12 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
             p.line(format!("    - the Plasma 5 landing rule from the press {said}"));
         }
         if bench.predicts() {
-            let (guessed, verdict) = guessed(&wakes, lines.get(log_mark..).unwrap_or_default());
+            let moved = !changed.is_empty();
+            let (guessed, verdict) = awaited(moved, VERDICT, Duration::from_millis(50), || guessed(&wakes, log_lines(&bench.log).get(log_mark..).unwrap_or_default()));
             tally.guessed[slot] += usize::from(guessed);
             if guessed && slot == 0 {
                 tally.guessed_sets.extend(set);
             }
-            let moved = !changed.is_empty();
             tally.judged[slot] += usize::from(guessed && moved);
             tally.held[slot] += usize::from(verdict == "agreed" && moved);
             let why = unguessed(lines.get(log_mark..).unwrap_or_default());
@@ -1857,7 +1912,7 @@ const SUBJECT: (f32, f32, f32) = (0.6, 0.65, 0.12);
     fn guessed(wakes: &[String], lines: &[String]) -> (bool, &'static str) {
         let guessed = wakes.iter().any(|wake| wake.starts_with("predicted drop "));
         let said = [("predicted drop agreed", "agreed"), ("predicted drop missed", "missed")];
-        let verdict = lines.iter().find_map(|line| said.iter().find(|(needle, _)| line.contains(needle)).map(|(_, verdict)| *verdict)).unwrap_or("nothing to judge");
+        let verdict = lines.iter().find_map(|line| said.iter().find(|(needle, _)| line.contains(needle)).map(|(_, verdict)| *verdict)).unwrap_or(UNJUDGED);
         (guessed, verdict)
     }
 
