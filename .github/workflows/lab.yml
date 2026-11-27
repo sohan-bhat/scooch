@@ -71,10 +71,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - leg: base-a
+          - leg: base
             mode: ""
-          - leg: base-b
+          - leg: trim
+            mode: trim
+          - leg: cache
+            mode: cache
+          - leg: mmap
+            mode: mmap
+          - leg: lean
+            mode: trim,mmap,quiet
+          - leg: fresh-gap
+            mode: fresh-gap
+          - leg: fresh-overlap
+            mode: fresh-overlap
+          - leg: base-gl
             mode: ""
+            gl: "1"
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -96,6 +109,7 @@ jobs:
         env:
           SCOOCH_LAB: ${{ matrix.mode }}
           LAB_LEG: ${{ matrix.leg }}
+          LAB_GL: ${{ matrix.gl }}
         run: |
           XDG_RUNTIME_DIR="$(mktemp -d)"
           chmod 700 "$XDG_RUNTIME_DIR"
@@ -118,70 +132,49 @@ jobs:
         if: always()
         run: cat lab/report.md >> "$GITHUB_STEP_SUMMARY" || true
 
-  build-windows:
-    runs-on: windows-2025
-    timeout-minutes: 30
+  handover-kde:
+    needs: build-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Rust
-        shell: bash
-        run: |
-          rustup toolchain install stable --profile minimal --component clippy --no-self-update
-          rustup default stable
-          rustup target add x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          key: windows-x64
-          save-if: false
-          workspaces: |
-            . -> target
-            crates/scooch-app -> target
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: 22
-      - name: Scooch programs
-        shell: pwsh
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
+          name: lab-deb
+          path: built
+      - name: Install the desktop packages
+        timeout-minutes: 12
         run: |
-          cargo build --release -p scooch --bins --target x86_64-pc-windows-msvc
-          New-Item -ItemType Directory -Force crates/scooch-app/binaries | Out-Null
-          foreach ($name in 'scooch', 'scoochw') {
-            Copy-Item "target/x86_64-pc-windows-msvc/release/$name.exe" "crates/scooch-app/binaries/$name-x86_64-pc-windows-msvc.exe"
-          }
-      - name: Window packages
-        shell: bash
-        working-directory: crates/scooch-app/ui
-        run: npm ci
-      - name: Compile
-        shell: bash
-        working-directory: crates/scooch-app
-        run: node ui/node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle --target x86_64-pc-windows-msvc
-      - name: Bundle
-        shell: bash
-        working-directory: crates/scooch-app
-        run: |
-          for attempt in 1 2 3; do
-            if node ui/node_modules/@tauri-apps/cli/tauri.js bundle --ci --target x86_64-pc-windows-msvc --bundles nsis; then break; fi
-            sleep 15
-          done
-          mkdir -p ../../built
-          cp target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe ../../built/
-          ls -l ../../built
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y xvfb xauth x11-utils xdotool wmctrl dbus-x11 libglib2.0-bin python3-gi plasma-desktop plasma-workspace kwin-x11
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends kde-cli-tools plasma-workspace-wallpapers breeze-icon-theme || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y ./built/*.deb
       - name: Measure
-        timeout-minutes: 15
-        shell: pwsh
-        run: ./.github/app/lab-windows.ps1 -Built built -Out lab
+        timeout-minutes: 12
+        env:
+          LAB_LEG: handover-kde
+          LAB_PLAN: gap
+          LAB_MODES: fresh-gap fresh-overlap
+        run: |
+          XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          XAUTHORITY="$RUNNER_TEMP/x-cookie/display.auth"
+          mkdir -p "$RUNNER_TEMP/x-cookie" "$RUNNER_TEMP/x-server"
+          xauth -q -f "$XAUTHORITY" add :99 . "$(mcookie)"
+          printf '#!/bin/sh\nexec /usr/bin/Xvfb "$@" -auth "%s"\n' "$XAUTHORITY" >"$RUNNER_TEMP/x-server/Xvfb"
+          chmod +x "$RUNNER_TEMP/x-server/Xvfb"
+          export XAUTHORITY
+          PATH="$RUNNER_TEMP/x-server:$PATH" dbus-run-session -- bash .github/linux/kde.sh .github/app/lab-linux.sh lab
       - name: Upload
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: lab-windows
+          name: lab-handover-kde
           path: lab
           if-no-files-found: warn
       - name: Summary
         if: always()
-        shell: bash
         run: cat lab/report.md >> "$GITHUB_STEP_SUMMARY" || true

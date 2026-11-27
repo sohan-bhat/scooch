@@ -110,6 +110,7 @@ open_window() {
 
 closes=0
 closed_ms=0
+closer=keys
 close_window() {
   local id old poller
   closes=$((closes + 1))
@@ -119,15 +120,20 @@ close_window() {
   mem watch "$old" "$1" "$out/watch-$closes.txt" >/dev/null 2>&1 &
   sleep 1
   id=$(window)
-  timeout 5 xdotool windowactivate --sync "$id" >/dev/null 2>&1
-  timeout 5 xdotool windowfocus --sync "$id" >/dev/null 2>&1
-  sleep 0.5
-  xdotool key --delay 120 alt+F4
-  closed_ms=$(now_ms)
-  if ! wait_for 5 window_gone >/dev/null; then
-    wmctrl -c Scooch
+  if [ "$closer" = keys ]; then
+    timeout 5 xdotool windowactivate --sync "$id" >/dev/null 2>&1
+    timeout 5 xdotool windowfocus --sync "$id" >/dev/null 2>&1
+    sleep 0.5
+    xdotool key --delay 120 alt+F4
     closed_ms=$(now_ms)
-    line "- close $closes: alt+F4 left the window open, so wmctrl asked the window manager to close it"
+    if ! wait_for 3 window_gone >/dev/null; then
+      closer=wmctrl
+      line "- close $closes: alt+F4 left the window open, so from here wmctrl asks the window manager to close it"
+    fi
+  fi
+  if [ "$closer" = wmctrl ] && has_window; then
+    wmctrl -ic "$id"
+    closed_ms=$(now_ms)
     wait_for 10 window_gone >/dev/null
   fi
   wait "$poller"
