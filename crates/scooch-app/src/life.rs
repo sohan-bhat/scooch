@@ -216,9 +216,13 @@ impl Door {
         held.opening = held.opening.saturating_sub(1);
     }
 
-    pub fn works(&self) -> Working<'_> {
-        self.held().working += 1;
-        Working(self)
+    pub fn works(&self) -> Option<Working<'_>> {
+        let mut held = self.held();
+        if held.leaving {
+            return None;
+        }
+        held.working += 1;
+        Some(Working(self))
     }
 
     fn leaves(&self) -> bool {
@@ -452,6 +456,7 @@ mod tests {
         assert_eq!(leave(&door, || panic!("a fresh process was started")), Leave::Busy);
         drop(saving);
         assert_eq!(leave(&door, || true), Leave::Gone);
+        assert!(door.works().is_none(), "work began in a process that hands the icon over");
     }
 
     #[test]
