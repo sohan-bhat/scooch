@@ -506,7 +506,7 @@ fn main() {
             return;
         }
         None if life::waits(&arguments) => match life::left_by(&arguments) {
-            Some(old) => life::succeed(life::HANDOVER, life::PAUSE, || lock::take(&folder), || life::runs(old)),
+            Some(old) => life::succeed(life::HANDOVER, life::PAUSE, life::LAG, || lock::take(&folder), || life::runs(old)),
             None => lock::wait(&folder, life::HANDOVER),
         },
         None => lock::take(&folder),
