@@ -1,13 +1,14 @@
 {
   "name": "scooch-app-ui",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "scripts": {
     "dev": "vite --mode mock",
     "build": "vite build",
     "build:mock": "vite build --mode mock --outDir dist-mock",
     "typecheck": "tsc --noEmit",
+    "test": "node --test src/backend/tauri.test.mjs",
     "pictures": "node scripts/make-pictures.mjs",
     "shots": "node scripts/shots.mjs",
     "tauri": "tauri"

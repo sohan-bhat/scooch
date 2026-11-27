@@ -100,14 +100,15 @@ pub fn shown(view: &mut facade::View, selection: Option<&Path>) {
         return;
     }
     if let Some(selection) = selection {
-        put(selection, &mut view.current, view.monitors.iter_mut().map(|monitor| &mut monitor.picture));
+        put(selection, &mut view.current, view.monitors.iter_mut().map(|monitor| (&mut monitor.picture, &mut monitor.stamp)));
     }
 }
 
-fn put<'a>(selection: &Path, current: &mut Option<PathBuf>, pictures: impl Iterator<Item = &'a mut Option<PathBuf>>) {
+fn put<'a>(selection: &Path, current: &mut Option<PathBuf>, monitors: impl Iterator<Item = (&'a mut Option<PathBuf>, &'a mut Option<u64>)>) {
     *current = Some(selection.to_path_buf());
-    for picture in pictures {
+    for (picture, stamp) in monitors {
         *picture = Some(selection.to_path_buf());
+        *stamp = facade::stamp(Some(selection));
     }
 }
 
@@ -194,9 +195,32 @@ mod tests {
     }
 
     #[test]
-    fn a_selection_becomes_the_current_picture_and_every_preview() {
-        let (mut current, mut left, mut right) = (Some(PathBuf::from("/old.jpg")), None, Some(PathBuf::from("/old.jpg")));
-        put(Path::new("/sky.jpg"), &mut current, [&mut left, &mut right].into_iter());
-        assert_eq!((current, left, right), (Some(PathBuf::from("/sky.jpg")), Some(PathBuf::from("/sky.jpg")), Some(PathBuf::from("/sky.jpg"))));
+    fn a_selection_becomes_the_current_picture_and_every_preview_with_its_own_stamp() {
+        let folder = std::env::temp_dir().join(format!("scooch-put-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let sky = folder.join("sky.jpg");
+        std::fs::write(&sky, b"x").unwrap();
+        std::fs::File::options().write(true).open(&sky).unwrap().set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_789)).unwrap();
+        let (mut current, mut left, mut right) = (Some(PathBuf::from("/old.jpg")), (None, None), (Some(PathBuf::from("/old.jpg")), Some(1_600_000_000_000)));
+        put(&sky, &mut current, [(&mut left.0, &mut left.1), (&mut right.0, &mut right.1)].into_iter());
+        let _ = std::fs::remove_dir_all(&folder);
+        let stamped = (Some(sky.clone()), Some(1_700_000_000_789));
+        assert_eq!((current, left, right), (Some(sky.clone()), stamped.clone(), stamped));
+    }
+
+    fn request(uri: &str) -> Request<Vec<u8>> {
+        Request::builder().uri(uri).body(Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn the_stamp_after_a_picture_path_changes_neither_the_path_nor_the_thumbnail_flag() {
+        let path = PathBuf::from("/home/ada/.local/share/scooch/out/main-shown.jpg");
+        let at = |query: &str| decoded_path(&request(&format!("scooch://localhost/%2Fhome%2Fada%2F.local%2Fshare%2Fscooch%2Fout%2Fmain-shown.jpg{query}")));
+        assert_eq!(at(""), Some((path.clone(), false)));
+        assert_eq!(at("?v=123"), Some((path.clone(), false)));
+        assert_eq!(at("?thumb"), Some((path.clone(), true)));
+        assert_eq!(at("?thumb&v=123"), Some((path.clone(), true)));
+        assert_eq!(at("?v=123&thumb"), Some((path, true)));
     }
 }

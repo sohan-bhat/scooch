@@ -3,7 +3,9 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { Backend, Monitor, Phase, Picture, Problem, SwitchName, View } from './types';
 
-type Facade = Omit<View, 'phase' | 'monitors'> & { on: boolean; running: boolean; restoring: boolean; monitors: Monitor[] };
+type Stamped = Monitor & { stamp: number | null };
+
+type Facade = Omit<View, 'phase' | 'monitors'> & { on: boolean; running: boolean; restoring: boolean; monitors: Stamped[] };
 
 const KINDS = /\.(jpe?g|png|heic|heif|webp|tiff?|bmp|avif)$/i;
 const listeners = new Set<() => void>();
@@ -13,7 +15,7 @@ let failedWith: View['failedWith'] = null;
 let failedOn: boolean | null = null;
 let lastOn: boolean | null = null;
 
-const shown = (path: string, thumb = false) => `${convertFileSrc(path, 'scooch')}${thumb ? '?thumb' : ''}`;
+const shown = (path: string, query?: string) => `${convertFileSrc(path, 'scooch')}${query ? `?${query}` : ''}`;
 
 function tell() {
   for (const listener of listeners) listener();
@@ -30,7 +32,7 @@ function shaped(raw: Facade): View {
     system: raw.system,
     phase: busy ?? (raw.on ? 'on' : 'off'),
     pending: raw.pending,
-    monitors: raw.monitors.map((monitor) => ({ ...monitor, picture: monitor.picture ? shown(monitor.picture) : null })),
+    monitors: raw.monitors.map(({ stamp, ...monitor }) => ({ ...monitor, picture: monitor.picture ? shown(monitor.picture, stamp == null ? undefined : `v=${stamp}`) : null })),
     switches: raw.switches,
     problem: raw.problem,
     flipHelps: raw.flipHelps,
@@ -80,7 +82,7 @@ export const tauri: Backend = {
   },
   async pictures(): Promise<Picture[]> {
     const paths = await invoke<string[]>('pictures');
-    return paths.map((path) => ({ path, thumb: shown(path, true) }));
+    return paths.map((path) => ({ path, thumb: shown(path, 'thumb') }));
   },
   turnOn: () => during('starting', 'turn-on', () => invoke('turn_on')),
   turnOff: () => during('stopping', 'turn-off', () => invoke('turn_off')),

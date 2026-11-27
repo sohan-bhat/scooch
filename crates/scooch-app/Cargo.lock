@@ -4134,7 +4134,7 @@ dependencies = [
 
 [[package]]
 name = "scooch"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "block2",
@@ -4167,7 +4167,7 @@ dependencies = [
 
 [[package]]
 name = "scooch-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "block2",
@@ -4194,7 +4194,7 @@ dependencies = [
 
 [[package]]
 name = "scooch-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "image",
  "rayon",
@@ -4203,7 +4203,7 @@ dependencies = [
 
 [[package]]
 name = "scooch-live"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "pollster",
  "raw-window-handle",
