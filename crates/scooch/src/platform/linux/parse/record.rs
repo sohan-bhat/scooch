@@ -90,7 +90,6 @@ pub fn write(settings: &dyn Settings, path: &Path, request: &Request, original: 
         }
         let held = match saved.get(key) {
             None => (!ours(current.as_deref())).then(|| current.clone()),
-            Some(old) if request.pictures.contains(key) => follow(old.as_deref(), current.as_deref()).map(Some),
             Some(_) => None,
         };
         if let Some(held) = held {
