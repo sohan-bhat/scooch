@@ -1,0 +1,30 @@
+name: lab
+
+on:
+  push:
+    branches: [lab-lock]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lock:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Lock after the leader ended
+        run: |
+          uname -r
+          nproc
+          python3 .github/app/lab-lock.py
