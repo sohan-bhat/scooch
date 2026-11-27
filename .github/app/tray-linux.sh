@@ -39,6 +39,18 @@ one_icon() {
 }
 shown_windows() { xdotool search --onlyvisible --name '^Scooch$' 2>/dev/null; }
 has_shown() { [ -n "$(shown_windows)" ]; }
+shown_by() {
+  local id
+  for id in $(shown_windows); do
+    echo "$(xdotool getwindowpid "$id" 2>/dev/null):$id"
+  done | grep -v '^:'
+}
+close_shown() {
+  timeout 5 xdotool windowactivate --sync "$1" >/dev/null 2>&1
+  timeout 5 xdotool windowfocus --sync "$1" >/dev/null 2>&1
+  sleep 0.3
+  xdotool key --delay 0 alt+F4
+}
 icon_only() { [ -z "$(shown_windows)" ] && one_icon; }
 settle() {
   local limit="$1" from
@@ -297,16 +309,17 @@ strays=0
 for delay in 0 30 60 120 250 500; do
   for trial in 1 2 3; do
     settle 15000 single_app >/dev/null || strays=$((strays + 1))
+    if has_shown; then
+      close_shown "$(shown_windows | head -1)"
+      line "- a window was still open before this start, so the probe closed that window first"
+    fi
     settle 15000 icon_only >/dev/null
     clean /usr/bin/scooch-app >>"$out/fresh-race.log" 2>&1 &
     settle 20000 has_shown >/dev/null
     sleep 1.5
-    old=$(shown_windows | head -1)
+    old=$(shown_by | head -1)
     holder=$(lock_pids)
-    timeout 5 xdotool windowactivate --sync "$old" >/dev/null 2>&1
-    timeout 5 xdotool windowfocus --sync "$old" >/dev/null 2>&1
-    sleep 0.3
-    xdotool key --delay 0 alt+F4
+    close_shown "${old#*:}"
     asked=$(now_ms)
     [ "$delay" = 0 ] || sleep "0.$(printf '%03d' "$delay")"
     from=$(now_ms)
@@ -314,7 +327,7 @@ for delay in 0 30 60 120 250 500; do
     new=""
     took=""
     while [ $(( $(now_ms) - from )) -lt 8000 ]; do
-      new=$(shown_windows | grep -vx "$old" | head -1)
+      new=$(shown_by | grep -vx "$old" | head -1)
       if [ -n "$new" ]; then
         took=$(( $(now_ms) - from ))
         break
@@ -326,13 +339,10 @@ for delay in 0 30 60 120 250 500; do
     one=$(one_icon && echo yes || echo no)
     left=no
     if [ -n "$new" ]; then
-      timeout 5 xdotool windowactivate --sync "$new" >/dev/null 2>&1
-      timeout 5 xdotool windowfocus --sync "$new" >/dev/null 2>&1
-      sleep 0.3
-      xdotool key --delay 0 alt+F4
+      close_shown "${new#*:}"
       settle 8000 icon_only >/dev/null && left=yes
     fi
-    line "- a start $(( from - asked )) ms after the close keys, the window was mapped after ${took:-more than 8000} ms, the icon went from process ${holder:-none} to ${held:-none}, one process holds the icon $one, the next close left the icon $left, app processes then $(live_apps | wc -l)"
+    line "- a start $(( from - asked )) ms after the close keys, the window of process ${old%%:*} closed and the window of process ${new%%:*} was mapped after ${took:-more than 8000} ms, the icon went from process ${holder:-none} to ${held:-none}, one process holds the icon $one, the next close left the icon with process $(lock_pids) $left, app processes then $(live_apps | wc -l)"
     if [ -z "$took" ] || [ "$took" -gt 5000 ] || [ "$one" != yes ] || [ "$left" != yes ]; then lost=$((lost + 1)); fi
   done
 done
