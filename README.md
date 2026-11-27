@@ -46,7 +46,7 @@ irm https://sohanbhat.me/scooch/install.ps1 | iex
 
 The app window has the same switches, named Slide, Clouds, Flip and Quick drop. Slide shows on macOS and Windows, and Quick drop on Xfce and on Plasma 5 under X11. A picture pressed or picked in the window while Scooch is off is only selected, and turning Scooch on then uses it.
 
-While Scooch is on, the Scooch icon sits in the menu bar, the notification area or the tray, also after a login, and closing the window leaves the icon there. The icon's menu opens the window, turns Scooch off and on, or quits Scooch, which puts the wallpaper back.
+While Scooch is on, the Scooch icon sits in the menu bar, the notification area or the tray where the desktop has one, also after a login, and closing the window leaves the icon there. The icon's menu opens the window, turns Scooch off and on, or quits Scooch, which puts the wallpaper back.
 
 ## How it works
 
@@ -56,7 +56,7 @@ While Scooch is on, the Scooch icon sits in the menu bar, the notification area 
 4. With scenery on, add clouds on a blue sky or sand islands on blue water around the icons, kept off the subject.
 5. Render one image and set it as the normal wallpaper. On macOS and Windows the old picture slides into the new one over 450 ms.
 
-One background process does this work. It is event driven and uses no CPU at rest. The slide runs in a helper process that exits 30 s after its last move. The engine, the daemon and each desktop adapter are described in [docs/DESIGN.md](docs/DESIGN.md).
+One background process does this work. It is event driven and uses no CPU at rest. The slide runs in a helper process that stays parked while the slide is on and lets its pictures go 30 s after its last command. The engine, the daemon and each desktop adapter are described in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Status
 
