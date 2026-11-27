@@ -2,11 +2,16 @@ name: linux
 
 on:
   push:
+    branches-ignore: [probe-water]
     paths:
       - "crates/**"
       - ".github/workflows/linux.yml"
       - ".github/linux/**"
   workflow_dispatch:
+
+concurrency:
+  group: linux-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'push' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
